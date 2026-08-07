@@ -46,6 +46,8 @@ src/
     │       ├── schemas.py            # FullPageIntelligenceProfile + taxonomy
     │       ├── weights.py            # Weight profiles + site-profile seam
     │       ├── site_profile.py       # Runtime platform detection (probe pass)
+    │       ├── discovery.py          # 3-path merged discovery -> PageEvidence
+    │       ├── discovery_parsers.py  # Sitemap XML, DOM links, CMS payloads
     │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       └── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
@@ -60,7 +62,6 @@ src/
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
 | `core/state_store.py` | Redis/Postgres checkpointing for crash recovery |
 | `modules/seo/page_classifier/tool.py` | `BaseTool` entry point (one call = one crawl job) |
-| `modules/seo/page_classifier/discovery.py` | 3-path merged URL discovery producing `PageEvidence` |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | `modules/seo/page_classifier/tree_visualizer.py` | Standalone interactive HTML site tree |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
