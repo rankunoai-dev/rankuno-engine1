@@ -437,7 +437,11 @@ def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth:
 
     while frontier:
         url, depth = frontier.popleft()
-        if depth > max_depth or graph.at_capacity():
+        # Capacity deliberately does NOT skip the fetch. `graph.add` already
+        # refuses *new* nodes when full, so the frontier stops growing on its
+        # own. Skipping here instead meant that whenever the sitemap alone
+        # filled the budget, the DOM crawl fetched nothing at all.
+        if depth > max_depth:
             continue
 
         # Filter permutations are classified from the URL alone; fetching them

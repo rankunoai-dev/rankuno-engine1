@@ -117,6 +117,22 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | Idempotency keys; distributed rate limit & spend ceiling | ❌ Not started |
 | `Dockerfile` / Railway deployment | ❌ Not started (deferred — see [ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
 
+### Running a crawl
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_crawl.py https://example.com
+.\.venv\Scripts\python.exe scripts\run_crawl.py https://example.com --max-pages 250 --depth 2
+```
+
+Defaults are deliberately conservative (50 pages, depth 1, concurrency 3) — this
+crawls somebody else's server. Writes a self-contained interactive HTML report.
+
+> **Validated against a live site.** See
+> [build-log/0007](docs/build-log/0007-first-live-run.md) for the first real run,
+> including two specification-versus-reality findings that need decisions:
+> Path A starves Path B on large sites, and the observed LLM escalation rate is
+> ~50x the assumption in ADR 0005.
+
 ### Verification
 
 ```powershell

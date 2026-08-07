@@ -36,6 +36,7 @@ which, for an AI-assisted codebase, is every session.
 | [0004](0004-three-path-merged-discovery.md) | 2026-08-07 | 3-path merged discovery | 554 tests, 94.99% |
 | [0005](0005-governed-crawl-tool.md) | 2026-08-07 | Governed crawl tool | 583 tests, 95.10% |
 | [0006](0006-async-crawl-and-tree-report.md) | 2026-08-07 | Concurrent crawl & hierarchy report | 638 tests, 94.50% |
+| [0007](0007-first-live-run.md) | 2026-08-07 | First live run — 3 findings | 640 tests, 94.56% |
 
 ---
 

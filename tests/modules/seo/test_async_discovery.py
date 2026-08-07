@@ -205,6 +205,23 @@ class TestConcurrentBehaviour:
         assert report.truncated is True
         assert report.total_urls == 2
 
+    def test_a_full_graph_still_fetches_pages(self, settings):
+        """Regression, found by the first live crawl of highradius.com.
+
+        The sitemap alone filled the node budget, so `at_capacity()` was already
+        true when the DOM crawl began and it broke out immediately: 40 URLs
+        discovered, **zero pages fetched**. No HTML, no link graph, no in-degree,
+        and Signals 1, 4 and 5 silently starved.
+
+        Capacity must stop *discovering* new nodes, not stop *fetching* known
+        ones. Mocks never caught this because the fixture site is smaller than
+        any sane ceiling.
+        """
+        graph, report = run_async(settings, max_pages=2)
+        assert report.truncated is True
+        assert report.pages_fetched > 0, "a full graph must still fetch what it knows about"
+        assert any(item.html for item in graph.to_page_evidence())
+
     def test_dom_crawl_can_be_disabled(self, settings):
         _, report = run_async(settings, crawl_dom=False)
         assert report.pages_fetched == 0

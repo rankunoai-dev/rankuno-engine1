@@ -245,7 +245,12 @@ async def _acrawl(
     fetched = 0
 
     for depth in range(max_depth + 1):
-        if not level or graph.at_capacity():
+        # Capacity deliberately does NOT stop the crawl. `graph.add` already
+        # refuses *new* nodes when full, so the frontier stops growing on its
+        # own. Breaking here instead meant that whenever the sitemap alone
+        # filled the budget, the DOM crawl fetched nothing at all — no HTML, no
+        # link graph, no in-degree, and Signals 1, 4 and 5 silently starved.
+        if not level:
             break
 
         crawlable = [url for url in level if not is_faceted_filter(url)]

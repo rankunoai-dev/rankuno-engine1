@@ -231,6 +231,19 @@ class TestMergedDiscovery:
         assert report.truncated is True
         assert report.total_urls == 2
 
+    def test_a_full_graph_still_fetches_pages(self, settings):
+        """Regression, found by the first live crawl of highradius.com.
+
+        Capacity must stop *discovering* new nodes, not stop *fetching* known
+        ones. When the sitemap alone filled the budget, the DOM crawl fetched
+        nothing: 40 URLs discovered, zero pages retrieved.
+        """
+        graph, report = discover_site(
+            site_fetcher(FULL_SITE, settings), "https://e.com", max_pages=2
+        )
+        assert report.pages_fetched > 0, "a full graph must still fetch what it knows about"
+        assert any(item.html for item in graph.to_page_evidence())
+
     def test_survives_a_site_with_nothing_at_all(self, settings):
         fetcher = site_fetcher({"/robots.txt": httpx.Response(200, text=ROBOTS)}, settings)
         graph, report = discover_site(fetcher, "https://e.com")
