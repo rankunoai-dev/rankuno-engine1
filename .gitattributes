@@ -1,0 +1,22 @@
+# Deterministic line endings regardless of any contributor's local git config.
+#
+# CI runs on ubuntu-latest while development happens on Windows. Without this,
+# line endings depend on whoever cloned the repo, which produces phantom diffs
+# and can break `ruff format --check` in CI while passing locally.
+* text=auto eol=lf
+
+# Windows-only scripts. CRLF is harmless to PowerShell and avoids surprises if
+# one is ever opened in a legacy editor.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binary assets — never line-ending converted, never diffed as text.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.onnx binary
+*.safetensors binary
+*.gguf binary

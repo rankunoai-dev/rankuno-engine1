@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Rankuno AI Engine - Architecture Blueprint & Master SDLC Plan</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap');
+
+  @page {
+    size: A4;
+    margin: 20mm 15mm 20mm 15mm;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #1e293b;
+    line-height: 1.6;
+    background-color: #ffffff;
+    font-size: 13px;
+  }
+
+  h1, h2, h3, h4 {
+    color: #0f172a;
+    font-weight: 700;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+    page-break-after: avoid;
+  }
+
+  h1 {
+    font-size: 24px;
+    border-bottom: 3px solid #2563eb;
+    padding-bottom: 8px;
+    margin-top: 0;
+    color: #1e3a8a;
+  }
+
+  h2 {
+    font-size: 18px;
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 6px;
+    color: #1e40af;
+  }
+
+  h3 {
+    font-size: 14px;
+    color: #3b82f6;
+  }
+
+  .header-box {
+    background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+    color: #ffffff;
+    padding: 24px;
+    border-radius: 8px;
+    margin-bottom: 24px;
+  }
+
+  .header-box h1 {
+    color: #ffffff;
+    border-bottom: none;
+    margin: 0 0 8px 0;
+    font-size: 26px;
+  }
+
+  .header-box p {
+    margin: 0;
+    opacity: 0.9;
+    font-size: 13px;
+  }
+
+  .badge {
+    display: inline-block;
+    background: #dbeafe;
+    color: #1e40af;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 12px;
+    page-break-inside: avoid;
+  }
+
+  th, td {
+    border: 1px solid #cbd5e1;
+    padding: 8px 12px;
+    text-align: left;
+  }
+
+  th {
+    background-color: #f1f5f9;
+    color: #0f172a;
+    font-weight: 600;
+  }
+
+  tr:nth-child(even) {
+    background-color: #f8fafc;
+  }
+
+  pre {
+    background-color: #0f172a;
+    color: #f8fafc;
+    padding: 14px;
+    border-radius: 6px;
+    font-family: 'Fira Code', monospace;
+    font-size: 11px;
+    overflow-x: auto;
+    page-break-inside: avoid;
+    line-height: 1.4;
+  }
+
+  code {
+    font-family: 'Fira Code', monospace;
+    background-color: #f1f5f9;
+    color: #0f172a;
+    padding: 2px 5px;
+    border-radius: 4px;
+    font-size: 11px;
+  }
+
+  pre code {
+    background-color: transparent;
+    color: inherit;
+    padding: 0;
+  }
+
+  .alert {
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 16px 0;
+    font-size: 12px;
+  }
+
+  .alert-info {
+    background-color: #eff6ff;
+    border-left: 4px solid #3b82f6;
+    color: #1e40af;
+  }
+
+  .alert-warning {
+    background-color: #fffbeb;
+    border-left: 4px solid #f59e0b;
+    color: #92400e;
+  }
+
+  .footer {
+    margin-top: 40px;
+    padding-top: 16px;
+    border-top: 1px solid #e2e8f0;
+    text-align: center;
+    font-size: 10px;
+    color: #64748b;
+  }
+</style>
+</head>
+<body>
+
+<div class="header-box">
+  <span class="badge" style="background: rgba(255,255,255,0.2); color: white;">CONFIDENTIAL &amp; PROPRIETARY</span>
+  <h1>Rankuno AI Engine - Architectural Blueprint</h1>
+  <p>Master SDLC Standards, Agentic Architecture, &amp; Phase 1 Page Classification Engine Specification</p>
+</div>
+
+<h2>1. Executive Summary &amp; Core Architecture Stack</h2>
+<p>The <strong>Rankuno AI Automation Infrastructure</strong> is built upon the <strong>Google Antigravity Agentic Stack</strong>. It establishes a 0-to-1 engineering framework for automating SEO operations, Paid Search (PPC), and Market Research with zero tech debt.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Layer</th>
+      <th>Component</th>
+      <th>Google Antigravity Equivalent</th>
+      <th>Rankuno Implementation Role</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Model</strong></td>
+      <td>Reasoning Engine</td>
+      <td>Gemini 3.6 Flash / Pro</td>
+      <td>Reasoning, architectural planning, and code generation.</td>
+    </tr>
+    <tr>
+      <td><strong>Agent</strong></td>
+      <td>Decision Maker</td>
+      <td>Antigravity Execution Loop</td>
+      <td>Primary orchestrator executing Plan &rarr; Act &rarr; Observe &rarr; Reason loop.</td>
+    </tr>
+    <tr>
+      <td><strong>Subagents</strong></td>
+      <td>Specialized Delegates</td>
+      <td><code>invoke_subagent</code></td>
+      <td>Background workers for research, audits, or isolated test suites.</td>
+    </tr>
+    <tr>
+      <td><strong>Skills</strong></td>
+      <td>Procedural Guides</td>
+      <td><code>skills/&lt;name&gt;/SKILL.md</code></td>
+      <td>Reusable procedural guides (<code>antigravity-sdlc-flow</code>, <code>seo-engine-guide</code>).</td>
+    </tr>
+    <tr>
+      <td><strong>Tools</strong></td>
+      <td>Native Capabilities</td>
+      <td>Atomic capabilities</td>
+      <td><code>read_file</code>, <code>write_file</code>, <code>run_command</code>, <code>grep_search</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>MCP</strong></td>
+      <td>External Connectors</td>
+      <td>Model Context Protocol</td>
+      <td>Connectors for Search Console, Google Ads API, SERP scrapers.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>2. Mandatory 8-Step SDLC Execution Protocol</h2>
+<div class="alert alert-info">
+  Every feature, module, or update in this repository MUST follow the strict 8-step engineering pipeline:
+</div>
+<ol>
+  <li><strong>Investigation &amp; Requirement Discovery</strong>: Inspect codebase, verify domain rules and existing structures.</li>
+  <li><strong>System Architecture &amp; Data Schema Blueprint</strong>: Define Pydantic contracts and component boundaries.</li>
+  <li><strong>Human-in-the-Loop (HITL) Review Checkpoint</strong>: Present architecture to operator for explicit approval.</li>
+  <li><strong>Reasoning-Driven Implementation Plan</strong>: Detail line-by-line file changes and logic.</li>
+  <li><strong>Security, Rate-Limit &amp; Edge-Case Audit</strong>: Audit for anti-bot blocks, rate limits, API spend, breaking changes.</li>
+  <li><strong>Step-by-Step Modular Implementation</strong>: Write clean, strictly typed, modular code.</li>
+  <li><strong>Automated Unit Testing &amp; Verification</strong>: Execute unit test suites (pytest); never declare success without passing tests.</li>
+  <li><strong>README &amp; Architecture Drift Audit</strong>: Keep documentation in sync with codebase changes immediately.</li>
+</ol>
+
+<h2>3. Phase 1: Multi-Dimensional Page Classification Engine</h2>
+<p>Phase 1 classifies website URLs across <strong>3 complementary interfaces</strong> to build a structured content graph:</p>
+<ul>
+  <li><strong>Interface 1: Page Type &amp; Hierarchy</strong> (<code>L0 Homepage</code>, <code>L1 Primary Nav Hub</code>, <code>L2 Sub-Nav Hub</code>, <code>L3 Leaf Page</code>, <code>Utility</code>).</li>
+  <li><strong>Interface 2: Theme &amp; Topical Cluster</strong> (Business Niche, Content Silos, Subject Matter).</li>
+  <li><strong>Interface 3: Semantic Intent &amp; Conversion Role</strong> (Informational, Commercial Investigation, Transactional, Navigational).</li>
+</ul>
+
+<h3>3.1 The 6-Signal Consensus Architecture (Fail-Safe Strategy)</h3>
+<p>To guarantee zero classification failures on complex or flat websites, the engine evaluates 6 independent signals:</p>
+<pre>
+1. ARIA Nav Tree Signal  --&gt; Inspects Accessibility ARIA tags (role="navigation") &amp; nested &lt;ul&gt;/&lt;li&gt; (Resolves Hidden/Hamburger Menus).
+2. CMS API Endpoint      --&gt; Queries WordPress (/wp-json/) &amp; Shopify (/collections.json) endpoints (Resolves Flat URLs).
+3. Grouped XML Sitemaps  --&gt; Parses product-sitemap.xml, category-sitemap.xml, post-sitemap.xml.
+4. Schema.org JSON-LD    --&gt; Parses @graph types (CollectionPage, Product, Article, Service).
+5. Link In-Degree        --&gt; Evaluates internal link weight (&gt;=1000 links = L1 Primary Hub).
+6. LLM Zero-Shot Backup  --&gt; Gemini 3.6 Flash fallback when structural signals are ambiguous.
+</pre>
+
+<h3>3.2 Pydantic Data Contracts</h3>
+<pre><code class="language-python">from enum import Enum
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
+class HierarchyLevel(str, Enum):
+    L0_HOMEPAGE = "L0_HOMEPAGE"
+    L1_PRIMARY_NAV_HUB = "L1_PRIMARY_NAV_HUB"
+    L2_SUB_NAV_HUB = "L2_SUB_NAV_HUB"
+    L3_LEAF_PAGE = "L3_LEAF_PAGE"
+    UTILITY_PAGE = "UTILITY_PAGE"
+
+class PrimaryPageType(str, Enum):
+    HOMEPAGE = "HOMEPAGE"
+    SERVICE_CATEGORY_HUB = "SERVICE_CATEGORY_HUB"
+    SERVICE_DETAIL_PAGE = "SERVICE_DETAIL_PAGE"
+    PRODUCT_CATEGORY_HUB = "PRODUCT_CATEGORY_HUB"
+    PRODUCT_DETAIL_PAGE = "PRODUCT_DETAIL_PAGE"
+    BLOG_HUB = "BLOG_HUB"
+    BLOG_ARTICLE = "BLOG_ARTICLE"
+    COMPANY_ABOUT = "COMPANY_ABOUT"
+    COMMERCIAL_LEAD_GEN = "COMMERCIAL_LEAD_GEN"
+    FACETED_FILTER = "FACETED_FILTER"
+    UTILITY_LEGAL = "UTILITY_LEGAL"
+    UNKNOWN = "UNKNOWN"
+
+class SignalScore(BaseModel):
+    source: str
+    suggested_level: HierarchyLevel
+    suggested_page_type: PrimaryPageType
+    confidence: float = Field(ge=0.0, le=1.0)
+    notes: str
+
+class FullPageIntelligenceProfile(BaseModel):
+    url: str
+    normalized_path: str
+    hierarchy_level: HierarchyLevel
+    primary_page_type: PrimaryPageType
+    nav_parent_url: Optional[str]
+    breadcrumb_path: List[str]
+    topical_category: str
+    sub_topic: Optional[str]
+    search_intent: str
+    conversion_role: str
+    signals_evaluated: List[SignalScore]
+    final_confidence_score: float = Field(ge=0.0, le=1.0)
+    consensus_method: str
+</code></pre>
+
+<h2>4. Edge-Case &amp; Security Audit Matrix</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Edge Case / Threat</th>
+      <th>Vulnerability / Cause</th>
+      <th>Rankuno Architectural Guardrail</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Hamburger / Hidden Mobile Navs</strong></td>
+      <td>CSS hides menu (<code>display: none</code>).</td>
+      <td>Inspect DOM ARIA tree (<code>role="navigation"</code>) ignoring visual CSS.</td>
+    </tr>
+    <tr>
+      <td><strong>Flat URLs (<code>site.com/page</code>)</strong></td>
+      <td>Directory path regex breaks.</td>
+      <td>Query CMS Endpoints (<code>/collections.json</code>) &amp; Sitemap index grouping.</td>
+    </tr>
+    <tr>
+      <td><strong>JavaScript SPAs</strong></td>
+      <td>Empty <code>&lt;div id="root"&gt;</code> returned.</td>
+      <td>Playwright headless browser rendering fallback.</td>
+    </tr>
+    <tr>
+      <td><strong>Multi-Language Paths</strong></td>
+      <td>Locale prefixes skew paths (<code>/en/services</code>).</td>
+      <td>Path Normalizer strips locale prefixes before hierarchy matching.</td>
+    </tr>
+    <tr>
+      <td><strong>Faceted Filter Params</strong></td>
+      <td>Query params (<code>?color=red</code>) create infinite URLs.</td>
+      <td>Parameter Normalizer flags parameterized URLs as <code>FACETED_FILTER</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>API Cost Overflow</strong></td>
+      <td>Unbounded LLM calls.</td>
+      <td>Rate-limiter &amp; caching layer: LLM invoked only when 5 structural signals are ambiguous.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="footer">
+  Rankuno AI Automation Infrastructure &bull; Confidential Architectural Document &bull; Generated July 2026
+</div>
+
+</body>
+</html>

@@ -1,0 +1,62 @@
+name: Documentation Drift Audit
+
+# SDLC Step 8, enforced mechanically.
+#
+# The drift protocol says: if a change alters repository paths, tool signatures
+# or environment settings, README.md and docs/ARCHITECTURE.md must be updated in
+# the same change. A protocol nobody checks is a protocol nobody follows, so
+# this job checks it.
+#
+# Escape hatch: apply the `docs-not-required` label to a PR that genuinely
+# does not affect documented capabilities.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Verify docs track code
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'docs-not-required') }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare changed source files against documentation updates
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"
+          echo "$changed"
+          echo "---"
+
+          # Structural changes: new/moved modules, dependency or env changes.
+          structural=$(echo "$changed" | grep -E '^(src/.*/__init__\.py|src/[^/]+/[^/]+\.py|pyproject\.toml|\.env\.example)$' || true)
+
+          if [ -z "$structural" ]; then
+            echo "No structural changes. Drift audit not required."
+            exit 0
+          fi
+
+          docs=$(echo "$changed" | grep -E '^(README\.md|docs/.*\.md|skills/.*/SKILL\.md)$' || true)
+
+          if [ -z "$docs" ]; then
+            echo "::error::Documentation drift detected."
+            echo "These files changed the repository's structure or capabilities:"
+            echo "$structural"
+            echo ""
+            echo "Update README.md and/or docs/ARCHITECTURE.md in this same PR,"
+            echo "or apply the 'docs-not-required' label with a justification."
+            exit 1
+          fi
+
+          echo "Documentation updated alongside code:"
+          echo "$docs"
