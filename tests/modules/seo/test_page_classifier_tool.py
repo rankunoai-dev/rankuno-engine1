@@ -51,16 +51,30 @@ SITE = {
 
 
 def build_fetcher(settings, routes: dict[str, httpx.Response] | None = None) -> HttpFetcher:
-    """Build a fetcher answering from a fixed path table."""
+    """Build a fetcher answering from a fixed path table.
+
+    Both transports are wired: the tool defaults to the concurrent crawl path,
+    so a sync-only mock would let the async path fall through to real network.
+    """
     table = routes if routes is not None else SITE
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return table.get(request.url.path, httpx.Response(404, text="not found"))
+        # Fresh response per request: a shared instance has its stream exhausted
+        # after the first read, and the async client asserts on the stream type.
+        template = table.get(request.url.path)
+        if template is None:
+            return httpx.Response(404, text="not found")
+        return httpx.Response(
+            template.status_code,
+            content=template.content,
+            headers={"content-type": template.headers.get("content-type", "text/plain")},
+        )
 
     return HttpFetcher(
         settings=settings,
         url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
         transport=httpx.MockTransport(handler),
+        async_transport=httpx.MockTransport(handler),
     )
 
 

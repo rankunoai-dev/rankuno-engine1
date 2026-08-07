@@ -31,6 +31,7 @@ degrades, it does not fail.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from typing import ClassVar, Protocol, runtime_checkable
 
@@ -42,6 +43,11 @@ from src.core.rate_limiter import CostLedger
 from src.core.schemas import RiskClass, StrictModel, ToolMetadata
 from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import HttpFetcher
+from src.modules.seo.page_classifier.async_discovery import (
+    DEFAULT_CONCURRENCY,
+    MAX_CONCURRENCY,
+    adiscover_site,
+)
 from src.modules.seo.page_classifier.cascading_pipeline import (
     ZeroShotClassifier,
     classify_page,
@@ -50,6 +56,7 @@ from src.modules.seo.page_classifier.cascading_pipeline import (
 from src.modules.seo.page_classifier.discovery import (
     DEFAULT_MAX_PAGES,
     DiscoveryReport,
+    SiteGraph,
     discover_site,
 )
 from src.modules.seo.page_classifier.schemas import (
@@ -113,6 +120,15 @@ class PageClassificationInput(StrictModel):
     respect_robots: bool = True
     llm_spend_cap_usd: float = Field(default=0.0, ge=0.0, le=100.0)
     user_agent: str = Field(default="RankunoBot", min_length=1)
+    concurrency: int = Field(default=DEFAULT_CONCURRENCY, ge=1, le=MAX_CONCURRENCY)
+    """Simultaneous in-flight requests. Bounds local resources only — per-host
+    politeness is enforced by the fetcher's token bucket regardless, so raising
+    this cannot make the crawler rude to a single host."""
+
+    use_async_crawl: bool = True
+    """Run the concurrent crawl path. Disabling falls back to serial fetching,
+    which is roughly 10x slower and exists only as an escape hatch for
+    debugging a crawl that behaves differently under concurrency."""
 
 
 class CrawlSummary(StrictModel):
@@ -236,16 +252,11 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         """
         fetcher, owns_fetcher = self._resolve_fetcher(payload)
         try:
+            # The probe runs synchronously and before the async crawl begins:
+            # it is six requests, so parallelising it saves nothing, and running
+            # it outside the event loop keeps `execute()` simple.
             site_profile = probe_site(fetcher, payload.base_url)
-
-            graph, discovery = discover_site(
-                fetcher,
-                payload.base_url,
-                site_profile=site_profile,
-                max_pages=payload.max_pages,
-                max_depth=payload.max_depth,
-                crawl_dom=payload.crawl_dom,
-            )
+            graph, discovery = self._discover(fetcher, payload, site_profile)
             evidence = graph.to_page_evidence()
             pages = self._classify_all(evidence, site_profile, payload)
         finally:
@@ -273,6 +284,36 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         )
 
     # -- internals ---------------------------------------------------------
+
+    def _discover(
+        self,
+        fetcher: HttpFetcher,
+        payload: PageClassificationInput,
+        site_profile: SiteProfile,
+    ) -> tuple[SiteGraph, DiscoveryReport]:
+        """Run discovery, concurrently where possible.
+
+        ADR 0003's design is exactly this: governance is synchronous because it
+        is per-job, while the crawl inside `execute()` is async because it is
+        per-request. `asyncio.run` is safe here because `BaseTool.run()` is
+        synchronous — but if a caller has somehow arranged otherwise, falling
+        back to the serial path is far better than raising.
+        """
+        kwargs = {
+            "site_profile": site_profile,
+            "max_pages": payload.max_pages,
+            "max_depth": payload.max_depth,
+            "crawl_dom": payload.crawl_dom,
+        }
+
+        if payload.use_async_crawl and not _event_loop_running():
+            return asyncio.run(
+                adiscover_site(fetcher, payload.base_url, concurrency=payload.concurrency, **kwargs)  # type: ignore[arg-type]
+            )
+
+        if payload.use_async_crawl:
+            _logger.warning("async_crawl_unavailable_in_running_loop")
+        return discover_site(fetcher, payload.base_url, **kwargs)  # type: ignore[arg-type]
 
     def _resolve_fetcher(self, payload: PageClassificationInput) -> tuple[HttpFetcher, bool]:
         """Return the fetcher to use, and whether this job owns its lifetime."""
@@ -367,6 +408,20 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             orphan_pages=discovery.orphans,
             llm_spend_usd=spent,
         )
+
+
+def _event_loop_running() -> bool:
+    """Whether this thread already has a running event loop.
+
+    `asyncio.run()` raises inside one. Detecting it lets the tool degrade to the
+    serial crawl rather than failing a job over an execution context it does not
+    control.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def register_tools() -> None:

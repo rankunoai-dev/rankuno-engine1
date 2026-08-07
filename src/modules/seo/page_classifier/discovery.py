@@ -53,6 +53,8 @@ from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
 
 __all__ = [
     "DEFAULT_MAX_PAGES",
+    "SHOPIFY_ENDPOINTS",
+    "WORDPRESS_ENDPOINTS",
     "DiscoveredNode",
     "DiscoveryReport",
     "DiscoverySource",
@@ -66,14 +68,18 @@ DEFAULT_MAX_PAGES = 20_000
 """Node ceiling for one crawl job. ADR 0001 targets 20k–500k; beyond that the
 in-memory implementations need replacing with the Bloom-filter path."""
 
-_WORDPRESS_ENDPOINTS = (
+WORDPRESS_ENDPOINTS = (
     ("/wp-json/wp/v2/pages?per_page=100", "page"),
     ("/wp-json/wp/v2/posts?per_page=100", "post"),
 )
-_SHOPIFY_ENDPOINTS = (
+"""WordPress content endpoints. Public so the async path shares one definition
+rather than drifting from a second copy."""
+
+SHOPIFY_ENDPOINTS = (
     ("/products.json?limit=250", "products"),
     ("/collections.json?limit=250", "collections"),
 )
+"""Shopify catalogue endpoints. Shared with the async path."""
 
 
 class DiscoverySource(StrictModel):
@@ -401,7 +407,7 @@ def _discover_from_cms(
     root = base_url.rstrip("/")
 
     if site_profile.cms_family is CmsFamily.WORDPRESS:
-        for path, record_type in _WORDPRESS_ENDPOINTS:
+        for path, record_type in WORDPRESS_ENDPOINTS:
             body = _safe_body(fetcher, f"{root}{path}")
             if body is None:
                 continue
@@ -409,7 +415,7 @@ def _discover_from_cms(
                 graph.add(url, cms_api=True, cms_record=record)
 
     elif site_profile.cms_family is CmsFamily.SHOPIFY:
-        for path, collection in _SHOPIFY_ENDPOINTS:
+        for path, collection in SHOPIFY_ENDPOINTS:
             body = _safe_body(fetcher, f"{root}{path}")
             if body is None:
                 continue
