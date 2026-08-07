@@ -41,7 +41,11 @@ src/
 └── modules/                     # Domain engines
     ├── seo/
     │   └── page_classifier/     # Phase 1 engine
-    │       └── schemas.py       # FullPageIntelligenceProfile + taxonomy
+    │       ├── schemas.py            # FullPageIntelligenceProfile + taxonomy
+    │       ├── weights.py            # Weight profiles + site-profile seam
+    │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
+    │       ├── signal_parsers.py     # The 5 structural consensus signals
+    │       └── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
     ├── ppc/                     # Reserved namespace, no implementation
     └── research/                # Reserved namespace, no implementation
 ```
@@ -52,9 +56,9 @@ src/
 | :--- | :--- |
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
 | `core/state_store.py` | Redis/Postgres checkpointing for crash recovery |
-| `modules/seo/page_classifier/signals.py` | The six consensus signal extractors |
-| `modules/seo/page_classifier/pipeline.py` | Layer 0–3 cascade & weighted consensus |
 | `modules/seo/page_classifier/tool.py` | `BaseTool` entry point (one call = one crawl job) |
+| A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
+| A `SiteProfile` producer | Contract exists; the probe pass that fills it does not |
 | `modules/seo/page_classifier/tree_visualizer.py` | Standalone interactive HTML site tree |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
 
@@ -105,6 +109,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0003](adr/0003-job-level-governance-and-async-internals.md) | One `BaseTool.run()` is one crawl job, not one page |
 | [0004](adr/0004-local-first-deployment-swappable-ml-layer.md) | Local-workstation deployment first; ML layers behind interfaces |
 | [0005](adr/0005-llm-provider-strategy-and-cost-metering.md) | Provider-agnostic `LLMClient`; per-call spend metering |
+| [0006](adr/0006-weight-profile-seam-and-runtime-site-detection.md) | Signal weights vary by runtime-detected site profile, behind a seam |
 
 ---
 

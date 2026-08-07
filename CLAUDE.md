@@ -116,6 +116,7 @@ Recorded in full as ADRs in `docs/adr/`. Summary:
 | Execution model | One `BaseTool.run()` == one **crawl job**, not one page. Per-page governance is forbidden. | 0003 |
 | Deployment | Local workstation first (RTX GPU). Layers 2/3 sit behind an interface so a cloud implementation drops in later. | 0004 |
 | Layer 3 LLM | Provider-agnostic `LLMClient`. Default Claude Haiku 4.5 with structured outputs + Batch API. | 0005 |
+| Signal weights | Architecture is client-agnostic; **calibration is not**. Weights are selected through the seam in `weights.get_weight_profile()`. Adaptive selection is **off** until a golden corpus exists — do not enable it without one. | 0006 |
 
 ---
 
