@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import ClassVar, TypeVar
 
 from src.core.config import Settings, get_settings
-from src.core.errors import IntegrationError
+from src.core.errors import GuardrailViolationError, IntegrationError
 from src.core.logger import get_logger
 from src.core.rate_limiter import RateLimiterRegistry, TokenBucket
 from src.core.retry import with_retries
@@ -86,6 +86,11 @@ class BaseAPIClient(ABC):
             Whatever `func` returns.
 
         Raises:
+            GuardrailViolationError: Propagated unchanged. A policy refusal —
+                an SSRF block, a robots.txt exclusion — is not an upstream
+                fault, and disguising one as an `IntegrationError` would put it
+                in `TRANSIENT_ERRORS`, where a caller would retry it. A refused
+                request must stay refused.
             IntegrationError: If the call fails after all retries.
         """
         service = type(self).service_name
@@ -96,7 +101,7 @@ class BaseAPIClient(ABC):
 
         try:
             result = with_retries(attempt)
-        except IntegrationError:
+        except (GuardrailViolationError, IntegrationError):
             raise
         except Exception as exc:
             _logger.exception("api_call_failed", extra={"service": service, "op": operation})

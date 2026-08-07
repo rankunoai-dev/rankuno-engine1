@@ -37,12 +37,15 @@ src/
 │   └── robots.py                # robots.txt & crawl-delay parsing (RFC 9309)
 ├── integrations/                # External API wrappers
 │   ├── base_client.py           # Quota, retry, credential handling for all connectors
+│   ├── http_fetcher.py          # The ONLY outbound web fetcher. Enforces SSRF,
+│   │                            # robots, per-host throttling. Sync + async.
 │   └── llm_client.py            # Provider-agnostic LLM interface + spend metering
 └── modules/                     # Domain engines
     ├── seo/
     │   └── page_classifier/     # Phase 1 engine
     │       ├── schemas.py            # FullPageIntelligenceProfile + taxonomy
     │       ├── weights.py            # Weight profiles + site-profile seam
+    │       ├── site_profile.py       # Runtime platform detection (probe pass)
     │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       └── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
@@ -57,8 +60,8 @@ src/
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
 | `core/state_store.py` | Redis/Postgres checkpointing for crash recovery |
 | `modules/seo/page_classifier/tool.py` | `BaseTool` entry point (one call = one crawl job) |
+| `modules/seo/page_classifier/discovery.py` | 3-path merged URL discovery producing `PageEvidence` |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
-| A `SiteProfile` producer | Contract exists; the probe pass that fills it does not |
 | `modules/seo/page_classifier/tree_visualizer.py` | Standalone interactive HTML site tree |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
 

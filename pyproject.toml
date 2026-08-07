@@ -14,10 +14,18 @@ authors = [{ name = "Rankuno AI Automation Team" }]
 # Core runtime dependencies. Keep this list MINIMAL — the core layer must stay
 # importable without any domain/vendor SDK installed. Domain libraries belong in
 # the optional extras below.
+#
+# httpx is core rather than a `seo` extra: it is generic HTTP, not a vendor SDK,
+# and BaseAPIClient is the platform's mandated outbound abstraction. Leaving it
+# in an extra meant `src/integrations` could not make a request without the
+# caller supplying a client. Upper bound is deliberate — httpx has made breaking
+# changes across minor versions, and a silent transport change would surface as
+# a crawl failure rather than an import error.
 dependencies = [
     "pydantic>=2.7,<3.0",
     "pydantic-settings>=2.3,<3.0",
     "tenacity>=8.3",
+    "httpx>=0.27.0,<1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +39,8 @@ dev = [
 # Domain extras are declared up-front so the dependency surface is reviewable,
 # but they are NOT installed by default and no code imports them yet.
 seo = [
-    "httpx>=0.27",
+    # httpx moved to core dependencies above; listing it here too would let the
+    # two bounds drift apart.
     "advertools>=0.14",
     "trafilatura>=1.9",
     "selectolax>=0.3.21",
