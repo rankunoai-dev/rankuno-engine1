@@ -53,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-dom", action="store_true", help="Skip the DOM link crawl (sitemap + CMS only)"
     )
     parser.add_argument(
+        "--dom-reserve",
+        type=float,
+        default=0.2,
+        help="Share of the budget only the DOM crawl may fill (default 0.2). Raise it when "
+        "the run reports the reserve exhausted.",
+    )
+    parser.add_argument(
         "--allow-private",
         action="store_true",
         help="Permit private/loopback targets. Local fixtures only — this disables the SSRF guard.",
@@ -96,6 +103,14 @@ def _print_report(output: PageClassificationOutput, elapsed: float) -> None:
     print(f"  pages fetched      {discovery.pages_fetched}")
     print(f"  truncated          {discovery.truncated}")
 
+    exhausted = discovery.dom_reserve and discovery.dom_reserve_used >= discovery.dom_reserve
+    print(f"  DOM reserve        {discovery.dom_reserve_used}/{discovery.dom_reserve} used")
+    if exhausted:
+        # The reserve is the only budget a sitemap-omitted page can occupy, so
+        # hitting the cap means such pages are still being dropped.
+        print("    ^ EXHAUSTED — sitemap-omitted pages are still being dropped.")
+        print("      Raise --dom-reserve or --max-pages to capture more of them.")
+
     print("\nCLASSIFICATION")
     print(f"  pages classified   {summary.pages_classified}")
     print(f"  unclassified       {summary.unknown_pages}")
@@ -136,6 +151,7 @@ def main() -> int:
         max_depth=args.depth,
         concurrency=args.concurrency,
         crawl_dom=not args.no_dom,
+        dom_reserve_fraction=args.dom_reserve,
         respect_robots=not args.ignore_robots,
         user_agent=args.user_agent,
     )

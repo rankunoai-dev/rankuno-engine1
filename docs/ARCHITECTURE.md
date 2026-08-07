@@ -118,6 +118,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0004](adr/0004-local-first-deployment-swappable-ml-layer.md) | Local-workstation deployment first; ML layers behind interfaces |
 | [0005](adr/0005-llm-provider-strategy-and-cost-metering.md) | Provider-agnostic `LLMClient`; per-call spend metering |
 | [0006](adr/0006-weight-profile-seam-and-runtime-site-detection.md) | Signal weights vary by runtime-detected site profile, behind a seam |
+| [0007](adr/0007-dom-discovery-budget-reserve.md) | Reserve part of the crawl budget for DOM-only discoveries |
 
 ---
 

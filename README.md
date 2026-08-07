@@ -127,11 +127,15 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 Defaults are deliberately conservative (50 pages, depth 1, concurrency 3) — this
 crawls somebody else's server. Writes a self-contained interactive HTML report.
 
-> **Validated against a live site.** See
-> [build-log/0007](docs/build-log/0007-first-live-run.md) for the first real run,
-> including two specification-versus-reality findings that need decisions:
-> Path A starves Path B on large sites, and the observed LLM escalation rate is
-> ~50x the assumption in ADR 0005.
+> **Validated against a live site.**
+> [build-log/0007](docs/build-log/0007-first-live-run.md) records the first real
+> run; [build-log/0008](docs/build-log/0008-dom-budget-reserve.md) records the
+> budget-reserve fix that followed from it, which recovered 4 of the 5
+> sitemap-omitted pages named in the HighRadius audit record.
+>
+> One finding remains open: the observed LLM escalation rate is ~50x the
+> assumption in [ADR 0005](docs/adr/0005-llm-provider-strategy-and-cost-metering.md),
+> so the cost model is not yet trustworthy.
 
 ### Verification
 

@@ -257,6 +257,93 @@ class TestMergedDiscovery:
         assert report.from_dom >= 2, "the DOM crawl must still run"
 
 
+class TestDomBudgetReserve:
+    """ADR 0007: a large sitemap must not starve out sitemap-omitted pages.
+
+    Reproduces the live-crawl condition from build-log 0007 §4.1 — a sitemap
+    bigger than the node budget — which mocks never hit because fixture sites
+    are smaller than any sane ceiling.
+    """
+
+    # 12 sitemap URLs, none of which is /code-of-ethics/.
+    BIG_SITEMAP = (
+        '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        + "".join(f"<url><loc>https://e.com/sm-{i}/</loc></url>" for i in range(12))
+        + "</urlset>"
+    )
+
+    HOME = (
+        '<html><body><a href="/code-of-ethics/">Ethics</a>'
+        '<a href="/human-rights-policy/">Rights</a></body></html>'
+    )
+
+    def routes(self) -> dict[str, httpx.Response]:
+        table = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/sitemap.xml": xml(self.BIG_SITEMAP),
+            "/": html(self.HOME),
+            "/code-of-ethics/": html(LEAF_HTML),
+            "/human-rights-policy/": html(LEAF_HTML),
+        }
+        for i in range(12):
+            table[f"/sm-{i}/"] = html(LEAF_HTML)
+        return table
+
+    def test_without_a_reserve_the_dom_path_is_starved(self, settings):
+        """The pre-fix behaviour, pinned so the regression is unmistakable."""
+        _, report = discover_site(
+            site_fetcher(self.routes(), settings),
+            "https://e.com",
+            max_pages=10,
+            dom_reserve_fraction=0.0,
+        )
+        assert report.dom_only == 0, "sitemap consumed the entire budget"
+
+    def test_a_reserve_lets_sitemap_omitted_pages_through(self, settings):
+        """The pages an audit actually wants are the ones no sitemap lists."""
+        graph, report = discover_site(
+            site_fetcher(self.routes(), settings),
+            "https://e.com",
+            max_pages=10,
+            dom_reserve_fraction=0.3,
+        )
+        found = {node.normalized for node in graph.nodes}
+        assert report.dom_only > 0
+        assert "https://e.com/code-of-ethics/" in found
+
+    def test_the_reserve_is_reported(self, settings):
+        _, report = discover_site(
+            site_fetcher(self.routes(), settings),
+            "https://e.com",
+            max_pages=10,
+            dom_reserve_fraction=0.3,
+        )
+        assert report.dom_reserve == 3
+        assert report.dom_reserve_used > 0
+
+    def test_the_hard_ceiling_is_still_absolute(self, settings):
+        """The reserve redistributes the budget; it must not enlarge it."""
+        graph, _ = discover_site(
+            site_fetcher(self.routes(), settings),
+            "https://e.com",
+            max_pages=10,
+            dom_reserve_fraction=0.3,
+        )
+        assert len(graph) <= 10
+
+    def test_reserve_is_clamped_for_tiny_budgets(self, settings):
+        """A 1-page budget must still discover something."""
+        graph = SiteGraph("https://e.com", max_pages=1, dom_reserve_fraction=0.9)
+        assert graph.pre_crawl_budget >= 1
+        assert graph.add("https://e.com/a/", sitemap=True) is not None
+
+    def test_reserve_fraction_is_bounded(self):
+        """A fraction above 0.9 would leave the non-DOM paths nothing."""
+        graph = SiteGraph("https://e.com", max_pages=100, dom_reserve_fraction=5.0)
+        assert graph.dom_reserve <= 90
+        assert graph.pre_crawl_budget >= 10
+
+
 class TestPageEvidenceProduction:
     def test_produces_evidence_the_signal_parsers_can_consume(self, settings):
         """The join between discovery and classification — this module's purpose."""

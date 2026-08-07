@@ -68,6 +68,19 @@ DEFAULT_MAX_PAGES = 20_000
 """Node ceiling for one crawl job. ADR 0001 targets 20k–500k; beyond that the
 in-memory implementations need replacing with the Bloom-filter path."""
 
+DEFAULT_DOM_RESERVE_FRACTION = 0.2
+"""Share of the node budget reserved for URLs only the DOM crawl can find.
+
+Without it, Path A starves Path B on any site whose sitemap is larger than the
+budget — and that is most real sites. HighRadius publishes ~3,145 sitemap URLs,
+so a 250-page crawl was filled entirely by Path A before the DOM crawl ran, and
+`dom_only` was structurally guaranteed to be zero (see
+`docs/build-log/0007-first-live-run.md` §4.1 and ADR 0007).
+
+The reserved slots are the *only* ones a sitemap-omitted page can occupy, which
+makes them the highest-value slots in the crawl: a URL no sitemap lists is
+exactly what an audit is looking for."""
+
 WORDPRESS_ENDPOINTS = (
     ("/wp-json/wp/v2/pages?per_page=100", "page"),
     ("/wp-json/wp/v2/posts?per_page=100", "post"),
@@ -153,7 +166,11 @@ class DiscoveryReport(StrictModel):
         orphans: Nodes with zero inbound internal links.
         sitemaps_fetched: Sitemap files successfully parsed.
         pages_fetched: Pages actually retrieved during the DOM crawl.
-        truncated: Whether the page ceiling stopped discovery early.
+        truncated: Whether a ceiling stopped discovery early.
+        dom_reserve: Slots reserved for DOM-only discoveries.
+        dom_reserve_used: Reserved slots actually filled. Compare against
+            `dom_reserve`: at the cap, the reserve is too small for this site
+            and pages the sitemap omits are still being dropped.
     """
 
     base_url: str
@@ -167,6 +184,8 @@ class DiscoveryReport(StrictModel):
     sitemaps_fetched: int = Field(default=0, ge=0)
     pages_fetched: int = Field(default=0, ge=0)
     truncated: bool = False
+    dom_reserve: int = Field(default=0, ge=0)
+    dom_reserve_used: int = Field(default=0, ge=0)
 
 
 class SiteGraph:
@@ -178,10 +197,28 @@ class SiteGraph:
     (`DiscoveredNode`, `PageEvidence`, `DiscoveryReport`) are all strict models.
     """
 
-    def __init__(self, base_url: str, max_pages: int = DEFAULT_MAX_PAGES) -> None:
-        """Create an empty graph rooted at `base_url`."""
+    def __init__(
+        self,
+        base_url: str,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
+    ) -> None:
+        """Create an empty graph rooted at `base_url`.
+
+        Args:
+            base_url: Crawl root.
+            max_pages: Hard node ceiling for the whole graph.
+            dom_reserve_fraction: Share of `max_pages` that only the DOM crawl
+                may fill. Sitemap and CMS discovery are capped below the hard
+                ceiling by this amount, so a sitemap-omitted page always has
+                somewhere to land.
+        """
         self.base_url = base_url
         self.max_pages = max_pages
+        self.dom_reserve = int(max_pages * max(0.0, min(dom_reserve_fraction, 0.9)))
+        # At least one slot must remain for the non-DOM paths, or a tiny budget
+        # would discover nothing at all before the crawl starts.
+        self.pre_crawl_budget = max(1, max_pages - self.dom_reserve)
         self._nodes: dict[str, DiscoveredNode] = {}
         self._html: dict[str, str] = {}
         self.truncated = False
@@ -213,15 +250,20 @@ class SiteGraph:
         """Insert or update a node, merging discovery sources.
 
         Returns:
-            The node, or `None` if the ceiling refused a new one. Existing nodes
-            are always updatable, so a full graph still records new evidence
-            about URLs it already holds.
+            The node, or `None` if the applicable ceiling refused a new one.
+            Existing nodes are always updatable, so a full graph still records
+            new evidence about URLs it already holds.
         """
         key = normalize_url(url)
         existing = self._nodes.get(key)
 
         if existing is None:
-            if self.at_capacity():
+            # DOM discoveries may use the whole budget; every other path stops
+            # at `pre_crawl_budget`, leaving the reserve for URLs no sitemap
+            # lists. Without this split, a large sitemap consumes everything and
+            # the reserve's beneficiaries are never even offered a slot.
+            limit = self.max_pages if dom_link else self.pre_crawl_budget
+            if len(self._nodes) >= limit:
                 self.truncated = True
                 return None
             existing = DiscoveredNode(url=url, normalized=key)
@@ -307,7 +349,11 @@ class SiteGraph:
     def report(self) -> DiscoveryReport:
         """Summarise what each path contributed."""
         nodes = self._nodes.values()
+        # Nodes beyond the non-DOM budget can only have arrived via the reserve.
+        reserve_used = max(0, len(self._nodes) - self.pre_crawl_budget)
         return DiscoveryReport(
+            dom_reserve=self.dom_reserve,
+            dom_reserve_used=reserve_used,
             base_url=self.base_url,
             total_urls=len(self._nodes),
             from_sitemap=sum(1 for n in nodes if n.sources.sitemap),
@@ -328,6 +374,7 @@ def discover_site(
     max_pages: int = DEFAULT_MAX_PAGES,
     max_depth: int = 5,
     crawl_dom: bool = True,
+    dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths and merge them into one graph.
 
@@ -341,11 +388,13 @@ def discover_site(
         max_depth: Link depth for the DOM crawl.
         crawl_dom: Disable to run sitemap and CMS discovery only — much cheaper,
             at the cost of missing exactly the pages Path B exists to find.
+        dom_reserve_fraction: Share of `max_pages` only the DOM crawl may fill,
+            so a large sitemap cannot starve out sitemap-omitted pages.
 
     Returns:
         The merged graph and its report.
     """
-    graph = SiteGraph(base_url, max_pages=max_pages)
+    graph = SiteGraph(base_url, max_pages=max_pages, dom_reserve_fraction=dom_reserve_fraction)
 
     sitemaps_fetched = _discover_from_sitemaps(fetcher, base_url, graph)
     _discover_from_cms(fetcher, base_url, graph, site_profile)

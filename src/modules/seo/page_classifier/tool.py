@@ -54,6 +54,7 @@ from src.modules.seo.page_classifier.cascading_pipeline import (
     needs_llm_escalation,
 )
 from src.modules.seo.page_classifier.discovery import (
+    DEFAULT_DOM_RESERVE_FRACTION,
     DEFAULT_MAX_PAGES,
     DiscoveryReport,
     SiteGraph,
@@ -129,6 +130,14 @@ class PageClassificationInput(StrictModel):
     """Run the concurrent crawl path. Disabling falls back to serial fetching,
     which is roughly 10x slower and exists only as an escape hatch for
     debugging a crawl that behaves differently under concurrency."""
+
+    dom_reserve_fraction: float = Field(default=DEFAULT_DOM_RESERVE_FRACTION, ge=0.0, le=0.9)
+    """Share of `max_pages` only the DOM crawl may fill.
+
+    Without a reserve, a sitemap larger than the budget consumes every slot and
+    pages the sitemap omits — the ones an audit most wants — are structurally
+    excluded. Setting this to `0.0` restores that behaviour and is almost never
+    what you want (ADR 0007)."""
 
 
 class CrawlSummary(StrictModel):
@@ -304,6 +313,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             "max_pages": payload.max_pages,
             "max_depth": payload.max_depth,
             "crawl_dom": payload.crawl_dom,
+            "dom_reserve_fraction": payload.dom_reserve_fraction,
         }
 
         if payload.use_async_crawl and not _event_loop_running():

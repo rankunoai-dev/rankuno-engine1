@@ -37,6 +37,7 @@ from typing import TypeVar
 from src.core.logger import get_logger
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.discovery import (
+    DEFAULT_DOM_RESERVE_FRACTION,
     DEFAULT_MAX_PAGES,
     SHOPIFY_ENDPOINTS,
     WORDPRESS_ENDPOINTS,
@@ -126,6 +127,7 @@ async def adiscover_site(
     max_depth: int = 5,
     crawl_dom: bool = True,
     concurrency: int = DEFAULT_CONCURRENCY,
+    dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths concurrently and merge them.
 
@@ -144,12 +146,14 @@ async def adiscover_site(
         max_depth: Link depth for the DOM crawl.
         crawl_dom: Run Path B.
         concurrency: Maximum simultaneous requests, clamped to `MAX_CONCURRENCY`.
+        dom_reserve_fraction: Share of `max_pages` only the DOM crawl may fill,
+            so a large sitemap cannot starve out sitemap-omitted pages.
 
     Returns:
         The merged graph and its report.
     """
     bounded = min(max(1, concurrency), MAX_CONCURRENCY)
-    graph = SiteGraph(base_url, max_pages=max_pages)
+    graph = SiteGraph(base_url, max_pages=max_pages, dom_reserve_fraction=dom_reserve_fraction)
 
     sitemaps_fetched = await _asitemaps(fetcher, base_url, graph, bounded)
     await _acms(fetcher, base_url, graph, site_profile)
