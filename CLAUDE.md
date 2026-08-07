@@ -37,6 +37,29 @@ steps that agents most often skip, and must not:
 - **Step 7 (Verification)**: run the gate. Paste the output.
 - **Step 8 (Drift Audit)**: update `README.md` and `docs/ARCHITECTURE.md` in the
   *same* change. Add an ADR to `docs/adr/` for any consequential decision.
+- **Step 8b (Build Log)** — **mandatory, not optional**: write a cycle entry to
+  `docs/build-log/NNNN-<slug>.md` and add it to that directory's index. See
+  `docs/build-log/README.md` for the required structure.
+
+### Why the build log is mandatory
+
+ADRs record what was decided; git records what changed. Neither records **why the
+code is shaped the way it is, what broke on the way, and what was deliberately
+left undone** — and in an AI-assisted codebase every session starts with no memory
+of the last one, so that reasoning is lost by default rather than by accident.
+
+Three sections carry most of the value and are the ones most likely to be skipped:
+
+* **Bugs found and fixed** — including bugs in the *specification*, and including
+  cases where a failing test turned out to be wrong and the code was right.
+* **Corrections** — anything previously stated that turned out to be false. A
+  wrong number that was published and then quietly fixed is worse than one never
+  published. Never edit an old entry; correct it in the new one.
+* **Explicitly not done** — so a later reader does not mistake a declared contract
+  for an implemented one. This is where most misunderstanding of this codebase
+  will come from.
+
+Paste real gate output. Do not summarise numbers from memory.
 
 ---
 

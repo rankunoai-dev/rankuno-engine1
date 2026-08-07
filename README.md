@@ -77,6 +77,7 @@ Procedural skills in `skills/` equipping subagents and review agents with domain
 * 🤖 **Agent Operating Instructions**: [CLAUDE.md](CLAUDE.md) — binding rules, contradiction rulings, known gaps
 * 🏗️ **System Architecture**: [ARCHITECTURE.md](docs/ARCHITECTURE.md)
 * 📚 **Architecture Decision Records**: [docs/adr/](docs/adr/)
+* 📓 **Build Log** — what shipped each cycle, why, and what broke: [docs/build-log/](docs/build-log/README.md)
 * ⚡ **Tech Stack & Cost-Optimization**: [TECH_STACK_SPECIFICATION.md](docs/TECH_STACK_SPECIFICATION.md)
 * 📐 **Phase 1 Page Classification Blueprint**: [PHASE1_PAGE_CLASSIFICATION_BLUEPRINT.md](docs/PHASE1_PAGE_CLASSIFICATION_BLUEPRINT.md)
 * 🛒 **Amazon-Scale E-Commerce Crawling Strategy**: [AMAZON_SCALE_ECOMMERCE_CRAWL_SPECIFICATION.md](docs/AMAZON_SCALE_ECOMMERCE_CRAWL_SPECIFICATION.md)

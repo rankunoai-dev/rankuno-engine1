@@ -116,6 +116,7 @@ Consequential decisions are recorded in [adr/](adr/):
 ## 6. Master Engineering Specifications & Blueprints
 
 - 🤖 **Agent Operating Instructions**: [CLAUDE.md](../CLAUDE.md)
+- 📓 **Build Log** — per-cycle implementation records: [build-log/](build-log/README.md)
 - ⚡ **Tech Stack & Cost-Optimization Specification**: [TECH_STACK_SPECIFICATION.md](TECH_STACK_SPECIFICATION.md)
 - 🛒 **Amazon-Scale E-Commerce Crawling Strategy**: [AMAZON_SCALE_ECOMMERCE_CRAWL_SPECIFICATION.md](AMAZON_SCALE_ECOMMERCE_CRAWL_SPECIFICATION.md)
 - 🌳 **Interactive Multi-Level Tree Visualizer Specification**: [TREE_VISUALIZER_SPECIFICATION.md](TREE_VISUALIZER_SPECIFICATION.md)
