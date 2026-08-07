@@ -102,6 +102,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `integrations/http_fetcher.py` — SSRF/robots-enforced fetcher, sync + async | ✅ Implemented & tested |
 | `page_classifier/site_profile.py` — runtime platform detection | ✅ Implemented & tested |
 | `page_classifier/discovery.py` — 3-path merged discovery → `PageEvidence` | ✅ Implemented & tested |
+| `page_classifier/tool.py` — **governed entry point**, one run = one crawl job | ✅ Implemented & tested |
 | `integrations/llm_client.py` — provider-agnostic LLM interface | ✅ Interface only; no concrete provider yet |
 | `modules/seo/page_classifier/schemas.py` — Phase 1 taxonomy | ✅ Implemented & tested |
 | `page_classifier/url_rules.py` — Layer 0 normalisation & pre-fetch rules | ✅ Implemented & tested |
@@ -109,7 +110,8 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `page_classifier/cascading_pipeline.py` — Layer 0–3 cascade & consensus | ✅ Implemented & tested |
 | `page_classifier/weights.py` — weight profiles & site-profile seam | ✅ Seam live; adaptive selection off pending corpus |
 | Layer 2 local ML classifier | ❌ Protocol only; needs local GPU ([ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
-| Phase 1 `tool.py`, tree visualizer | ❌ Not started |
+| Layer 3 `LlmPageClassifier` implementation | ❌ Protocol only; needs a live credential |
+| Phase 1 tree visualizer | ❌ Not started |
 | `core/circuit_breaker.py`, `core/state_store.py` | ❌ Not started |
 | Idempotency keys; distributed rate limit & spend ceiling | ❌ Not started |
 | `Dockerfile` / Railway deployment | ❌ Not started (deferred — see [ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |

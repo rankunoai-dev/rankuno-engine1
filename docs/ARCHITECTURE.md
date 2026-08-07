@@ -48,6 +48,8 @@ src/
     │       ├── site_profile.py       # Runtime platform detection (probe pass)
     │       ├── discovery.py          # 3-path merged discovery -> PageEvidence
     │       ├── discovery_parsers.py  # Sitemap XML, DOM links, CMS payloads
+    │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
+    │       │                         # crawl job, RiskClass.READ (ADR 0003)
     │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       └── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
@@ -61,8 +63,9 @@ src/
 | :--- | :--- |
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
 | `core/state_store.py` | Redis/Postgres checkpointing for crash recovery |
-| `modules/seo/page_classifier/tool.py` | `BaseTool` entry point (one call = one crawl job) |
+| `modules/seo/page_classifier/tree_visualizer.py` | Standalone interactive HTML site tree |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
+| An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `modules/seo/page_classifier/tree_visualizer.py` | Standalone interactive HTML site tree |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
 
