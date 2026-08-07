@@ -104,6 +104,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `page_classifier/discovery.py` — 3-path merged discovery → `PageEvidence` | ✅ Implemented & tested |
 | `page_classifier/async_discovery.py` — concurrent crawl path | ✅ Implemented & tested |
 | `page_classifier/tree_visualizer.py` — standalone interactive HTML report | ✅ Implemented & tested |
+| `page_classifier/corpus.py` + `evaluation.py` — golden corpus & accuracy harness | ✅ Implemented & tested |
 | `page_classifier/tool.py` — **governed entry point**, one run = one crawl job | ✅ Implemented & tested |
 | `integrations/llm_client.py` — provider-agnostic LLM interface | ✅ Interface only; no concrete provider yet |
 | `modules/seo/page_classifier/schemas.py` — Phase 1 taxonomy | ✅ Implemented & tested |
@@ -113,6 +114,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `page_classifier/weights.py` — weight profiles & site-profile seam | ✅ Seam live; adaptive selection off pending corpus |
 | Layer 2 local ML classifier | ❌ Protocol only; needs local GPU ([ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
 | Layer 3 `LlmPageClassifier` implementation | ❌ Protocol only; needs a live credential |
+| Golden corpus coverage | ⚠️ 13 labels, 1 of 6 archetypes — **not yet enough to validate any accuracy claim** |
 | `core/circuit_breaker.py`, `core/state_store.py` | ❌ Not started |
 | Idempotency keys; distributed rate limit & spend ceiling | ❌ Not started |
 | `Dockerfile` / Railway deployment | ❌ Not started (deferred — see [ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |

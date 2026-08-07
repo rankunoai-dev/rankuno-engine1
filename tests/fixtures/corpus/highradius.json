@@ -1,0 +1,100 @@
+{
+  "name": "highradius",
+  "base_url": "https://www.highradius.com",
+  "archetype": "B2B_SAAS",
+  "labelled_by": "Rankuno AI Lead, transcribed from docs/HIGHRADIUS_CRAWL_AUDIT_RECORD.md",
+  "notes": "The only entries in this corpus with human-assigned labels. Every URL below is quoted verbatim from the audit record. Section 3 of that document gives eight classifications; section 4 names five pages absent from every XML sitemap, which are labelled here from their observed role. Do not add machine-generated labels to this file - keep provenance clean so a disputed label can be re-checked against the source.",
+  "entries": [
+    {
+      "url": "https://www.highradius.com/",
+      "expected_level": "L0_HOMEPAGE",
+      "expected_page_type": "HOMEPAGE",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 3.1",
+      "notes": "Apex node."
+    },
+    {
+      "url": "https://www.highradius.com/software/accounts-payable/",
+      "expected_level": "L1_PRIMARY_NAV_HUB",
+      "expected_page_type": "PRODUCT_CATEGORY_HUB",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 3.2",
+      "notes": "Section hub reachable from global navigation."
+    },
+    {
+      "url": "https://www.highradius.com/product/treasury-management-software/liquidity-management/",
+      "expected_level": "L2_SUB_NAV_HUB",
+      "expected_page_type": "PRODUCT_CATEGORY_HUB",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 3.3",
+      "notes": "Same page type as its L1 parent but a different level - the decoupling ADR 0002 exists for."
+    },
+    {
+      "url": "https://www.highradius.com/software/order-to-cash/credit-cloud/credit-application-processing/",
+      "expected_level": "L3_LEAF_PAGE",
+      "expected_page_type": "PRODUCT_DETAIL_PAGE",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 3.4",
+      "notes": "Four path segments deep; depth alone would not distinguish it from an L2 hub."
+    },
+    {
+      "url": "https://www.highradius.com/resources/Blog/agentic-ai-invoice-processing/",
+      "expected_level": "L3_LEAF_PAGE",
+      "expected_page_type": "BLOG_ARTICLE",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 3.4",
+      "notes": "Mixed-case path segment 'Blog' - normalisation must not treat it as distinct from 'blog'."
+    },
+    {
+      "url": "https://www.highradius.com/resources/case-studies/kraft-heinz-dms/",
+      "expected_level": "L3_LEAF_PAGE",
+      "expected_page_type": "CASE_STUDY",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 3.4",
+      "notes": "One of the two page types CLAUDE.md 7 ruling 5 added to the taxonomy."
+    },
+    {
+      "url": "https://www.highradius.com/demo-request/",
+      "expected_level": "UTILITY_PAGE",
+      "expected_page_type": "COMMERCIAL_LEAD_GEN",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 3.5",
+      "notes": "The level/type pair that forced the validity matrix to permit lead-gen at UTILITY_PAGE."
+    },
+    {
+      "url": "https://www.highradius.com/privacy-policy/",
+      "expected_level": "UTILITY_PAGE",
+      "expected_page_type": "UTILITY_LEGAL",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 3.5",
+      "notes": "Resolvable by Layer 0 from the URL alone."
+    },
+    {
+      "url": "https://www.highradius.com/code-of-ethics/",
+      "expected_level": "UTILITY_PAGE",
+      "expected_page_type": "UTILITY_LEGAL",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 4 - absent from every XML sitemap",
+      "notes": "Reachable only by DOM link. Discovered for the first time in build-log 0008 after the DOM budget reserve landed."
+    },
+    {
+      "url": "https://www.highradius.com/anti-corruption-and-bribery-policy/",
+      "expected_level": "UTILITY_PAGE",
+      "expected_page_type": "UTILITY_LEGAL",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 4 - absent from every XML sitemap",
+      "notes": "Still not discovered at a 0.6 DOM reserve; the reserve was exhausted."
+    },
+    {
+      "url": "https://www.highradius.com/human-rights-policy/",
+      "expected_level": "UTILITY_PAGE",
+      "expected_page_type": "UTILITY_LEGAL",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 4 - absent from every XML sitemap",
+      "notes": "Corporate ESG page, sitemap-omitted."
+    },
+    {
+      "url": "https://www.highradius.com/glossary/",
+      "expected_level": "L1_PRIMARY_NAV_HUB",
+      "expected_page_type": "BLOG_HUB",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 4 - absent from every XML sitemap",
+      "notes": "Described in the audit record as an SEO terminology hub. Sitemap-omitted despite being a hub, which is the finding the 3-path pipeline exists to surface."
+    },
+    {
+      "url": "https://www.highradius.com/finsider/",
+      "expected_level": "L1_PRIMARY_NAV_HUB",
+      "expected_page_type": "BLOG_HUB",
+      "source": "HIGHRADIUS_CRAWL_AUDIT_RECORD.md 4 - absent from every XML sitemap",
+      "notes": "Editorial hub, sitemap-omitted."
+    }
+  ]
+}

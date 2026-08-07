@@ -235,6 +235,7 @@ def classify_page(
     site_profile: SiteProfile | None = None,
     local_classifier: ZeroShotClassifier | None = None,
     llm_signal: SignalScore | None = None,
+    weights_override: Mapping[SignalSource, float] | None = None,
 ) -> FullPageIntelligenceProfile:
     """Classify one page through the cascade.
 
@@ -247,13 +248,17 @@ def classify_page(
         llm_signal: Layer 3 result, supplied by the caller because the LLM call
             is I/O and this module performs none. Callers should invoke the LLM
             only when `needs_llm_escalation` would be true — see that helper.
+        weights_override: Force a specific weight vector, bypassing the seam.
+            The calibration hook: scoring the same evidence under several
+            profiles is how the uncalibrated ones in ADR 0006 get fitted. Not
+            for production use — a crawl should let the seam choose.
 
     Returns:
         A complete profile. Never raises for an unclassifiable page: it returns
         `UNKNOWN` with low confidence, which is a measurable defect signal
         rather than a crash mid-crawl.
     """
-    weights = get_weight_profile(site_profile)
+    weights = weights_override if weights_override is not None else get_weight_profile(site_profile)
     signals: list[SignalScore] = []
 
     # Layer 0 — free, and decisive when it fires.
