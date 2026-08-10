@@ -1,4 +1,7 @@
-import type { PageClassificationOutput } from "../types/schema";
+import type {
+  PageClassificationInput,
+  PageClassificationOutput,
+} from "../types/schema";
 
 /**
  * Lifecycle of a crawl job.
@@ -61,4 +64,36 @@ export interface CrawlDataAdapter {
    * components are written against polling from the start.
    */
   getProgress(jobId: string): Promise<JobProgress>;
+
+  /**
+   * Start a new crawl, returning its job id.
+   *
+   * Optional, and that is the point: `MockAdapter` reads files that were
+   * generated ahead of time and genuinely cannot start anything. Declaring it
+   * required would force the mock to implement a method that throws, and the UI
+   * would have no way to know before calling. Absent here means the "start a
+   * crawl" control is simply not rendered.
+   *
+   * Resolves as soon as the job is *accepted*. Nothing has been crawled yet —
+   * poll `getProgress` until the status is terminal.
+   */
+  startJob?(request: PageClassificationInput): Promise<string>;
 }
+
+/**
+ * Sensible defaults for a live crawl, matching the Pydantic model's own.
+ *
+ * `max_depth: null` is unlimited — bounded by `max_pages`, not by depth.
+ */
+export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
+  base_url: "",
+  max_pages: 500,
+  max_depth: null,
+  crawl_dom: true,
+  respect_robots: true,
+  llm_spend_cap_usd: 0,
+  user_agent: "RankunoBot",
+  concurrency: 5,
+  use_async_crawl: true,
+  dom_reserve_fraction: 0.2,
+};

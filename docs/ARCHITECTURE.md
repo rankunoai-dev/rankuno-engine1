@@ -16,7 +16,11 @@ This repository (`project-standards`) serves as the **Master Governance & SDLC R
 
 The platform architecture enforces an immutable inward-only dependency flow across all modules and subagents:
 
-$$\text{modules} \longrightarrow \text{integrations} \longrightarrow \text{core}$$
+$$\text{api} \longrightarrow \text{modules} \longrightarrow \text{integrations} \longrightarrow \text{core}$$
+
+`api/` is the outermost layer ([ADR 0008](adr/0008-local-api-layer-and-job-store.md)).
+Nothing below it may import from it, and it adds no analysis or safety control of
+its own — it is a transport over the governed tools.
 
 **Implemented** — this tree reflects files that exist today. Planned modules are listed
 separately below, per `SDLC_STEP8` §2.1 (documentation describes verified state only).
@@ -34,7 +38,13 @@ src/
 │   ├── registry.py              # Tool catalogue & risk-surface audit
 │   ├── retry.py                 # Exponential backoff with jitter (tenacity)
 │   ├── url_safety.py            # SSRF guard: private-range blocker, scheme allowlist
-│   └── robots.py                # robots.txt & crawl-delay parsing (RFC 9309)
+│   ├── robots.py                # robots.txt & crawl-delay parsing (RFC 9309)
+│   └── state_store.py           # Durable background-job records. Domain-agnostic:
+│                                # opaque request/result mappings, atomic writes
+├── api/                         # Local HTTP API (ADR 0008). Outermost layer;
+│   └── server.py                # nothing below imports from it. Implements no
+│                                # safety control of its own — all inherited from
+│                                # BaseTool.run(). Binds 127.0.0.1.
 ├── integrations/                # External API wrappers
 │   ├── base_client.py           # Quota, retry, credential handling for all connectors
 │   ├── http_fetcher.py          # The ONLY outbound web fetcher. Enforces SSRF,
@@ -64,7 +74,7 @@ src/
 | Path | Purpose |
 | :--- | :--- |
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
-| `core/state_store.py` | Redis/Postgres checkpointing for crash recovery |
+| Crawl checkpointing | `core/state_store.py` records whole jobs, but does not checkpoint *within* a crawl — an interrupted crawl still loses its work |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `modules/seo/page_classifier/tree_visualizer.py` | Standalone interactive HTML site tree |

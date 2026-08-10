@@ -1,6 +1,12 @@
-import { ExperimentOutlined, WarningOutlined } from "@ant-design/icons";
-import { Alert, Select, Space, Statistic, Tag, Typography } from "antd";
+import {
+  ExperimentOutlined,
+  RadarChartOutlined,
+  WarningOutlined,
+} from "@ant-design/icons";
+import { Alert, Button, Select, Space, Statistic, Tag, Typography } from "antd";
+import { useState } from "react";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { LiveCrawlModal } from "./LiveCrawlModal";
 
 const STATUS_COLOR: Record<string, string> = {
   idle: "default",
@@ -25,7 +31,14 @@ export function HeaderBar(): JSX.Element {
   const status = useCrawlStore((state) => state.status);
   const error = useCrawlStore((state) => state.error);
   const result = useCrawlStore((state) => state.result);
+  const adapter = useCrawlStore((state) => state.adapter);
+  const liveMessage = useCrawlStore((state) => state.liveMessage);
+  const [crawlOpen, setCrawlOpen] = useState(false);
 
+  // Presence of `startJob` is the capability check. `MockAdapter` reads files
+  // generated ahead of time and genuinely cannot start a crawl, so offering the
+  // button against it would be offering an action that cannot work.
+  const canStartCrawl = adapter?.startJob !== undefined;
   const active = jobs.find((job) => job.id === activeJobId);
   const discovery = result?.discovery;
   const summary = result?.summary;
@@ -66,7 +79,24 @@ export function HeaderBar(): JSX.Element {
           }))}
         />
 
+        {canStartCrawl && (
+          <Button
+            type="primary"
+            icon={<RadarChartOutlined />}
+            loading={status === "running" || status === "queued"}
+            onClick={() => setCrawlOpen(true)}
+          >
+            New crawl
+          </Button>
+        )}
+
         <Tag color={STATUS_COLOR[status] ?? "default"}>{status.toUpperCase()}</Tag>
+
+        {liveMessage && (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {liveMessage}
+          </Typography.Text>
+        )}
 
         {summary && discovery && (
           <Space size={26}>
@@ -124,6 +154,8 @@ export function HeaderBar(): JSX.Element {
           }
         />
       )}
+
+      <LiveCrawlModal open={crawlOpen} onClose={() => setCrawlOpen(false)} />
     </div>
   );
 }

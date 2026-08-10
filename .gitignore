@@ -67,3 +67,10 @@ logs/
 scratch/
 outputs/
 reports/
+
+# Background job records written by the local API server. Machine state, not
+# source: each finished 20k-page crawl stores a ~16 MB result blob here.
+.jobs/
+
+# Tree reports written by scripts/run_crawl.py --out
+*-tree.html

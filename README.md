@@ -127,8 +127,28 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 .\.venv\Scripts\python.exe scripts\run_crawl.py https://example.com --max-pages 250 --depth 2
 ```
 
-Defaults are deliberately conservative (50 pages, depth 1, concurrency 3) — this
-crawls somebody else's server. Writes a self-contained interactive HTML report.
+Defaults are deliberately conservative (50 pages, concurrency 3) — this crawls
+somebody else's server. Writes a self-contained interactive HTML report.
+
+`--max-pages` is what bounds a run; `--depth` is unlimited by default. A depth
+ceiling does not reduce how many pages are fetched — the page budget is spent
+either way — it only decides whether a deep site's lower levels are reachable.
+
+### The local API and the React UI
+
+```powershell
+.\.venv\Scripts\python.exe -m src.api.server        # http://127.0.0.1:8000
+cd rankuno-ui; npm run dev                          # http://localhost:5173
+```
+
+The server binds loopback deliberately: there is no authentication and it fetches
+arbitrary URLs on request ([ADR 0008](docs/adr/0008-local-api-layer-and-job-store.md)).
+Started without it, the UI falls back to bundled fixtures and says so on screen —
+fixture data is indistinguishable from crawl output otherwise.
+
+Job records persist under `.jobs/`, so crawls survive a restart. A crawl
+interrupted mid-run is marked `failed` rather than resumed: there is no
+within-crawl checkpointing, so the work genuinely is lost.
 
 > **Validated against a live site.**
 > [build-log/0007](docs/build-log/0007-first-live-run.md) records the first real

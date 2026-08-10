@@ -38,6 +38,17 @@ dev = [
 ]
 # Domain extras are declared up-front so the dependency surface is reviewable,
 # but they are NOT installed by default and no code imports them yet.
+# The local API server (`src/api/`). An extra rather than a core dependency:
+# importing this package as a library must not drag in a web server, and the
+# engine is fully usable without one — `scripts/run_crawl.py` needs none of it.
+#
+# `scripts/bootstrap.ps1` installs this extra by default, because `mypy --strict`
+# runs over the whole tree and a missing `fastapi` would fail the quality gate on
+# a fresh clone rather than producing a clear "not installed" error.
+api = [
+    "fastapi>=0.110.0,<1.0.0",
+    "uvicorn>=0.28.0,<1.0.0",
+]
 seo = [
     # httpx moved to core dependencies above; listing it here too would let the
     # two bounds drift apart.

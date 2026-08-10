@@ -55,7 +55,10 @@ if (-not (Test-Path $venvPython)) { Write-Error "venv creation failed: $venvPyth
 # --- 3. Install dependencies ----------------------------------------------
 Write-Host 'Installing dependencies...' -ForegroundColor Cyan
 & $venvPython -m pip install --upgrade pip
-$extras = if ($WithSeo) { '.[dev,seo]' } else { '.[dev]' }
+# `api` is always installed: mypy --strict runs over the whole tree, so without
+# fastapi a fresh clone fails the quality gate on src/api rather than reporting a
+# missing optional dependency.
+$extras = if ($WithSeo) { '.[dev,api,seo]' } else { '.[dev,api]' }
 & $venvPython -m pip install -e $extras
 if ($LASTEXITCODE -ne 0) { Write-Error 'Dependency installation failed.' }
 

@@ -4,6 +4,7 @@ import type {
   CrawlJobSummary,
   JobStatus,
 } from "../adapters/adapterInterface";
+import { HttpAdapter } from "../adapters/httpAdapter";
 import {
   buildSearchIndex,
   buildTree,
@@ -12,6 +13,7 @@ import {
 } from "../lib/tree";
 import type {
   FullPageIntelligenceProfile,
+  PageClassificationInput,
   PageClassificationOutput,
   PrimaryPageType,
 } from "../types/schema";
@@ -36,8 +38,13 @@ interface CrawlState {
   selectedUrl: string | null;
   drawerOpen: boolean;
 
+  /** Message shown while a live crawl runs, or null when none is running. */
+  liveMessage: string | null;
+
   init: (adapter: CrawlDataAdapter) => Promise<void>;
   selectJob: (jobId: string) => Promise<void>;
+  startCrawl: (request: PageClassificationInput) => Promise<void>;
+  refreshJobs: () => Promise<void>;
   setQuery: (query: string) => void;
   setTypeFilter: (types: PrimaryPageType[]) => void;
   selectNode: (url: string | null) => void;
@@ -51,6 +58,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
   activeJobId: null,
   status: "idle",
   error: null,
+  liveMessage: null,
 
   result: null,
   tree: null,
@@ -111,6 +119,67 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       });
     } catch (cause) {
       set({ status: "failed", error: describe(cause) });
+    }
+  },
+
+  async refreshJobs() {
+    const adapter = get().adapter;
+    if (!adapter) return;
+    try {
+      set({ jobs: await adapter.listJobs() });
+    } catch (cause) {
+      set({ error: describe(cause) });
+    }
+  },
+
+  async startCrawl(request) {
+    const adapter = get().adapter;
+    if (!adapter?.startJob) {
+      set({ error: "This data source cannot start crawls." });
+      return;
+    }
+
+    set({
+      status: "queued",
+      error: null,
+      liveMessage: "Submitting…",
+      result: null,
+      tree: null,
+      searchIndex: [],
+      byUrl: new Map(),
+      selectedUrl: null,
+      drawerOpen: false,
+      query: "",
+    });
+
+    try {
+      const jobId = await adapter.startJob(request);
+      set({ activeJobId: jobId });
+      await get().refreshJobs();
+
+      // Polling is delegated to the adapter, which owns the backoff schedule.
+      // Duplicating the interval here would let the two drift apart.
+      const progress =
+        adapter instanceof HttpAdapter
+          ? await adapter.waitForCompletion(jobId, (update) => {
+              set({ status: update.status, liveMessage: update.message });
+            })
+          : await adapter.getProgress(jobId);
+
+      set({ liveMessage: null });
+
+      if (progress.status === "failed") {
+        set({ status: "failed", error: progress.message });
+        await get().refreshJobs();
+        return;
+      }
+
+      // `selectJob` fetches the result and rebuilds every derived structure, so
+      // a finished live crawl lands in exactly the same state as a selected one.
+      await get().selectJob(jobId);
+      await get().refreshJobs();
+    } catch (cause) {
+      set({ status: "failed", error: describe(cause), liveMessage: null });
     }
   },
 

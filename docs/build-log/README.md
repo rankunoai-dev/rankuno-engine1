@@ -41,6 +41,7 @@ which, for an AI-assisted codebase, is every session.
 | [0009](0009-golden-corpus.md) | 2026-08-07 | Golden corpus & evaluation harness | 705 tests, 94.92% |
 | [0010](0010-draft-label-worksheets.md) | 2026-08-07 | Draft worksheets & multi-archetype crawls | 742 tests, 94.95% |
 | [0011](0011-cms-pagination.md) | 2026-08-07 | Multi-page CMS retrieval | 777 tests, 95.15% |
+| [0012](0012-live-api-and-unlimited-depth.md) | 2026-08-10 | Live API, job store, unlimited depth | 877 tests, 95.65% |
 
 ---
 
