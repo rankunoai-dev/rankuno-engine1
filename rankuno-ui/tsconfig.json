@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": false,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Kept: catches the real bug of indexing an array and assuming a hit, which
+    // the tree code does constantly.
+    "noUncheckedIndexedAccess": true
+
+    // `exactOptionalPropertyTypes` is deliberately off. Ant Design's prop types
+    // are not written for it, so it rejects ordinary usage like passing
+    // `value={maybeUndefined}` to a Select. The errors it produced here were all
+    // library-shape friction rather than defects in our code.
+  },
+  "include": ["src"]
+}

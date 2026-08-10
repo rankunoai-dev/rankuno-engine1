@@ -88,6 +88,21 @@ SITE = {
     ),
 }
 
+CHAIN_LENGTH = 20
+"""Longer than the depth ceiling that used to be the default (5).
+
+A chain, not a tree: each hop is reachable only through the one above it, so the
+number of pages fetched states exactly how far traversal got.
+"""
+
+DEEP_CHAIN: dict[str, httpx.Response] = {
+    "/robots.txt": httpx.Response(200, text=ROBOTS),
+    "/": html('<html><body><a href="/c0/">Down</a></body></html>'),
+}
+for _hop in range(CHAIN_LENGTH):
+    _next = f'<a href="/c{_hop + 1}/">Down</a>' if _hop + 1 < CHAIN_LENGTH else "end"
+    DEEP_CHAIN[f"/c{_hop}/"] = html(f"<html><body>{_next}</body></html>")
+
 NESTED_SITEMAPS = {
     "/robots.txt": httpx.Response(200, text=ROBOTS),
     "/sitemap_index.xml": xml(SITEMAP_INDEX),
@@ -199,6 +214,53 @@ class TestConcurrentBehaviour:
     def test_respects_the_depth_ceiling(self, settings):
         _, report = run_async(settings, max_depth=0)
         assert report.pages_fetched == 1
+
+
+class TestUnlimitedDepth:
+    """`max_depth=None` traverses until the frontier is exhausted.
+
+    The previous default of 5 was a silent truncation: a site deeper than five
+    hops lost everything below, while the page budget it would have used sat
+    unspent. `max_pages` is the real bound.
+    """
+
+    def test_async_follows_the_whole_chain(self, settings):
+        graph, report = run_async(settings, DEEP_CHAIN)
+        paths = {node.normalized for node in graph.nodes}
+        assert f"https://e.com/c{CHAIN_LENGTH - 1}/" in paths
+        assert report.pages_fetched == CHAIN_LENGTH + 1, "every hop, plus the root"
+
+    def test_serial_follows_the_whole_chain(self, settings):
+        _, report = discover_site(build_fetcher(settings, DEEP_CHAIN), "https://e.com")
+        assert report.pages_fetched == CHAIN_LENGTH + 1
+
+    def test_unlimited_is_the_default(self, settings):
+        """Neither path needs `max_depth` passed to reach the bottom."""
+        _, serial = discover_site(build_fetcher(settings, DEEP_CHAIN), "https://e.com")
+        _, concurrent = run_async(settings, DEEP_CHAIN)
+        assert serial.pages_fetched == concurrent.pages_fetched == CHAIN_LENGTH + 1
+
+    def test_an_explicit_ceiling_still_truncates(self, settings):
+        """Opting back in must work, or the ceiling is not a ceiling."""
+        _, report = run_async(settings, DEEP_CHAIN, max_depth=3)
+        assert report.pages_fetched == 4, "root plus three hops"
+
+    def test_both_paths_truncate_identically(self, settings):
+        """Depth arithmetic differs between the loops; the result must not."""
+        _, serial = discover_site(build_fetcher(settings, DEEP_CHAIN), "https://e.com", max_depth=3)
+        _, concurrent = run_async(settings, DEEP_CHAIN, max_depth=3)
+        assert serial.pages_fetched == concurrent.pages_fetched == 4
+
+    def test_the_page_budget_still_bounds_an_unlimited_crawl(self, settings):
+        """Unlimited depth is not unlimited work.
+
+        The graph refuses new nodes at `max_pages`, so the frontier drains. If
+        this ever regressed, an unlimited crawl of a cyclic site would not
+        terminate.
+        """
+        graph, report = run_async(settings, DEEP_CHAIN, max_pages=6)
+        assert report.truncated is True
+        assert len(list(graph.nodes)) == 6
 
     def test_reports_truncation(self, settings):
         _, report = run_async(settings, max_pages=2)

@@ -385,7 +385,7 @@ def discover_site(
     *,
     site_profile: SiteProfile | None = None,
     max_pages: int = DEFAULT_MAX_PAGES,
-    max_depth: int = 5,
+    max_depth: int | None = None,
     crawl_dom: bool = True,
     dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
 ) -> tuple[SiteGraph, DiscoveryReport]:
@@ -398,7 +398,8 @@ def discover_site(
         site_profile: Platform hints from the probe pass. Path C is skipped for
             an unrecognised platform rather than guessed at.
         max_pages: Node ceiling.
-        max_depth: Link depth for the DOM crawl.
+        max_depth: Link depth ceiling for the DOM crawl. `None` traverses until
+            the link frontier is exhausted or `max_pages` is reached.
         crawl_dom: Disable to run sitemap and CMS discovery only — much cheaper,
             at the cost of missing exactly the pages Path B exists to find.
         dom_reserve_fraction: Share of `max_pages` only the DOM crawl may fill,
@@ -540,12 +541,18 @@ def _paginate(fetcher: HttpFetcher, endpoint: str) -> Iterator[str]:
     _logger.info("cms_pagination_ceiling_reached", extra={"endpoint": endpoint})
 
 
-def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth: int) -> int:
+def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth: int | None) -> int:
     """Path B — breadth-first link traversal from the root.
 
     Breadth-first rather than depth-first so that when the ceiling is hit, what
     was captured is the shallow, structurally important part of the site rather
     than one arbitrarily deep branch.
+
+    `max_depth=None` traverses without a depth ceiling. That is bounded, not
+    unbounded: `graph.record_links` drops targets the graph refused, and the
+    graph refuses new nodes at `max_pages`, so the frontier stops growing once
+    the budget is spent. `max_pages` is the real limit either way — a depth
+    ceiling only decides *which* pages fill it.
     """
     graph.add(base_url, dom_link=True, depth=0)
     frontier: deque[tuple[str, int]] = deque([(base_url, 0)])
@@ -558,7 +565,7 @@ def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth:
         # refuses *new* nodes when full, so the frontier stops growing on its
         # own. Skipping here instead meant that whenever the sitemap alone
         # filled the budget, the DOM crawl fetched nothing at all.
-        if depth > max_depth:
+        if max_depth is not None and depth > max_depth:
             continue
 
         # Filter permutations are classified from the URL alone; fetching them

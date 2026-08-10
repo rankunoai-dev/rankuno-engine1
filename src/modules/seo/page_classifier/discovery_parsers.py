@@ -11,10 +11,19 @@ input. Python's `xml.etree.ElementTree` does not resolve *external* entities,
 but it does expand *internal* ones, so a "billion laughs" document is a live
 denial-of-service vector against a crawler.
 
-A sitemap has no legitimate use for a DTD, so any document containing a
-`<!DOCTYPE` declaration is rejected outright before parsing. That closes both
-entity-expansion and XXE without adding a dependency, and it cannot reject a
-well-formed sitemap because well-formed sitemaps never carry one.
+The defence is to parse only the `<urlset>`/`<sitemapindex>` element, sliced out
+of whatever the response body happens to be. A DTD can only appear in the
+prolog, *before* the root element, so the slice cannot contain one. Any
+`&entity;` reference surviving inside it is then an undefined entity, which
+expat reports as a `ParseError` rather than expanding — entity expansion and
+XXE are both closed structurally, with no dependency added.
+
+This replaced a blanket rejection of any body containing `<!DOCTYPE`. That rule
+was written on the assumption that only an attacker would send one, which is
+false: Yoast and RankMath serve sitemaps wrapped in an XHTML skin so the file
+renders as a styled page in a browser, and the wrapper carries a doctype. The
+rule was discarding those sites' sitemaps in full. Slicing keeps the same
+guarantee and stops throwing away legitimate documents to get it.
 """
 
 from __future__ import annotations
@@ -52,7 +61,16 @@ _logger = get_logger("modules.seo.discovery_parsers")
 MAX_SITEMAP_ENTRIES = 50_000
 """Per the sitemap protocol. A file claiming more is malformed or hostile."""
 
-_DOCTYPE_RE = re.compile(r"<!DOCTYPE", re.IGNORECASE)
+_SITEMAP_ROOTS = ("sitemapindex", "urlset")
+
+_ROOT_OPEN_RE = {
+    name: re.compile(rf"<(?:[\w.\-]+:)?{name}(?=[\s/>])", re.IGNORECASE) for name in _SITEMAP_ROOTS
+}
+"""Opening tag of a sitemap root, with or without a namespace prefix."""
+
+_ROOT_CLOSE_RE = {
+    name: re.compile(rf"</(?:[\w.\-]+:)?{name}\s*>", re.IGNORECASE) for name in _SITEMAP_ROOTS
+}
 
 _SKIP_LINK_PREFIXES = ("#", "javascript:", "mailto:", "tel:", "data:", "sms:")
 
@@ -145,14 +163,78 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].lower()
 
 
+def _extract_root_element(text: str) -> str | None:
+    """Slice out the `<urlset>`/`<sitemapindex>` element, discarding any prolog.
+
+    This is the safety boundary, not a convenience. XML permits a DTD only in
+    the prolog, so a slice that begins at the root element's opening tag cannot
+    carry an internal subset — and therefore cannot carry an entity declaration
+    to expand. Whatever wrapped the element, XHTML skin or nothing at all, is
+    dropped along with it.
+
+    The last closing tag is used rather than the first: `<loc>` values are
+    escaped, so a literal `</urlset>` cannot appear inside the element, and
+    taking the last one survives trailing wrapper markup.
+
+    Returns:
+        The sliced element, or `None` if no sitemap root is present.
+    """
+    best: tuple[int, str] | None = None
+    for name in _SITEMAP_ROOTS:
+        opening = _ROOT_OPEN_RE[name].search(text)
+        if opening is not None and (best is None or opening.start() < best[0]):
+            best = (opening.start(), name)
+
+    if best is None:
+        return None
+
+    start, name = best
+
+    tag_end = _opening_tag_end(text, start)
+    if tag_end is not None and text[tag_end - 2 : tag_end] == "/>":
+        # `<urlset/>` — an empty sitemap, well-formed and with no closing tag.
+        # Falling through would return the wrapper's trailing markup as well.
+        return text[start:tag_end]
+
+    closings = list(_ROOT_CLOSE_RE[name].finditer(text, start))
+    if not closings:
+        # Unterminated. Hand it over anyway so ElementTree reports the truncation
+        # rather than this function silently deciding the document is empty.
+        return text[start:]
+    return text[start : closings[-1].end()]
+
+
+def _opening_tag_end(text: str, start: int) -> int | None:
+    """Index just past the `>` closing the tag that begins at `start`.
+
+    Quote-aware, because an XML attribute value may legally contain `>` and a
+    naive `find(">")` would cut the tag in half.
+    """
+    quote = ""
+    for index in range(start, len(text)):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == ">":
+            return index + 1
+    return None
+
+
 def parse_sitemap(xml_text: str, source_name: str = "") -> SitemapDocument:
     """Parse a sitemap index or urlset.
 
     Malformed XML yields an empty document rather than raising: one broken
     sitemap among a dozen must not abort discovery for the whole site.
 
+    The document is sliced to its root element before parsing, which both
+    tolerates the XHTML wrapper WordPress SEO plugins emit and removes the
+    entity-expansion surface. See the module docstring.
+
     Args:
-        xml_text: Raw sitemap XML.
+        xml_text: Raw sitemap XML, optionally wrapped in other markup.
         source_name: Filename it came from, carried through to signal parsing.
 
     Returns:
@@ -162,14 +244,14 @@ def parse_sitemap(xml_text: str, source_name: str = "") -> SitemapDocument:
     if not xml_text.strip():
         return SitemapDocument(source_name=source_name)
 
-    if _DOCTYPE_RE.search(xml_text):
-        # No legitimate sitemap carries a DTD; one that does is an
-        # entity-expansion attempt. Refuse before handing it to the parser.
-        _logger.warning("sitemap_doctype_rejected", extra={"source": source_name})
+    sliced = _extract_root_element(xml_text)
+    if sliced is None:
+        _logger.info("sitemap_no_root_element", extra={"source": source_name})
         return SitemapDocument(source_name=source_name)
 
     try:
-        root = ElementTree.fromstring(xml_text)  # noqa: S314 - DOCTYPE rejected above
+        # Safe: `sliced` starts at the root tag, so no DTD can precede it.
+        root = ElementTree.fromstring(sliced)  # noqa: S314
     except ElementTree.ParseError as exc:
         _logger.info("sitemap_unparseable", extra={"source": source_name, "error": str(exc)})
         return SitemapDocument(source_name=source_name)

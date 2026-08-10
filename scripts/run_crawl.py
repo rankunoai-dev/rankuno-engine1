@@ -10,8 +10,12 @@ Usage:
     python scripts/run_crawl.py http://127.0.0.1:8000 --allow-private   # fixtures
 
 Defaults are deliberately conservative. This crawls somebody else's server, and
-the polite default is a small, shallow, low-concurrency pass. Raise the limits
-knowingly.
+the polite default is a small, low-concurrency pass. Raise the limits knowingly.
+
+`--max-pages` is what bounds a run, not `--depth`. Depth is unlimited by default
+because a ceiling does not reduce how many pages are fetched — the page budget
+is spent either way — it only decides whether the budget goes to a deep site's
+lower levels or is left unspent.
 """
 
 from __future__ import annotations
@@ -41,7 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("url", help="Site root, e.g. https://example.com")
     parser.add_argument("--max-pages", type=int, default=50, help="Node ceiling (default 50)")
-    parser.add_argument("--depth", type=int, default=1, help="Link depth (default 1)")
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        help="Link depth ceiling. Omit for unlimited (bounded by --max-pages).",
+    )
     parser.add_argument(
         "--concurrency", type=int, default=3, help="Simultaneous requests (default 3)"
     )
@@ -156,8 +165,9 @@ def main() -> int:
         user_agent=args.user_agent,
     )
 
+    depth_label = "unlimited depth" if args.depth is None else f"depth {args.depth}"
     print(
-        f"Crawling {args.url} (max {args.max_pages} pages, depth {args.depth}, "
+        f"Crawling {args.url} (max {args.max_pages} pages, {depth_label}, "
         f"concurrency {args.concurrency})..."
     )
 

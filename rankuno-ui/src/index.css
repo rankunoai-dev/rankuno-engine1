@@ -1,0 +1,49 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #0a0d14;
+  color: #e2e8f0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* The tree renders one long virtual list; a visible scrollbar makes it obvious
+   the pane scrolls independently of the page. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0d14;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* React Flow paints its own light background by default. */
+.react-flow__renderer,
+.react-flow__pane {
+  background: #0a0d14;
+}
+
+.react-flow__controls-button {
+  background: #131823;
+  border-bottom: 1px solid #1e293b;
+  fill: #94a3b8;
+}

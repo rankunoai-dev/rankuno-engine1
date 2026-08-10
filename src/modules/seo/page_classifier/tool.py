@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from typing import ClassVar, Protocol, runtime_checkable
+from typing import Annotated, ClassVar, Protocol, runtime_checkable
 
 from pydantic import Field
 
@@ -105,7 +105,7 @@ class PageClassificationInput(StrictModel):
     Attributes:
         base_url: Site root. Validated by the SSRF guard before any fetch.
         max_pages: Node ceiling. ADR 0001 targets 20k–500k.
-        max_depth: Link depth for the DOM crawl.
+        max_depth: Link depth ceiling for the DOM crawl; `None` is unlimited.
         crawl_dom: Run Path B. Disabling is much cheaper but misses exactly the
             pages Path B exists to find.
         respect_robots: Only disable for a site you own.
@@ -116,7 +116,14 @@ class PageClassificationInput(StrictModel):
 
     base_url: str = Field(min_length=1)
     max_pages: int = Field(default=DEFAULT_MAX_PAGES, gt=0, le=500_000)
-    max_depth: int = Field(default=5, ge=0, le=15)
+    max_depth: Annotated[int, Field(ge=0, le=15)] | None = None
+    """`None` — the default — traverses until the link frontier is exhausted.
+
+    Bounded by `max_pages`, not by depth: the graph refuses new nodes once full,
+    so the frontier drains. A depth ceiling therefore does not decide *how many*
+    pages are crawled, only *which* ones, and a fixed default of 5 silently
+    truncated deep sites that had budget left. Set an integer to reinstate the
+    ceiling when shallow structure is what is wanted."""
     crawl_dom: bool = True
     respect_robots: bool = True
     llm_spend_cap_usd: float = Field(default=0.0, ge=0.0, le=100.0)
@@ -244,9 +251,13 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
 
     def describe_invocation(self, payload: PageClassificationInput) -> str:
         """Operator-facing summary. Names the site, not the object graph."""
+        # Spelled out rather than rendering `None`: this is what an approver
+        # reads before authorising the crawl, and "depth None" states the
+        # opposite of what it means to someone skimming it.
+        depth = "unlimited depth" if payload.max_depth is None else f"depth {payload.max_depth}"
         return (
             f"Crawl and classify up to {payload.max_pages:,} pages of "
-            f"{payload.base_url} (depth {payload.max_depth}, "
+            f"{payload.base_url} ({depth}, "
             f"LLM cap ${payload.llm_spend_cap_usd:.2f})"
         )
 

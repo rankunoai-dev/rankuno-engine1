@@ -81,22 +81,101 @@ class TestSitemapParsing:
 
 
 class TestSitemapHostileInput:
-    def test_rejects_billion_laughs(self):
+    """The guarantee is that no declared entity is ever expanded.
+
+    It is upheld structurally rather than by rejecting documents: parsing starts
+    at the root element, a DTD can only appear before it, so a declaration can
+    never be in scope. A surviving `&ref;` is then an *undefined* entity, which
+    expat reports as a parse error.
+    """
+
+    def test_billion_laughs_yields_nothing(self):
         """Entity expansion is a live DoS vector against a crawler."""
         document = parse_sitemap(BILLION_LAUGHS, "evil.xml")
         assert document.kind is SitemapKind.UNKNOWN
         assert document.locations == ()
 
-    def test_rejects_xxe(self):
+    def test_xxe_yields_nothing(self):
         document = parse_sitemap(XXE, "evil.xml")
         assert document.locations == ()
 
-    def test_rejects_doctype_regardless_of_case(self):
-        assert parse_sitemap("<!doctype foo><urlset></urlset>").kind is SitemapKind.UNKNOWN
+    def test_no_declared_entity_survives_into_the_output(self):
+        """The specific regression: a DTD alongside an otherwise valid urlset.
 
-    def test_a_legitimate_sitemap_never_carries_a_doctype(self):
+        Slicing must not carry the declaration into the parse. If it ever did,
+        `/etc/passwd` would land in `locations` and be crawled.
+        """
+        hostile = (
+            '<!DOCTYPE t [<!ENTITY p SYSTEM "file:///etc/passwd">]>'
+            "<urlset><url><loc>https://e.com/a/</loc></url>"
+            "<url><loc>&p;</loc></url></urlset>"
+        )
+        document = parse_sitemap(hostile, "evil.xml")
+        assert document.locations == ()
+
+    def test_predefined_entities_still_work(self):
+        """`&amp;` is built into XML, not declared, so it must survive."""
+        xml = "<urlset><url><loc>https://e.com/a/?x=1&amp;y=2</loc></url></urlset>"
+        assert parse_sitemap(xml).locations == ("https://e.com/a/?x=1&y=2",)
+
+    def test_a_plain_sitemap_still_parses(self):
         """Sanity check that the guard cannot reject valid input."""
         assert parse_sitemap(URLSET).kind is SitemapKind.URLSET
+
+
+class TestWordPressWrappedSitemap:
+    """Yoast and RankMath serve sitemaps inside an XHTML skin.
+
+    The wrapper exists so the file renders as a styled page in a browser, and it
+    carries a doctype. Rejecting on doctype discarded these sites' sitemaps in
+    full — the entire reason this parser was rewritten (build-log 0012).
+    """
+
+    @staticmethod
+    def _wrapped(inner: str) -> str:
+        return (
+            "<!DOCTYPE html>\n<html>\n<head>"
+            '<link rel="stylesheet" href="//e.com/main-sitemap.xsl"/>'
+            "</head>\n<body>\n<!-- Yoast SEO sitemap -->\n"
+            f"{inner}\n</body>\n</html>"
+        )
+
+    def test_parses_every_url_from_a_wrapped_urlset(self):
+        urls = [f"https://e.com/post-{index}/" for index in range(50)]
+        entries = "".join(f"<url><loc>{url}</loc></url>" for url in urls)
+        document = parse_sitemap(
+            self._wrapped(f"<urlset {SITEMAP_NS}>{entries}</urlset>"), "post-sitemap.xml"
+        )
+        assert document.kind is SitemapKind.URLSET
+        assert document.locations == tuple(urls)
+        assert document.source_name == "post-sitemap.xml"
+
+    def test_parses_a_wrapped_index(self):
+        document = parse_sitemap(self._wrapped(INDEX.split("?>", 1)[1]), "sitemap_index.xml")
+        assert document.kind is SitemapKind.INDEX
+        assert len(document.locations) == 2
+
+    def test_handles_a_namespace_prefixed_root(self):
+        inner = (
+            '<sm:urlset xmlns:sm="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<sm:url><sm:loc>https://e.com/a/</sm:loc></sm:url></sm:urlset>"
+        )
+        document = parse_sitemap(self._wrapped(inner))
+        assert document.kind is SitemapKind.URLSET
+        assert document.locations == ("https://e.com/a/",)
+
+    def test_markup_after_the_closing_tag_is_discarded(self):
+        """The wrapper's trailing `</body></html>` must not break the parse."""
+        assert parse_sitemap(self._wrapped(URLSET.split("?>", 1)[1])).locations == (
+            "https://e.com/a/",
+            "https://e.com/b/",
+        )
+
+    def test_an_empty_self_closing_urlset_is_recognised(self):
+        """A site with nothing in a sitemap is valid, not broken."""
+        document = parse_sitemap(self._wrapped(f"<urlset {SITEMAP_NS}/>"))
+        assert document.kind is SitemapKind.URLSET
+        assert document.locations == ()
 
 
 class TestLinkExtraction:

@@ -128,7 +128,7 @@ async def adiscover_site(
     *,
     site_profile: SiteProfile | None = None,
     max_pages: int = DEFAULT_MAX_PAGES,
-    max_depth: int = 5,
+    max_depth: int | None = None,
     crawl_dom: bool = True,
     concurrency: int = DEFAULT_CONCURRENCY,
     dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
@@ -147,7 +147,8 @@ async def adiscover_site(
         site_profile: Platform hints. Path C is skipped for an unrecognised
             platform rather than guessed at.
         max_pages: Node ceiling.
-        max_depth: Link depth for the DOM crawl.
+        max_depth: Link depth ceiling for the DOM crawl. `None` traverses until
+            the link frontier is exhausted or `max_pages` is reached.
         crawl_dom: Run Path B.
         concurrency: Maximum simultaneous requests, clamped to `MAX_CONCURRENCY`.
         dom_reserve_fraction: Share of `max_pages` only the DOM crawl may fill,
@@ -289,24 +290,28 @@ async def _acrawl(
     fetcher: HttpFetcher,
     base_url: str,
     graph: SiteGraph,
-    max_depth: int,
+    max_depth: int | None,
     concurrency: int,
 ) -> int:
-    """Path B — breadth-first traversal, one level at a time, fetched in parallel."""
+    """Path B — breadth-first traversal, one level at a time, fetched in parallel.
+
+    Driven by whether a level is non-empty rather than by a fixed range, so
+    `max_depth=None` runs until the frontier is exhausted. That is bounded by
+    `max_pages`: `graph.record_links` drops targets the graph refused, so once
+    the budget is spent no new URLs can enter the next level.
+    """
     graph.add(base_url, dom_link=True, depth=0)
     seen: set[str] = {normalize_url(base_url)}
     level = [base_url]
     fetched = 0
+    depth = 0
 
-    for depth in range(max_depth + 1):
-        # Capacity deliberately does NOT stop the crawl. `graph.add` already
-        # refuses *new* nodes when full, so the frontier stops growing on its
-        # own. Breaking here instead meant that whenever the sitemap alone
-        # filled the budget, the DOM crawl fetched nothing at all — no HTML, no
-        # link graph, no in-degree, and Signals 1, 4 and 5 silently starved.
-        if not level:
-            break
-
+    # Capacity deliberately does NOT stop the crawl. `graph.add` already
+    # refuses *new* nodes when full, so the frontier stops growing on its
+    # own. Breaking on capacity instead meant that whenever the sitemap alone
+    # filled the budget, the DOM crawl fetched nothing at all — no HTML, no
+    # link graph, no in-degree, and Signals 1, 4 and 5 silently starved.
+    while level and (max_depth is None or depth <= max_depth):
         crawlable = [url for url in level if not is_faceted_filter(url)]
         results = await _gather_bounded(
             [_factory(_ahtml, fetcher, url) for url in crawlable], concurrency
@@ -332,6 +337,7 @@ async def _acrawl(
             extra={"depth": depth, "fetched": len(crawlable), "queued": len(next_level)},
         )
         level = next_level
+        depth += 1
 
     return fetched
 
