@@ -96,6 +96,10 @@ class FetchResult(StrictModel):
         peer_address: Address actually connected to, when the transport
             reported it. `None` under a mock transport or when unavailable.
         truncated: Whether the body hit the size ceiling.
+        headers: Response headers, keys lower-cased. Needed because pagination
+            state lives only in headers: Shopify signals the next cursor via
+            `Link`, and WordPress reports `X-WP-TotalPages`. Without these a
+            caller can only guess when a collection has been exhausted.
     """
 
     requested_url: str
@@ -103,6 +107,7 @@ class FetchResult(StrictModel):
     status_code: int = Field(ge=100, le=599)
     content_type: str = ""
     body: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
     elapsed_ms: float = Field(default=0.0, ge=0.0)
     redirect_chain: tuple[str, ...] = ()
     peer_address: str | None = None
@@ -490,6 +495,7 @@ class HttpFetcher(BaseAPIClient):
             status_code=response.status_code,
             content_type=response.headers.get("content-type", "").split(";")[0].strip().lower(),
             body=body,
+            headers={key.lower(): value for key, value in response.headers.items()},
             elapsed_ms=elapsed_ms,
             redirect_chain=chain,
             peer_address=self._peer_address(response),

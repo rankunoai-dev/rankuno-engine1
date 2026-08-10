@@ -40,6 +40,7 @@ which, for an AI-assisted codebase, is every session.
 | [0008](0008-dom-budget-reserve.md) | 2026-08-07 | DOM discovery budget reserve | 646 tests, 94.55% |
 | [0009](0009-golden-corpus.md) | 2026-08-07 | Golden corpus & evaluation harness | 705 tests, 94.92% |
 | [0010](0010-draft-label-worksheets.md) | 2026-08-07 | Draft worksheets & multi-archetype crawls | 742 tests, 94.95% |
+| [0011](0011-cms-pagination.md) | 2026-08-07 | Multi-page CMS retrieval | 777 tests, 95.15% |
 
 ---
 

@@ -31,7 +31,7 @@ local resource use (sockets, memory), not remote impact.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import TypeVar
 
 from src.core.logger import get_logger
@@ -39,6 +39,7 @@ from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.discovery import (
     DEFAULT_DOM_RESERVE_FRACTION,
     DEFAULT_MAX_PAGES,
+    MAX_CMS_PAGES,
     SHOPIFY_ENDPOINTS,
     WORDPRESS_ENDPOINTS,
     DiscoveryReport,
@@ -46,9 +47,12 @@ from src.modules.seo.page_classifier.discovery import (
 )
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
+    parse_link_header,
     parse_shopify_records,
     parse_sitemap,
     parse_wordpress_records,
+    with_page_param,
+    wordpress_total_pages,
 )
 from src.modules.seo.page_classifier.url_rules import is_faceted_filter, normalize_url
 from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
@@ -220,19 +224,65 @@ async def _acms(
 
     if site_profile.cms_family is CmsFamily.WORDPRESS:
         for path, record_type in WORDPRESS_ENDPOINTS:
-            body = await _abody(fetcher, f"{root}{path}")
-            if body is None:
-                continue
-            for url, record in parse_wordpress_records(body, record_type).items():
-                graph.add(url, cms_api=True, cms_record=record)
+            async for body in _apaginate(fetcher, f"{root}{path}"):
+                for url, record in parse_wordpress_records(body, record_type).items():
+                    graph.add(url, cms_api=True, cms_record=record)
 
     elif site_profile.cms_family is CmsFamily.SHOPIFY:
         for path, collection in SHOPIFY_ENDPOINTS:
-            body = await _abody(fetcher, f"{root}{path}")
-            if body is None:
-                continue
-            for url, record in parse_shopify_records(body, root, collection=collection).items():
-                graph.add(url, cms_api=True, cms_record=record)
+            async for body in _apaginate(fetcher, f"{root}{path}"):
+                records = parse_shopify_records(body, root, collection=collection)
+                for url, record in records.items():
+                    graph.add(url, cms_api=True, cms_record=record)
+
+
+async def _apaginate(fetcher: HttpFetcher, endpoint: str) -> AsyncIterator[str]:
+    """Yield every page of a CMS collection.
+
+    The async twin of `discovery._paginate`, with identical termination rules —
+    `Link: rel="next"`, then `X-WP-TotalPages`, then an empty or repeated page.
+    Pages are fetched sequentially rather than concurrently because each one's
+    cursor is only knowable from the previous response.
+
+    Args:
+        fetcher: Safety-wired fetcher.
+        endpoint: First-page URL.
+
+    Yields:
+        Response bodies, in page order.
+    """
+    url: str | None = endpoint
+    declared_pages: int | None = None
+    seen_bodies: set[int] = set()
+
+    for page in range(1, MAX_CMS_PAGES + 1):
+        if url is None:
+            return
+        try:
+            result = await fetcher.afetch(url)
+        except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
+            _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
+            return
+        if not result.ok or not result.body.strip():
+            return
+
+        fingerprint = hash(result.body)
+        if fingerprint in seen_bodies:
+            _logger.debug("cms_pagination_not_advancing", extra={"endpoint": endpoint})
+            return
+        seen_bodies.add(fingerprint)
+
+        yield result.body
+
+        if declared_pages is None:
+            declared_pages = wordpress_total_pages(result.headers)
+        if declared_pages is not None and page >= declared_pages:
+            return
+
+        next_link = parse_link_header(result.headers.get("link", "")).get("next")
+        url = next_link or with_page_param(endpoint, page + 1)
+
+    _logger.info("cms_pagination_ceiling_reached", extra={"endpoint": endpoint})
 
 
 async def _acrawl(

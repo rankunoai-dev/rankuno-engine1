@@ -35,6 +35,7 @@ looks complete is worse than one that says it stopped.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterator
 
 from pydantic import Field
 
@@ -43,9 +44,12 @@ from src.core.schemas import StrictModel
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
+    parse_link_header,
     parse_shopify_records,
     parse_sitemap,
     parse_wordpress_records,
+    with_page_param,
+    wordpress_total_pages,
 )
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord, PageEvidence
 from src.modules.seo.page_classifier.url_rules import is_faceted_filter, normalize_url
@@ -93,6 +97,15 @@ SHOPIFY_ENDPOINTS = (
     ("/collections.json?limit=250", "collections"),
 )
 """Shopify catalogue endpoints. Shared with the async path."""
+
+MAX_CMS_PAGES = 40
+"""Pages fetched per CMS collection before giving up.
+
+At WordPress's 100 records per page that is 4,000 records, and at Shopify's 250
+it is 10,000 — comfortably past the point where the node budget binds instead.
+A ceiling is required because pagination termination depends on the remote
+server behaving: one that ignores `page` and serves the same response forever
+would otherwise loop until the crawl was killed."""
 
 
 class DiscoverySource(StrictModel):
@@ -457,19 +470,74 @@ def _discover_from_cms(
 
     if site_profile.cms_family is CmsFamily.WORDPRESS:
         for path, record_type in WORDPRESS_ENDPOINTS:
-            body = _safe_body(fetcher, f"{root}{path}")
-            if body is None:
-                continue
-            for url, record in parse_wordpress_records(body, record_type).items():
-                graph.add(url, cms_api=True, cms_record=record)
+            for body in _paginate(fetcher, f"{root}{path}"):
+                for url, record in parse_wordpress_records(body, record_type).items():
+                    graph.add(url, cms_api=True, cms_record=record)
 
     elif site_profile.cms_family is CmsFamily.SHOPIFY:
         for path, collection in SHOPIFY_ENDPOINTS:
-            body = _safe_body(fetcher, f"{root}{path}")
-            if body is None:
-                continue
-            for url, record in parse_shopify_records(body, root, collection=collection).items():
-                graph.add(url, cms_api=True, cms_record=record)
+            for body in _paginate(fetcher, f"{root}{path}"):
+                records = parse_shopify_records(body, root, collection=collection)
+                for url, record in records.items():
+                    graph.add(url, cms_api=True, cms_record=record)
+
+
+def _paginate(fetcher: HttpFetcher, endpoint: str) -> Iterator[str]:
+    """Yield every page of a CMS collection, not just the first.
+
+    Reading page one and stopping is what capped the Allbirds crawl at 35 CMS
+    records for a much larger catalogue, and CMS coverage is the dominant driver
+    of classification confidence (build-log 0010 §4). This is the fix.
+
+    Three termination signals, in order of reliability:
+
+    * **`Link: rel="next"`** — Shopify's cursor pagination. Authoritative, and
+      the only signal that exists in the response at all.
+    * **`X-WP-TotalPages`** — WordPress states the count up front, so pagination
+      stops exactly instead of probing until the server returns an error.
+    * **An empty or repeated page** — the universal fallback.
+
+    Args:
+        fetcher: Safety-wired fetcher.
+        endpoint: First-page URL, already carrying its `per_page`/`limit`.
+
+    Yields:
+        Response bodies, in page order.
+    """
+    url: str | None = endpoint
+    declared_pages: int | None = None
+    seen_bodies: set[int] = set()
+
+    for page in range(1, MAX_CMS_PAGES + 1):
+        if url is None:
+            return
+        try:
+            result = fetcher.fetch(url)
+        except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
+            _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
+            return
+        if not result.ok or not result.body.strip():
+            return
+
+        # A server that ignores the page parameter serves page one forever.
+        # Without this the loop would run to the ceiling collecting duplicates.
+        fingerprint = hash(result.body)
+        if fingerprint in seen_bodies:
+            _logger.debug("cms_pagination_not_advancing", extra={"endpoint": endpoint})
+            return
+        seen_bodies.add(fingerprint)
+
+        yield result.body
+
+        if declared_pages is None:
+            declared_pages = wordpress_total_pages(result.headers)
+        if declared_pages is not None and page >= declared_pages:
+            return
+
+        next_link = parse_link_header(result.headers.get("link", "")).get("next")
+        url = next_link or with_page_param(endpoint, page + 1)
+
+    _logger.info("cms_pagination_ceiling_reached", extra={"endpoint": endpoint})
 
 
 def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth: int) -> int:

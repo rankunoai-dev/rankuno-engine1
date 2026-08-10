@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from enum import StrEnum
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 from pydantic import Field
@@ -38,9 +39,12 @@ __all__ = [
     "SitemapDocument",
     "SitemapKind",
     "extract_page_links",
+    "parse_link_header",
     "parse_shopify_records",
     "parse_sitemap",
     "parse_wordpress_records",
+    "with_page_param",
+    "wordpress_total_pages",
 ]
 
 _logger = get_logger("modules.seo.discovery_parsers")
@@ -87,7 +91,17 @@ _NON_PAGE_SUFFIXES = (
     ".exe",
     ".dmg",
     ".pkg",
+    # Markdown. Observed live: allbirds.com/agents.md entered the graph as a
+    # page and was classified UNKNOWN at 0.0 confidence — crawl budget spent on
+    # something that can never be classified (build-log 0010 §7).
+    ".md",
+    ".markdown",
 )
+"""Extensions that are never HTML pages.
+
+`.txt` is deliberately **absent**. `llms.txt` and `llms-full.txt` are the AI
+crawler manifests Phase 7's answer-readiness audit reads, so excluding `.txt`
+would blind a later phase to files it specifically needs."""
 
 
 class SitemapKind(StrEnum):
@@ -327,6 +341,83 @@ def parse_wordpress_records(payload: str, record_type: str = "page") -> dict[str
         )
         for page in pages
     }
+
+
+def parse_link_header(value: str) -> dict[str, str]:
+    """Parse an RFC 8288 `Link` header into a rel-to-URL map.
+
+    Shopify signals cursor pagination here and nowhere else — the response body
+    gives no indication that more records exist, so a caller without this header
+    has no way to know it stopped early. That is exactly how the Allbirds crawl
+    read 35 of a much larger catalogue (build-log 0010 §4).
+
+    Args:
+        value: Raw `Link` header, possibly holding several comma-separated links.
+
+    Returns:
+        Map of `rel` value to URL. Empty when the header is absent or unparseable.
+    """
+    links: dict[str, str] = {}
+    if not value:
+        return links
+
+    for part in value.split(","):
+        segments = part.split(";")
+        target = segments[0].strip()
+        if not (target.startswith("<") and target.endswith(">")):
+            continue
+        url = target[1:-1].strip()
+        for attribute in segments[1:]:
+            name, _, raw = attribute.partition("=")
+            if name.strip().lower() != "rel":
+                continue
+            rel = raw.strip().strip('"').strip("'").lower()
+            if rel and url:
+                links[rel] = url
+    return links
+
+
+def with_page_param(url: str, page: int) -> str:
+    """Return `url` with its `page` query parameter set to `page`.
+
+    Replaces an existing value rather than appending a second one, which would
+    produce `?page=1&page=2` and let the server pick.
+
+    Args:
+        url: Endpoint URL, with or without an existing `page` parameter.
+        page: Page number to request.
+
+    Returns:
+        The URL with `page` set.
+    """
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "page"]
+    query.append(("page", str(page)))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def wordpress_total_pages(headers: Mapping[str, str]) -> int | None:
+    """Read WordPress's declared page count from response headers.
+
+    WordPress states the total in `X-WP-TotalPages`, which lets pagination stop
+    exactly rather than probing until it gets a 400. Requesting a page past the
+    end returns `rest_post_invalid_page_number`, so probing works but wastes a
+    request and logs an error on the client's server.
+
+    Args:
+        headers: Response headers, keys lower-cased.
+
+    Returns:
+        The page count, or `None` when the header is absent or malformed.
+    """
+    raw = headers.get("x-wp-totalpages", "").strip()
+    if not raw:
+        return None
+    try:
+        total = int(raw)
+    except ValueError:
+        return None
+    return total if total > 0 else None
 
 
 def parse_shopify_records(
