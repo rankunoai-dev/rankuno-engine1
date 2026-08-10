@@ -151,6 +151,7 @@ export interface DiscoveryReport {
   orphans: number;
   sitemaps_fetched: number;
   pages_fetched: number;
+  fetch_failures: number;
   truncated: boolean;
   dom_reserve: number;
   dom_reserve_used: number;

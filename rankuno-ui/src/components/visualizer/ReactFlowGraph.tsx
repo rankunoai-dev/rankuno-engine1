@@ -10,10 +10,11 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Alert, Empty, Typography } from "antd";
+import { Alert, Typography } from "antd";
 import { useMemo } from "react";
 import { LEVEL_COLORS, LEVEL_LABELS, PAGE_TYPE_COLORS } from "../../constants/colors";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { CrawlEmptyState } from "./CrawlEmptyState";
 import type { FullPageIntelligenceProfile, HierarchyLevel } from "../../types/schema";
 
 /**
@@ -125,7 +126,7 @@ export function ReactFlowGraph(): JSX.Element {
     return buildGraph(result.pages, selectedUrl);
   }, [result, selectedUrl]);
 
-  if (!result) return <Empty description="No crawl loaded" style={{ marginTop: 120 }} />;
+  if (!result) return <CrawlEmptyState />;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>

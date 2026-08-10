@@ -38,6 +38,7 @@ from typing import Annotated, ClassVar, Protocol, runtime_checkable
 from pydantic import Field
 
 from src.core.base_tool import BaseTool
+from src.core.errors import CrawlBlockedError
 from src.core.logger import get_logger
 from src.core.rate_limiter import CostLedger
 from src.core.schemas import RiskClass, StrictModel, ToolMetadata
@@ -269,6 +270,9 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
 
         Returns:
             The complete job result.
+
+        Raises:
+            CrawlBlockedError: If nothing was retrieved from the network at all.
         """
         fetcher, owns_fetcher = self._resolve_fetcher(payload)
         try:
@@ -277,6 +281,14 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             # it outside the event loop keeps `execute()` simple.
             site_profile = probe_site(fetcher, payload.base_url)
             graph, discovery = self._discover(fetcher, payload, site_profile)
+
+            # Checked before classification, not after. Classifying the seed node
+            # would produce a confident `HOMEPAGE` from the URL string on no
+            # evidence whatsoever, and returning that as a result is how a fully
+            # blocked site comes to look like a successful one-page crawl.
+            if discovery.retrieved_nothing:
+                raise CrawlBlockedError(_blocked_message(payload.base_url, discovery))
+
             evidence = graph.to_page_evidence()
             pages = self._classify_all(evidence, site_profile, payload)
         finally:
@@ -429,6 +441,31 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             orphan_pages=discovery.orphans,
             llm_spend_usd=spent,
         )
+
+
+def _blocked_message(base_url: str, discovery: DiscoveryReport) -> str:
+    """Explain a zero-retrieval crawl in terms the operator can act on.
+
+    Two distinguishable causes, and conflating them would send someone to fix
+    the wrong thing:
+
+    * **Requests were made and refused** — bot protection, an IP block, or a
+      robots.txt disallow. Nothing about the crawl configuration will change it.
+    * **No request was made at all** — every candidate URL was filtered before
+      the fetch, which points at the configuration rather than the target.
+    """
+    if discovery.fetch_failures:
+        return (
+            f"Crawl failed: all {discovery.fetch_failures} requests to {base_url} were "
+            f"refused by the target server. The site is blocking automated clients — "
+            f"robots.txt, the sitemap and the homepage were all unreachable, so nothing "
+            f"could be classified from real data."
+        )
+    return (
+        f"Crawl failed: no request to {base_url} returned usable content, and none was "
+        f"refused either. Every candidate URL was filtered before fetching — check the "
+        f"page ceiling and the URL rules."
+    )
 
 
 def _event_loop_running() -> bool:

@@ -64,6 +64,7 @@ __all__ = [
     "DiscoverySource",
     "SiteGraph",
     "discover_site",
+    "is_refusal",
 ]
 
 _logger = get_logger("modules.seo.discovery")
@@ -196,9 +197,26 @@ class DiscoveryReport(StrictModel):
     orphans: int = Field(default=0, ge=0)
     sitemaps_fetched: int = Field(default=0, ge=0)
     pages_fetched: int = Field(default=0, ge=0)
+    fetch_failures: int = Field(default=0, ge=0)
     truncated: bool = False
     dom_reserve: int = Field(default=0, ge=0)
     dom_reserve_used: int = Field(default=0, ge=0)
+
+    @property
+    def retrieved_nothing(self) -> bool:
+        """Whether the crawl obtained no data from the network at all.
+
+        The distinction that matters: a graph can be non-empty while nothing was
+        ever fetched, because the crawl root is seeded as a node before the first
+        request. A site behind bot protection therefore produces one confidently
+        classified `HOMEPAGE` — classified from the URL string, on no evidence —
+        and looks exactly like a successful crawl of a one-page site.
+
+        Observed live: macys.com returned 403 to every request, including
+        `robots.txt`, and the run reported `succeeded` with one page at 0.97
+        confidence (build-log 0013).
+        """
+        return self.pages_fetched == 0 and self.sitemaps_fetched == 0 and self.from_cms == 0
 
 
 class SiteGraph:
@@ -235,6 +253,18 @@ class SiteGraph:
         self._nodes: dict[str, DiscoveredNode] = {}
         self._html: dict[str, str] = {}
         self.truncated = False
+        self.fetch_failures = 0
+        """Requests actively **refused** by the server, plus transport failures.
+
+        Counted on the graph because every discovery path already holds one, and
+        because a crawl that retrieved nothing must be able to say so — silently
+        dropping every 403 is what let a fully blocked site report success.
+
+        A `404` is deliberately **not** a refusal. Discovery probes
+        `/sitemap_index.xml` and `/sitemap.xml` speculatively and most sites have
+        only one of them, so counting 404s would put a non-zero failure count on
+        virtually every healthy crawl and destroy the signal this exists to
+        carry. See `is_refusal`."""
 
     def __len__(self) -> int:
         """Node count."""
@@ -375,6 +405,7 @@ class SiteGraph:
             sitemap_only=sum(1 for n in nodes if n.sources.sitemap and not n.sources.dom_link),
             dom_only=sum(1 for n in nodes if n.sources.dom_link and not n.sources.sitemap),
             orphans=sum(1 for n in nodes if n.is_orphan),
+            fetch_failures=self.fetch_failures,
             truncated=self.truncated,
         )
 
@@ -434,7 +465,7 @@ def _discover_from_sitemaps(fetcher: HttpFetcher, base_url: str, graph: SiteGrap
             continue
         visited.add(sitemap_url)
 
-        body = _safe_body(fetcher, sitemap_url)
+        body = _safe_body(fetcher, sitemap_url, graph)
         if body is None:
             continue
 
@@ -471,19 +502,19 @@ def _discover_from_cms(
 
     if site_profile.cms_family is CmsFamily.WORDPRESS:
         for path, record_type in WORDPRESS_ENDPOINTS:
-            for body in _paginate(fetcher, f"{root}{path}"):
+            for body in _paginate(fetcher, f"{root}{path}", graph):
                 for url, record in parse_wordpress_records(body, record_type).items():
                     graph.add(url, cms_api=True, cms_record=record)
 
     elif site_profile.cms_family is CmsFamily.SHOPIFY:
         for path, collection in SHOPIFY_ENDPOINTS:
-            for body in _paginate(fetcher, f"{root}{path}"):
+            for body in _paginate(fetcher, f"{root}{path}", graph):
                 records = parse_shopify_records(body, root, collection=collection)
                 for url, record in records.items():
                     graph.add(url, cms_api=True, cms_record=record)
 
 
-def _paginate(fetcher: HttpFetcher, endpoint: str) -> Iterator[str]:
+def _paginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> Iterator[str]:
     """Yield every page of a CMS collection, not just the first.
 
     Reading page one and stopping is what capped the Allbirds crawl at 35 CMS
@@ -501,6 +532,8 @@ def _paginate(fetcher: HttpFetcher, endpoint: str) -> Iterator[str]:
     Args:
         fetcher: Safety-wired fetcher.
         endpoint: First-page URL, already carrying its `per_page`/`limit`.
+        graph: Receives the refusal count, so a blocked CMS endpoint is visible
+            in the report rather than only in debug logs.
 
     Yields:
         Response bodies, in page order.
@@ -516,8 +549,13 @@ def _paginate(fetcher: HttpFetcher, endpoint: str) -> Iterator[str]:
             result = fetcher.fetch(url)
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
             _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
+            graph.fetch_failures += 1
             return
-        if not result.ok or not result.body.strip():
+        if not result.ok:
+            if is_refusal(result.status_code):
+                graph.fetch_failures += 1
+            return
+        if not result.body.strip():
             return
 
         # A server that ignores the page parameter serves page one forever.
@@ -573,7 +611,7 @@ def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth:
         if is_faceted_filter(url):
             continue
 
-        result = _safe_fetch_html(fetcher, url)
+        result = _safe_fetch_html(fetcher, url, graph)
         if result is None:
             continue
         fetched += 1
@@ -589,21 +627,56 @@ def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth:
     return fetched
 
 
-def _safe_body(fetcher: HttpFetcher, url: str) -> str | None:
-    """Fetch a URL, returning `None` for any failure or non-2xx."""
+def is_refusal(status_code: int) -> bool:
+    """Whether a status means the server *declined* rather than lacked the page.
+
+    The distinction decides whether `fetch_failures` is a usable blocked-crawl
+    signal or noise. Discovery probes two sitemap URLs speculatively and most
+    sites publish only one, so treating `404` as a failure would mark nearly
+    every healthy crawl as partly failed.
+
+    Counted: `401`, `403`, `407`, `429` — access refused or rate-limited — and
+    any `5xx`, where the server broke rather than answered.
+    """
+    return status_code in {401, 403, 407, 429} or status_code >= 500
+
+
+def _safe_body(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | None:
+    """Fetch a URL, returning `None` for any failure or non-2xx.
+
+    Refusals are counted on the graph rather than only logged at debug level.
+    A crawl that is refused everywhere must be able to say so; silently
+    discarding every 403 is what let a fully blocked site report success.
+    """
     try:
         result = fetcher.fetch(url)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
+        graph.fetch_failures += 1
         return None
-    return result.body if result.ok else None
+    if not result.ok:
+        if is_refusal(result.status_code):
+            graph.fetch_failures += 1
+        return None
+    return result.body
 
 
-def _safe_fetch_html(fetcher: HttpFetcher, url: str) -> str | None:
-    """Fetch a URL, returning its body only when it is HTML."""
+def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | None:
+    """Fetch a URL, returning its body only when it is HTML.
+
+    A non-HTML 200 is *not* counted as a failure. The server answered; the
+    payload simply is not a page. Counting it would inflate the refusal count
+    with PDFs and feeds and make a blocked crawl harder to recognise, not
+    easier.
+    """
     try:
         result = fetcher.fetch(url)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
+        graph.fetch_failures += 1
         return None
-    return result.body if result.ok and result.is_html else None
+    if not result.ok:
+        if is_refusal(result.status_code):
+            graph.fetch_failures += 1
+        return None
+    return result.body if result.is_html else None

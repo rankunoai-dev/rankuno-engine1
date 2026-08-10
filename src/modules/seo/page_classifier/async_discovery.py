@@ -44,6 +44,7 @@ from src.modules.seo.page_classifier.discovery import (
     WORDPRESS_ENDPOINTS,
     DiscoveryReport,
     SiteGraph,
+    is_refusal,
 )
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
@@ -100,24 +101,43 @@ async def _gather_bounded(
     return list(await asyncio.gather(*(run(factory) for factory in factories)))
 
 
-async def _abody(fetcher: HttpFetcher, url: str) -> str | None:
-    """Fetch a URL, returning `None` for any failure or non-2xx."""
+async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> str | None:
+    """Fetch a URL, returning `None` for any failure or non-2xx.
+
+    Refusals are counted on the graph, matching the serial path. Behavioural
+    equivalence is the central claim of this module, and a report that differed
+    between the two paths would break it.
+    """
     try:
         result = await fetcher.afetch(url)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
+        graph.fetch_failures += 1
         return None
-    return result.body if result.ok else None
+    if not result.ok:
+        if is_refusal(result.status_code):
+            graph.fetch_failures += 1
+        return None
+    return result.body
 
 
-async def _ahtml(fetcher: HttpFetcher, url: str) -> tuple[str, str] | None:
-    """Fetch a URL, returning `(url, html)` only when the response is HTML."""
+async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str, str] | None:
+    """Fetch a URL, returning `(url, html)` only when the response is HTML.
+
+    A non-HTML 200 is not a failure: the server answered, the payload simply is
+    not a page.
+    """
     try:
         result = await fetcher.afetch(url)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
+        graph.fetch_failures += 1
         return None
-    if not (result.ok and result.is_html):
+    if not result.ok:
+        if is_refusal(result.status_code):
+            graph.fetch_failures += 1
+        return None
+    if not result.is_html:
         return None
     return url, result.body
 
@@ -191,7 +211,7 @@ async def _asitemaps(
             break
 
         bodies = await _gather_bounded(
-            [_factory(_abody, fetcher, url) for url in batch], concurrency
+            [_factory(_abody, graph, fetcher, url) for url in batch], concurrency
         )
 
         next_round: list[str] = []
@@ -225,19 +245,19 @@ async def _acms(
 
     if site_profile.cms_family is CmsFamily.WORDPRESS:
         for path, record_type in WORDPRESS_ENDPOINTS:
-            async for body in _apaginate(fetcher, f"{root}{path}"):
+            async for body in _apaginate(fetcher, f"{root}{path}", graph):
                 for url, record in parse_wordpress_records(body, record_type).items():
                     graph.add(url, cms_api=True, cms_record=record)
 
     elif site_profile.cms_family is CmsFamily.SHOPIFY:
         for path, collection in SHOPIFY_ENDPOINTS:
-            async for body in _apaginate(fetcher, f"{root}{path}"):
+            async for body in _apaginate(fetcher, f"{root}{path}", graph):
                 records = parse_shopify_records(body, root, collection=collection)
                 for url, record in records.items():
                     graph.add(url, cms_api=True, cms_record=record)
 
 
-async def _apaginate(fetcher: HttpFetcher, endpoint: str) -> AsyncIterator[str]:
+async def _apaginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> AsyncIterator[str]:
     """Yield every page of a CMS collection.
 
     The async twin of `discovery._paginate`, with identical termination rules —
@@ -248,6 +268,8 @@ async def _apaginate(fetcher: HttpFetcher, endpoint: str) -> AsyncIterator[str]:
     Args:
         fetcher: Safety-wired fetcher.
         endpoint: First-page URL.
+        graph: Receives the refusal count, so a blocked CMS endpoint is visible
+            in the report rather than only in debug logs.
 
     Yields:
         Response bodies, in page order.
@@ -263,8 +285,13 @@ async def _apaginate(fetcher: HttpFetcher, endpoint: str) -> AsyncIterator[str]:
             result = await fetcher.afetch(url)
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
             _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
+            graph.fetch_failures += 1
             return
-        if not result.ok or not result.body.strip():
+        if not result.ok:
+            if is_refusal(result.status_code):
+                graph.fetch_failures += 1
+            return
+        if not result.body.strip():
             return
 
         fingerprint = hash(result.body)
@@ -314,7 +341,7 @@ async def _acrawl(
     while level and (max_depth is None or depth <= max_depth):
         crawlable = [url for url in level if not is_faceted_filter(url)]
         results = await _gather_bounded(
-            [_factory(_ahtml, fetcher, url) for url in crawlable], concurrency
+            [_factory(_ahtml, graph, fetcher, url) for url in crawlable], concurrency
         )
 
         next_level: list[str] = []
@@ -343,7 +370,10 @@ async def _acrawl(
 
 
 def _factory(
-    coro: Callable[[HttpFetcher, str], Awaitable[ResultT]], fetcher: HttpFetcher, url: str
+    coro: Callable[[SiteGraph, HttpFetcher, str], Awaitable[ResultT]],
+    graph: SiteGraph,
+    fetcher: HttpFetcher,
+    url: str,
 ) -> Callable[[], Awaitable[ResultT]]:
     """Bind a coroutine function to its arguments without invoking it.
 
@@ -351,4 +381,4 @@ def _factory(
     each request begins. Passing coroutine objects directly would start them all
     at creation and defeat the bound.
     """
-    return lambda: coro(fetcher, url)
+    return lambda: coro(graph, fetcher, url)

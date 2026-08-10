@@ -346,3 +346,38 @@ def _fake_output(*, truncated: bool) -> PageClassificationOutput:
         discovery=DiscoveryReport(base_url=SAFE_URL, truncated=truncated),
         summary=CrawlSummary(),
     )
+
+
+class TestBlockedCrawlSurfacing:
+    """A blocked crawl must reach the client as a failure, not as a result.
+
+    The tool raises `CrawlBlockedError`, `BaseTool.run()` converts it to a
+    non-success `ToolResult`, and the API must persist that as `FAILED` with the
+    reason intact. If any link in that chain drops the message, the UI shows a
+    green job with one confident page and no explanation.
+    """
+
+    def test_a_blocked_crawl_becomes_a_failed_job(self, client, store, stub_tool):
+        stub_tool.result = StubResult(
+            ok=False,
+            error="Crawl failed: all 6 requests were refused by the target server.",
+        )
+        job_id = run_job(client, store)
+
+        record = store.get(job_id)
+        assert record.status is JobStatus.FAILED
+        assert record.has_result is False, "no result blob for a crawl that produced nothing"
+
+    def test_the_refusal_reason_reaches_the_client(self, client, store, stub_tool):
+        stub_tool.result = StubResult(ok=False, error="all 6 requests were refused")
+        job_id = run_job(client, store)
+
+        body = client.get(f"{API_PREFIX}/jobs/{job_id}").json()
+        assert "refused" in (body["error"] or "")
+
+    def test_a_failed_job_offers_no_result_endpoint(self, client, store, stub_tool):
+        """409, so a poller learns it has stopped rather than retrying forever."""
+        stub_tool.result = StubResult(ok=False, error="all requests refused")
+        job_id = run_job(client, store)
+
+        assert client.get(f"{API_PREFIX}/jobs/{job_id}/result").status_code == 409

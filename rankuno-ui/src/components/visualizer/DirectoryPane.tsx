@@ -3,12 +3,13 @@ import {
   DownOutlined,
   MinusSquareOutlined,
 } from "@ant-design/icons";
-import { Button, Empty, Input, Select, Space, Tag, Tree, Typography } from "antd";
+import { Button, Input, Select, Space, Tag, Tree, Typography } from "antd";
 import type { DataNode } from "antd/es/tree";
 import { useDeferredValue, useMemo, useState } from "react";
 import { LEVEL_COLORS, LEVEL_LABELS, PAGE_TYPE_COLORS } from "../../constants/colors";
 import { matchingPaths, pathsToDepth, presentPageTypes, type TreeNode } from "../../lib/tree";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { CrawlEmptyState } from "./CrawlEmptyState";
 
 const { DirectoryTree } = Tree;
 
@@ -65,7 +66,7 @@ export function DirectoryPane(): JSX.Element {
   );
 
   if (!tree) {
-    return <Empty description="No crawl loaded" style={{ marginTop: 80 }} />;
+    return <CrawlEmptyState />;
   }
 
   const expandTo = (depth: number): void => setExpandedKeys(pathsToDepth(tree, depth));

@@ -10,6 +10,7 @@ __all__ = [
     "ApprovalRequiredError",
     "BudgetExceededError",
     "ConfigurationError",
+    "CrawlBlockedError",
     "GuardrailViolationError",
     "IntegrationError",
     "RankunoError",
@@ -26,6 +27,21 @@ class RankunoError(Exception):
 
 class ConfigurationError(RankunoError):
     """Required settings are missing, malformed, or mutually inconsistent."""
+
+
+class CrawlBlockedError(RankunoError):
+    """A crawl retrieved nothing at all: no page, no sitemap, no CMS record.
+
+    A hard error rather than an empty report, because an empty report is not
+    what the caller would see. The crawl root is seeded as a graph node before
+    the first request, so a fully blocked site yields exactly one node,
+    classified `HOMEPAGE` at high confidence from the URL string alone — visually
+    identical to a successful crawl of a one-page site.
+
+    Observed live: macys.com returned 403 to every request including
+    `robots.txt`, and the job reported `succeeded` with one page at 0.97
+    confidence.
+    """
 
 
 class GuardrailViolationError(RankunoError):

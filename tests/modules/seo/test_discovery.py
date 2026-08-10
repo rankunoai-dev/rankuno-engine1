@@ -405,3 +405,73 @@ class TestEndToEnd:
 def test_trailing_slash_on_base_url_is_tolerated(base, settings):
     _, report = discover_site(site_fetcher(FULL_SITE, settings), base)
     assert report.total_urls >= 4
+
+
+class TestBlockedSite:
+    """A site that refuses every request must be distinguishable from a small one.
+
+    Observed live: macys.com returned 403 to robots.txt, the sitemap and the
+    homepage, and the crawl reported one page classified `HOMEPAGE` at 0.97
+    confidence — because the crawl root is seeded as a graph node before the
+    first request, and Layer 0 classifies `/` from the URL string alone.
+    """
+
+    @staticmethod
+    def _forbidden() -> dict[str, httpx.Response]:
+        """Every path 403s, as a bot-protected CDN does."""
+        return {}
+
+    def test_refusals_are_counted(self, settings):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, text="<html>Access Denied</html>")
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", max_pages=20)
+
+        assert report.fetch_failures > 0, "a 403 must not vanish into a debug log"
+        assert report.pages_fetched == 0
+        assert report.sitemaps_fetched == 0
+
+    def test_a_fully_blocked_crawl_reports_retrieving_nothing(self, settings):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, text="denied")
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", max_pages=20)
+
+        assert report.retrieved_nothing is True
+        assert report.total_urls == 1, "only the seed node, which was never fetched"
+
+    def test_a_working_crawl_does_not_report_retrieving_nothing(self, settings):
+        _, report = discover_site(site_fetcher(FULL_SITE, settings), "https://e.com")
+        assert report.retrieved_nothing is False
+
+    def test_a_sitemap_only_crawl_counts_as_retrieval(self, settings):
+        """`crawl_dom=False` fetches no page but is a legitimate, complete run."""
+        _, report = discover_site(
+            site_fetcher(FULL_SITE, settings), "https://e.com", crawl_dom=False
+        )
+        assert report.pages_fetched == 0
+        assert report.sitemaps_fetched > 0
+        assert report.retrieved_nothing is False, "a sitemap is real retrieved data"
+
+    def test_a_non_html_200_is_not_counted_as_a_refusal(self, settings):
+        """The server answered; the payload just is not a page.
+
+        Counting it would inflate the refusal count with PDFs and feeds and make
+        a genuinely blocked crawl harder to recognise, not easier.
+        """
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": httpx.Response(200, text="%PDF-1.4", headers={"content-type": "application/pdf"}),
+        }
+        _, report = discover_site(site_fetcher(routes, settings), "https://e.com", max_pages=10)
+        assert report.fetch_failures == 0

@@ -319,3 +319,87 @@ def test_evidence_contract_is_what_the_llm_protocol_receives(settings):
     tool.run(PageClassificationInput(base_url="https://e.com", llm_spend_cap_usd=1.0))
     assert isinstance(stub.batches, list)
     assert PageEvidence.model_fields.keys()
+
+
+class TestBlockedCrawl:
+    """A crawl that retrieved nothing must fail, not report a one-page site.
+
+    The failure mode this prevents was observed live on macys.com: every request
+    including `robots.txt` returned 403, and the job reported `succeeded` with a
+    single page classified `HOMEPAGE` at 0.97 confidence. The crawl root is
+    seeded as a graph node before the first request, and Layer 0 classifies `/`
+    from the URL string alone — so a fully blocked site is visually identical to
+    a successful crawl of a tiny one.
+    """
+
+    @staticmethod
+    def _forbidden_fetcher(settings) -> HttpFetcher:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, text="<html>Access Denied</html>")
+
+        return HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+            async_transport=httpx.MockTransport(handler),
+        )
+
+    def test_a_fully_blocked_crawl_fails(self, settings):
+        tool = PageClassificationTool(fetcher=self._forbidden_fetcher(settings))
+        result = tool.run(PageClassificationInput(base_url="https://e.com", max_pages=10))
+
+        assert result.status is not ExecutionStatus.SUCCESS
+        assert result.data is None, "no result at all, rather than one invented page"
+
+    def test_the_failure_names_the_cause(self, settings):
+        """An operator must be able to tell 'blocked' from 'small site'."""
+        tool = PageClassificationTool(fetcher=self._forbidden_fetcher(settings))
+        result = tool.run(PageClassificationInput(base_url="https://e.com", max_pages=10))
+
+        assert "refused" in (result.error or "").lower()
+        assert "https://e.com" in (result.error or "")
+
+    def test_a_working_crawl_still_succeeds(self, settings):
+        """The guard must not fire on a site that returned real data."""
+        result = build_tool(settings).run(
+            PageClassificationInput(base_url="https://e.com", max_pages=20)
+        )
+        assert result.status is ExecutionStatus.SUCCESS
+        assert result.data is not None
+
+    def test_a_sitemap_only_crawl_is_not_treated_as_blocked(self, settings):
+        """`crawl_dom=False` fetches no page, but a sitemap is real data."""
+        result = build_tool(settings).run(
+            PageClassificationInput(base_url="https://e.com", max_pages=20, crawl_dom=False)
+        )
+        assert result.status is ExecutionStatus.SUCCESS
+
+    def test_a_partially_blocked_crawl_reports_its_refusals(self, settings):
+        """A section behind a 403 must be visible in the report, not silent.
+
+        This is the partial case: the crawl succeeds, so nothing fails, but the
+        result covers less of the site than it appears to.
+        """
+        routes = dict(SITE)
+        routes["/services/"] = httpx.Response(403, text="denied")
+
+        result = build_tool(settings, fetcher=build_fetcher(settings, routes)).run(
+            PageClassificationInput(base_url="https://e.com", max_pages=20)
+        )
+
+        assert result.status is ExecutionStatus.SUCCESS
+        assert result.data is not None
+        assert result.data.discovery.fetch_failures >= 1
+
+    def test_a_healthy_crawl_reports_no_refusals(self, settings):
+        """404s from speculative sitemap probing must not inflate the count.
+
+        Discovery tries `/sitemap_index.xml` and `/sitemap.xml`; this fixture
+        publishes only the second. If a 404 counted, every healthy crawl in the
+        wild would report failures and the signal would be worthless.
+        """
+        result = build_tool(settings).run(
+            PageClassificationInput(base_url="https://e.com", max_pages=20)
+        )
+        assert result.data is not None
+        assert result.data.discovery.fetch_failures == 0

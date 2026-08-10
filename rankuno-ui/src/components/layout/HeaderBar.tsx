@@ -1,4 +1,5 @@
 import {
+  DisconnectOutlined,
   ExperimentOutlined,
   RadarChartOutlined,
   WarningOutlined,
@@ -46,6 +47,11 @@ export function HeaderBar(): JSX.Element {
     discovery !== undefined &&
     discovery.dom_reserve > 0 &&
     discovery.dom_reserve_used >= discovery.dom_reserve;
+
+  // A crawl that fetched no page still produces classifications — Layer 0 reads
+  // the URL string and is confident about it. Without this banner those look
+  // exactly like classifications drawn from real page content.
+  const noPagesFetched = discovery !== undefined && discovery.pages_fetched === 0;
 
   return (
     <div style={{ borderBottom: "1px solid #1e293b", background: "#0a0d14" }}>
@@ -138,6 +144,20 @@ export function HeaderBar(): JSX.Element {
           showIcon
           icon={<ExperimentOutlined />}
           message="Synthetic dataset — generated for performance testing. Not crawl output, and not evidence about the engine."
+        />
+      )}
+
+      {noPagesFetched && (
+        <Alert
+          type="error"
+          banner
+          showIcon
+          icon={<DisconnectOutlined />}
+          message={
+            discovery.fetch_failures > 0
+              ? `0 pages fetched over the network — ${discovery.fetch_failures} requests were refused by the server. Classifications rest on URL string patterns alone and are not evidence about this site.`
+              : "0 pages fetched over the network. Classifications rest on URL string patterns alone and are not evidence about this site."
+          }
         />
       )}
 
