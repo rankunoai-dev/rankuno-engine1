@@ -114,7 +114,8 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `page_classifier/weights.py` — weight profiles & site-profile seam | ✅ Seam live; adaptive selection off pending corpus |
 | Layer 2 local ML classifier | ❌ Protocol only; needs local GPU ([ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
 | Layer 3 `LlmPageClassifier` implementation | ❌ Protocol only; needs a live credential |
-| Golden corpus coverage | ⚠️ 13 labels, 1 of 6 archetypes — **not yet enough to validate any accuracy claim** |
+| Golden corpus coverage | ⚠️ 13 labels, 1 of 6 archetypes — **not yet enough to validate any accuracy claim**. 141 draft rows await review in [drafts/](tests/fixtures/corpus/drafts/README.md) |
+| CMS pagination | ⚠️ Only the first page of `/products.json` and `/wp-json` is read. [Build-log 0010 §4](docs/build-log/0010-draft-label-worksheets.md) shows this is the dominant driver of LLM escalation cost |
 | `core/circuit_breaker.py`, `core/state_store.py` | ❌ Not started |
 | Idempotency keys; distributed rate limit & spend ceiling | ❌ Not started |
 | `Dockerfile` / Railway deployment | ❌ Not started (deferred — see [ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
