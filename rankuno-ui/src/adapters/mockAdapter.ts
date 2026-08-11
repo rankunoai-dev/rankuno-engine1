@@ -71,6 +71,7 @@ export class MockAdapter implements CrawlDataAdapter {
             pagesClassified: cached.summary.pages_classified,
             truncated: cached.discovery.truncated,
             synthetic: cached.synthetic,
+            recoverable: false,
           };
         }
         const synthetic = id.startsWith("synthetic");
@@ -85,6 +86,7 @@ export class MockAdapter implements CrawlDataAdapter {
           pagesClassified: Number.isFinite(approximate) ? approximate : 0,
           truncated: false,
           synthetic,
+          recoverable: false,
         };
       }),
     );

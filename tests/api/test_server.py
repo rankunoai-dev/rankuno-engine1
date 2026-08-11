@@ -20,7 +20,7 @@ from src.api import server as server_module
 from src.api.server import API_PREFIX, create_app
 from src.core.state_store import DiskJobStore, JobStatus
 from src.core.url_safety import UrlSafetyPolicy
-from src.modules.seo.page_classifier.discovery import DiscoveryReport
+from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.tool import (
     CrawlSummary,
     PageClassificationOutput,
@@ -462,3 +462,106 @@ class TestTelemetryContract:
         from src.core.state_store import JobTelemetry
 
         assert JobTelemetry(completed=120, discovered=100).fraction == 1.0
+
+
+class TestCheckpointRecovery:
+    """A crawl killed by the process dying must not lose what it found.
+
+    Cycle 0018 covers in-process failures: a stall or an exception still returns
+    a partial result. This covers the case that one cannot, where the process is
+    gone and whatever reached disk is all there is.
+    """
+
+    def test_the_first_write_is_immediate(self, store):
+        graph = SiteGraph("https://e.com", max_pages=100)
+        graph.add("https://e.com/a/", sitemap=True)
+        job_id = store.create("seo.page_classifier", {}).id
+
+        server_module.CrawlCheckpointer(store, job_id, "https://e.com")(graph)
+        assert store.get(job_id).has_checkpoint is True
+
+    def test_rapid_calls_are_throttled(self, store):
+        """20,000 URLs through fsync per page would cost more than the crawl."""
+        graph = SiteGraph("https://e.com", max_pages=1_000)
+        graph.add("https://e.com/a/", sitemap=True)
+        job_id = store.create("seo.page_classifier", {}).id
+        checkpointer = server_module.CrawlCheckpointer(store, job_id, "https://e.com")
+        checkpointer(graph)
+
+        for index in range(50):
+            graph.add(f"https://e.com/p{index}/", sitemap=True)
+            checkpointer(graph)
+
+        saved = store.read_checkpoint(job_id)
+        assert saved is not None
+        assert len(saved["urls"]) == 1, "only the first write landed inside the window"
+
+    def test_a_page_count_boundary_forces_a_write(self, store):
+        """Time alone under-saves a fast crawl: Turbo puts 250 pages in 10s."""
+        graph = SiteGraph("https://e.com", max_pages=1_000)
+        job_id = store.create("seo.page_classifier", {}).id
+        checkpointer = server_module.CrawlCheckpointer(store, job_id, "https://e.com")
+
+        for index in range(server_module.CHECKPOINT_EVERY_PAGES + 5):
+            graph.add(f"https://e.com/p{index}/", sitemap=True)
+            checkpointer(graph)
+
+        saved = store.read_checkpoint(job_id)
+        assert saved is not None
+        assert len(saved["urls"]) >= server_module.CHECKPOINT_EVERY_PAGES
+
+    def test_an_empty_graph_writes_nothing(self, store):
+        """A checkpoint of zero URLs is not worth an fsync."""
+        job_id = store.create("seo.page_classifier", {}).id
+        server_module.CrawlCheckpointer(store, job_id, "https://e.com")(
+            SiteGraph("https://e.com", max_pages=10)
+        )
+        assert store.get(job_id).has_checkpoint is False
+
+    def test_a_deleted_job_does_not_break_the_crawl(self, store):
+        graph = SiteGraph("https://e.com", max_pages=10)
+        graph.add("https://e.com/a/", sitemap=True)
+        server_module.CrawlCheckpointer(store, "gone", "https://e.com")(graph)
+
+    def test_a_corrupt_checkpoint_reads_as_absent(self, store):
+        """A truncated write is what a power cut produces; it must not raise."""
+        job_id = store.create("seo.page_classifier", {}).id
+        (store.root / f"{job_id}.checkpoint.json").write_text("{trunca", encoding="utf-8")
+        assert store.read_checkpoint(job_id) is None
+
+
+class TestCheckpointEndpoint:
+    def test_a_saved_checkpoint_renders_as_an_output(self, client, store):
+        job_id = store.create("seo.page_classifier", {}).id
+        store.write_checkpoint(
+            job_id, {"base_url": SAFE_URL, "urls": [f"{SAFE_URL}p{n}/" for n in range(5)]}
+        )
+
+        body = client.get(f"{API_PREFIX}/jobs/{job_id}/checkpoint").json()
+        assert body["base_url"] == SAFE_URL
+        assert len(body["pages"]) == 5
+
+    def test_recovered_pages_are_marked_unclassified(self, client, store):
+        """A checkpoint holds URLs, not classifications. Saying otherwise lies."""
+        job_id = store.create("seo.page_classifier", {}).id
+        store.write_checkpoint(job_id, {"base_url": SAFE_URL, "urls": [f"{SAFE_URL}a/"]})
+
+        body = client.get(f"{API_PREFIX}/jobs/{job_id}/checkpoint").json()
+        assert body["pages"][0]["primary_page_type"] == "UNKNOWN"
+        assert body["pages"][0]["final_confidence_score"] == 0.0
+        assert body["summary"]["unknown_pages"] == 1
+
+    def test_the_recovered_view_says_it_is_recovered(self, client, store):
+        """It must never be mistaken for a completed crawl."""
+        job_id = store.create("seo.page_classifier", {}).id
+        store.write_checkpoint(job_id, {"base_url": SAFE_URL, "urls": [f"{SAFE_URL}a/"]})
+
+        body = client.get(f"{API_PREFIX}/jobs/{job_id}/checkpoint").json()
+        assert "interrupted" in body["discovery"]["stopped_reason"]
+
+    def test_a_job_with_no_checkpoint_is_404(self, client, store):
+        job_id = store.create("seo.page_classifier", {}).id
+        assert client.get(f"{API_PREFIX}/jobs/{job_id}/checkpoint").status_code == 404
+
+    def test_an_unknown_job_is_404(self, client):
+        assert client.get(f"{API_PREFIX}/jobs/nope/checkpoint").status_code == 404

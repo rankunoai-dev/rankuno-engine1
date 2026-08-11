@@ -58,6 +58,7 @@ from src.modules.seo.page_classifier.discovery import (
     ABSOLUTE_MAX_PAGES,
     DEFAULT_DOM_RESERVE_FRACTION,
     DEFAULT_MAX_PAGES,
+    CheckpointSink,
     DiscoveryReport,
     ProgressSink,
     SiteGraph,
@@ -284,6 +285,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         llm_classifier: LlmPageClassifier | None = None,
         cost_ledger: CostLedger | None = None,
         progress_sink: ProgressSink | None = None,
+        checkpoint_sink: CheckpointSink | None = None,
         **kwargs: object,
     ) -> None:
         """Build the tool.
@@ -292,6 +294,8 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             fetcher: Safety-wired fetcher. One is built per job if omitted, and
                 closed when the job ends.
             url_policy: SSRF policy for a fetcher built here.
+            checkpoint_sink: Optional durability hook, offered the graph so
+                partial work survives an interruption.
             progress_sink: Optional observability hook, called as pages are
                 fetched. Constructor-injected rather than a field on the input
                 model: it is a callable the *caller* owns, not a crawl parameter,
@@ -310,6 +314,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         self._llm_classifier = llm_classifier
         self._cost_ledger = cost_ledger
         self._progress_sink = progress_sink
+        self._checkpoint_sink = checkpoint_sink
 
     def describe_invocation(self, payload: PageClassificationInput) -> str:
         """Operator-facing summary. Names the site, not the object graph."""
@@ -455,6 +460,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             "crawl_dom": payload.crawl_dom,
             "dom_reserve_fraction": payload.dom_reserve_fraction,
             "on_progress": self._progress_sink,
+            "on_checkpoint": self._checkpoint_sink,
         }
 
         if payload.use_async_crawl and not _event_loop_running():

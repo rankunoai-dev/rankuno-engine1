@@ -35,6 +35,7 @@ export function DashboardShell(): JSX.Element {
   const error = useCrawlStore((state) => state.error);
   const liveMessage = useCrawlStore((state) => state.liveMessage);
 
+  const loadCheckpoint = useCrawlStore((state) => state.loadCheckpoint);
   const setModel = useDashboardStore((state) => state.setModel);
   const expandAll = useDashboardStore((state) => state.expandAll);
   const collapseAll = useDashboardStore((state) => state.collapseAll);
@@ -104,7 +105,28 @@ export function DashboardShell(): JSX.Element {
           </div>
         </header>
 
-        {error && <Alert type="error" banner showIcon message={error} />}
+        {error && (
+          <Alert
+            type="error"
+            banner
+            showIcon
+            message={error}
+            /* A failed job with saved work is not a dead end. Offering the
+               recovery here, next to the reason, is the only place the user is
+               already looking when they need it. */
+            action={
+              active?.recoverable ? (
+                <Button
+                  size="small"
+                  type="primary"
+                  onClick={() => void loadCheckpoint(active.id)}
+                >
+                  Render partial tree
+                </Button>
+              ) : undefined
+            }
+          />
+        )}
 
         {active?.synthetic && (
           <Alert

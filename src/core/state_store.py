@@ -169,6 +169,9 @@ class JobRecord(StrictModel):
         finished_at: When it reached a terminal status.
         error: Failure reason. Set only for `FAILED`.
         has_result: Whether a result blob exists to fetch.
+        has_checkpoint: Whether partial work was saved before the job ended.
+            Distinct from `has_result`: a checkpoint is what survived an
+            interruption, not what the job set out to produce.
         telemetry: Live progress. Meaningful only while `RUNNING`; retained
             afterwards so a finished job still shows what it did.
     """
@@ -184,6 +187,7 @@ class JobRecord(StrictModel):
     finished_at: datetime | None = None
     error: str | None = None
     has_result: bool = False
+    has_checkpoint: bool = False
     telemetry: JobTelemetry = JobTelemetry()
 
     @property
@@ -233,6 +237,14 @@ class JobStore(Protocol):
 
     def read_result(self, job_id: str) -> Mapping[str, object]:
         """Read a job's result blob."""
+        ...
+
+    def write_checkpoint(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save partial work so an interruption does not lose it."""
+        ...
+
+    def read_checkpoint(self, job_id: str) -> Mapping[str, object] | None:
+        """Read saved partial work, or `None` if there is none."""
         ...
 
     def recover_orphans(self) -> list[str]:
@@ -294,6 +306,9 @@ class DiskJobStore:
 
     def _result_path(self, job_id: str) -> Path:
         return self._root / f"{job_id}.result.json"
+
+    def _checkpoint_path(self, job_id: str) -> Path:
+        return self._root / f"{job_id}.checkpoint.json"
 
     def _read(self, job_id: str) -> JobRecord:
         path = self._record_path(job_id)
@@ -446,6 +461,41 @@ class DiskJobStore:
             loaded: Mapping[str, object] = json.loads(path.read_text(encoding="utf-8"))
         return loaded
 
+    def write_checkpoint(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save partial work for a job that may not finish.
+
+        Written before the metadata flag, so a crash between the two leaves a
+        record that does not advertise a checkpoint it lacks — the same ordering
+        `finish` uses, and for the same reason.
+
+        Callers must throttle: this rewrites a file through `os.replace` and an
+        `fsync`, and a 20,000-URL payload is not small.
+        """
+        with self._lock:
+            self._read(job_id)  # Fail before writing for a job that is gone.
+            _atomic_write(self._checkpoint_path(job_id), json.dumps(dict(payload)))
+        self._transition(job_id, has_checkpoint=True)
+
+    def read_checkpoint(self, job_id: str) -> Mapping[str, object] | None:
+        """Read a job's saved partial work.
+
+        Returns `None` rather than raising when absent or unreadable: a corrupt
+        checkpoint should cost the recovery, not the ability to see the job at
+        all. A truncated write is exactly what a power failure produces.
+        """
+        path = self._checkpoint_path(job_id)
+        with self._lock:
+            if not path.exists():
+                return None
+            try:
+                loaded: Mapping[str, object] = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                _logger.warning(
+                    "checkpoint_unreadable", extra={"job_id": job_id, "error": str(exc)}
+                )
+                return None
+        return loaded
+
     def recover_orphans(self) -> list[str]:
         """Fail every job left non-terminal by a previous process.
 
@@ -462,7 +512,13 @@ class DiskJobStore:
         for record in self.list_jobs():
             if record.is_terminal:
                 continue
-            self.mark_failed(record.id, "interrupted by a server restart")
+            reason = "interrupted by a server restart"
+            if record.has_checkpoint:
+                # Cycle 0013 said the work was "genuinely lost", which was true
+                # then and is not now: a checkpoint survives the process. The
+                # job still failed, but what it found is recoverable.
+                reason = f"{reason} — partial results were saved and can be viewed"
+            self.mark_failed(record.id, reason)
             recovered.append(record.id)
 
         if recovered:

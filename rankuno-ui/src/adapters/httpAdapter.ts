@@ -22,6 +22,7 @@ interface JobRecord {
   finished_at: string | null;
   error: string | null;
   has_result: boolean;
+  has_checkpoint: boolean;
   telemetry: JobTelemetry;
 }
 
@@ -114,7 +115,21 @@ export class HttpAdapter implements CrawlDataAdapter {
       pagesClassified: cached?.summary.pages_classified ?? 0,
       truncated: record.status === "partial",
       synthetic: false,
+      recoverable: record.has_checkpoint && !record.has_result,
     };
+  }
+
+  /**
+   * What a job saved before it was interrupted.
+   *
+   * Returns the same shape as a finished crawl, so the UI renders it through
+   * the ordinary path. Its pages are all `UNKNOWN` and its `stopped_reason`
+   * says why — a checkpoint holds URLs, never classifications.
+   */
+  async getCheckpoint(jobId: string): Promise<PageClassificationOutput> {
+    return this.request<PageClassificationOutput>(
+      `/jobs/${encodeURIComponent(jobId)}/checkpoint`,
+    );
   }
 
   async getResult(jobId: string): Promise<PageClassificationOutput> {

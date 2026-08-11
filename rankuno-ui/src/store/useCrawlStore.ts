@@ -35,6 +35,7 @@ interface CrawlState {
   selectJob: (jobId: string) => Promise<void>;
   startCrawl: (request: PageClassificationInput) => Promise<void>;
   refreshJobs: () => Promise<void>;
+  loadCheckpoint: (jobId: string) => Promise<void>;
 }
 
 /*
@@ -170,6 +171,25 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
         telemetry: null,
         startedAt: null,
       });
+    }
+  },
+
+  async loadCheckpoint(jobId) {
+    const adapter = get().adapter;
+    if (!(adapter instanceof HttpAdapter)) return;
+
+    set({ status: "running", error: null, result: null, activeJobId: jobId });
+    try {
+      const result = await adapter.getCheckpoint(jobId);
+      set({
+        result,
+        // `partial`, never `succeeded`. The tree is real; the classifications
+        // in it are placeholders, and the banner reads off `stopped_reason`.
+        status: "partial",
+        grouping: "path",
+      });
+    } catch (cause) {
+      set({ status: "failed", error: describe(cause) });
     }
   },
 

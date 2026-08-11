@@ -42,9 +42,11 @@ from src.modules.seo.page_classifier.discovery import (
     MAX_CMS_PAGES,
     SHOPIFY_ENDPOINTS,
     WORDPRESS_ENDPOINTS,
+    CheckpointSink,
     DiscoveryReport,
     ProgressSink,
     SiteGraph,
+    _checkpoint,
     _notify,
     is_refusal,
 )
@@ -235,6 +237,7 @@ async def adiscover_site(
     concurrency: int = DEFAULT_CONCURRENCY,
     dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
     on_progress: ProgressSink | None = None,
+    on_checkpoint: CheckpointSink | None = None,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths concurrently and merge them.
 
@@ -257,6 +260,8 @@ async def adiscover_site(
         dom_reserve_fraction: Share of `max_pages` only the DOM crawl may fill,
             so a large sitemap cannot starve out sitemap-omitted pages.
         on_progress: Optional observability hook, called as pages are fetched.
+        on_checkpoint: Optional durability hook, offered the graph so partial
+            work survives an interruption. Implementations must throttle.
 
     Returns:
         The merged graph and its report.
@@ -286,6 +291,7 @@ async def _asitemaps(
     graph: SiteGraph,
     concurrency: int,
     on_progress: ProgressSink | None = None,
+    on_checkpoint: CheckpointSink | None = None,
 ) -> int:
     """Path A — walk the index, then fetch every child sitemap concurrently.
 
@@ -416,6 +422,7 @@ async def _acrawl(
     max_depth: int | None,
     concurrency: int,
     on_progress: ProgressSink | None = None,
+    on_checkpoint: CheckpointSink | None = None,
 ) -> int:
     """Path B — breadth-first traversal, one level at a time, fetched in parallel.
 
@@ -454,6 +461,7 @@ async def _acrawl(
             fetched += 1
             recent.append(url)
             _notify(on_progress, graph, fetched, recent)
+            _checkpoint(on_checkpoint, graph)
 
         try:
             results = await _gather_bounded(

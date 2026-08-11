@@ -28,6 +28,13 @@ export interface CrawlJobSummary {
   truncated: boolean;
   /** Generated rather than crawled. Never quote a synthetic run as evidence. */
   synthetic: boolean;
+  /**
+   * Partial work survived an interruption and can be rendered.
+   *
+   * Only meaningful when there is no full result: a finished crawl needs no
+   * recovery.
+   */
+  recoverable?: boolean;
 }
 
 /** Progress of a running job. */

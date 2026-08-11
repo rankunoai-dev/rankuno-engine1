@@ -58,6 +58,7 @@ from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
 __all__ = [
     "ABSOLUTE_MAX_PAGES",
     "DEFAULT_MAX_PAGES",
+    "CheckpointSink",
     "ProgressSink",
     "SHOPIFY_ENDPOINTS",
     "WORDPRESS_ENDPOINTS",
@@ -123,6 +124,18 @@ server behaving: one that ignores `page` and serves the same response forever
 would otherwise loop until the crawl was killed."""
 
 
+CheckpointSink = Callable[["SiteGraph"], None]
+"""Called with the graph so far, so an interruption does not lose the crawl.
+
+Separate from `ProgressSink` because the two carry different things at
+different costs: progress is three integers on every page, a checkpoint is the
+whole URL set and must be throttled by the implementation. Merging them would
+force the cheap call to pay the expensive call's price.
+
+Like `ProgressSink`, it cannot influence the crawl and its exceptions are
+swallowed.
+"""
+
 ProgressSink = Callable[[int, int, tuple[str, ...]], None]
 """Called as a crawl advances with `(fetched, discovered, recent_urls)`.
 
@@ -133,6 +146,16 @@ and nothing here introduces a per-page decision point.
 Implementations must be cheap and must not block. This is invoked from inside
 the fetch loop, including from the concurrent path.
 """
+
+
+def _checkpoint(sink: CheckpointSink | None, graph: SiteGraph) -> None:
+    """Offer the graph for checkpointing. Cheap when the sink declines."""
+    if sink is None:
+        return
+    try:
+        sink(graph)
+    except Exception as exc:  # noqa: BLE001 - saving work must not lose work
+        _logger.debug("checkpoint_sink_failed", extra={"error": str(exc)})
 
 
 def _notify(sink: ProgressSink | None, graph: SiteGraph, fetched: int, recent: list[str]) -> None:
@@ -413,6 +436,15 @@ class SiteGraph:
         """Retain a page's HTML for later evidence assembly."""
         self._html[normalize_url(url)] = html
 
+    def all_urls(self) -> tuple[str, ...]:
+        """Every URL in the graph, in discovery order.
+
+        Materialised only when a checkpoint is actually being written — at
+        20,000 nodes this is the expensive part, and building it per page would
+        cost more than the crawl.
+        """
+        return tuple(node.url for node in self._nodes.values())
+
     def html_for(self, url: str) -> str | None:
         """Retrieve a stored page body, or `None` if it was never fetched.
 
@@ -482,6 +514,7 @@ def discover_site(
     crawl_dom: bool = True,
     dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
     on_progress: ProgressSink | None = None,
+    on_checkpoint: CheckpointSink | None = None,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths and merge them into one graph.
 
@@ -499,6 +532,8 @@ def discover_site(
         dom_reserve_fraction: Share of `max_pages` only the DOM crawl may fill,
             so a large sitemap cannot starve out sitemap-omitted pages.
         on_progress: Optional observability hook, called as pages are fetched.
+        on_checkpoint: Optional durability hook, offered the graph so partial
+            work survives an interruption. Implementations must throttle.
 
     Returns:
         The merged graph and its report.
@@ -652,6 +687,7 @@ def _crawl_dom(
     graph: SiteGraph,
     max_depth: int | None,
     on_progress: ProgressSink | None = None,
+    on_checkpoint: CheckpointSink | None = None,
 ) -> int:
     """Path B — breadth-first link traversal from the root.
 
@@ -692,6 +728,7 @@ def _crawl_dom(
         graph.store_html(url, result)
         recent.append(url)
         _notify(on_progress, graph, fetched, recent)
+        _checkpoint(on_checkpoint, graph)
 
         links = extract_page_links(result, url)
         for target in graph.record_links(url, links, depth):

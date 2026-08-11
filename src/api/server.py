@@ -57,13 +57,25 @@ from src.core.state_store import (
     JobTelemetry,
 )
 from src.core.url_safety import UrlSafetyPolicy
+from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
+from src.modules.seo.page_classifier.schemas import (
+    ConsensusMethod,
+    FullPageIntelligenceProfile,
+    HierarchyLevel,
+    PrimaryPageType,
+    SearchIntent,
+    SignalScore,
+    SignalSource,
+)
 from src.modules.seo.page_classifier.tool import (
+    CrawlSummary,
     PageClassificationInput,
     PageClassificationOutput,
     PageClassificationTool,
 )
+from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
 
-__all__ = ["ApiState", "TelemetryRecorder", "create_app", "serve"]
+__all__ = ["ApiState", "CrawlCheckpointer", "TelemetryRecorder", "create_app", "serve"]
 
 _logger = get_logger("api.server")
 
@@ -120,6 +132,66 @@ RATE_SMOOTHING = 0.3
 Lower is smoother. At 0.3 a single stalled request moves the estimate a little;
 an instantaneous rate would make it jump on every retry.
 """
+
+
+CHECKPOINT_INTERVAL_S = 10.0
+"""Minimum gap between checkpoint writes."""
+
+CHECKPOINT_EVERY_PAGES = 100
+"""Pages between checkpoints, whichever boundary arrives first.
+
+Two triggers because either alone fails at one end of the range. Time alone
+under-saves a fast crawl — Turbo at 25 pages/sec puts 250 pages between writes.
+Page count alone under-saves a slow one, where 100 pages can be several minutes
+of work exposed to a power cut.
+"""
+
+
+class CrawlCheckpointer:
+    """Saves the discovered URL set so an interruption does not lose the crawl.
+
+    Deliberately **not** the classified output. Re-serialising every profile on
+    each write means megabytes through `fsync` hundreds of times per crawl —
+    measurably more expensive than the crawling. URLs are what cannot be
+    recovered without going back to the network; classification is CPU-only and
+    can be redone.
+
+    Called from crawler threads, so mutations are under the lock.
+    """
+
+    def __init__(self, store: JobStore, job_id: str, base_url: str) -> None:
+        """Build a checkpointer for one job."""
+        self._store = store
+        self._job_id = job_id
+        self._base_url = base_url
+        self._lock = threading.Lock()
+        self._last_write = 0.0
+        self._last_count = 0
+
+    def __call__(self, graph: SiteGraph) -> None:
+        """Save the graph if enough time or enough pages have passed."""
+        now = time.monotonic()
+        with self._lock:
+            count = len(graph)
+            due = (
+                now - self._last_write >= CHECKPOINT_INTERVAL_S
+                or count - self._last_count >= CHECKPOINT_EVERY_PAGES
+            )
+            if not due or count == 0:
+                return
+            self._last_write = now
+            self._last_count = count
+            # Materialised inside the throttle, never outside it: at 20,000
+            # nodes building this tuple is the expensive part of a checkpoint.
+            urls = graph.all_urls()
+
+        try:
+            self._store.write_checkpoint(
+                self._job_id,
+                {"base_url": self._base_url, "urls": list(urls), "saved_at_count": count},
+            )
+        except JobNotFoundError:
+            _logger.debug("checkpoint_job_missing", extra={"job_id": self._job_id})
 
 
 class TelemetryRecorder:
@@ -299,6 +371,7 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
         result = PageClassificationTool(
             url_policy=state.url_policy,
             progress_sink=TelemetryRecorder(store, job_id, payload.resolved_max_pages),
+            checkpoint_sink=CrawlCheckpointer(store, job_id, payload.base_url),
         ).run(payload)
 
         if not result.ok or result.data is None:
@@ -356,7 +429,9 @@ def create_app(
     Returns:
         The configured application.
     """
-    resolved_store = store if store is not None else DiskJobStore(jobs_root or Path(".jobs"))
+    resolved_store: JobStore = (
+        store if store is not None else DiskJobStore(jobs_root or Path(".jobs"))
+    )
     state = ApiState(
         store=resolved_store,
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
@@ -481,7 +556,86 @@ def create_app(
             )
         return state.store.read_result(job_id)
 
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/checkpoint")
+    def get_checkpoint(job_id: str) -> Mapping[str, object]:
+        """A renderable view of what a job saved before it ended.
+
+        Shaped as a `PageClassificationOutput` so the client renders it through
+        exactly the path it uses for a finished crawl — a second shape would
+        mean a second set of components to keep in step.
+
+        Every page comes back `UNKNOWN`, which is honest rather than lazy: a
+        checkpoint stores URLs, not classifications. The structure is real; what
+        each page *is* was never determined.
+
+        Raises:
+            HTTPException: `404` if the job or its checkpoint does not exist.
+        """
+        try:
+            state.store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+
+        checkpoint = state.store.read_checkpoint(job_id)
+        if checkpoint is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"job {job_id} saved no partial work"
+            )
+        return _checkpoint_as_output(checkpoint).model_dump(mode="json")
+
     return app
+
+
+def _checkpoint_as_output(checkpoint: Mapping[str, object]) -> PageClassificationOutput:
+    """Rebuild a renderable output from saved URLs.
+
+    The classifications are placeholders, and `stopped_reason` says so in the one
+    place every consumer already reads — so a recovered view cannot be mistaken
+    for a completed crawl.
+    """
+    base_url = str(checkpoint.get("base_url") or "")
+    raw = checkpoint.get("urls")
+    urls = [str(item) for item in raw] if isinstance(raw, list) else []
+
+    return PageClassificationOutput(
+        base_url=base_url,
+        site_profile=SiteProfile(),
+        weight_profile=WeightProfileReport.for_site(SiteProfile()),
+        discovery=DiscoveryReport(
+            base_url=base_url,
+            total_urls=len(urls),
+            stopped_reason=(
+                "recovered from a checkpoint — these URLs were discovered before the "
+                "crawl was interrupted, and none of them were classified"
+            ),
+        ),
+        summary=CrawlSummary(pages_classified=len(urls), unknown_pages=len(urls)),
+        pages=tuple(_placeholder_profile(url) for url in urls),
+    )
+
+
+def _placeholder_profile(url: str) -> FullPageIntelligenceProfile:
+    """An unclassified page, carrying only what a checkpoint actually knows."""
+    return FullPageIntelligenceProfile(
+        url=url,
+        canonical_url=url,
+        normalized_path=url,
+        hierarchy_level=HierarchyLevel.L3_LEAF_PAGE,
+        primary_page_type=PrimaryPageType.UNKNOWN,
+        depth_from_l0=1,
+        search_intent=SearchIntent.INFORMATIONAL,
+        signals_evaluated=(
+            SignalScore(
+                source=SignalSource.SITEMAP_INDEX,
+                suggested_level=HierarchyLevel.L3_LEAF_PAGE,
+                suggested_page_type=PrimaryPageType.UNKNOWN,
+                confidence=0.0,
+                notes="discovered before the crawl was interrupted; never classified",
+            ),
+        ),
+        final_confidence_score=0.0,
+        consensus_method=ConsensusMethod.LAYER0_FAST_PATH,
+    )
 
 
 class ServerConfig(StrictModel):
