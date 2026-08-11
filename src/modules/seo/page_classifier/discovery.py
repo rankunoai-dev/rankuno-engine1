@@ -56,6 +56,7 @@ from src.modules.seo.page_classifier.url_rules import is_faceted_filter, normali
 from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
 
 __all__ = [
+    "ABSOLUTE_MAX_PAGES",
     "DEFAULT_MAX_PAGES",
     "ProgressSink",
     "SHOPIFY_ENDPOINTS",
@@ -73,6 +74,18 @@ _logger = get_logger("modules.seo.discovery")
 DEFAULT_MAX_PAGES = 20_000
 """Node ceiling for one crawl job. ADR 0001 targets 20k–500k; beyond that the
 in-memory implementations need replacing with the Bloom-filter path."""
+
+ABSOLUTE_MAX_PAGES = 500_000
+"""What "no ceiling" actually resolves to.
+
+There is no genuinely unbounded mode, and offering one would be a lie about the
+implementation. `SiteGraph` holds every node **and every page's HTML** in memory;
+ADR 0001 sets 500k as the top of the range these structures are built for and
+defers the Bloom-filter and disk-spill path needed beyond it.
+
+For any real site this is "everything reachable". For a site large enough to
+exceed it, an unbounded crawl would exhaust memory hours in and lose the work —
+so the ceiling is stated and reported rather than removed."""
 
 DEFAULT_DOM_RESERVE_FRACTION = 0.2
 """Share of the node budget reserved for URLs only the DOM crawl can find.

@@ -298,7 +298,7 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
         store.mark_running(job_id)
         result = PageClassificationTool(
             url_policy=state.url_policy,
-            progress_sink=TelemetryRecorder(store, job_id, payload.max_pages),
+            progress_sink=TelemetryRecorder(store, job_id, payload.resolved_max_pages),
         ).run(payload)
 
         if not result.ok or result.data is None:

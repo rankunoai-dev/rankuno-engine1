@@ -4,11 +4,12 @@ import {
   Input,
   InputNumber,
   Modal,
+  Segmented,
   Switch,
   Typography,
 } from "antd";
 import { useState } from "react";
-import { DEFAULT_CRAWL_REQUEST } from "../../adapters/adapterInterface";
+import { CRAWL_SPEEDS, DEFAULT_CRAWL_REQUEST } from "../../adapters/adapterInterface";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import type { PageClassificationInput } from "../../types/schema";
 
@@ -20,9 +21,9 @@ interface Props {
 /** Form fields the operator controls. The rest of the payload uses defaults. */
 interface FormValues {
   base_url: string;
-  max_pages: number;
+  max_pages: number | null;
   max_depth: number | null;
-  concurrency: number;
+  speed: "polite" | "standard" | "turbo";
   crawl_dom: boolean;
   respect_robots: boolean;
   browser_headers: boolean;
@@ -43,12 +44,22 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [ignoreRobots, setIgnoreRobots] = useState(false);
   const [browserMode, setBrowserMode] = useState(false);
+  const [speed, setSpeed] = useState<"polite" | "standard" | "turbo">("polite");
 
   async function submit(): Promise<void> {
     const values = await form.validateFields();
+    const preset = CRAWL_SPEEDS.find((option) => option.key === values.speed) ?? CRAWL_SPEEDS[0]!;
+    const { speed: _speed, ...rest } = values;
+
     const request: PageClassificationInput = {
       ...DEFAULT_CRAWL_REQUEST,
-      ...values,
+      ...rest,
+      rate_limit_rps: preset.rate_limit_rps,
+      concurrency: preset.concurrency,
+      // Empty means no ceiling — every reachable page, up to the engine's own
+      // 500,000 limit. `null` is what the API expects; `undefined` would fall
+      // back to the model default of 20,000 and quietly cap the crawl.
+      max_pages: values.max_pages ?? null,
       // An empty depth field means unlimited, not zero. AntD yields `null` for
       // a cleared InputNumber, which is already the value the API expects.
       max_depth: values.max_depth ?? null,
@@ -88,7 +99,7 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           base_url: "",
           max_pages: DEFAULT_CRAWL_REQUEST.max_pages,
           max_depth: null,
-          concurrency: DEFAULT_CRAWL_REQUEST.concurrency,
+          speed: "polite",
           crawl_dom: true,
           respect_robots: true,
           browser_headers: false,
@@ -98,6 +109,7 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           if (changed.respect_robots !== undefined) {
             setIgnoreRobots(!changed.respect_robots);
           }
+          if (changed.speed !== undefined) setSpeed(changed.speed);
           if (changed.browser_headers !== undefined) {
             setBrowserMode(changed.browser_headers);
             // The engine substitutes a browser token only while the field still
@@ -125,11 +137,42 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
         <Form.Item
           name="max_pages"
           label="Page ceiling"
-          extra="What actually bounds the crawl. 500 pages takes a couple of minutes; 20,000 takes hours at polite request rates."
-          rules={[{ required: true, message: "A page ceiling is required." }]}
+          extra="Leave empty to crawl every reachable page, up to the engine's 500,000 limit. Not truly unbounded: the crawl holds every page in memory, so a site larger than that would exhaust it rather than finish."
         >
-          <InputNumber min={1} max={500_000} style={{ width: "100%" }} />
+          <InputNumber
+            min={1}
+            max={500_000}
+            placeholder="Every reachable page"
+            style={{ width: "100%" }}
+          />
         </Form.Item>
+
+        <Form.Item name="speed" label="Crawl speed">
+          <Segmented
+            block
+            options={CRAWL_SPEEDS.map((option) => ({
+              label: option.label,
+              value: option.key,
+            }))}
+          />
+        </Form.Item>
+
+        <Typography.Paragraph type="secondary" style={{ fontSize: 11, marginTop: -12 }}>
+          {CRAWL_SPEEDS.find((option) => option.key === speed)?.detail}
+          {". "}
+          A declared Crawl-delay always wins: a site asking to be crawled slowly
+          is never sped up by this setting.
+        </Typography.Paragraph>
+
+        {speed === "turbo" && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="25 requests per second is real load on the target server."
+            description="Appropriate for a site you own or have written permission to crawl at this rate. On anything else, Standard or Polite is the right choice."
+          />
+        )}
 
         <Form.Item
           name="max_depth"
@@ -137,14 +180,6 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           extra="Leave empty for unlimited. A depth limit does not reduce how many pages are fetched — the page budget is spent either way — it only decides whether deep pages are reachable."
         >
           <InputNumber min={0} max={15} placeholder="Unlimited" style={{ width: "100%" }} />
-        </Form.Item>
-
-        <Form.Item
-          name="concurrency"
-          label="Concurrency"
-          extra="Local in-flight requests only. Per-host politeness is enforced by the fetcher regardless, so raising this cannot make the crawler rude to one site."
-        >
-          <InputNumber min={1} max={20} style={{ width: "100%" }} />
         </Form.Item>
 
         <Form.Item

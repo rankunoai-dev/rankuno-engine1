@@ -262,3 +262,36 @@ class TestCostLedger:
 
         assert ledger.spent_usd <= 1.0 + 1e-9
         assert refused == 10
+
+
+class TestBurstCapacity:
+    """A bucket's default burst is a full minute, which is wrong for a crawler.
+
+    At 60 rpm that lets 60 requests leave back to back, so a crawl of fewer
+    pages than that never throttles. Measured live on gep.com: a "1 req/sec"
+    setting peaked at 10.2 requests/sec because the whole crawl fitted inside
+    the burst.
+    """
+
+    def test_the_default_burst_is_a_full_minute(self):
+        """Correct for an API quota — spending early is fine if the minute balances."""
+        assert TokenBucket.per_minute("api", 60).capacity == 60
+
+    def test_an_explicit_burst_binds_the_start_of_a_crawl(self):
+        bucket = TokenBucket.per_minute("host", 60, burst=1)
+        assert bucket.capacity == 1
+        assert bucket.try_acquire() is True
+        assert bucket.try_acquire() is False, "the second request must wait"
+
+    def test_the_sustained_rate_is_unchanged_by_the_burst(self):
+        """Burst bounds the start; it must not slow the steady state."""
+        assert TokenBucket.per_minute("host", 600, burst=10).refill_per_second == 10.0
+
+    def test_a_zero_burst_is_raised_to_one(self):
+        """A capacity of zero would stall the crawl rather than pace it."""
+        assert TokenBucket.per_minute("host", 60, burst=0).capacity == 1
+
+    def test_the_async_bucket_matches(self):
+        bucket = AsyncTokenBucket.per_minute("host", 60, burst=2)
+        assert bucket.capacity == 2
+        assert AsyncTokenBucket.per_minute("api", 60).capacity == 60

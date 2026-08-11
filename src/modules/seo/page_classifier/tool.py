@@ -55,6 +55,7 @@ from src.modules.seo.page_classifier.cascading_pipeline import (
     needs_llm_escalation,
 )
 from src.modules.seo.page_classifier.discovery import (
+    ABSOLUTE_MAX_PAGES,
     DEFAULT_DOM_RESERVE_FRACTION,
     DEFAULT_MAX_PAGES,
     DiscoveryReport,
@@ -114,7 +115,8 @@ class PageClassificationInput(StrictModel):
 
     Attributes:
         base_url: Site root. Validated by the SSRF guard before any fetch.
-        max_pages: Node ceiling. ADR 0001 targets 20k–500k.
+        max_pages: Node ceiling. `None` crawls everything reachable, up to the
+            ADR 0001 limit of 500,000.
         max_depth: Link depth ceiling for the DOM crawl; `None` is unlimited.
         crawl_dom: Run Path B. Disabling is much cheaper but misses exactly the
             pages Path B exists to find.
@@ -125,7 +127,14 @@ class PageClassificationInput(StrictModel):
     """
 
     base_url: str = Field(min_length=1)
-    max_pages: int = Field(default=DEFAULT_MAX_PAGES, gt=0, le=500_000)
+    max_pages: Annotated[int, Field(gt=0, le=ABSOLUTE_MAX_PAGES)] | None = DEFAULT_MAX_PAGES
+    """`None` means "every URL the crawl can reach", up to `ABSOLUTE_MAX_PAGES`.
+
+    Not truly unbounded, and the difference matters: the graph holds every node
+    and every page body in memory, so an unbounded crawl of a large catalogue
+    would exhaust it hours in and lose the whole run. `resolved_max_pages`
+    performs the substitution, and the ceiling that was applied is reported in
+    `DiscoveryReport` either way."""
     max_depth: Annotated[int, Field(ge=0, le=15)] | None = None
     """`None` — the default — traverses until the link frontier is exhausted.
 
@@ -137,6 +146,17 @@ class PageClassificationInput(StrictModel):
     crawl_dom: bool = True
     respect_robots: bool = True
     llm_spend_cap_usd: float = Field(default=0.0, ge=0.0, le=100.0)
+    rate_limit_rps: float | None = Field(default=None, gt=0.0, le=25.0)
+    """Requests per second **per host**. `None` uses the configured default.
+
+    A declared `Crawl-delay` is combined with this using `min`, in both
+    directions: a site asking to be crawled slowly is never sped up, and a site
+    permitting speed never overrides a deliberately polite setting.
+
+    This is load on somebody else's server. The ceiling of 25 exists because
+    beyond it a crawler stops being a guest — and even below it, the polite
+    default is the right choice for any site not owned by the operator."""
+
     user_agent: str = Field(default="RankunoBot", min_length=1)
     browser_headers: bool = False
     """Send the `Accept`/`Accept-Language` headers a browser would.
@@ -159,6 +179,11 @@ class PageClassificationInput(StrictModel):
     """Run the concurrent crawl path. Disabling falls back to serial fetching,
     which is roughly 10x slower and exists only as an escape hatch for
     debugging a crawl that behaves differently under concurrency."""
+
+    @property
+    def resolved_max_pages(self) -> int:
+        """The ceiling actually applied, substituting the cap for `None`."""
+        return self.max_pages if self.max_pages is not None else ABSOLUTE_MAX_PAGES
 
     dom_reserve_fraction: float = Field(default=DEFAULT_DOM_RESERVE_FRACTION, ge=0.0, le=0.9)
     """Share of `max_pages` only the DOM crawl may fill.
@@ -292,10 +317,21 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         # reads before authorising the crawl, and "depth None" states the
         # opposite of what it means to someone skimming it.
         depth = "unlimited depth" if payload.max_depth is None else f"depth {payload.max_depth}"
+        pages = (
+            f"every reachable page (max {ABSOLUTE_MAX_PAGES:,})"
+            if payload.max_pages is None
+            else f"up to {payload.max_pages:,} pages"
+        )
+        # The request rate is named because it is the part of this decision that
+        # lands on somebody else's server.
+        rate = (
+            "default rate"
+            if payload.rate_limit_rps is None
+            else f"{payload.rate_limit_rps:g} req/sec"
+        )
         return (
-            f"Crawl and classify up to {payload.max_pages:,} pages of "
-            f"{payload.base_url} ({depth}, "
-            f"LLM cap ${payload.llm_spend_cap_usd:.2f})"
+            f"Crawl and classify {pages} of {payload.base_url} "
+            f"({depth}, {rate}, LLM cap ${payload.llm_spend_cap_usd:.2f})"
         )
 
     def execute(self, payload: PageClassificationInput) -> PageClassificationOutput:
@@ -414,7 +450,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         """
         kwargs = {
             "site_profile": site_profile,
-            "max_pages": payload.max_pages,
+            "max_pages": payload.resolved_max_pages,
             "max_depth": payload.max_depth,
             "crawl_dom": payload.crawl_dom,
             "dom_reserve_fraction": payload.dom_reserve_fraction,
@@ -438,6 +474,11 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             url_policy=self._url_policy,
             user_agent=payload.user_agent,
             browser_headers=payload.browser_headers,
+            rate_limit_rps=payload.rate_limit_rps,
+            # Sized to the crawl's own concurrency: a pool smaller than the
+            # worker count makes requests queue on sockets instead of on the
+            # rate limiter, and the configured rate is never reached.
+            max_connections=max(payload.concurrency, DEFAULT_CONCURRENCY),
             respect_robots=payload.respect_robots,
         )
         return fetcher, True

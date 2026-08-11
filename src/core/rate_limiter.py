@@ -100,11 +100,28 @@ class TokenBucket:
         self._lock = threading.Lock()
 
     @classmethod
-    def per_minute(cls, key: str, requests_per_minute: int) -> TokenBucket:
-        """Build a bucket from a requests-per-minute quota."""
+    def per_minute(
+        cls, key: str, requests_per_minute: int, burst: int | None = None
+    ) -> TokenBucket:
+        """Build a bucket from a requests-per-minute quota.
+
+        Args:
+            key: Quota identifier.
+            requests_per_minute: Sustained rate.
+            burst: Tokens available at once. Defaults to a full minute's worth,
+                which is right for an API quota — spending it early is allowed
+                as long as the minute balances.
+
+                It is **wrong for pacing a crawler**. At 60 rpm the default lets
+                60 requests leave instantly, so a crawl of fewer pages than that
+                never throttles at all: measured on gep.com, a "1 req/sec"
+                setting peaked at 10.2 requests/sec and the limiter never
+                engaged. Callers pacing a host should pass roughly one second's
+                worth.
+        """
         return cls(
             key=key,
-            capacity=requests_per_minute,
+            capacity=max(1, burst if burst is not None else requests_per_minute),
             refill_per_second=requests_per_minute / 60.0,
         )
 
@@ -201,11 +218,16 @@ class AsyncTokenBucket:
         self._lock = asyncio.Lock()
 
     @classmethod
-    def per_minute(cls, key: str, requests_per_minute: int) -> AsyncTokenBucket:
-        """Build a bucket from a requests-per-minute quota."""
+    def per_minute(
+        cls, key: str, requests_per_minute: int, burst: int | None = None
+    ) -> AsyncTokenBucket:
+        """Build a bucket from a requests-per-minute quota.
+
+        See `TokenBucket.per_minute` for why a crawler must pass `burst`.
+        """
         return cls(
             key=key,
-            capacity=requests_per_minute,
+            capacity=max(1, burst if burst is not None else requests_per_minute),
             refill_per_second=requests_per_minute / 60.0,
         )
 
@@ -304,13 +326,26 @@ class RateLimiterRegistry:
         self._buckets: dict[str, TokenBucket] = {}
         self._lock = threading.Lock()
 
-    def get_or_create(self, key: str, requests_per_minute: int | None = None) -> TokenBucket:
-        """Return the bucket for `key`, creating it on first use."""
+    def get_or_create(
+        self,
+        key: str,
+        requests_per_minute: int | None = None,
+        burst: int | None = None,
+    ) -> TokenBucket:
+        """Return the bucket for `key`, creating it on first use.
+
+        Args:
+            key: Quota identifier.
+            requests_per_minute: Sustained rate. Defaults to the configured one.
+            burst: Tokens available back to back. Omit for an API quota; pass
+                roughly one second's worth when pacing a crawler, or the rate
+                will not bind on a crawl shorter than a minute's allowance.
+        """
         with self._lock:
             bucket = self._buckets.get(key)
             if bucket is None:
                 rpm = requests_per_minute or get_settings().default_requests_per_minute
-                bucket = TokenBucket.per_minute(key, rpm)
+                bucket = TokenBucket.per_minute(key, rpm, burst)
                 self._buckets[key] = bucket
                 _logger.debug("bucket_created", extra={"bucket": key, "rpm": rpm})
             return bucket
@@ -342,25 +377,43 @@ class AsyncRateLimiterRegistry:
         self._buckets: dict[str, AsyncTokenBucket] = {}
         self._default_rpm = default_requests_per_minute
 
-    def get_or_create(self, key: str, crawl_delay_s: float | None = None) -> AsyncTokenBucket:
+    def get_or_create(
+        self,
+        key: str,
+        crawl_delay_s: float | None = None,
+        requests_per_minute: int | None = None,
+        burst: int | None = None,
+    ) -> AsyncTokenBucket:
         """Return the bucket for `key`, creating it on first use.
 
         Args:
             key: Quota identifier, conventionally the target host.
-            crawl_delay_s: Host-declared crawl delay. When present it always
-                wins over the default rate — a site's own stated preference is
-                not something to average against a global default.
+            crawl_delay_s: Host-declared crawl delay, used when no explicit rate
+                is given.
+            requests_per_minute: Explicit rate, already reconciled against any
+                declared `Crawl-delay` by the caller. Takes precedence.
+
+                This exists because reconciling here would be wrong in one
+                direction: a host declaring `Crawl-delay: 0.1` permits 10 rps,
+                and letting that override a slower *configured* rate would make
+                a "polite" setting crawl ten times faster than asked. The two
+                limits have to be combined with `min`, and only the caller knows
+                both.
+            burst: Tokens available back to back. Pass roughly one second's
+                worth when pacing a crawler; the default of a full minute lets a
+                short crawl finish before the rate binds at all.
 
         Returns:
             The bucket governing `key`.
         """
         bucket = self._buckets.get(key)
         if bucket is None:
-            bucket = (
-                AsyncTokenBucket.from_crawl_delay(key, crawl_delay_s)
-                if crawl_delay_s
-                else AsyncTokenBucket.per_minute(key, self._default_rpm)
-            )
+            if requests_per_minute is not None:
+                bucket = AsyncTokenBucket.per_minute(key, requests_per_minute, burst)
+            elif crawl_delay_s:
+                bucket = AsyncTokenBucket.from_crawl_delay(key, crawl_delay_s)
+            else:
+                bucket = AsyncTokenBucket.per_minute(key, self._default_rpm)
             self._buckets[key] = bucket
             _logger.debug(
                 "async_bucket_created", extra={"bucket": key, "crawl_delay_s": crawl_delay_s}

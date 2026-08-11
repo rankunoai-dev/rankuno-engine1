@@ -12,10 +12,12 @@ from typing import Any
 import httpx
 import pytest
 from src.core.errors import IntegrationError, RobotsDisallowedError, UnsafeUrlError
-from src.core.robots import DEFAULT_USER_AGENT
+from src.core.robots import DEFAULT_USER_AGENT, RobotsTxt, parse_robots_txt
 from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import (
     BROWSER_USER_AGENT,
+    DEFAULT_MAX_CONNECTIONS,
+    MAX_CONNECTIONS,
     FetchResult,
     HttpFetcher,
 )
@@ -374,3 +376,74 @@ class TestBrowserHeaders:
             transport=httpx.MockTransport(lambda r: httpx.Response(200)),
         )
         assert fetcher._respect_robots is True
+
+
+class TestRateLimitReconciliation:
+    """A declared `Crawl-delay` and a configured rate combine with `min`.
+
+    Both directions matter. A site asking to be crawled slowly must never be
+    sped up by a Turbo setting — that is the instruction robots.txt exists to
+    carry. And a site permitting speed must not override a deliberately polite
+    choice, or "Polite" would crawl ten times faster than the operator asked on
+    any host declaring `Crawl-delay: 0.1`.
+    """
+
+    @staticmethod
+    def _fetcher(settings, **kwargs: object) -> HttpFetcher:
+        """A fetcher whose transport never touches the network."""
+        return HttpFetcher(
+            settings=settings,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+            **kwargs,
+        )
+
+    def test_the_configured_rate_applies_with_no_declared_delay(self, settings):
+        fetcher = self._fetcher(settings, rate_limit_rps=25.0)
+        assert fetcher._host_rpm(RobotsTxt()) == 1500
+
+    def test_a_slower_crawl_delay_wins_over_a_faster_setting(self, settings):
+        """The site said 10 seconds between requests. Turbo does not get a vote."""
+        robots = parse_robots_txt("User-agent: *\nCrawl-delay: 10\n")
+        fetcher = self._fetcher(settings, rate_limit_rps=25.0)
+        assert fetcher._host_rpm(robots) == 6
+
+    def test_a_faster_crawl_delay_does_not_override_a_polite_setting(self, settings):
+        """`Crawl-delay: 0.1` permits 10 rps; a 1 rps choice must still hold."""
+        robots = parse_robots_txt("User-agent: *\nCrawl-delay: 0.1\n")
+        fetcher = self._fetcher(settings, rate_limit_rps=1.0)
+        assert fetcher._host_rpm(robots) == 60
+
+    def test_the_default_applies_when_nothing_is_configured(self, settings):
+        fetcher = self._fetcher(settings)
+        assert fetcher._host_rpm(RobotsTxt()) == settings.default_requests_per_minute
+
+    def test_the_rate_never_falls_below_one_per_minute(self, settings):
+        """A rate of zero would stall the crawl rather than slow it."""
+        robots = parse_robots_txt("User-agent: *\nCrawl-delay: 3600\n")
+        assert self._fetcher(settings, rate_limit_rps=25.0)._host_rpm(robots) >= 1
+
+
+class TestConnectionPool:
+    def test_the_pool_defaults_to_the_documented_size(self, settings):
+        fetcher = HttpFetcher(
+            settings=settings, transport=httpx.MockTransport(lambda r: httpx.Response(200))
+        )
+        assert fetcher._max_connections == DEFAULT_MAX_CONNECTIONS
+
+    def test_the_pool_can_be_sized_to_the_crawl(self, settings):
+        """Below the worker count, requests queue on sockets not on the limiter."""
+        fetcher = HttpFetcher(
+            settings=settings,
+            max_connections=50,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._max_connections == 50
+
+    def test_an_absurd_pool_request_is_capped(self, settings):
+        """Sockets are finite; asking for thousands is a mistake, not a choice."""
+        fetcher = HttpFetcher(
+            settings=settings,
+            max_connections=100_000,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._max_connections == MAX_CONNECTIONS

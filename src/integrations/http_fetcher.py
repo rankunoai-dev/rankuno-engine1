@@ -104,12 +104,26 @@ __all__ = [
     "BROWSER_CLIENT_HINTS",
     "BROWSER_USER_AGENT",
     "DEFAULT_MAX_BODY_BYTES",
+    "DEFAULT_MAX_CONNECTIONS",
     "DEFAULT_MAX_REDIRECTS",
+    "MAX_CONNECTIONS",
     "FetchResult",
     "HttpFetcher",
 ]
 
 _logger = get_logger("integrations.http_fetcher")
+
+DEFAULT_MAX_CONNECTIONS = 20
+"""Sockets held open per fetcher.
+
+Must be at least the caller's concurrency. Below it, requests queue on the
+connection pool instead of on the rate limiter — the configured rate is never
+reached and the crawl is slower than requested for no visible reason.
+"""
+
+MAX_CONNECTIONS = 100
+"""Hard pool ceiling. Sockets are a finite local resource, and a caller asking
+for thousands has made a mistake rather than a choice."""
 
 DEFAULT_MAX_REDIRECTS = 5
 """Redirect hops permitted. Each is independently re-validated."""
@@ -180,6 +194,8 @@ class HttpFetcher(BaseAPIClient):
         url_policy: UrlSafetyPolicy | None = None,
         user_agent: str = DEFAULT_USER_AGENT,
         browser_headers: bool = False,
+        rate_limit_rps: float | None = None,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
         respect_robots: bool = True,
         max_redirects: int = DEFAULT_MAX_REDIRECTS,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
@@ -192,6 +208,13 @@ class HttpFetcher(BaseAPIClient):
             settings: Configuration override, primarily for tests.
             url_policy: SSRF policy. Defaults to the deny-by-default policy.
             user_agent: Product token sent, and matched against robots.txt.
+            rate_limit_rps: Requests per second per host. `None` uses the
+                configured default. A declared `Crawl-delay` always wins over
+                this — see `_host_rpm`.
+            max_connections: Connection pool ceiling. Must be at least as large
+                as the caller's concurrency or requests queue on sockets rather
+                than on the rate limiter, and the configured rate is never
+                reached.
             browser_headers: Present as a desktop browser — `BROWSER_USER_AGENT`
                 plus the `Accept` headers one sends. Off by default. An explicit
                 `user_agent` overrides the token. Does not relax robots
@@ -222,6 +245,8 @@ class HttpFetcher(BaseAPIClient):
             else user_agent
         )
         self._browser_headers = browser_headers
+        self._rate_limit_rps = rate_limit_rps
+        self._max_connections = max(1, min(max_connections, MAX_CONNECTIONS))
         self._respect_robots = respect_robots
         self._max_redirects = max_redirects
         self._max_body_bytes = max_body_bytes
@@ -368,6 +393,10 @@ class HttpFetcher(BaseAPIClient):
                 follow_redirects=False,
                 timeout=self._settings.default_timeout_s,
                 headers=self._headers(),
+                limits=httpx.Limits(
+                    max_connections=self._max_connections,
+                    max_keepalive_connections=self._max_connections,
+                ),
                 transport=self._transport,
             )
         return self._client
@@ -380,6 +409,13 @@ class HttpFetcher(BaseAPIClient):
                 follow_redirects=False,
                 timeout=self._settings.default_timeout_s,
                 headers=self._headers(),
+                # Sized to the caller's concurrency. Too small and requests
+                # queue on sockets rather than on the rate limiter, so the
+                # configured rate is silently never reached.
+                limits=httpx.Limits(
+                    max_connections=self._max_connections,
+                    max_keepalive_connections=self._max_connections,
+                ),
                 transport=self._async_transport,
             )
         return self._aclient
@@ -419,18 +455,52 @@ class HttpFetcher(BaseAPIClient):
         self._robots[host] = parsed
         return parsed
 
+    @staticmethod
+    def _host_burst(rpm: int) -> int:
+        """Requests allowed back to back before pacing engages.
+
+        One second's worth. A token bucket's default burst is a full minute,
+        which for a crawler means the configured rate does not bind at all on a
+        short crawl — measured on gep.com, a "1 req/sec" setting peaked at 10.2
+        requests/sec because the whole crawl fitted inside the burst.
+        """
+        return max(1, round(rpm / 60))
+
+    def _host_rpm(self, robots: RobotsTxt | None) -> int:
+        """Requests per minute permitted for a host.
+
+        A declared `Crawl-delay` is a **floor that configuration cannot raise**.
+        The site owner stated a rate; a faster setting here would be this tool
+        deciding it knows better about someone else's server, which is exactly
+        what robots.txt exists to prevent. So the two are combined with `min`,
+        not by preferring whichever is configured.
+
+        With no declared delay, the configured rate applies — that is a choice
+        about a site that has expressed no preference.
+        """
+        configured = (
+            max(1, int(self._rate_limit_rps * 60))
+            if self._rate_limit_rps
+            else self._settings.default_requests_per_minute
+        )
+        delay = robots.crawl_delay(self._user_agent) if robots else None
+        if delay:
+            return min(configured, max(1, int(60 / delay)))
+        return configured
+
     def _throttle_sync(self, safe: SafeUrl, robots: RobotsTxt | None) -> None:
         """Block until the host's bucket allows a request."""
-        delay = robots.crawl_delay(self._user_agent) if robots else None
-        rpm = max(1, int(60 / delay)) if delay else self._settings.default_requests_per_minute
-        bucket = self._host_buckets.get_or_create(f"host:{safe.host}", rpm)
+        rpm = self._host_rpm(robots)
+        bucket = self._host_buckets.get_or_create(f"host:{safe.host}", rpm, self._host_burst(rpm))
         bucket.acquire(timeout_s=self._settings.default_timeout_s)
 
     async def _throttle_async(self, safe: SafeUrl, robots: RobotsTxt | None) -> None:
         """Await the host's bucket."""
-        delay = robots.crawl_delay(self._user_agent) if robots else None
+        rpm = self._host_rpm(robots)
         bucket: AsyncTokenBucket = self._async_host_buckets.get_or_create(
-            f"host:{safe.host}", delay
+            f"host:{safe.host}",
+            requests_per_minute=rpm,
+            burst=self._host_burst(rpm),
         )
         await bucket.acquire(timeout_s=self._settings.default_timeout_s)
 

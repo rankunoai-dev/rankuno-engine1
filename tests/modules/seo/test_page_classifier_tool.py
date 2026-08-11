@@ -403,3 +403,57 @@ class TestBlockedCrawl:
         )
         assert result.data is not None
         assert result.data.discovery.fetch_failures == 0
+
+
+class TestUnlimitedPageCeiling:
+    """`max_pages=None` means "everything reachable", bounded by ADR 0001.
+
+    Not truly unbounded, and the distinction is load-bearing: `SiteGraph` holds
+    every node and every page body in memory, so a genuinely unbounded crawl of
+    a large catalogue would exhaust memory hours in and lose the whole run.
+    """
+
+    def test_none_resolves_to_the_adr_ceiling(self):
+        from src.modules.seo.page_classifier.discovery import ABSOLUTE_MAX_PAGES
+
+        payload = PageClassificationInput(base_url="https://e.com", max_pages=None)
+        assert payload.resolved_max_pages == ABSOLUTE_MAX_PAGES
+
+    def test_an_explicit_ceiling_is_preserved(self):
+        payload = PageClassificationInput(base_url="https://e.com", max_pages=250)
+        assert payload.resolved_max_pages == 250
+
+    def test_a_ceiling_beyond_the_adr_limit_is_rejected(self):
+        """Accepting it would promise machinery ADR 0001 explicitly defers."""
+        with pytest.raises(ValueError, match="less than or equal"):
+            PageClassificationInput(base_url="https://e.com", max_pages=1_000_000)
+
+    def test_the_approval_summary_says_what_unlimited_means(self, settings):
+        """An approver must not read "unlimited" as "no bound at all"."""
+        summary = build_tool(settings).describe_invocation(
+            PageClassificationInput(base_url="https://e.com", max_pages=None)
+        )
+        assert "every reachable page" in summary
+        assert "500,000" in summary
+
+    def test_the_approval_summary_names_the_request_rate(self, settings):
+        """The rate is the part of this decision that lands on someone else."""
+        summary = build_tool(settings).describe_invocation(
+            PageClassificationInput(base_url="https://e.com", rate_limit_rps=25.0)
+        )
+        assert "25 req/sec" in summary
+
+
+class TestRateLimitInput:
+    def test_the_rate_is_capped(self):
+        """Past this a crawler stops being a guest on someone else's server."""
+        with pytest.raises(ValueError, match="less than or equal"):
+            PageClassificationInput(base_url="https://e.com", rate_limit_rps=100.0)
+
+    def test_a_zero_rate_is_rejected(self):
+        with pytest.raises(ValueError, match="greater than"):
+            PageClassificationInput(base_url="https://e.com", rate_limit_rps=0.0)
+
+    def test_the_default_is_unset_not_fast(self):
+        """The polite configured default applies unless asked otherwise."""
+        assert PageClassificationInput(base_url="https://e.com").rate_limit_rps is None

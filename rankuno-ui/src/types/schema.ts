@@ -227,11 +227,12 @@ export interface CrawlSummary {
 /** What to crawl, and the limits that apply to it. */
 export interface PageClassificationInput {
   base_url: string;
-  max_pages: number;
+  max_pages: number | null;
   max_depth: number | null;
   crawl_dom: boolean;
   respect_robots: boolean;
   llm_spend_cap_usd: number;
+  rate_limit_rps: number | null;
   user_agent: string;
   browser_headers: boolean;
   concurrency: number;

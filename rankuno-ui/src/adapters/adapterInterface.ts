@@ -84,6 +84,48 @@ export interface CrawlDataAdapter {
 }
 
 /**
+ * How hard to push the target server.
+ *
+ * The rate is per host, and a declared `Crawl-delay` is combined with it using
+ * `min` — a site asking to be crawled slowly is never sped up by picking Turbo.
+ *
+ * Polite is the default because most crawls are of somebody else's server.
+ * Turbo is a choice to make about a site you own or have permission to crawl at
+ * that rate; it is not a free speed-up.
+ */
+export interface CrawlSpeed {
+  key: "polite" | "standard" | "turbo";
+  label: string;
+  detail: string;
+  rate_limit_rps: number;
+  concurrency: number;
+}
+
+export const CRAWL_SPEEDS: readonly CrawlSpeed[] = [
+  {
+    key: "polite",
+    label: "Polite",
+    detail: "1 req/sec · safe on any site you do not own",
+    rate_limit_rps: 1,
+    concurrency: 5,
+  },
+  {
+    key: "standard",
+    label: "Standard",
+    detail: "10 req/sec · typical for a site you manage",
+    rate_limit_rps: 10,
+    concurrency: 20,
+  },
+  {
+    key: "turbo",
+    label: "Turbo",
+    detail: "25 req/sec · real load on the target — own the site or have permission",
+    rate_limit_rps: 25,
+    concurrency: 50,
+  },
+];
+
+/**
  * Sensible defaults for a live crawl, matching the Pydantic model's own.
  *
  * `max_depth: null` is unlimited — bounded by `max_pages`, not by depth.
@@ -91,6 +133,7 @@ export interface CrawlDataAdapter {
 export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   base_url: "",
   max_pages: 500,
+  rate_limit_rps: null,
   max_depth: null,
   crawl_dom: true,
   respect_robots: true,
