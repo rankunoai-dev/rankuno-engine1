@@ -5,18 +5,9 @@ import type {
   JobStatus,
 } from "../adapters/adapterInterface";
 import { HttpAdapter } from "../adapters/httpAdapter";
-import { buildNavTree } from "../lib/navTree";
-import {
-  buildSearchIndex,
-  buildTree,
-  type SearchEntry,
-  type TreeNode,
-} from "../lib/tree";
 import type {
-  FullPageIntelligenceProfile,
   PageClassificationInput,
   PageClassificationOutput,
-  PrimaryPageType,
 } from "../types/schema";
 
 interface CrawlState {
@@ -28,18 +19,8 @@ interface CrawlState {
   error: string | null;
 
   result: PageClassificationOutput | null;
-  tree: TreeNode | null;
   /** How the tree is grouped. Navigation mirrors the site's own header menu. */
   grouping: "navigation" | "path";
-  /** Built once per result. Rebuilding per keystroke is the obvious 20k killer. */
-  searchIndex: SearchEntry[];
-  /** Profiles by URL, so the drawer is a lookup rather than a scan. */
-  byUrl: Map<string, FullPageIntelligenceProfile>;
-
-  query: string;
-  typeFilter: PrimaryPageType[];
-  selectedUrl: string | null;
-  drawerOpen: boolean;
 
   /** Message shown while a live crawl runs, or null when none is running. */
   liveMessage: string | null;
@@ -49,11 +30,17 @@ interface CrawlState {
   selectJob: (jobId: string) => Promise<void>;
   startCrawl: (request: PageClassificationInput) => Promise<void>;
   refreshJobs: () => Promise<void>;
-  setQuery: (query: string) => void;
-  setTypeFilter: (types: PrimaryPageType[]) => void;
-  selectNode: (url: string | null) => void;
-  closeDrawer: () => void;
 }
+
+/*
+ * This store owns the *crawl*: which job is selected, its result, and the
+ * lifecycle of starting a new one. Everything about how that result is
+ * displayed — expansion, focus, filters, search — belongs to
+ * `useDashboardStore`, which derives it from `result`.
+ *
+ * The split matters because the derived structures are expensive at 20,000
+ * pages. Keeping them here meant rebuilding them on every job-status change.
+ */
 
 export const useCrawlStore = create<CrawlState>((set, get) => ({
   adapter: null,
@@ -65,15 +52,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
   liveMessage: null,
 
   result: null,
-  tree: null,
   grouping: "navigation",
-  searchIndex: [],
-  byUrl: new Map(),
-
-  query: "",
-  typeFilter: [],
-  selectedUrl: null,
-  drawerOpen: false,
 
   async init(adapter) {
     set({ adapter, status: "queued", error: null });
@@ -91,39 +70,25 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     const adapter = get().adapter;
     if (!adapter) return;
 
-    // Clear derived state immediately. Leaving the previous tree on screen under
-    // a "running" label is how a user ends up reading one site's structure while
+    // Cleared immediately. Leaving the previous crawl on screen under a new
+    // job's label is how a user ends up reading one site's structure while
     // believing they are looking at another.
     set({
       activeJobId: jobId,
       status: "running",
       error: null,
       result: null,
-      tree: null,
-      searchIndex: [],
-      byUrl: new Map(),
-      selectedUrl: null,
-      drawerOpen: false,
-      query: "",
     });
 
     try {
       const result = await adapter.getResult(jobId);
-      // Navigation grouping needs a menu to group by. Falling back to the path
-      // tree when none was parsed is the honest default: with no menu there is
-      // no published structure, and a single OTHERS bucket holding the whole
-      // site is worse than the path view it replaced.
-      const grouping = result.navigation.roots.length > 0 ? get().grouping : "path";
-      const tree =
-        grouping === "navigation" ? buildNavTree(result.pages) : buildTree(result.pages);
-      const byUrl = new Map(result.pages.map((page) => [page.url, page]));
-
       set({
         result,
-        tree,
-        grouping,
-        searchIndex: buildSearchIndex(tree),
-        byUrl,
+        // Navigation grouping needs a menu to group by. Falling back to the path
+        // view when none was parsed is the honest default: with no menu there is
+        // no published structure, and one OTHERS bucket holding the whole site
+        // is worse than the path view it replaced.
+        grouping: result.navigation.roots.length > 0 ? get().grouping : "path",
         // `partial` is not an error. Every live crawl so far hit a ceiling, and
         // presenting truncated data as complete is the failure mode that
         // matters here.
@@ -151,18 +116,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       return;
     }
 
-    set({
-      status: "queued",
-      error: null,
-      liveMessage: "Submitting…",
-      result: null,
-      tree: null,
-      searchIndex: [],
-      byUrl: new Map(),
-      selectedUrl: null,
-      drawerOpen: false,
-      query: "",
-    });
+    set({ status: "queued", error: null, liveMessage: "Submitting…", result: null });
 
     try {
       const jobId = await adapter.startJob(request);
@@ -196,33 +150,10 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
   },
 
   setGrouping(grouping) {
-    const result = get().result;
-    if (!result) {
-      set({ grouping });
-      return;
-    }
-    // Rebuilt here rather than in the component: the search index is derived
-    // from the tree, and leaving a stale index behind makes search silently
-    // return paths that no longer exist in the rendered tree.
-    const tree =
-      grouping === "navigation" ? buildNavTree(result.pages) : buildTree(result.pages);
-    set({ grouping, tree, searchIndex: buildSearchIndex(tree), query: "" });
-  },
-
-  setQuery(query) {
-    set({ query });
-  },
-
-  setTypeFilter(typeFilter) {
-    set({ typeFilter });
-  },
-
-  selectNode(url) {
-    set({ selectedUrl: url, drawerOpen: url !== null });
-  },
-
-  closeDrawer() {
-    set({ drawerOpen: false });
+    // Only the flag is stored. `DashboardShell` rebuilds its model from
+    // `result` and `grouping`, so there is no derived state here to keep in
+    // step — which is what made the previous version easy to leave stale.
+    set({ grouping });
   },
 }));
 
@@ -230,9 +161,3 @@ function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** The currently selected profile, or null. */
-export function useSelectedProfile(): FullPageIntelligenceProfile | null {
-  return useCrawlStore((state) =>
-    state.selectedUrl ? (state.byUrl.get(state.selectedUrl) ?? null) : null,
-  );
-}

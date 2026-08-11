@@ -26,6 +26,7 @@ interface FormValues {
   crawl_dom: boolean;
   respect_robots: boolean;
   browser_headers: boolean;
+  user_agent: string;
 }
 
 /**
@@ -41,6 +42,7 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
   const startCrawl = useCrawlStore((state) => state.startCrawl);
   const [submitting, setSubmitting] = useState(false);
   const [ignoreRobots, setIgnoreRobots] = useState(false);
+  const [browserMode, setBrowserMode] = useState(false);
 
   async function submit(): Promise<void> {
     const values = await form.validateFields();
@@ -50,6 +52,9 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
       // An empty depth field means unlimited, not zero. AntD yields `null` for
       // a cleared InputNumber, which is already the value the API expects.
       max_depth: values.max_depth ?? null,
+      // An empty field means "whatever browser mode implies"; the engine only
+      // substitutes its browser token while this holds the default.
+      user_agent: values.user_agent?.trim() || DEFAULT_CRAWL_REQUEST.user_agent,
     };
 
     setSubmitting(true);
@@ -87,10 +92,22 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           crawl_dom: true,
           respect_robots: true,
           browser_headers: false,
+          user_agent: DEFAULT_CRAWL_REQUEST.user_agent,
         }}
         onValuesChange={(changed: Partial<FormValues>) => {
           if (changed.respect_robots !== undefined) {
             setIgnoreRobots(!changed.respect_robots);
+          }
+          if (changed.browser_headers !== undefined) {
+            setBrowserMode(changed.browser_headers);
+            // The engine substitutes a browser token only while the field still
+            // holds the default. Showing that substitution here keeps the form
+            // honest about what will actually be sent.
+            if (changed.browser_headers && form.getFieldValue("user_agent") === DEFAULT_CRAWL_REQUEST.user_agent) {
+              form.setFieldValue("user_agent", "");
+            } else if (!changed.browser_headers && !form.getFieldValue("user_agent")) {
+              form.setFieldValue("user_agent", DEFAULT_CRAWL_REQUEST.user_agent);
+            }
           }
         }}
       >
@@ -145,11 +162,23 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
 
         <Form.Item
           name="browser_headers"
-          label="Send browser request headers"
+          label="Present as a browser"
           valuePropName="checked"
-          extra="Some enterprise edges refuse any client they do not recognise — returning 403 even for robots.txt, so the site cannot state what it permits. Use on sites you own or have permission to crawl. robots.txt is still obeyed."
+          extra="Sends a desktop Chrome user agent and the Accept headers a browser sends. Some enterprise edges refuse any client they do not recognise — returning 403 even for robots.txt, so the site cannot state what it permits. Use on sites you own or have permission to crawl. robots.txt is still obeyed, matched against whatever token is sent."
         >
           <Switch />
+        </Form.Item>
+
+        <Form.Item
+          name="user_agent"
+          label="User agent"
+          extra={
+            browserMode
+              ? "Leave empty to send the desktop Chrome token. A value here overrides it."
+              : "The token sent and matched against robots.txt. A descriptive token with contact details is what lets a site owner allow or block you deliberately."
+          }
+        >
+          <Input placeholder={browserMode ? "Chrome (default for browser mode)" : "RankunoBot"} />
         </Form.Item>
 
         {ignoreRobots && (

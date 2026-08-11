@@ -1,8 +1,4 @@
-import type {
-  FullPageIntelligenceProfile,
-  HierarchyLevel,
-  PrimaryPageType,
-} from "../types/schema";
+import type { FullPageIntelligenceProfile, HierarchyLevel } from "../types/schema";
 
 /**
  * A node in the site hierarchy.
@@ -136,79 +132,3 @@ function compareNodes(a: TreeNode, b: TreeNode): number {
   return a.segment.localeCompare(b.segment);
 }
 
-/** A flat, lower-cased search index. Built once; filtering never re-derives it. */
-export interface SearchEntry {
-  path: string;
-  haystack: string;
-}
-
-/**
- * Build the search index.
- *
- * Pre-computing the lower-cased haystack matters at scale: doing
- * `toLowerCase()` inside the filter would run 20,000 times per keystroke.
- */
-export function buildSearchIndex(root: TreeNode): SearchEntry[] {
-  const entries: SearchEntry[] = [];
-  const stack: TreeNode[] = [...root.children];
-
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    const type = node.profile?.primary_page_type ?? "";
-    const level = node.profile?.hierarchy_level ?? "";
-    entries.push({
-      path: node.path,
-      haystack: `${node.path} ${type} ${level}`.toLowerCase(),
-    });
-    for (const child of node.children) stack.push(child);
-  }
-  return entries;
-}
-
-/**
- * Paths matching a query, plus every ancestor needed to reach them.
- *
- * Ancestors are included because a matched leaf is unreachable in a tree whose
- * parents are filtered out — the user would see an empty panel and conclude the
- * search was broken.
- */
-export function matchingPaths(index: readonly SearchEntry[], query: string): Set<string> {
-  const needle = query.trim().toLowerCase();
-  const matched = new Set<string>();
-  if (needle.length === 0) return matched;
-
-  for (const entry of index) {
-    if (!entry.haystack.includes(needle)) continue;
-    matched.add(entry.path);
-    // Add each ancestor path: "/a/b/c/" -> "/a/", "/a/b/"
-    const parts = entry.path.split("/").filter(Boolean);
-    let accumulated = "";
-    for (const part of parts) {
-      accumulated = `${accumulated}/${part}`;
-      matched.add(`${accumulated}/`);
-    }
-  }
-  return matched;
-}
-
-/** Every path down to `maxDepth`, for the expand-to-level controls. */
-export function pathsToDepth(root: TreeNode, maxDepth: number): string[] {
-  const keys: string[] = [];
-  const stack: TreeNode[] = [...root.children];
-
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    if (node.depth < maxDepth && node.children.length > 0) keys.push(node.path);
-    if (node.depth < maxDepth) for (const child of node.children) stack.push(child);
-  }
-  return keys;
-}
-
-/** Page types present in a result set, for building filter options. */
-export function presentPageTypes(
-  profiles: readonly FullPageIntelligenceProfile[],
-): PrimaryPageType[] {
-  const seen = new Set<PrimaryPageType>();
-  for (const profile of profiles) seen.add(profile.primary_page_type);
-  return [...seen].sort();
-}

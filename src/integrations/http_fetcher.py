@@ -192,9 +192,10 @@ class HttpFetcher(BaseAPIClient):
             settings: Configuration override, primarily for tests.
             url_policy: SSRF policy. Defaults to the deny-by-default policy.
             user_agent: Product token sent, and matched against robots.txt.
-            browser_headers: Send the `Accept` and `Accept-Language` headers a
-                browser would. Off by default. Does not change `user_agent` and
-                does not relax robots compliance.
+            browser_headers: Present as a desktop browser — `BROWSER_USER_AGENT`
+                plus the `Accept` headers one sends. Off by default. An explicit
+                `user_agent` overrides the token. Does not relax robots
+                compliance; robots is matched against whatever is sent.
             respect_robots: Disabling is permitted only for fetching a site you
                 own. It is logged loudly, because the usual reason a crawler
                 gets an IP range banned is someone turning this off.
@@ -207,7 +208,19 @@ class HttpFetcher(BaseAPIClient):
         super().__init__(settings)
 
         self._policy = url_policy or UrlSafetyPolicy()
-        self._user_agent = user_agent
+        # The user agent *is* a request header, so `browser_headers` has to
+        # carry it. Sending browser `Accept` headers under a `RankunoBot` token
+        # changes nothing on an edge that filters by product token — which is
+        # every edge this option exists for.
+        #
+        # An explicit `user_agent` always wins: an operator who named an
+        # identity meant it, and silently replacing it would make the audit log
+        # disagree with what was actually sent.
+        self._user_agent = (
+            BROWSER_USER_AGENT
+            if browser_headers and user_agent == DEFAULT_USER_AGENT
+            else user_agent
+        )
         self._browser_headers = browser_headers
         self._respect_robots = respect_robots
         self._max_redirects = max_redirects
@@ -226,11 +239,14 @@ class HttpFetcher(BaseAPIClient):
         if not respect_robots:
             _logger.warning("robots_compliance_disabled", extra={"user_agent": user_agent})
 
-        if user_agent != DEFAULT_USER_AGENT:
+        if self._user_agent != DEFAULT_USER_AGENT:
             # Recorded in the audit log, not hidden: which identity a crawl
             # presented is part of what it did, and a reviewer reading the log
             # afterwards must be able to see it.
-            _logger.info("non_default_user_agent", extra={"user_agent": user_agent})
+            # robots.txt is matched against whatever token is actually sent, so
+            # presenting a browser means obeying the rules a browser is given.
+            # Presenting one identity and obeying another's rules is incoherent.
+            _logger.info("non_default_user_agent", extra={"user_agent": self._user_agent})
 
     def _headers(self) -> dict[str, str]:
         """Request headers for every outbound call."""

@@ -12,8 +12,13 @@ from typing import Any
 import httpx
 import pytest
 from src.core.errors import IntegrationError, RobotsDisallowedError, UnsafeUrlError
+from src.core.robots import DEFAULT_USER_AGENT
 from src.core.url_safety import UrlSafetyPolicy
-from src.integrations.http_fetcher import FetchResult, HttpFetcher
+from src.integrations.http_fetcher import (
+    BROWSER_USER_AGENT,
+    FetchResult,
+    HttpFetcher,
+)
 
 PUBLIC_IP = "93.184.216.34"
 
@@ -303,3 +308,69 @@ class TestLifecycle:
 
     def test_authenticate_is_a_noop_for_the_public_web(self, settings):
         assert make_fetcher(route_map({}), settings).authenticate() is None
+
+
+class TestBrowserHeaders:
+    """`browser_headers` has to change the product token, not just `Accept`.
+
+    An edge that filters by user agent — which is every edge this option exists
+    for — is unaffected by `Accept` headers alone. Shipped without this, the
+    option was unreachable: `BROWSER_USER_AGENT` was defined, exported, and
+    referenced by nothing.
+    """
+
+    def test_off_by_default(self, settings):
+        fetcher = HttpFetcher(
+            settings=settings, transport=httpx.MockTransport(lambda r: httpx.Response(200))
+        )
+        assert fetcher._headers()["User-Agent"] == DEFAULT_USER_AGENT
+        assert "Accept-Language" not in fetcher._headers()
+
+    def test_sends_a_browser_token(self, settings):
+        fetcher = HttpFetcher(
+            settings=settings,
+            browser_headers=True,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._headers()["User-Agent"] == BROWSER_USER_AGENT
+
+    def test_sends_browser_accept_headers(self, settings):
+        fetcher = HttpFetcher(
+            settings=settings,
+            browser_headers=True,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        headers = fetcher._headers()
+        assert "text/html" in headers["Accept"]
+        assert headers["Accept-Language"].startswith("en")
+
+    def test_an_explicit_user_agent_wins(self, settings):
+        """An operator who named an identity meant it.
+
+        Silently replacing it would make the audit log disagree with what was
+        actually sent.
+        """
+        fetcher = HttpFetcher(
+            settings=settings,
+            user_agent="AcmeAudit/1.0 (+https://acme.test/bot)",
+            browser_headers=True,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._headers()["User-Agent"] == "AcmeAudit/1.0 (+https://acme.test/bot)"
+
+    def test_robots_is_matched_against_the_token_actually_sent(self, settings):
+        """Presenting one identity and obeying another's rules is incoherent."""
+        fetcher = HttpFetcher(
+            settings=settings,
+            browser_headers=True,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._user_agent == BROWSER_USER_AGENT
+
+    def test_robots_compliance_is_not_relaxed(self, settings):
+        fetcher = HttpFetcher(
+            settings=settings,
+            browser_headers=True,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._respect_robots is True

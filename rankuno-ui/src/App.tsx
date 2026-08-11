@@ -1,13 +1,10 @@
 import { Alert, Spin } from "antd";
 import { useEffect, useState } from "react";
+import "./styles/design-system.css";
 import type { CrawlDataAdapter } from "./adapters/adapterInterface";
 import { DEFAULT_API_BASE, HttpAdapter } from "./adapters/httpAdapter";
 import { MockAdapter } from "./adapters/mockAdapter";
-import { HeaderBar } from "./components/layout/HeaderBar";
-import { DirectoryPane } from "./components/visualizer/DirectoryPane";
-import { PageDetailDrawer } from "./components/visualizer/PageDetailDrawer";
-import { ReactFlowGraph } from "./components/visualizer/ReactFlowGraph";
-import { SplitPaneLayout } from "./components/visualizer/SplitPaneLayout";
+import { DashboardShell } from "./components/layout/DashboardShell";
 import { useCrawlStore } from "./store/useCrawlStore";
 
 const API_BASE = import.meta.env["VITE_API_BASE"] ?? DEFAULT_API_BASE;
@@ -17,8 +14,7 @@ const API_BASE = import.meta.env["VITE_API_BASE"] ?? DEFAULT_API_BASE;
  *
  * The fallback is announced rather than silent. Fixture data looks exactly like
  * crawl output on screen, so a user who started the UI without the server and
- * was quietly handed `example.com` would have no way to tell they were reading
- * generated data.
+ * was quietly handed `example.com` would have no way to tell.
  */
 async function chooseAdapter(): Promise<{
   adapter: CrawlDataAdapter;
@@ -37,7 +33,6 @@ async function chooseAdapter(): Promise<{
 
 export default function App(): JSX.Element {
   const init = useCrawlStore((state) => state.init);
-  const status = useCrawlStore((state) => state.status);
   const [offline, setOffline] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -48,11 +43,25 @@ export default function App(): JSX.Element {
     })();
   }, [init]);
 
-  const busy = status === "running" || status === "queued";
+  if (offline === null) {
+    return (
+      <div
+        style={{
+          height: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#f5f6f8",
+        }}
+      >
+        <Spin size="large" tip="Connecting…" />
+      </div>
+    );
+  }
 
   return (
-    <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
-      {offline === true && (
+    <>
+      {offline && (
         <Alert
           type="info"
           banner
@@ -60,25 +69,7 @@ export default function App(): JSX.Element {
           message={`Engine not reachable at ${API_BASE} — showing bundled fixtures. Start it with: python -m src.api.server`}
         />
       )}
-
-      <HeaderBar />
-
-      {offline === null || busy ? (
-        <div
-          style={{
-            flex: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <Spin size="large" tip={busy ? "Crawling…" : "Connecting…"} />
-        </div>
-      ) : (
-        <SplitPaneLayout left={<DirectoryPane />} right={<ReactFlowGraph />} />
-      )}
-
-      <PageDetailDrawer />
-    </div>
+      <DashboardShell />
+    </>
   );
 }
