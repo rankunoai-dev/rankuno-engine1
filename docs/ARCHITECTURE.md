@@ -62,6 +62,8 @@ src/
     │       ├── tree_visualizer.py    # Standalone interactive HTML site tree
     │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
     │       │                         # crawl job, RiskClass.READ (ADR 0003)
+    │       ├── nav_tree_parser.py    # Header menu -> tree (footer excluded)
+    │       ├── logical_hierarchy.py  # Maps URLs to menu sections; OTHERS bucket
     │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       └── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus

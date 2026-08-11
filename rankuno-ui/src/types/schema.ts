@@ -172,6 +172,37 @@ export interface WeightProfileReport {
   detected_profile_name: string;
 }
 
+/** Where a navigation tree came from, and how much it found. */
+export interface NavSource {
+  strategy: string;
+  containers: number;
+  link_count: number;
+}
+
+/** One entry in the header menu. */
+export interface NavNode {
+  label: string;
+  url: string | null;
+  depth: number;
+  children: NavNode[];
+}
+
+/** A parsed header menu. */
+export interface NavigationTree {
+  roots: NavNode[];
+  source: NavSource;
+}
+
+/** How much of the site the navigation menu actually accounts for. */
+export interface NavCoverageReport {
+  total_urls: number;
+  exact_matches: number;
+  inherited_matches: number;
+  unmatched: number;
+  nav_entries: number;
+  groups: string[];
+}
+
 /** Aggregate outcome of one crawl. */
 export interface CrawlSummary {
   pages_classified: number;
@@ -192,6 +223,7 @@ export interface PageClassificationInput {
   respect_robots: boolean;
   llm_spend_cap_usd: number;
   user_agent: string;
+  browser_headers: boolean;
   concurrency: number;
   use_async_crawl: boolean;
   dom_reserve_fraction: number;
@@ -205,4 +237,6 @@ export interface PageClassificationOutput {
   discovery: DiscoveryReport;
   summary: CrawlSummary;
   pages: FullPageIntelligenceProfile[];
+  navigation: NavigationTree;
+  nav_coverage: NavCoverageReport;
 }

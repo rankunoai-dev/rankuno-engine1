@@ -5,6 +5,7 @@ import type {
   JobStatus,
 } from "../adapters/adapterInterface";
 import { HttpAdapter } from "../adapters/httpAdapter";
+import { buildNavTree } from "../lib/navTree";
 import {
   buildSearchIndex,
   buildTree,
@@ -28,6 +29,8 @@ interface CrawlState {
 
   result: PageClassificationOutput | null;
   tree: TreeNode | null;
+  /** How the tree is grouped. Navigation mirrors the site's own header menu. */
+  grouping: "navigation" | "path";
   /** Built once per result. Rebuilding per keystroke is the obvious 20k killer. */
   searchIndex: SearchEntry[];
   /** Profiles by URL, so the drawer is a lookup rather than a scan. */
@@ -41,6 +44,7 @@ interface CrawlState {
   /** Message shown while a live crawl runs, or null when none is running. */
   liveMessage: string | null;
 
+  setGrouping: (grouping: "navigation" | "path") => void;
   init: (adapter: CrawlDataAdapter) => Promise<void>;
   selectJob: (jobId: string) => Promise<void>;
   startCrawl: (request: PageClassificationInput) => Promise<void>;
@@ -62,6 +66,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
 
   result: null,
   tree: null,
+  grouping: "navigation",
   searchIndex: [],
   byUrl: new Map(),
 
@@ -104,12 +109,19 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
 
     try {
       const result = await adapter.getResult(jobId);
-      const tree = buildTree(result.pages);
+      // Navigation grouping needs a menu to group by. Falling back to the path
+      // tree when none was parsed is the honest default: with no menu there is
+      // no published structure, and a single OTHERS bucket holding the whole
+      // site is worse than the path view it replaced.
+      const grouping = result.navigation.roots.length > 0 ? get().grouping : "path";
+      const tree =
+        grouping === "navigation" ? buildNavTree(result.pages) : buildTree(result.pages);
       const byUrl = new Map(result.pages.map((page) => [page.url, page]));
 
       set({
         result,
         tree,
+        grouping,
         searchIndex: buildSearchIndex(tree),
         byUrl,
         // `partial` is not an error. Every live crawl so far hit a ceiling, and
@@ -181,6 +193,20 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     } catch (cause) {
       set({ status: "failed", error: describe(cause), liveMessage: null });
     }
+  },
+
+  setGrouping(grouping) {
+    const result = get().result;
+    if (!result) {
+      set({ grouping });
+      return;
+    }
+    // Rebuilt here rather than in the component: the search index is derived
+    // from the tree, and leaving a stale index behind makes search silently
+    // return paths that no longer exist in the rendered tree.
+    const tree =
+      grouping === "navigation" ? buildNavTree(result.pages) : buildTree(result.pages);
+    set({ grouping, tree, searchIndex: buildSearchIndex(tree), query: "" });
   },
 
   setQuery(query) {

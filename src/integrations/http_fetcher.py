@@ -64,7 +64,45 @@ from src.core.schemas import StrictModel
 from src.core.url_safety import SafeUrl, UrlSafetyPolicy
 from src.integrations.base_client import BaseAPIClient
 
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+)
+"""A desktop Chrome product token, for sites that reject unknown clients.
+
+Some enterprise edge configurations refuse any user agent they do not recognise,
+returning `403` to `robots.txt` itself — which means the site cannot even tell
+the crawler what it permits. Sending a common token gets past that particular
+filter.
+
+Two things this deliberately is **not**:
+
+* It is not automatic. An operator selects it per job. A fallback that re-sent a
+  refused request under a different identity the moment a server said no would be
+  working to defeat the refusal, not to configure a client.
+* It does not relax robots compliance. `respect_robots` is untouched, and the
+  point of reaching `robots.txt` is to obey what it says.
+
+Use it on sites you own or have permission to crawl. On anything else, prefer
+`DEFAULT_USER_AGENT`, which names the crawler honestly and lets a site owner
+allow or block it deliberately.
+"""
+
+BROWSER_CLIENT_HINTS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+"""Headers an ordinary browser sends that a bare HTTP client does not.
+
+Deliberately minimal. `Accept` matters because some origins content-negotiate on
+it and return a non-HTML body without it. `Sec-CH-UA` client hints are omitted:
+they exist for a browser to describe itself accurately, and forging them adds
+nothing beyond making the request harder to identify as automated.
+"""
+
 __all__ = [
+    "BROWSER_CLIENT_HINTS",
+    "BROWSER_USER_AGENT",
     "DEFAULT_MAX_BODY_BYTES",
     "DEFAULT_MAX_REDIRECTS",
     "FetchResult",
@@ -141,6 +179,7 @@ class HttpFetcher(BaseAPIClient):
         settings: Settings | None = None,
         url_policy: UrlSafetyPolicy | None = None,
         user_agent: str = DEFAULT_USER_AGENT,
+        browser_headers: bool = False,
         respect_robots: bool = True,
         max_redirects: int = DEFAULT_MAX_REDIRECTS,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
@@ -153,6 +192,9 @@ class HttpFetcher(BaseAPIClient):
             settings: Configuration override, primarily for tests.
             url_policy: SSRF policy. Defaults to the deny-by-default policy.
             user_agent: Product token sent, and matched against robots.txt.
+            browser_headers: Send the `Accept` and `Accept-Language` headers a
+                browser would. Off by default. Does not change `user_agent` and
+                does not relax robots compliance.
             respect_robots: Disabling is permitted only for fetching a site you
                 own. It is logged loudly, because the usual reason a crawler
                 gets an IP range banned is someone turning this off.
@@ -166,6 +208,7 @@ class HttpFetcher(BaseAPIClient):
 
         self._policy = url_policy or UrlSafetyPolicy()
         self._user_agent = user_agent
+        self._browser_headers = browser_headers
         self._respect_robots = respect_robots
         self._max_redirects = max_redirects
         self._max_body_bytes = max_body_bytes
@@ -182,6 +225,19 @@ class HttpFetcher(BaseAPIClient):
 
         if not respect_robots:
             _logger.warning("robots_compliance_disabled", extra={"user_agent": user_agent})
+
+        if user_agent != DEFAULT_USER_AGENT:
+            # Recorded in the audit log, not hidden: which identity a crawl
+            # presented is part of what it did, and a reviewer reading the log
+            # afterwards must be able to see it.
+            _logger.info("non_default_user_agent", extra={"user_agent": user_agent})
+
+    def _headers(self) -> dict[str, str]:
+        """Request headers for every outbound call."""
+        headers = {"User-Agent": self._user_agent}
+        if self._browser_headers:
+            headers.update(BROWSER_CLIENT_HINTS)
+        return headers
 
     def authenticate(self) -> None:
         """No credentials: this client fetches the public web."""
@@ -295,7 +351,7 @@ class HttpFetcher(BaseAPIClient):
                 http2=False,
                 follow_redirects=False,
                 timeout=self._settings.default_timeout_s,
-                headers={"User-Agent": self._user_agent},
+                headers=self._headers(),
                 transport=self._transport,
             )
         return self._client
@@ -307,7 +363,7 @@ class HttpFetcher(BaseAPIClient):
                 http2=False,
                 follow_redirects=False,
                 timeout=self._settings.default_timeout_s,
-                headers={"User-Agent": self._user_agent},
+                headers=self._headers(),
                 transport=self._async_transport,
             )
         return self._aclient

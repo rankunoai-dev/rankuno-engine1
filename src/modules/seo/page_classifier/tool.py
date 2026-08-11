@@ -61,6 +61,14 @@ from src.modules.seo.page_classifier.discovery import (
     SiteGraph,
     discover_site,
 )
+from src.modules.seo.page_classifier.logical_hierarchy import (
+    NavCoverageReport,
+    assign_navigation,
+)
+from src.modules.seo.page_classifier.nav_tree_parser import (
+    NavigationTree,
+    parse_navigation,
+)
 from src.modules.seo.page_classifier.schemas import (
     FullPageIntelligenceProfile,
     PrimaryPageType,
@@ -129,6 +137,18 @@ class PageClassificationInput(StrictModel):
     respect_robots: bool = True
     llm_spend_cap_usd: float = Field(default=0.0, ge=0.0, le=100.0)
     user_agent: str = Field(default="RankunoBot", min_length=1)
+    browser_headers: bool = False
+    """Send the `Accept`/`Accept-Language` headers a browser would.
+
+    Off by default. Some enterprise edge configurations reject any client they do
+    not recognise — returning `403` even for `robots.txt`, so the site cannot
+    state what it permits. This, with a `user_agent` the edge accepts, gets past
+    that filter.
+
+    An operator sets it per job rather than the crawler retrying under a new
+    identity after a refusal: re-sending a rejected request as something else is
+    working around the refusal, not configuring a client. Use it on sites you own
+    or have permission to crawl. robots.txt is still obeyed either way."""
     concurrency: int = Field(default=DEFAULT_CONCURRENCY, ge=1, le=MAX_CONCURRENCY)
     """Simultaneous in-flight requests. Bounds local resources only — per-host
     politeness is enforced by the fetcher's token bucket regardless, so raising
@@ -189,6 +209,13 @@ class PageClassificationOutput(StrictModel):
         discovery: Per-path discovery breakdown.
         summary: Aggregate outcome.
         pages: One profile per discovered URL.
+        navigation: The site's header menu, as published. Empty when the menu
+            could not be read — a client-rendered header leaves no links in the
+            served HTML.
+        nav_coverage: How much of the crawl the menu accounts for. Reported
+            rather than assumed: menu coverage varies enormously between sites,
+            and a consumer showing a navigation tree needs to know whether it
+            describes the site or a corner of it.
     """
 
     base_url: str
@@ -197,6 +224,8 @@ class PageClassificationOutput(StrictModel):
     discovery: DiscoveryReport
     summary: CrawlSummary
     pages: tuple[FullPageIntelligenceProfile, ...] = ()
+    navigation: NavigationTree = NavigationTree()
+    nav_coverage: NavCoverageReport = NavCoverageReport()
 
 
 class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificationOutput]):
@@ -291,6 +320,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
 
             evidence = graph.to_page_evidence()
             pages = self._classify_all(evidence, site_profile, payload)
+            navigation, nav_coverage, pages = self._apply_navigation(graph, payload.base_url, pages)
         finally:
             if owns_fetcher:
                 fetcher.close()
@@ -313,7 +343,51 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             discovery=discovery,
             summary=summary,
             pages=pages,
+            navigation=navigation,
+            nav_coverage=nav_coverage,
         )
+
+    def _apply_navigation(
+        self,
+        graph: SiteGraph,
+        base_url: str,
+        pages: tuple[FullPageIntelligenceProfile, ...],
+    ) -> tuple[NavigationTree, NavCoverageReport, tuple[FullPageIntelligenceProfile, ...]]:
+        """Parse the header menu and place every page under a section.
+
+        Read from the homepage only. The header menu is global, so parsing it on
+        every page would repeat identical work thousands of times for one answer.
+
+        This fills `nav_parent_url` and `breadcrumb_path`, which have been on the
+        profile contract since Phase 1 was specified and have never been
+        populated by anything.
+
+        Returns:
+            The menu, its coverage, and the profiles with navigation filled in.
+        """
+        homepage_html = graph.html_for(base_url)
+        if not homepage_html:
+            # No homepage body means no menu to read. Reported as an empty tree
+            # rather than an error: a sitemap-only crawl is legitimate and simply
+            # has no navigation data.
+            _logger.info("nav_skipped_no_homepage_html", extra={"base_url": base_url})
+            return NavigationTree(), NavCoverageReport(total_urls=len(pages)), pages
+
+        navigation = parse_navigation(homepage_html, base_url)
+        assignments, coverage = assign_navigation(navigation, pages)
+
+        placed = tuple(
+            page.model_copy(
+                update={
+                    "nav_parent_url": assignment.nav_parent_url,
+                    "breadcrumb_path": assignment.nav_path,
+                }
+            )
+            if (assignment := assignments.get(page.url)) is not None
+            else page
+            for page in pages
+        )
+        return navigation, coverage, placed
 
     # -- internals ---------------------------------------------------------
 
@@ -355,6 +429,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         fetcher = HttpFetcher(
             url_policy=self._url_policy,
             user_agent=payload.user_agent,
+            browser_headers=payload.browser_headers,
             respect_robots=payload.respect_robots,
         )
         return fetcher, True

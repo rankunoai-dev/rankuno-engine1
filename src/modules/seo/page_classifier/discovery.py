@@ -361,6 +361,15 @@ class SiteGraph:
         """Retain a page's HTML for later evidence assembly."""
         self._html[normalize_url(url)] = html
 
+    def html_for(self, url: str) -> str | None:
+        """Retrieve a stored page body, or `None` if it was never fetched.
+
+        Exists for the navigation parse, which needs the homepage's markup after
+        the crawl rather than during it — the header menu is global, so it is
+        read once from the root instead of on every page.
+        """
+        return self._html.get(normalize_url(url))
+
     def to_page_evidence(self, total_pages: int | None = None) -> tuple[PageEvidence, ...]:
         """Project the graph into the contract the signal parsers consume.
 

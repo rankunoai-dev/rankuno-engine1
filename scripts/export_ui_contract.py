@@ -42,6 +42,14 @@ from src.modules.seo.page_classifier.discovery import (  # noqa: E402
     DiscoveryReport,
     DiscoverySource,
 )
+from src.modules.seo.page_classifier.logical_hierarchy import (  # noqa: E402
+    NavCoverageReport,
+)
+from src.modules.seo.page_classifier.nav_tree_parser import (  # noqa: E402
+    NavigationTree,
+    NavNode,
+    NavSource,
+)
 from src.modules.seo.page_classifier.schemas import (  # noqa: E402
     ConsensusMethod,
     ConversionRole,
@@ -91,6 +99,10 @@ MODELS: tuple[type[BaseModel], ...] = (
     DiscoveryReport,
     SiteProfile,
     WeightProfileReport,
+    NavSource,
+    NavNode,
+    NavigationTree,
+    NavCoverageReport,
     CrawlSummary,
     PageClassificationInput,
     PageClassificationOutput,

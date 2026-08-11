@@ -93,6 +93,7 @@ export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   respect_robots: true,
   llm_spend_cap_usd: 0,
   user_agent: "RankunoBot",
+  browser_headers: false,
   concurrency: 5,
   use_async_crawl: true,
   dom_reserve_fraction: 0.2,

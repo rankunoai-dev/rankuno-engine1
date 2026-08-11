@@ -3,7 +3,7 @@ import {
   DownOutlined,
   MinusSquareOutlined,
 } from "@ant-design/icons";
-import { Button, Input, Select, Space, Tag, Tree, Typography } from "antd";
+import { Button, Input, Segmented, Select, Space, Tag, Tooltip, Tree, Typography } from "antd";
 import type { DataNode } from "antd/es/tree";
 import { useDeferredValue, useMemo, useState } from "react";
 import { LEVEL_COLORS, LEVEL_LABELS, PAGE_TYPE_COLORS } from "../../constants/colors";
@@ -36,6 +36,10 @@ export function DirectoryPane(): JSX.Element {
   const setTypeFilter = useCrawlStore((state) => state.setTypeFilter);
   const searchIndex = useCrawlStore((state) => state.searchIndex);
   const selectNode = useCrawlStore((state) => state.selectNode);
+  const grouping = useCrawlStore((state) => state.grouping);
+  const setGrouping = useCrawlStore((state) => state.setGrouping);
+  const navCoverage = useCrawlStore((state) => state.result?.nav_coverage);
+  const navigation = useCrawlStore((state) => state.result?.navigation);
 
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const deferredQuery = useDeferredValue(query);
@@ -73,6 +77,46 @@ export function DirectoryPane(): JSX.Element {
 
   return (
     <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+      <Segmented
+        size="small"
+        block
+        value={grouping}
+        onChange={(value) => setGrouping(value as "navigation" | "path")}
+        options={[
+          {
+            label: "Navigation",
+            value: "navigation",
+            disabled: !navigation || navigation.roots.length === 0,
+          },
+          { label: "URL path", value: "path" },
+        ]}
+      />
+
+      {grouping === "navigation" && navCoverage && (
+        <Tooltip
+          title={
+            `${navCoverage.exact_matches.toLocaleString()} pages are menu entries; ` +
+            `${navCoverage.inherited_matches.toLocaleString()} sit beneath one; ` +
+            `${navCoverage.unmatched.toLocaleString()} are in OTHERS. ` +
+            "OTHERS holds pages no navigation path reaches — pages a visitor " +
+            "cannot browse to, which is a finding rather than a gap."
+          }
+        >
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+            Menu accounts for{" "}
+            {navCoverage.total_urls > 0
+              ? `${Math.round(
+                  ((navCoverage.exact_matches + navCoverage.inherited_matches) /
+                    navCoverage.total_urls) *
+                    100,
+                )}%`
+              : "0%"}{" "}
+            of {navCoverage.total_urls.toLocaleString()} pages
+            {navigation && navigation.source.strategy === "jsonld" && " (from JSON-LD)"}
+          </Typography.Text>
+        </Tooltip>
+      )}
+
       <Input.Search
         placeholder="Filter by path or page type…"
         allowClear

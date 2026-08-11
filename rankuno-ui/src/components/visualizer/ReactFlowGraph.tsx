@@ -121,10 +121,14 @@ export function ReactFlowGraph(): JSX.Element {
   const selectNode = useCrawlStore((state) => state.selectNode);
   const selectedUrl = useCrawlStore((state) => state.selectedUrl);
 
+  const grouping = useCrawlStore((state) => state.grouping);
+
   const { nodes, edges, omitted } = useMemo(() => {
     if (!result) return { nodes: [], edges: [], omitted: 0 };
-    return buildGraph(result.pages, selectedUrl);
-  }, [result, selectedUrl]);
+    return grouping === "navigation" && result.navigation.roots.length > 0
+      ? buildNavGraph(result.pages, result.nav_coverage.groups, selectedUrl)
+      : buildGraph(result.pages, selectedUrl);
+  }, [result, selectedUrl, grouping]);
 
   if (!result) return <CrawlEmptyState />;
 
@@ -137,9 +141,20 @@ export function ReactFlowGraph(): JSX.Element {
           banner
           message={
             <Typography.Text style={{ fontSize: 12 }}>
-              Lanes group by <strong>hierarchy level</strong>; the tree nests by{" "}
-              <strong>URL path</strong>. A level is a page&apos;s role, not its position —
-              so the two views intentionally differ.
+              {grouping === "navigation" && result.navigation.roots.length > 0 ? (
+                <>
+                  Lanes are the site&apos;s <strong>header menu sections</strong>; edges
+                  follow the menu. <strong>OTHERS</strong> holds pages no menu path
+                  reaches — pages a visitor cannot browse to, which is a finding rather
+                  than a gap.
+                </>
+              ) : (
+                <>
+                  Lanes group by <strong>hierarchy level</strong>; the tree nests by{" "}
+                  <strong>URL path</strong>. A level is a page&apos;s role, not its
+                  position — so the two views intentionally differ.
+                </>
+              )}
               {omitted > 0 && (
                 <>
                   {" "}
@@ -182,6 +197,66 @@ export function ReactFlowGraph(): JSX.Element {
   );
 }
 
+/**
+ * Lay the graph out by the site's header menu rather than by hierarchy level.
+ *
+ * One lane per top-level menu section, in the order the site publishes them, so
+ * the columns read left-to-right like the header itself. `OTHERS` is last.
+ *
+ * Edges follow `nav_parent_url`, which the engine now populates from the parsed
+ * menu — so these are the site's real navigation relationships rather than URL
+ * paths standing in for them.
+ */
+function buildNavGraph(
+  pages: readonly FullPageIntelligenceProfile[],
+  groups: readonly string[],
+  selectedUrl: string | null,
+): { nodes: Node[]; edges: Edge[]; omitted: number } {
+  const ranked = [...pages].sort(
+    (a, b) => b.inbound_internal_links_count - a.inbound_internal_links_count,
+  );
+  const visible = ranked.slice(0, MAX_RENDERED_NODES);
+  const omitted = Math.max(0, pages.length - visible.length);
+
+  const lanes = groups.length > 0 ? groups : ["OTHERS"];
+  const laneIndex = new Map(lanes.map((label, index) => [label, index]));
+  const rows = new Map<number, number>();
+
+  const nodes: Node[] = [];
+  const byUrl = new Set<string>();
+
+  for (const profile of visible) {
+    const group = profile.breadcrumb_path[0] ?? "OTHERS";
+    const column = laneIndex.get(group) ?? lanes.length - 1;
+    const row = rows.get(column) ?? 0;
+    rows.set(column, row + 1);
+
+    byUrl.add(profile.url);
+    nodes.push({
+      id: profile.url,
+      type: "levelCard",
+      position: { x: column * LANE_X, y: row * NODE_Y },
+      data: { profile } satisfies CardData,
+      selected: profile.url === selectedUrl,
+    });
+  }
+
+  const edges: Edge[] = [];
+  for (const profile of visible) {
+    const parent = profile.nav_parent_url;
+    // A menu item is its own nav parent; drawing that would be a self-loop.
+    if (!parent || parent === profile.url || !byUrl.has(parent)) continue;
+    edges.push({
+      id: `${parent}->${profile.url}`,
+      source: parent,
+      target: profile.url,
+      style: { stroke: "#1e293b", strokeWidth: 1 },
+    });
+  }
+
+  return { nodes, edges, omitted };
+}
+
 function buildGraph(
   pages: readonly FullPageIntelligenceProfile[],
   selectedUrl: string | null,
@@ -217,8 +292,8 @@ function buildGraph(
     });
   });
 
-  // Edges follow URL-path parentage, the only containment the engine actually
-  // produces: `nav_parent_url` is declared on the model but never populated.
+  // Edges follow URL-path parentage, which is the only containment available in
+  // this view. Navigation parentage is used by `buildNavGraph` instead.
   const edges: Edge[] = [];
   for (const profile of visible) {
     const parentPath = parentOf(profile.normalized_path);

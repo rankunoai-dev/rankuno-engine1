@@ -25,6 +25,7 @@ interface FormValues {
   concurrency: number;
   crawl_dom: boolean;
   respect_robots: boolean;
+  browser_headers: boolean;
 }
 
 /**
@@ -85,6 +86,7 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           concurrency: DEFAULT_CRAWL_REQUEST.concurrency,
           crawl_dom: true,
           respect_robots: true,
+          browser_headers: false,
         }}
         onValuesChange={(changed: Partial<FormValues>) => {
           if (changed.respect_robots !== undefined) {
@@ -138,6 +140,15 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
         </Form.Item>
 
         <Form.Item name="respect_robots" label="Respect robots.txt" valuePropName="checked">
+          <Switch />
+        </Form.Item>
+
+        <Form.Item
+          name="browser_headers"
+          label="Send browser request headers"
+          valuePropName="checked"
+          extra="Some enterprise edges refuse any client they do not recognise — returning 403 even for robots.txt, so the site cannot state what it permits. Use on sites you own or have permission to crawl. robots.txt is still obeyed."
+        >
           <Switch />
         </Form.Item>
 
