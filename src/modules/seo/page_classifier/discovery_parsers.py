@@ -345,8 +345,15 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
     for href in collector.hrefs:
         if href.startswith(_SKIP_LINK_PREFIXES):
             continue
-        absolute = urljoin(base_url, href)
-        parts = urlsplit(absolute)
+        try:
+            absolute = urljoin(base_url, href)
+            parts = urlsplit(absolute)
+        except ValueError as exc:
+            # A bracketed host that is not a valid IP makes `urlsplit` raise, so
+            # a single malformed `<a href>` used to abort extraction for the
+            # whole page — every other link on it was lost with it.
+            _logger.debug("link_unparseable", extra={"href": href, "error": str(exc)})
+            continue
         if parts.scheme not in {"http", "https"}:
             continue
         if same_host_only and parts.netloc.lower() != base_host:

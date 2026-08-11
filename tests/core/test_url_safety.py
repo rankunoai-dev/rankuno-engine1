@@ -253,3 +253,36 @@ class TestSystemResolver:
 
         monkeypatch.setattr(socket, "getaddrinfo", fake)
         assert system_resolver("example.com") == ["8.8.8.8", PUBLIC_IP]
+
+
+class TestUnparseableUrls:
+    """`urlsplit` raises on some inputs, and callers only expect `UnsafeUrlError`.
+
+    Python 3.11's `_check_bracketed_host` rejects a bracketed host that is not a
+    valid IP, so `http://[invalid-ipv6]/` makes the standard library raise
+    `ValueError`. Bare, that escapes every caller of `validate` — one such link
+    in a page's markup aborted a crawl.
+    """
+
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "http://[invalid-ipv6]/",
+            "http://[not:an:ip]/",
+            "http://[]/",
+        ],
+    )
+    def test_a_bracketed_non_ip_host_is_refused_not_raised(self, hostile):
+        policy = UrlSafetyPolicy(resolver=lambda host: ["93.184.216.34"])
+        with pytest.raises(UnsafeUrlError):
+            policy.validate(hostile)
+
+    def test_a_valid_ipv6_literal_is_still_evaluated(self):
+        """The fix must not turn every bracketed host into a parse failure.
+
+        `[::1]` is loopback and must still be refused *as loopback*, which is
+        the SSRF guard working rather than a parse error.
+        """
+        policy = UrlSafetyPolicy(resolver=lambda host: ["93.184.216.34"])
+        with pytest.raises(UnsafeUrlError, match="loopback"):
+            policy.validate("http://[::1]/")

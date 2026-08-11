@@ -217,7 +217,18 @@ class UrlSafetyPolicy:
         if any(char in candidate for char in ("\r", "\n", "\t", "\x00")):
             raise UnsafeUrlError(url, "URL contains a control character")
 
-        parts = urlsplit(candidate)
+        try:
+            parts = urlsplit(candidate)
+        except ValueError as exc:
+            # `urlsplit` itself raises on a bracketed host that is not a valid
+            # IP — `http://[invalid-ipv6]/` — as of the 3.11 hardening in
+            # `_check_bracketed_host`. Left bare, that `ValueError` escapes every
+            # caller, none of which expect anything but `UnsafeUrlError` from
+            # this method: one such link in a page's markup aborted the crawl.
+            #
+            # A URL the standard library cannot parse is unsafe by definition,
+            # so it becomes the error callers already handle.
+            raise UnsafeUrlError(url, f"URL is unparseable ({exc})") from exc
 
         scheme = parts.scheme.lower()
         if scheme not in self._schemes:

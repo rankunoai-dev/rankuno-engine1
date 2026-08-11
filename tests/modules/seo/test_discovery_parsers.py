@@ -290,3 +290,28 @@ class TestShopifyRecords:
     def test_skips_entries_without_a_handle(self):
         payload = '{"products": [{"title": "no handle"}, {"handle": "ok"}]}'
         assert set(parse_shopify_records(payload, "https://s.com")) == {"https://s.com/products/ok"}
+
+
+class TestMalformedLinkIsolation:
+    """One unparseable href must not cost a page its other links."""
+
+    def test_a_bracketed_non_ip_href_is_skipped(self):
+        html = '<a href="http://[invalid-ipv6]/">bad</a><a href="/good/">good</a>'
+        assert extract_page_links(html, "https://e.com/") == ("https://e.com/good/",)
+
+    def test_several_malformed_hrefs_do_not_abort_extraction(self):
+        html = (
+            '<a href="http://[bad]/">1</a>'
+            '<a href="/keep-1/">2</a>'
+            '<a href="http://[also:bad:host]/">3</a>'
+            '<a href="/keep-2/">4</a>'
+        )
+        links = extract_page_links(html, "https://e.com/")
+        assert links == ("https://e.com/keep-1/", "https://e.com/keep-2/")
+
+    def test_a_valid_ipv6_href_is_not_discarded_as_malformed(self):
+        """Only unparseable hosts are skipped, not every bracketed one."""
+        links = extract_page_links(
+            '<a href="http://[2001:db8::1]/x/">v6</a>', "http://[2001:db8::1]/"
+        )
+        assert links == ("http://[2001:db8::1]/x/",)
