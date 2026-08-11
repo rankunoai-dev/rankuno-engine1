@@ -545,7 +545,20 @@ def discover_site(
     # Reported once before the DOM crawl: sitemap and CMS discovery establish the
     # denominator, so without this the first progress reading is 0 of 0.
     _notify(on_progress, graph, 0, [])
-    pages_fetched = _crawl_dom(fetcher, base_url, graph, max_depth, on_progress) if crawl_dom else 0
+    # The sitemap alone is often most of what a crawl will ever know. Saving it
+    # before the DOM crawl starts means an interruption seconds in still leaves
+    # something worth rendering.
+    _checkpoint(on_checkpoint, graph)
+
+    pages_fetched = 0
+    if crawl_dom:
+        try:
+            pages_fetched = _crawl_dom(
+                fetcher, base_url, graph, max_depth, on_progress, on_checkpoint
+            )
+        except Exception as exc:  # noqa: BLE001 - a partial graph beats no graph
+            _logger.exception("dom_crawl_aborted", extra={"url": base_url})
+            graph.stopped_reason = f"{type(exc).__name__}: {exc}"
 
     report = graph.report().model_copy(
         update={"sitemaps_fetched": sitemaps_fetched, "pages_fetched": pages_fetched}

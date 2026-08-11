@@ -21,8 +21,9 @@ page it resolves is a page that never reaches the paid Layer 3, which per
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit, urlunsplit
 
+from src.core.logger import get_logger
 from src.modules.seo.page_classifier.schemas import (
     MAX_CRAWL_DEPTH,
     HierarchyLevel,
@@ -30,6 +31,7 @@ from src.modules.seo.page_classifier.schemas import (
 )
 
 __all__ = [
+    "safe_split",
     "MAX_QUERY_PARAMS",
     "TRACKING_PARAM_PREFIXES",
     "TRACKING_PARAMS",
@@ -246,6 +248,32 @@ def normalize_path(path: str) -> str:
     return "/" + "/".join(s.lower() for s in segments) + "/"
 
 
+_logger = get_logger("modules.seo.url_rules")
+
+
+def safe_split(url: str) -> SplitResult | None:
+    """Split a URL, or return `None` when the standard library refuses.
+
+    `urlsplit` raises `ValueError` on some inputs — an unbalanced bracket gives
+    "Invalid IPv6 URL", and a bracketed host that is not a valid IP fails
+    `_check_bracketed_host`, both added as 3.11 hardening. Neither is rare in
+    the wild: a page only has to contain one such `<a href>`.
+
+    Left unguarded, that exception propagates out of `normalize_url`, which is
+    called for every URL entering the graph — so a single malformed link on any
+    page failed the entire crawl. Observed live on highradius.com.
+
+    `None` means "not a usable URL", which every caller can act on. Raising is
+    not useful here: the crawl cannot fix the markup, and there is nothing to
+    retry.
+    """
+    try:
+        return urlsplit(url.strip())
+    except ValueError as exc:
+        _logger.debug("url_unsplittable", extra={"url": url[:120], "error": str(exc)})
+        return None
+
+
 def normalize_url(
     url: str, *, strip_locale: bool = True, known_locales: frozenset[str] | None = None
 ) -> str:
@@ -265,7 +293,12 @@ def normalize_url(
     Returns:
         The normalised URL.
     """
-    parts = urlsplit(url.strip())
+    parts = safe_split(url)
+    if parts is None:
+        # Unparseable. Returned as-is so it still has a stable identity in the
+        # graph and can be reported, rather than aborting the crawl that found
+        # it.
+        return url.strip()
 
     path = parts.path or "/"
     if strip_locale:
@@ -318,8 +351,8 @@ def is_faceted_filter(url: str) -> bool:
     Returns:
         True when the URL should be classified as a faceted filter unfetched.
     """
-    parts = urlsplit(url)
-    if not parts.query:
+    parts = safe_split(url)
+    if parts is None or not parts.query:
         return False
 
     meaningful = [
@@ -346,7 +379,9 @@ def url_fast_path(url: str) -> tuple[HierarchyLevel, PrimaryPageType] | None:
     Returns:
         A `(level, page_type)` pair, or `None` if the URL is not conclusive.
     """
-    parts = urlsplit(url)
+    parts = safe_split(url)
+    if parts is None:
+        return None
     path, _ = strip_locale_prefix(parts.path or "/")
     segments = [s.lower() for s in path.split("/") if s]
 

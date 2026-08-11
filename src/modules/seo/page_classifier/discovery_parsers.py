@@ -34,7 +34,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlunsplit
 from xml.etree import ElementTree
 
 from pydantic import Field
@@ -42,6 +42,7 @@ from pydantic import Field
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord
+from src.modules.seo.page_classifier.url_rules import safe_split
 
 __all__ = [
     "MAX_SITEMAP_ENTRIES",
@@ -306,7 +307,11 @@ class _AnchorCollector(HTMLParser):
 
 def _is_page_link(url: str) -> bool:
     """Whether a URL plausibly points at an HTML page."""
-    path = urlsplit(url).path.lower()
+    parts = safe_split(url)
+    if parts is None:
+        # Unparseable, so not a page worth fetching either way.
+        return True
+    path = parts.path.lower()
     return not path.endswith(_NON_PAGE_SUFFIXES)
 
 
@@ -339,7 +344,8 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
         # broken page is far more common than a broken parser.
         _logger.debug("link_extraction_partial", extra={"url": base_url, "error": str(exc)})
 
-    base_host = urlsplit(base_url).netloc.lower()
+    base_split = safe_split(base_url)
+    base_host = base_split.netloc.lower() if base_split else ""
     found: dict[str, None] = {}
 
     for href in collector.hrefs:
@@ -347,12 +353,14 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
             continue
         try:
             absolute = urljoin(base_url, href)
-            parts = urlsplit(absolute)
         except ValueError as exc:
-            # A bracketed host that is not a valid IP makes `urlsplit` raise, so
-            # a single malformed `<a href>` used to abort extraction for the
-            # whole page — every other link on it was lost with it.
+            # A malformed href makes `urljoin` raise, so one bad link used to
+            # abort extraction for the whole page — every other link on it was
+            # lost with it.
             _logger.debug("link_unparseable", extra={"href": href, "error": str(exc)})
+            continue
+        parts = safe_split(absolute)
+        if parts is None:
             continue
         if parts.scheme not in {"http", "https"}:
             continue
@@ -479,7 +487,9 @@ def with_page_param(url: str, page: int) -> str:
     Returns:
         The URL with `page` set.
     """
-    parts = urlsplit(url)
+    parts = safe_split(url)
+    if parts is None:
+        return url
     query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "page"]
     query.append(("page", str(page)))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))

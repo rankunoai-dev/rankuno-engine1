@@ -482,3 +482,44 @@ class TestStallAndPartialResults:
         """Otherwise every crawl would carry a disclaimer it does not need."""
         _, report = run_async(settings)
         assert report.stopped_reason is None
+
+
+class TestCheckpointHookReachesTheCrawl:
+    """The wiring, not the checkpointer.
+
+    Both paths silently dropped `on_checkpoint` between `discover_site` and the
+    DOM crawl: every unit test of the checkpointer passed while no crawl ever
+    invoked it, and `has_checkpoint` was false on a live 400-URL run. A test of
+    a component in isolation cannot catch an argument that is never passed.
+    """
+
+    def test_the_concurrent_path_invokes_the_sink(self, settings):
+        seen: list[int] = []
+        run_async(settings, on_checkpoint=lambda graph: seen.append(len(graph)))
+        assert seen, "adiscover_site never offered the graph for checkpointing"
+
+    def test_the_serial_path_invokes_the_sink(self, settings):
+        seen: list[int] = []
+        discover_site(
+            build_fetcher(settings),
+            "https://e.com",
+            on_checkpoint=lambda graph: seen.append(len(graph)),
+        )
+        assert seen, "discover_site never offered the graph for checkpointing"
+
+    def test_the_sink_is_offered_before_the_dom_crawl(self, settings):
+        """A crawl interrupted seconds in must still have saved its sitemap."""
+        seen: list[int] = []
+        run_async(settings, crawl_dom=False, on_checkpoint=lambda graph: seen.append(len(graph)))
+        assert seen, "nothing was offered when the DOM crawl was disabled"
+
+    def test_a_failing_sink_does_not_break_the_crawl(self, settings):
+        def explode(_graph: object) -> None:
+            raise RuntimeError("disk full")
+
+        _, report = run_async(settings, on_checkpoint=explode)
+        assert report.total_urls > 0
+
+    def test_no_sink_is_the_default(self, settings):
+        _, report = run_async(settings)
+        assert report.total_urls > 0

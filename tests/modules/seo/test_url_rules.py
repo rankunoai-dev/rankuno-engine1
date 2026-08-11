@@ -14,6 +14,7 @@ from src.modules.seo.page_classifier.url_rules import (
     is_tracking_param,
     normalize_path,
     normalize_url,
+    safe_split,
     strip_locale_prefix,
     url_fast_path,
 )
@@ -207,3 +208,43 @@ class TestFastPath:
     def test_stays_silent_on_ambiguous_urls(self, url):
         """Layer 0 must not guess. A wrong answer here is never revisited."""
         assert url_fast_path(url) is None
+
+
+class TestUnsplittableUrls:
+    """`urlsplit` raises on inputs a crawler really does meet.
+
+    An unbalanced bracket gives "Invalid IPv6 URL"; a bracketed host that is
+    not a valid IP fails `_check_bracketed_host`. Both are 3.11 hardening.
+
+    `normalize_url` runs on every URL entering the graph, so one such link on
+    any page failed the whole crawl — observed live on highradius.com, which
+    reported "Invalid IPv6 URL" and produced nothing.
+    """
+
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "http://[abc",
+            "http://[invalid-ipv6]/",
+            "http://[::1",
+            "https://e.com/ok/][",
+        ],
+    )
+    def test_normalize_url_does_not_raise(self, hostile):
+        assert isinstance(normalize_url(hostile), str)
+
+    def test_an_unparseable_url_keeps_a_stable_identity(self):
+        """Returned as-is so the graph can still key on it and report it."""
+        assert normalize_url("  http://[abc  ") == "http://[abc"
+
+    @pytest.mark.parametrize("hostile", ["http://[abc", "http://[invalid-ipv6]/"])
+    def test_faceted_filter_does_not_raise(self, hostile):
+        assert is_faceted_filter(hostile) is False
+
+    def test_safe_split_reports_failure_rather_than_raising(self):
+        assert safe_split("http://[abc") is None
+        assert safe_split("https://e.com/a/") is not None
+
+    def test_a_valid_url_is_unaffected(self):
+        """The guard must not change parsing for anything well-formed."""
+        assert normalize_url("https://e.com/a/?utm_source=x") == "https://e.com/a/"

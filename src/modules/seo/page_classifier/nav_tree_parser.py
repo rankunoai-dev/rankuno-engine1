@@ -33,12 +33,13 @@ from __future__ import annotations
 import json
 import re
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.modules.seo.page_classifier.url_rules import safe_split
 
 __all__ = [
     "MAX_NAV_DEPTH",
@@ -251,7 +252,8 @@ def _label_from_url(url: str) -> str:
     `https://e.com/login` becomes `Login`. Without this, an anchor whose only
     content is an SVG icon produces a section with a blank name.
     """
-    path = urlsplit(url).path.strip("/")
+    parts = safe_split(url)
+    path = parts.path.strip("/") if parts else ""
     if not path:
         return "Home"
     return path.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").strip().title()
@@ -270,9 +272,12 @@ def _usable_href(href: str | None, base_url: str, base_host: str) -> str | None:
     if not candidate or candidate.lower().startswith(_SKIP_HREF_PREFIXES):
         return None
 
-    absolute = urljoin(base_url, candidate)
-    split = urlsplit(absolute)
-    if split.scheme not in {"http", "https"}:
+    try:
+        absolute = urljoin(base_url, candidate)
+    except ValueError:
+        return None
+    split = safe_split(absolute)
+    if split is None or split.scheme not in {"http", "https"}:
         return None
     if split.netloc.lower() != base_host:
         return None
@@ -389,7 +394,8 @@ def parse_navigation(html: str, base_url: str) -> NavigationTree:
         # is far more common than a broken parser.
         _logger.debug("nav_parse_partial", extra={"url": base_url, "error": str(exc)})
 
-    base_host = urlsplit(base_url).netloc.lower()
+    base_split = safe_split(base_url)
+    base_host = base_split.netloc.lower() if base_split else ""
     resolved: list[tuple[int, str, str | None]] = []
     seen_urls: set[str] = set()
 
