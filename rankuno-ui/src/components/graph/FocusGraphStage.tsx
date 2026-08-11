@@ -6,8 +6,39 @@ import { BreadcrumbBar } from "./BreadcrumbBar";
 /** Children drawn per page. Beyond this the lane stops being readable. */
 const PAGE_SIZE = 10;
 
-/** Children per row within a lane before wrapping. */
-const COLUMNS = 5;
+/** Widest a node card may be, matching `.gn { max-width }`. */
+const CARD_WIDTH = 180;
+
+/** Clear space between two cards in the same row. */
+const CARD_GUTTER = 14;
+
+/** Width of the lane's vertical label tab, which cards must not sit under. */
+const LANE_TAB_WIDTH = 30;
+
+/** Vertical distance between wrapped rows inside one lane. */
+const ROW_HEIGHT = 52;
+
+/**
+ * Columns that fit in `width` without overlapping.
+ *
+ * Fixed columns overlap on a narrow stage: five 180px cards need 970px of
+ * usable width, and below that they were drawn on top of each other with their
+ * labels running together. Wrapping to fewer columns is readable; overlapping
+ * never is.
+ */
+function columnsFor(width: number, count: number): number {
+  const usable = Math.max(0, width - LANE_TAB_WIDTH * 2);
+  const fits = Math.max(1, Math.floor(usable / (CARD_WIDTH + CARD_GUTTER)));
+  return Math.max(1, Math.min(count, fits));
+}
+
+/** Keep a card's centre inside the stage, clear of the lane tab. */
+function clampX(x: number, width: number): number {
+  const half = CARD_WIDTH / 2;
+  const min = LANE_TAB_WIDTH + half + 6;
+  const max = Math.max(min, width - half - 6);
+  return Math.min(Math.max(x, min), max);
+}
 
 const NODE_CLASS = ["g0", "g1", "g2", "g3", "go"];
 const LANE_CLASS = ["ln0", "ln1", "ln2", "ln3", "lno"];
@@ -113,20 +144,31 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
   if (centres.length > 0 && width > 0) {
     chain.forEach((index, position) => {
       const lane = model.nodes[index]!.lv;
-      const x =
-        chain.length === 1 ? width / 2 : Math.min(90 + position * (width * 0.28), width - 140);
-      positions.set(index, { x, y: centres[lane] ?? 0 });
+      // Spread across the usable width rather than by a fixed step, so a long
+      // ancestor chain does not run off the right edge or under the lane tab.
+      const span = width - LANE_TAB_WIDTH * 2 - CARD_WIDTH;
+      const step = chain.length > 1 ? span / (chain.length - 1) : 0;
+      const raw =
+        chain.length === 1
+          ? width / 2
+          : LANE_TAB_WIDTH + CARD_WIDTH / 2 + position * step;
+      positions.set(index, { x: clampX(raw, width), y: centres[lane] ?? 0 });
     });
 
-    const rows = Math.ceil(shown.length / COLUMNS) || 1;
+    const columns = columnsFor(width, shown.length);
+    const rows = Math.ceil(shown.length / columns) || 1;
+    const usable = width - LANE_TAB_WIDTH * 2;
+
     shown.forEach((kid, position) => {
       const lane = model.nodes[kid]!.lv;
-      const columns = Math.min(shown.length, COLUMNS);
       const row = Math.floor(position / columns);
       const column = position % columns;
+      // Cards in the final row are centred against a full row's spacing, so a
+      // partial row does not stretch its cards apart.
+      const raw = LANE_TAB_WIDTH + (usable / (columns + 1)) * (column + 1);
       positions.set(kid, {
-        x: ((width - 100) / (columns + 1)) * (column + 1) + 70,
-        y: (centres[lane] ?? 0) + (row - (rows - 1) / 2) * 44,
+        x: clampX(raw, width),
+        y: (centres[lane] ?? 0) + (row - (rows - 1) / 2) * ROW_HEIGHT,
       });
     });
   }
@@ -200,7 +242,10 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
               className="gn pager"
               style={{
                 left: width - 110,
-                top: (centres[expandedLane] ?? 0) + Math.ceil(shown.length / COLUMNS) * 30,
+                top:
+                  (centres[expandedLane] ?? 0) +
+                  (Math.ceil(shown.length / columnsFor(width, shown.length)) * ROW_HEIGHT) / 2 +
+                  ROW_HEIGHT,
               }}
               onClick={() => focus !== null && nextChildPage(focus, pageCount)}
             >

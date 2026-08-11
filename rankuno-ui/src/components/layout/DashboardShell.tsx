@@ -1,3 +1,4 @@
+import { FilePdfOutlined } from "@ant-design/icons";
 import { Alert, Button, Select, Segmented, Space } from "antd";
 import { useEffect, useMemo } from "react";
 import { buildDashModel, EMPTY_MODEL } from "../../lib/dashboardModel";
@@ -9,6 +10,7 @@ import { KpiMetricStrip } from "../metrics/KpiMetricStrip";
 import { LevelFilterRow } from "../tree/LevelFilterRow";
 import { TeleportSearch } from "../tree/TeleportSearch";
 import { VirtualizedTree } from "../tree/VirtualizedTree";
+import { CrawlReport } from "../report/CrawlReport";
 import { LiveCrawlProgressModal } from "../telemetry/LiveCrawlProgressModal";
 import { LiveCrawlModal } from "./LiveCrawlModal";
 import { NavigationRail } from "./NavigationRail";
@@ -40,6 +42,7 @@ export function DashboardShell(): JSX.Element {
   const expandAll = useDashboardStore((state) => state.expandAll);
   const collapseAll = useDashboardStore((state) => state.collapseAll);
   const [crawlOpen, setCrawlOpen] = useState(false);
+  const [printedAt, setPrintedAt] = useState<Date | null>(null);
 
   // Rebuilt only when the crawl or the grouping changes. At 20,000 pages this
   // walk is the single most expensive thing the UI does.
@@ -84,6 +87,22 @@ export function DashboardShell(): JSX.Element {
                 onClick={() => setCrawlOpen(true)}
               >
                 New crawl
+              </Button>
+            )}
+            {result && (
+              <Button
+                size="small"
+                icon={<FilePdfOutlined />}
+                onClick={() => {
+                  // Stamped before printing so the report carries the moment it
+                  // was produced, not the moment it is read.
+                  setPrintedAt(new Date());
+                  // One frame, so React has committed the report before the
+                  // browser snapshots the page for printing.
+                  requestAnimationFrame(() => window.print());
+                }}
+              >
+                PDF
               </Button>
             )}
             <Segmented
@@ -232,6 +251,17 @@ export function DashboardShell(): JSX.Element {
 
       <LiveCrawlModal open={crawlOpen} onClose={() => setCrawlOpen(false)} />
       <LiveCrawlProgressModal />
+
+      {/* Always mounted, revealed only by `@media print`. The on-screen tree is
+          virtualized, so printing the page would capture the ~25 rows that
+          happen to be in the DOM. */}
+      {result && model.nodes.length > 0 && (
+        <CrawlReport
+          model={model}
+          result={result}
+          generatedAt={printedAt ?? new Date()}
+        />
+      )}
     </div>
   );
 }

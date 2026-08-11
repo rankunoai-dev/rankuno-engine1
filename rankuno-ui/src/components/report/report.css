@@ -1,0 +1,151 @@
+/*
+ * Print stylesheet for the crawl report.
+ *
+ * The report is always in the DOM but positioned off-screen, and only `@media
+ * print` reveals it. Mounting it on demand instead would mean the browser's
+ * print dialog opening before React had rendered it.
+ *
+ * `display: none` is deliberately *not* used off-screen: some browsers skip
+ * layout for hidden subtrees, and the printed output came out blank.
+ */
+
+.rk-report {
+  position: absolute;
+  left: -10000px;
+  top: 0;
+  width: 190mm;
+  font-family: "Inter", system-ui, sans-serif;
+  color: #1d2635;
+  font-size: 9pt;
+  line-height: 1.45;
+}
+
+.rep-head h1 {
+  font-size: 16pt;
+  margin: 0 0 2mm;
+}
+.rep-sub {
+  color: #5c6b83;
+  font-size: 8.5pt;
+  margin: 0 0 4mm;
+}
+
+.rk-report h2 {
+  font-size: 11pt;
+  margin: 6mm 0 2mm;
+  border-bottom: 1px solid #d3d9e3;
+  padding-bottom: 1mm;
+}
+
+.rep-warn {
+  background: #fdf6de;
+  border-left: 3px solid #b8860b;
+  padding: 2mm 3mm;
+  margin: 0 0 3mm;
+  font-size: 8.5pt;
+}
+
+.rep-note {
+  font-size: 8.5pt;
+  color: #5c6b83;
+  margin: 0 0 3mm;
+}
+
+.rep-kpi {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 3mm;
+}
+.rep-kpi th {
+  text-align: left;
+  font-weight: 500;
+  color: #5c6b83;
+  padding: 1.2mm 2mm 1.2mm 0;
+  width: 22%;
+}
+.rep-kpi td {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-weight: 600;
+  padding: 1.2mm 4mm 1.2mm 0;
+  width: 28%;
+}
+
+.rep-tree {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 8pt;
+}
+.rep-tree thead th {
+  text-align: left;
+  border-bottom: 1px solid #1d2635;
+  padding: 1mm 2mm 1mm 0;
+  font-size: 7.5pt;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.rep-tree td {
+  padding: 0.8mm 2mm 0.8mm 0;
+  border-bottom: 1px solid #eef1f5;
+  vertical-align: top;
+  word-break: break-word;
+}
+.rep-tree td:nth-child(2),
+.rep-tree td:nth-child(3),
+.rep-tree td:nth-child(4),
+.rep-tree td:nth-child(5) {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  white-space: nowrap;
+}
+.rep-dim {
+  color: #98a4b8;
+}
+.rep-flag {
+  color: #b8860b;
+  font-weight: 600;
+}
+
+.rep-foot {
+  margin-top: 5mm;
+  padding-top: 2mm;
+  border-top: 1px solid #d3d9e3;
+  font-size: 7.5pt;
+  color: #98a4b8;
+}
+
+@media print {
+  /* The app is a fixed-height flex shell with its own scrollers; printed as-is
+     it yields one clipped page. Hiding it and promoting the report is the whole
+     mechanism. */
+  .rk-dash,
+  .ant-modal-root,
+  .ant-modal-mask,
+  .ant-message,
+  .ant-notification {
+    display: none !important;
+  }
+
+  .rk-report {
+    position: static;
+    left: auto;
+    width: auto;
+  }
+
+  /* Repeat the column headers on every page, and never split a row across a
+     page break — a URL cut in half is unreadable. */
+  .rep-tree thead {
+    display: table-header-group;
+  }
+  .rep-tree tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .rep-warn,
+  .rep-kpi {
+    break-inside: avoid;
+  }
+
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+}

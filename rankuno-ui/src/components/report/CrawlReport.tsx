@@ -1,0 +1,186 @@
+import type { PageClassificationOutput } from "../../types/schema";
+import { OTHERS_LANE, LANE_LABELS, type DashModel } from "../../lib/dashboardModel";
+import "./report.css";
+
+/** Rows included in the printed tree. */
+export const REPORT_ROW_LIMIT = 3_000;
+
+interface Props {
+  model: DashModel;
+  result: PageClassificationOutput;
+  generatedAt: Date;
+}
+
+/**
+ * The printable report.
+ *
+ * Rendered off-screen and revealed only by `@media print`, because the on-screen
+ * tree is virtualized: printing what is visible would produce the ~25 rows that
+ * happen to be mounted. A report has to build its own full list.
+ *
+ * Capped at `REPORT_ROW_LIMIT` rows, and the cap is stated on the page rather
+ * than applied silently — a truncated report that looks complete is worse than
+ * one that says where it stopped.
+ */
+export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element {
+  const { summary, discovery, nav_coverage: coverage } = result;
+  const inNav = coverage.exact_matches + coverage.inherited_matches;
+  const rows = flatten(model, REPORT_ROW_LIMIT);
+  const omitted = model.nodes.length - rows.length;
+
+  return (
+    <div className="rk-report" aria-hidden="true">
+      <header className="rep-head">
+        <h1>Site architecture report</h1>
+        <p className="rep-sub">
+          {result.base_url} · generated {generatedAt.toLocaleString()}
+        </p>
+      </header>
+
+      {/* Every caveat the screen carries is repeated here. A PDF outlives the
+          session it came from and will be read by someone who never saw the
+          banners. */}
+      {discovery.stopped_reason && (
+        <p className="rep-warn">
+          Crawl stopped early — {discovery.stopped_reason}. The pages below are
+          real, but this is not the whole site and how much is missing is
+          unknown.
+        </p>
+      )}
+      {discovery.truncated && (
+        <p className="rep-warn">
+          Crawl stopped at its page ceiling of {discovery.total_urls.toLocaleString()} URLs.
+          This is a partial view of the site.
+        </p>
+      )}
+      {discovery.pages_fetched === 0 && (
+        <p className="rep-warn">
+          No page was fetched over the network. Classifications below rest on URL
+          string patterns alone.
+        </p>
+      )}
+
+      <table className="rep-kpi">
+        <tbody>
+          <tr>
+            <th>URLs classified</th>
+            <td>{summary.pages_classified.toLocaleString()}</td>
+            <th>Discovered</th>
+            <td>{discovery.total_urls.toLocaleString()}</td>
+          </tr>
+          <tr>
+            <th>Pages fetched</th>
+            <td>{discovery.pages_fetched.toLocaleString()}</td>
+            <th>Refused</th>
+            <td>{discovery.fetch_failures.toLocaleString()}</td>
+          </tr>
+          <tr>
+            <th>In navigation</th>
+            <td>
+              {inNav.toLocaleString()}
+              {coverage.total_urls > 0 &&
+                ` (${Math.round((inNav / coverage.total_urls) * 100)}%)`}
+            </td>
+            <th>OTHERS</th>
+            <td>{coverage.unmatched.toLocaleString()}</td>
+          </tr>
+          <tr>
+            <th>Orphans</th>
+            <td>{summary.orphan_pages.toLocaleString()}</td>
+            <th>Unclassified</th>
+            <td>{summary.unknown_pages.toLocaleString()}</td>
+          </tr>
+          <tr>
+            <th>LLM spend</th>
+            <td>${summary.llm_spend_usd.toFixed(2)}</td>
+            <th>Escalated</th>
+            <td>
+              {summary.escalated_to_llm.toLocaleString()} (
+              {(summary.escalation_rate * 100).toFixed(2)}%)
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Sections</h2>
+      <p className="rep-note">
+        {coverage.unmatched > 0 ? (
+          <>
+            <strong>OTHERS</strong> holds {coverage.unmatched.toLocaleString()} pages no
+            navigation path reaches — pages a visitor cannot browse to.
+          </>
+        ) : (
+          "Every page sits under a navigation section."
+        )}
+      </p>
+
+      <h2>Structure</h2>
+      {omitted > 0 && (
+        <p className="rep-warn">
+          Showing the first {rows.length.toLocaleString()} of{" "}
+          {model.nodes.length.toLocaleString()} nodes; {omitted.toLocaleString()} omitted
+          to keep this report printable.
+        </p>
+      )}
+
+      <table className="rep-tree">
+        <thead>
+          <tr>
+            <th>Path</th>
+            <th>Level</th>
+            <th>Type</th>
+            <th>Conf.</th>
+            <th>In</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(({ index, depth }) => {
+            const node = model.nodes[index]!;
+            const profile = node.profile;
+            return (
+              <tr key={index}>
+                <td style={{ paddingLeft: 4 + depth * 12 }}>
+                  {node.label}
+                  {!profile && <span className="rep-dim"> · not crawled</span>}
+                </td>
+                <td>{LANE_LABELS[node.lv]}</td>
+                <td>{profile?.primary_page_type ?? "—"}</td>
+                <td>
+                  {profile ? `${Math.round(profile.final_confidence_score * 100)}%` : "—"}
+                </td>
+                <td className={profile?.inbound_internal_links_count === 0 ? "rep-flag" : ""}>
+                  {profile?.inbound_internal_links_count ?? "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <footer className="rep-foot">
+        Rankuno AI Engine · {result.base_url} ·{" "}
+        {model.laneCounts[OTHERS_LANE]?.toLocaleString() ?? 0} nodes in OTHERS
+      </footer>
+    </div>
+  );
+}
+
+/** Depth-first order, capped. Iterative for the same reason the tree build is. */
+function flatten(model: DashModel, limit: number): Array<{ index: number; depth: number }> {
+  const rows: Array<{ index: number; depth: number }> = [];
+  const stack: Array<{ index: number; depth: number }> = [];
+  for (let k = model.roots.length - 1; k >= 0; k -= 1) {
+    stack.push({ index: model.roots[k]!, depth: 0 });
+  }
+
+  while (stack.length > 0 && rows.length < limit) {
+    const row = stack.pop()!;
+    rows.push(row);
+    const node = model.nodes[row.index];
+    if (!node) continue;
+    for (let k = node.kids.length - 1; k >= 0; k -= 1) {
+      stack.push({ index: node.kids[k]!, depth: row.depth + 1 });
+    }
+  }
+  return rows;
+}
