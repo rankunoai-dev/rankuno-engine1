@@ -45,6 +45,7 @@ which, for an AI-assisted codebase, is every session.
 | [0013](0013-blocked-crawl-honesty.md) | 2026-08-10 | Blocked crawls fail instead of reporting success | 891 tests, 95.48% |
 | [0014](0014-navigation-hierarchy.md) | 2026-08-11 | Header-navigation grouping and OTHERS | 943 tests, 95.57% |
 | [0015](0015-navigation-dashboard.md) | 2026-08-11 | Navigation dashboard; browser mode actually works | 949 tests, 95.66% |
+| [0016](0016-crawl-telemetry.md) | 2026-08-11 | Live crawl telemetry: progress, ETA, URL stream | 966 tests, 95.71% |
 
 ---
 

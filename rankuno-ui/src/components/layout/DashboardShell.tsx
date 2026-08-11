@@ -9,6 +9,7 @@ import { KpiMetricStrip } from "../metrics/KpiMetricStrip";
 import { LevelFilterRow } from "../tree/LevelFilterRow";
 import { TeleportSearch } from "../tree/TeleportSearch";
 import { VirtualizedTree } from "../tree/VirtualizedTree";
+import { LiveCrawlProgressModal } from "../telemetry/LiveCrawlProgressModal";
 import { LiveCrawlModal } from "./LiveCrawlModal";
 import { NavigationRail } from "./NavigationRail";
 import { useState } from "react";
@@ -196,6 +197,7 @@ export function DashboardShell(): JSX.Element {
       </div>
 
       <LiveCrawlModal open={crawlOpen} onClose={() => setCrawlOpen(false)} />
+      <LiveCrawlProgressModal />
     </div>
   );
 }

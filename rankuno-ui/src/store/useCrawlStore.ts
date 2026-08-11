@@ -6,6 +6,7 @@ import type {
 } from "../adapters/adapterInterface";
 import { HttpAdapter } from "../adapters/httpAdapter";
 import type {
+  JobTelemetry,
   PageClassificationInput,
   PageClassificationOutput,
 } from "../types/schema";
@@ -24,6 +25,10 @@ interface CrawlState {
 
   /** Message shown while a live crawl runs, or null when none is running. */
   liveMessage: string | null;
+  /** Live counters while a crawl runs. Null when none is. */
+  telemetry: JobTelemetry | null;
+  /** Wall-clock seconds since the running crawl was submitted. */
+  startedAt: number | null;
 
   setGrouping: (grouping: "navigation" | "path") => void;
   init: (adapter: CrawlDataAdapter) => Promise<void>;
@@ -50,6 +55,8 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
   status: "idle",
   error: null,
   liveMessage: null,
+  telemetry: null,
+  startedAt: null,
 
   result: null,
   grouping: "navigation",
@@ -116,7 +123,14 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       return;
     }
 
-    set({ status: "queued", error: null, liveMessage: "Submitting…", result: null });
+    set({
+      status: "queued",
+      error: null,
+      liveMessage: "Submitting…",
+      result: null,
+      telemetry: null,
+      startedAt: Date.now(),
+    });
 
     try {
       const jobId = await adapter.startJob(request);
@@ -128,11 +142,15 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       const progress =
         adapter instanceof HttpAdapter
           ? await adapter.waitForCompletion(jobId, (update) => {
-              set({ status: update.status, liveMessage: update.message });
+              set({
+                status: update.status,
+                liveMessage: update.message,
+                telemetry: update.telemetry ?? null,
+              });
             })
           : await adapter.getProgress(jobId);
 
-      set({ liveMessage: null });
+      set({ liveMessage: null, telemetry: null, startedAt: null });
 
       if (progress.status === "failed") {
         set({ status: "failed", error: progress.message });
@@ -145,7 +163,13 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       await get().selectJob(jobId);
       await get().refreshJobs();
     } catch (cause) {
-      set({ status: "failed", error: describe(cause), liveMessage: null });
+      set({
+        status: "failed",
+        error: describe(cause),
+        liveMessage: null,
+        telemetry: null,
+        startedAt: null,
+      });
     }
   },
 

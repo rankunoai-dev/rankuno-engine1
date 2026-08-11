@@ -30,6 +30,7 @@ import argparse
 import sys
 import types
 import typing
+from datetime import datetime
 from enum import EnumMeta
 from pathlib import Path
 
@@ -37,6 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from pydantic import BaseModel  # noqa: E402
+from src.core.state_store import JobTelemetry  # noqa: E402
 from src.modules.seo.page_classifier.discovery import (  # noqa: E402
     DiscoveredNode,
     DiscoveryReport,
@@ -103,6 +105,7 @@ MODELS: tuple[type[BaseModel], ...] = (
     NavNode,
     NavigationTree,
     NavCoverageReport,
+    JobTelemetry,
     CrawlSummary,
     PageClassificationInput,
     PageClassificationOutput,
@@ -115,6 +118,11 @@ _SCALARS: dict[type, str] = {
     int: "number",
     float: "number",
     bool: "boolean",
+    # Pydantic serialises a datetime to an ISO 8601 string in JSON mode, which is
+    # what reaches the browser. Mapping it to `Date` would be a lie: `JSON.parse`
+    # produces a string, and TypeScript would let a consumer call `.getTime()` on
+    # it and fail at runtime.
+    datetime: "string",
 }
 
 BANNER = (

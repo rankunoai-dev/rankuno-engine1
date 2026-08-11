@@ -201,3 +201,16 @@ class TestGeneratedShape:
         colors = exporter.COLORS_PATH.read_text(encoding="utf-8")
         for page_type, colour in PAGE_TYPE_COLOURS.items():
             assert f'{page_type.value}: "{colour}"' in colors
+
+
+class TestDatetimeMapping:
+    def test_datetime_maps_to_string_not_date(self):
+        """JSON carries an ISO 8601 string; `Date` would fail at runtime.
+
+        `JSON.parse` yields a string, so typing it as `Date` would let a
+        consumer call `.getTime()` on something that has no such method.
+        """
+        from datetime import datetime
+
+        assert exporter.ts_type(datetime) == "string"
+        assert exporter.ts_type(datetime | None) == "string | null"

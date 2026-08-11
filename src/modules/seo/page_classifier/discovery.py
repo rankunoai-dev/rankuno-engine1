@@ -35,7 +35,7 @@ looks complete is worse than one that says it stopped.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from pydantic import Field
 
@@ -57,6 +57,7 @@ from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
 
 __all__ = [
     "DEFAULT_MAX_PAGES",
+    "ProgressSink",
     "SHOPIFY_ENDPOINTS",
     "WORDPRESS_ENDPOINTS",
     "DiscoveredNode",
@@ -107,6 +108,32 @@ it is 10,000 — comfortably past the point where the node budget binds instead.
 A ceiling is required because pagination termination depends on the remote
 server behaving: one that ignores `page` and serves the same response forever
 would otherwise loop until the crawl was killed."""
+
+
+ProgressSink = Callable[[int, int, tuple[str, ...]], None]
+"""Called as a crawl advances with `(fetched, discovered, recent_urls)`.
+
+Observability only. It cannot influence the crawl and its exceptions are
+swallowed, so ADR 0003 still holds: one `BaseTool.run()` is one governed job,
+and nothing here introduces a per-page decision point.
+
+Implementations must be cheap and must not block. This is invoked from inside
+the fetch loop, including from the concurrent path.
+"""
+
+
+def _notify(sink: ProgressSink | None, graph: SiteGraph, fetched: int, recent: list[str]) -> None:
+    """Report progress, never letting a reporting failure break a crawl.
+
+    A telemetry sink writes to disk or a socket. Neither is worth losing a
+    twenty-minute crawl over.
+    """
+    if sink is None:
+        return
+    try:
+        sink(fetched, len(graph), tuple(recent[-20:]))
+    except Exception as exc:  # noqa: BLE001 - observability must not break work
+        _logger.debug("progress_sink_failed", extra={"error": str(exc)})
 
 
 class DiscoverySource(StrictModel):
@@ -428,6 +455,7 @@ def discover_site(
     max_depth: int | None = None,
     crawl_dom: bool = True,
     dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
+    on_progress: ProgressSink | None = None,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths and merge them into one graph.
 
@@ -444,6 +472,7 @@ def discover_site(
             at the cost of missing exactly the pages Path B exists to find.
         dom_reserve_fraction: Share of `max_pages` only the DOM crawl may fill,
             so a large sitemap cannot starve out sitemap-omitted pages.
+        on_progress: Optional observability hook, called as pages are fetched.
 
     Returns:
         The merged graph and its report.
@@ -452,7 +481,10 @@ def discover_site(
 
     sitemaps_fetched = _discover_from_sitemaps(fetcher, base_url, graph)
     _discover_from_cms(fetcher, base_url, graph, site_profile)
-    pages_fetched = _crawl_dom(fetcher, base_url, graph, max_depth) if crawl_dom else 0
+    # Reported once before the DOM crawl: sitemap and CMS discovery establish the
+    # denominator, so without this the first progress reading is 0 of 0.
+    _notify(on_progress, graph, 0, [])
+    pages_fetched = _crawl_dom(fetcher, base_url, graph, max_depth, on_progress) if crawl_dom else 0
 
     report = graph.report().model_copy(
         update={"sitemaps_fetched": sitemaps_fetched, "pages_fetched": pages_fetched}
@@ -588,7 +620,13 @@ def _paginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> Iterator
     _logger.info("cms_pagination_ceiling_reached", extra={"endpoint": endpoint})
 
 
-def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth: int | None) -> int:
+def _crawl_dom(
+    fetcher: HttpFetcher,
+    base_url: str,
+    graph: SiteGraph,
+    max_depth: int | None,
+    on_progress: ProgressSink | None = None,
+) -> int:
     """Path B — breadth-first link traversal from the root.
 
     Breadth-first rather than depth-first so that when the ceiling is hit, what
@@ -605,6 +643,7 @@ def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth:
     frontier: deque[tuple[str, int]] = deque([(base_url, 0)])
     seen: set[str] = {normalize_url(base_url)}
     fetched = 0
+    recent: list[str] = []
 
     while frontier:
         url, depth = frontier.popleft()
@@ -625,6 +664,8 @@ def _crawl_dom(fetcher: HttpFetcher, base_url: str, graph: SiteGraph, max_depth:
             continue
         fetched += 1
         graph.store_html(url, result)
+        recent.append(url)
+        _notify(on_progress, graph, fetched, recent)
 
         links = extract_page_links(result, url)
         for target in graph.record_links(url, links, depth):

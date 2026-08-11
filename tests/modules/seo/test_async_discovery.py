@@ -339,3 +339,58 @@ class TestSafetyIsNotRelaxed:
         routes["/"] = html('<html><body><a href="/shop?color=red">Filter</a></body></html>')
         _, report = run_async(settings, routes)
         assert report.pages_fetched == 1, "only the root; the facet is classified unfetched"
+
+
+class TestProgressReporting:
+    """Progress has to arrive per page, not per level.
+
+    This crawler is level-synchronous, so one level can hold hundreds of pages
+    fetched concurrently over tens of seconds. Reporting once per level leaves a
+    progress bar frozen and then jumping — observed live on gep.com at 1/400 for
+    28 seconds, then 81/400 at completion.
+    """
+
+    def test_progress_is_reported_for_every_page(self, settings):
+        seen: list[tuple[int, int]] = []
+        _, report = run_async(
+            settings,
+            DEEP_CHAIN,
+            on_progress=lambda done, total, _recent: seen.append((done, total)),
+        )
+        completions = [done for done, _ in seen]
+        assert report.pages_fetched == CHAIN_LENGTH + 1
+        # One reading per page, not one per level.
+        assert max(completions) == CHAIN_LENGTH + 1
+        assert len([c for c in completions if c > 0]) >= CHAIN_LENGTH
+
+    def test_completion_counts_never_go_backwards(self, settings):
+        """A bar that rewinds reads as a bug even when the crawl is fine."""
+        seen: list[int] = []
+        run_async(settings, DEEP_CHAIN, on_progress=lambda done, _t, _r: seen.append(done))
+        assert seen == sorted(seen)
+
+    def test_recent_urls_are_reported(self, settings):
+        recent: list[tuple[str, ...]] = []
+        run_async(settings, on_progress=lambda _d, _t, urls: recent.append(urls))
+        assert any(len(batch) > 0 for batch in recent)
+        assert all(url.startswith("https://e.com") for batch in recent for url in batch)
+
+    def test_the_denominator_is_reported_before_any_page_is_fetched(self, settings):
+        """Otherwise the first ten seconds of a large crawl show 0 of 0."""
+        seen: list[tuple[int, int]] = []
+        run_async(settings, on_progress=lambda done, total, _r: seen.append((done, total)))
+        assert seen[0][0] == 0
+        assert seen[0][1] > 0, "sitemap discovery establishes the total"
+
+    def test_a_failing_sink_does_not_break_the_crawl(self, settings):
+        """Telemetry is not worth losing a twenty-minute crawl over."""
+
+        def explode(_done: int, _total: int, _recent: tuple[str, ...]) -> None:
+            raise RuntimeError("sink is down")
+
+        _, report = run_async(settings, DEEP_CHAIN, on_progress=explode)
+        assert report.pages_fetched == CHAIN_LENGTH + 1
+
+    def test_no_sink_is_the_default(self, settings):
+        _, report = run_async(settings, DEEP_CHAIN)
+        assert report.pages_fetched == CHAIN_LENGTH + 1

@@ -1,4 +1,5 @@
 import type {
+  JobTelemetry,
   PageClassificationInput,
   PageClassificationOutput,
 } from "../types/schema";
@@ -21,6 +22,7 @@ interface JobRecord {
   finished_at: string | null;
   error: string | null;
   has_result: boolean;
+  telemetry: JobTelemetry;
 }
 
 export const DEFAULT_API_BASE = "http://127.0.0.1:8000/api/v1";
@@ -130,14 +132,19 @@ export class HttpAdapter implements CrawlDataAdapter {
     const record = await this.request<JobRecord>(
       `/jobs/${encodeURIComponent(jobId)}`,
     );
+    const telemetry = record.telemetry;
     return {
       status: record.status,
-      // Null, not a number. The engine has no progress hook — one `run()` is
-      // one atomic crawl job (ADR 0003) — so any fraction here would be
-      // invented. The UI shows an indeterminate indicator instead of a bar
-      // that lies about how far along the crawl is.
-      fraction: TERMINAL.has(record.status) ? 1 : null,
+      // Real now, from the engine's progress sink — but still `null` until the
+      // crawl has discovered enough to have a denominator. An unknown total is
+      // not a total of zero, and a bar sitting at 0% says the wrong thing.
+      fraction: TERMINAL.has(record.status)
+        ? 1
+        : telemetry.discovered > 0
+          ? Math.min(1, telemetry.completed / telemetry.discovered)
+          : null,
       message: describeStatus(record),
+      telemetry,
     };
   }
 

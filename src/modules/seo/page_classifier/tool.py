@@ -58,6 +58,7 @@ from src.modules.seo.page_classifier.discovery import (
     DEFAULT_DOM_RESERVE_FRACTION,
     DEFAULT_MAX_PAGES,
     DiscoveryReport,
+    ProgressSink,
     SiteGraph,
     discover_site,
 )
@@ -257,6 +258,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         local_classifier: ZeroShotClassifier | None = None,
         llm_classifier: LlmPageClassifier | None = None,
         cost_ledger: CostLedger | None = None,
+        progress_sink: ProgressSink | None = None,
         **kwargs: object,
     ) -> None:
         """Build the tool.
@@ -265,6 +267,10 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             fetcher: Safety-wired fetcher. One is built per job if omitted, and
                 closed when the job ends.
             url_policy: SSRF policy for a fetcher built here.
+            progress_sink: Optional observability hook, called as pages are
+                fetched. Constructor-injected rather than a field on the input
+                model: it is a callable the *caller* owns, not a crawl parameter,
+                and it has no place in a serialised, audited request payload.
             local_classifier: Layer 2 implementation. `None` means the layer is
                 unavailable and the cascade falls through to Layer 3.
             llm_classifier: Layer 3 handler. `None` means ambiguous pages keep
@@ -278,6 +284,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         self._local_classifier = local_classifier
         self._llm_classifier = llm_classifier
         self._cost_ledger = cost_ledger
+        self._progress_sink = progress_sink
 
     def describe_invocation(self, payload: PageClassificationInput) -> str:
         """Operator-facing summary. Names the site, not the object graph."""
@@ -411,6 +418,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             "max_depth": payload.max_depth,
             "crawl_dom": payload.crawl_dom,
             "dom_reserve_fraction": payload.dom_reserve_fraction,
+            "on_progress": self._progress_sink,
         }
 
         if payload.use_async_crawl and not _event_loop_running():

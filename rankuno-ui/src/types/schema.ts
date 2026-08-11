@@ -203,6 +203,16 @@ export interface NavCoverageReport {
   groups: string[];
 }
 
+/** Live progress for a running job. */
+export interface JobTelemetry {
+  completed: number;
+  discovered: number;
+  rate_per_sec: number;
+  eta_seconds: number | null;
+  recent_items: string[];
+  updated_at: string | null;
+}
+
 /** Aggregate outcome of one crawl. */
 export interface CrawlSummary {
   pages_classified: number;

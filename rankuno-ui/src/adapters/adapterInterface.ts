@@ -1,4 +1,5 @@
 import type {
+  JobTelemetry,
   PageClassificationInput,
   PageClassificationOutput,
 } from "../types/schema";
@@ -35,6 +36,8 @@ export interface JobProgress {
   /** 0..1, or null when the total is not yet known — the normal early state. */
   fraction: number | null;
   message: string;
+  /** Live counters. Absent from adapters that read finished files. */
+  telemetry?: JobTelemetry;
 }
 
 /**

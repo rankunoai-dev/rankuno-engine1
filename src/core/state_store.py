@@ -52,11 +52,13 @@ from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 
 __all__ = [
+    "MAX_RECENT_ITEMS",
     "DiskJobStore",
     "JobNotFoundError",
     "JobRecord",
     "JobStatus",
     "JobStore",
+    "JobTelemetry",
 ]
 
 _logger = get_logger("core.state_store")
@@ -94,8 +96,60 @@ TERMINAL_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus
 """Statuses from which a job never moves again, so a poller can stop."""
 
 
+MAX_RECENT_ITEMS = 20
+"""Recent work items retained for display.
+
+A bound, not a preference. A 20,000-page crawl returning every URL on every
+status poll would push megabytes per second at a browser that only ever renders
+the last handful — the poller would cost more than the crawl.
+"""
+
+
 class JobNotFoundError(KeyError):
     """No job exists with the given id."""
+
+
+class JobTelemetry(StrictModel):
+    """Live progress for a running job.
+
+    Kept deliberately small: this rides on every status poll, and a poller runs
+    for the whole life of a long job.
+
+    Domain-agnostic like the rest of this module — "items" are whatever the job
+    processes. The API layer maps crawl vocabulary onto these fields; nothing
+    here imports from `modules/`.
+
+    Attributes:
+        completed: Units of work finished — for a crawl, pages fetched.
+        discovered: Units known to exist. Grows during a crawl as discovery
+            finds more, so it is an estimate rather than a fixed total.
+        rate_per_sec: Smoothed throughput. Smoothed rather than instantaneous
+            because a single slow response would otherwise swing the estimate.
+        eta_seconds: Seconds remaining at the current rate, or `None` while it
+            cannot be estimated honestly — before any work completes, and
+            before enough time has passed for a rate to mean anything.
+        recent_items: The last `MAX_RECENT_ITEMS` things processed, newest last.
+        updated_at: When this snapshot was taken.
+    """
+
+    completed: int = Field(default=0, ge=0)
+    discovered: int = Field(default=0, ge=0)
+    rate_per_sec: float = Field(default=0.0, ge=0.0)
+    eta_seconds: float | None = Field(default=None, ge=0.0)
+    recent_items: tuple[str, ...] = ()
+    updated_at: datetime | None = None
+
+    @property
+    def fraction(self) -> float | None:
+        """Completion as 0.0–1.0, or `None` when the total is not yet known.
+
+        Measured against `discovered`, never against a configured ceiling: a
+        300-page site crawled with a 20,000-page ceiling is finished at 300, and
+        dividing by the ceiling would leave the bar at 1.5% forever.
+        """
+        if self.discovered <= 0:
+            return None
+        return min(1.0, self.completed / self.discovered)
 
 
 class JobRecord(StrictModel):
@@ -115,6 +169,8 @@ class JobRecord(StrictModel):
         finished_at: When it reached a terminal status.
         error: Failure reason. Set only for `FAILED`.
         has_result: Whether a result blob exists to fetch.
+        telemetry: Live progress. Meaningful only while `RUNNING`; retained
+            afterwards so a finished job still shows what it did.
     """
 
     id: str = Field(min_length=1)
@@ -128,6 +184,7 @@ class JobRecord(StrictModel):
     finished_at: datetime | None = None
     error: str | None = None
     has_result: bool = False
+    telemetry: JobTelemetry = JobTelemetry()
 
     @property
     def is_terminal(self) -> bool:
@@ -158,6 +215,10 @@ class JobStore(Protocol):
 
     def mark_running(self, job_id: str) -> JobRecord:
         """Move a job to `RUNNING`."""
+        ...
+
+    def update_telemetry(self, job_id: str, telemetry: JobTelemetry) -> JobRecord:
+        """Replace a job's progress snapshot."""
         ...
 
     def mark_failed(self, job_id: str, error: str) -> JobRecord:
@@ -314,6 +375,20 @@ class DiskJobStore:
     def mark_running(self, job_id: str) -> JobRecord:
         """Move a job to `RUNNING` and stamp its start time."""
         return self._transition(job_id, status=JobStatus.RUNNING, started_at=_now())
+
+    def update_telemetry(self, job_id: str, telemetry: JobTelemetry) -> JobRecord:
+        """Replace a job's progress snapshot.
+
+        Callers must throttle. Every call rewrites the record through
+        `os.replace` and an `fsync`; calling this per unit of work on a
+        20,000-page crawl would spend more time in the filesystem than on the
+        network.
+
+        Args:
+            job_id: The job.
+            telemetry: The new snapshot.
+        """
+        return self._transition(job_id, telemetry=telemetry)
 
     def mark_failed(self, job_id: str, error: str) -> JobRecord:
         """Move a job to `FAILED` with a reason.

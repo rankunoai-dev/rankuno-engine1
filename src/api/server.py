@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, status
@@ -46,7 +48,14 @@ from pydantic import Field
 from src.core.errors import UnsafeUrlError
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
-from src.core.state_store import DiskJobStore, JobNotFoundError, JobRecord, JobStore
+from src.core.state_store import (
+    MAX_RECENT_ITEMS,
+    DiskJobStore,
+    JobNotFoundError,
+    JobRecord,
+    JobStore,
+    JobTelemetry,
+)
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier.tool import (
     PageClassificationInput,
@@ -54,7 +63,7 @@ from src.modules.seo.page_classifier.tool import (
     PageClassificationTool,
 )
 
-__all__ = ["ApiState", "create_app", "serve"]
+__all__ = ["ApiState", "TelemetryRecorder", "create_app", "serve"]
 
 _logger = get_logger("api.server")
 
@@ -87,6 +96,114 @@ crawl results out of this server.
 """
 
 TOOL_NAME = "seo.page_classifier"
+
+TELEMETRY_FLUSH_SECONDS = 0.5
+"""Minimum gap between telemetry writes.
+
+Not a preference — a correctness bound. Each write rewrites the job record
+through `os.replace` and an `fsync`. Flushing per page on a 20,000-page crawl
+would spend more wall-clock in the filesystem than on the network, so the
+telemetry would slow the thing it is measuring.
+"""
+
+TELEMETRY_WARMUP_SECONDS = 3.0
+"""Elapsed time before an ETA is offered at all.
+
+A rate computed over the first fraction of a second is noise, and an ETA derived
+from it swings between seconds and hours. Showing nothing is better than showing
+a number that is about to change by two orders of magnitude.
+"""
+
+RATE_SMOOTHING = 0.3
+"""EMA weight for the newest rate sample, 0–1.
+
+Lower is smoother. At 0.3 a single stalled request moves the estimate a little;
+an instantaneous rate would make it jump on every retry.
+"""
+
+
+class TelemetryRecorder:
+    """Turns raw progress callbacks into a throttled, smoothed snapshot.
+
+    Lives in the API layer, not in the crawler: throughput smoothing and write
+    throttling are presentation concerns for a polling client, and the engine
+    should not know that anyone is watching.
+
+    Called from crawler threads, so every mutation is under the lock.
+    """
+
+    def __init__(self, store: JobStore, job_id: str, ceiling: int) -> None:
+        """Build a recorder for one job.
+
+        Args:
+            store: Where snapshots are persisted.
+            job_id: The job being reported on.
+            ceiling: `max_pages`, used only to cap the denominator — never as
+                the denominator itself.
+        """
+        self._store = store
+        self._job_id = job_id
+        self._ceiling = ceiling
+        self._lock = threading.Lock()
+        self._started = time.monotonic()
+        self._last_flush = 0.0
+        self._last_completed = 0
+        self._last_sample = self._started
+        self._rate = 0.0
+
+    def __call__(self, completed: int, discovered: int, recent: tuple[str, ...]) -> None:
+        """Record progress. Cheap, non-blocking, and never raises."""
+        now = time.monotonic()
+        with self._lock:
+            self._update_rate(completed, now)
+            if now - self._last_flush < TELEMETRY_FLUSH_SECONDS and completed > 0:
+                return
+            self._last_flush = now
+            snapshot = self._snapshot(completed, discovered, recent, now)
+
+        try:
+            self._store.update_telemetry(self._job_id, snapshot)
+        except JobNotFoundError:
+            # The job was deleted mid-crawl. Losing telemetry is not a reason to
+            # interrupt work that is still producing a result.
+            _logger.debug("telemetry_job_missing", extra={"job_id": self._job_id})
+
+    def _update_rate(self, completed: int, now: float) -> None:
+        elapsed = now - self._last_sample
+        if elapsed < 0.05:
+            return
+        sample = max(0, completed - self._last_completed) / elapsed
+        # Seeded rather than blended on the first sample: blending against a
+        # zero start would halve the very first estimate.
+        self._rate = (
+            sample
+            if self._rate == 0.0
+            else (RATE_SMOOTHING * sample + (1 - RATE_SMOOTHING) * self._rate)
+        )
+        self._last_completed = completed
+        self._last_sample = now
+
+    def _snapshot(
+        self, completed: int, discovered: int, recent: tuple[str, ...], now: float
+    ) -> JobTelemetry:
+        # Capped at the ceiling because the crawl stops there; measured against
+        # what was discovered because that is the real total. Using the ceiling
+        # as the denominator leaves a 300-page site reading 1.5% forever.
+        total = min(discovered, self._ceiling) if discovered else 0
+        remaining = max(0, total - completed)
+
+        eta: float | None = None
+        if now - self._started >= TELEMETRY_WARMUP_SECONDS and self._rate > 0 and total > 0:
+            eta = remaining / self._rate
+
+        return JobTelemetry(
+            completed=completed,
+            discovered=total,
+            rate_per_sec=round(self._rate, 3),
+            eta_seconds=None if eta is None else round(eta, 1),
+            recent_items=recent[-MAX_RECENT_ITEMS:],
+            updated_at=datetime.now(UTC),
+        )
 
 
 class HealthView(StrictModel):
@@ -179,7 +296,10 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
     store = state.store
     try:
         store.mark_running(job_id)
-        result = PageClassificationTool(url_policy=state.url_policy).run(payload)
+        result = PageClassificationTool(
+            url_policy=state.url_policy,
+            progress_sink=TelemetryRecorder(store, job_id, payload.max_pages),
+        ).run(payload)
 
         if not result.ok or result.data is None:
             store.mark_failed(job_id, result.error or "the tool returned no data")

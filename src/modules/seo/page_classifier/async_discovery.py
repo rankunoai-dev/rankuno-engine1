@@ -43,7 +43,9 @@ from src.modules.seo.page_classifier.discovery import (
     SHOPIFY_ENDPOINTS,
     WORDPRESS_ENDPOINTS,
     DiscoveryReport,
+    ProgressSink,
     SiteGraph,
+    _notify,
     is_refusal,
 )
 from src.modules.seo.page_classifier.discovery_parsers import (
@@ -152,6 +154,7 @@ async def adiscover_site(
     crawl_dom: bool = True,
     concurrency: int = DEFAULT_CONCURRENCY,
     dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
+    on_progress: ProgressSink | None = None,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths concurrently and merge them.
 
@@ -173,6 +176,7 @@ async def adiscover_site(
         concurrency: Maximum simultaneous requests, clamped to `MAX_CONCURRENCY`.
         dom_reserve_fraction: Share of `max_pages` only the DOM crawl may fill,
             so a large sitemap cannot starve out sitemap-omitted pages.
+        on_progress: Optional observability hook, called as pages are fetched.
 
     Returns:
         The merged graph and its report.
@@ -180,9 +184,14 @@ async def adiscover_site(
     bounded = min(max(1, concurrency), MAX_CONCURRENCY)
     graph = SiteGraph(base_url, max_pages=max_pages, dom_reserve_fraction=dom_reserve_fraction)
 
-    sitemaps_fetched = await _asitemaps(fetcher, base_url, graph, bounded)
+    sitemaps_fetched = await _asitemaps(fetcher, base_url, graph, bounded, on_progress)
     await _acms(fetcher, base_url, graph, site_profile)
-    pages_fetched = await _acrawl(fetcher, base_url, graph, max_depth, bounded) if crawl_dom else 0
+    # Reported once before the DOM crawl: sitemap and CMS discovery establish the
+    # denominator, so without this the first progress reading is 0 of 0.
+    _notify(on_progress, graph, 0, [])
+    pages_fetched = (
+        await _acrawl(fetcher, base_url, graph, max_depth, bounded, on_progress) if crawl_dom else 0
+    )
 
     report = graph.report().model_copy(
         update={"sitemaps_fetched": sitemaps_fetched, "pages_fetched": pages_fetched}
@@ -192,7 +201,11 @@ async def adiscover_site(
 
 
 async def _asitemaps(
-    fetcher: HttpFetcher, base_url: str, graph: SiteGraph, concurrency: int
+    fetcher: HttpFetcher,
+    base_url: str,
+    graph: SiteGraph,
+    concurrency: int,
+    on_progress: ProgressSink | None = None,
 ) -> int:
     """Path A — walk the index, then fetch every child sitemap concurrently.
 
@@ -229,6 +242,9 @@ async def _asitemaps(
                 for location in document.locations:
                     graph.add(location, sitemap=True, sitemap_source=document.source_name)
 
+        # Sitemap discovery can run for ten seconds before the DOM crawl starts.
+        # Without this the client shows 0 of 0 for that whole window.
+        _notify(on_progress, graph, 0, [])
         pending = next_round
 
     return parsed
@@ -319,6 +335,7 @@ async def _acrawl(
     graph: SiteGraph,
     max_depth: int | None,
     concurrency: int,
+    on_progress: ProgressSink | None = None,
 ) -> int:
     """Path B — breadth-first traversal, one level at a time, fetched in parallel.
 
@@ -332,6 +349,7 @@ async def _acrawl(
     level = [base_url]
     fetched = 0
     depth = 0
+    recent: list[str] = []
 
     # Capacity deliberately does NOT stop the crawl. `graph.add` already
     # refuses *new* nodes when full, so the frontier stops growing on its
@@ -340,8 +358,25 @@ async def _acrawl(
     # link graph, no in-degree, and Signals 1, 4 and 5 silently starved.
     while level and (max_depth is None or depth <= max_depth):
         crawlable = [url for url in level if not is_faceted_filter(url)]
+
+        def note(url: str) -> None:
+            """Report one completed page, from inside the level.
+
+            Per page, not per level. This crawler is level-synchronous, and a
+            single level can hold hundreds of pages taking tens of seconds — so
+            notifying once per level leaves a progress bar frozen and then
+            jumping. Observed live on gep.com: 1/400 for 28 seconds, then 81/400.
+
+            Cheap because the sink throttles its own writes; asyncio is
+            single-threaded, so the counter needs no lock.
+            """
+            nonlocal fetched
+            fetched += 1
+            recent.append(url)
+            _notify(on_progress, graph, fetched, recent)
+
         results = await _gather_bounded(
-            [_factory(_ahtml, graph, fetcher, url) for url in crawlable], concurrency
+            [_factory(_ahtml, graph, fetcher, url, note) for url in crawlable], concurrency
         )
 
         next_level: list[str] = []
@@ -349,7 +384,6 @@ async def _acrawl(
             if item is None:
                 continue
             url, html = item
-            fetched += 1
             graph.store_html(url, html)
 
             links = extract_page_links(html, url)
@@ -370,10 +404,11 @@ async def _acrawl(
 
 
 def _factory(
-    coro: Callable[[SiteGraph, HttpFetcher, str], Awaitable[ResultT]],
+    coro: Callable[..., Awaitable[ResultT]],
     graph: SiteGraph,
     fetcher: HttpFetcher,
     url: str,
+    on_page: Callable[[str], None] | None = None,
 ) -> Callable[[], Awaitable[ResultT]]:
     """Bind a coroutine function to its arguments without invoking it.
 
@@ -381,4 +416,16 @@ def _factory(
     each request begins. Passing coroutine objects directly would start them all
     at creation and defeat the bound.
     """
-    return lambda: coro(graph, fetcher, url)
+    if on_page is None:
+        return lambda: coro(graph, fetcher, url)
+    return lambda: _with_notify(coro(graph, fetcher, url), url, on_page)
+
+
+async def _with_notify(
+    awaitable: Awaitable[ResultT], url: str, on_page: Callable[[str], None]
+) -> ResultT:
+    """Await a fetch and report it the moment it lands, not when its level ends."""
+    result = await awaitable
+    if result is not None:
+        on_page(url)
+    return result

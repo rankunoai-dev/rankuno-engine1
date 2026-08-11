@@ -381,3 +381,84 @@ class TestBlockedCrawlSurfacing:
         job_id = run_job(client, store)
 
         assert client.get(f"{API_PREFIX}/jobs/{job_id}/result").status_code == 409
+
+
+class TestTelemetryRecorder:
+    """Progress reporting must not cost more than the work it reports on.
+
+    Each write rewrites the job record through `os.replace` and an `fsync`, so
+    an unthrottled recorder on a 20,000-page crawl would spend more wall-clock
+    in the filesystem than on the network.
+    """
+
+    def test_the_first_call_flushes_immediately(self, store):
+        """A crawl that shows nothing until half a second in looks stuck."""
+        job_id = store.create("seo.page_classifier", {}).id
+        server_module.TelemetryRecorder(store, job_id, 100)(0, 50, ())
+        assert store.get(job_id).telemetry.discovered == 50
+
+    def test_rapid_calls_are_throttled(self, store):
+        job_id = store.create("seo.page_classifier", {}).id
+        recorder = server_module.TelemetryRecorder(store, job_id, 100)
+        recorder(0, 50, ())
+        for completed in range(1, 60):
+            recorder(completed, 50, ())
+        # Only the initial flush should have landed inside half a second.
+        assert store.get(job_id).telemetry.completed == 0
+
+    def test_progress_is_measured_against_discovery_not_the_ceiling(self, store):
+        """A 300-page site crawled with a 20,000 ceiling finishes at 300.
+
+        Dividing by the ceiling would leave the bar at 1.5% forever.
+        """
+        job_id = store.create("seo.page_classifier", {}).id
+        server_module.TelemetryRecorder(store, job_id, 20_000)(300, 300, ())
+        telemetry = store.get(job_id).telemetry
+        assert telemetry.discovered == 300
+        assert telemetry.fraction == 1.0
+
+    def test_discovery_beyond_the_ceiling_is_capped(self, store):
+        """The crawl stops at the ceiling, so the denominator does too."""
+        job_id = store.create("seo.page_classifier", {}).id
+        server_module.TelemetryRecorder(store, job_id, 500)(0, 4_427, ())
+        assert store.get(job_id).telemetry.discovered == 500
+
+    def test_no_eta_during_warmup(self, store):
+        """A rate over the first fraction of a second swings by orders of magnitude."""
+        job_id = store.create("seo.page_classifier", {}).id
+        server_module.TelemetryRecorder(store, job_id, 100)(5, 100, ())
+        assert store.get(job_id).telemetry.eta_seconds is None
+
+    def test_recent_items_are_capped(self, store):
+        """20,000 URLs on every poll would cost more than the crawl."""
+        job_id = store.create("seo.page_classifier", {}).id
+        urls = tuple(f"https://e.com/{n}/" for n in range(200))
+        server_module.TelemetryRecorder(store, job_id, 1_000)(0, 200, urls)
+
+        recent = store.get(job_id).telemetry.recent_items
+        assert len(recent) == 20
+        assert recent[-1] == "https://e.com/199/", "newest last"
+
+    def test_a_deleted_job_does_not_break_the_crawl(self, store):
+        """Losing telemetry must not interrupt work still producing a result."""
+        recorder = server_module.TelemetryRecorder(store, "gone", 100)
+        recorder(1, 10, ())  # must not raise
+
+    def test_telemetry_survives_into_the_status_payload(self, client, store, stub_tool):
+        stub_tool.result = StubResult(ok=True, data=_fake_output(truncated=False))
+        job_id = run_job(client, store)
+        assert "telemetry" in client.get(f"{API_PREFIX}/jobs/{job_id}").json()
+
+
+class TestTelemetryContract:
+    def test_fraction_is_none_before_anything_is_discovered(self):
+        """`None`, not zero: an unknown total is not a total of zero."""
+        from src.core.state_store import JobTelemetry
+
+        assert JobTelemetry().fraction is None
+
+    def test_fraction_cannot_exceed_one(self):
+        """Discovery shrinks when duplicates merge; the bar must not overrun."""
+        from src.core.state_store import JobTelemetry
+
+        assert JobTelemetry(completed=120, discovered=100).fraction == 1.0
