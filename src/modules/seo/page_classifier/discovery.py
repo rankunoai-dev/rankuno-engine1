@@ -220,7 +220,8 @@ class DiscoveryReport(StrictModel):
         orphans: Nodes with zero inbound internal links.
         sitemaps_fetched: Sitemap files successfully parsed.
         pages_fetched: Pages actually retrieved during the DOM crawl.
-        truncated: Whether a ceiling stopped discovery early.
+        truncated: Whether the page ceiling stopped discovery.
+        stopped_reason: Why the crawl was abandoned, if it was.
         dom_reserve: Slots reserved for DOM-only discoveries.
         dom_reserve_used: Reserved slots actually filled. Compare against
             `dom_reserve`: at the cap, the reserve is too small for this site
@@ -239,6 +240,14 @@ class DiscoveryReport(StrictModel):
     pages_fetched: int = Field(default=0, ge=0)
     fetch_failures: int = Field(default=0, ge=0)
     truncated: bool = False
+    stopped_reason: str | None = None
+    """Why the crawl ended early, or `None` if it ran to completion.
+
+    Distinct from `truncated`, which means the page ceiling was reached — a
+    planned stop at a known boundary. This means the crawl was abandoned: the
+    target stopped responding, or something failed mid-run. The pages already
+    found are real, but the crawl covered less of the site than the settings
+    asked for and there is no way to know how much less."""
     dom_reserve: int = Field(default=0, ge=0)
     dom_reserve_used: int = Field(default=0, ge=0)
 
@@ -293,6 +302,9 @@ class SiteGraph:
         self._nodes: dict[str, DiscoveredNode] = {}
         self._html: dict[str, str] = {}
         self.truncated = False
+        self.stopped_reason: str | None = None
+        """Set when the crawl is abandoned rather than completed. See
+        `DiscoveryReport.stopped_reason`."""
         self.fetch_failures = 0
         """Requests actively **refused** by the server, plus transport failures.
 
@@ -456,6 +468,7 @@ class SiteGraph:
             orphans=sum(1 for n in nodes if n.is_orphan),
             fetch_failures=self.fetch_failures,
             truncated=self.truncated,
+            stopped_reason=self.stopped_reason,
         )
 
 

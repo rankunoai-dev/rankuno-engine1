@@ -128,6 +128,18 @@ export function DashboardShell(): JSX.Element {
           />
         )}
 
+        {/* Distinct from truncation. Truncated means the crawl stopped at a
+            ceiling it was told about; this means it was abandoned, and there is
+            no way to know how much of the site is missing. */}
+        {discovery?.stopped_reason && (
+          <Alert
+            type="warning"
+            banner
+            showIcon
+            message={`Crawl stopped early — ${discovery.stopped_reason}. Showing the ${discovery.total_urls.toLocaleString()} URLs found before it stopped; this is not the whole site, and how much is missing is unknown.`}
+          />
+        )}
+
         {discovery?.truncated && (
           <Alert
             type="warning"

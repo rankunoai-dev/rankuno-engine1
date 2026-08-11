@@ -153,6 +153,7 @@ export interface DiscoveryReport {
   pages_fetched: number;
   fetch_failures: number;
   truncated: boolean;
+  stopped_reason: string | null;
   dom_reserve: number;
   dom_reserve_used: number;
 }

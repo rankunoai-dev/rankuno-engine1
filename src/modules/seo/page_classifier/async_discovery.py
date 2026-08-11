@@ -78,14 +78,65 @@ the network, and a 512 MB worker starts to matter."""
 
 ResultT = TypeVar("ResultT")
 
+REQUEST_DEADLINE_S = 20.0
+"""Total wall-clock a single page fetch may take.
+
+httpx has no equivalent setting. Its read timeout measures the gap between
+bytes, so a server sending one byte every few seconds resets it forever — the
+request never times out and the worker never comes back. This bounds the whole
+request, which is the only thing that defeats that.
+"""
+
+STALL_TIMEOUT_S = 30.0
+"""How long a crawl may make no progress at all before it is abandoned.
+
+The last line of defence, above the per-request deadline. If every in-flight
+request is stuck, the crawl stops and returns what it has rather than hanging —
+a partial result an operator can read beats a job that never finishes.
+"""
+
+
+class CrawlStalledError(RuntimeError):
+    """No request completed within the stall window.
+
+    Not a failure of the crawl so much as its end: the caller keeps what was
+    already discovered and records why it stopped.
+    """
+
+    def __init__(self, in_flight: int, window_s: float) -> None:
+        """Describe the stall in terms an operator can act on."""
+        super().__init__(
+            f"no page completed in {window_s:g}s with {in_flight} requests in flight — "
+            f"the target stopped responding"
+        )
+        self.in_flight = in_flight
+
 
 async def _gather_bounded(
-    factories: Sequence[Callable[[], Awaitable[ResultT]]], concurrency: int
+    factories: Sequence[Callable[[], Awaitable[ResultT]]],
+    concurrency: int,
+    stall_timeout_s: float | None = None,
 ) -> list[ResultT | None]:
     """Await every factory with at most `concurrency` in flight.
 
     A failing task resolves to `None` rather than cancelling its siblings: one
     unreachable page must not abandon the other 19,999.
+
+    Args:
+        factories: Un-started awaitables.
+        concurrency: Maximum in flight.
+        stall_timeout_s: Abandon the batch if **nothing at all** completes within
+            this window. Not a per-request timeout — a slow batch that keeps
+            finishing pages is healthy and must not be cut off. This fires only
+            when every in-flight request is stuck, which is what a tarpit or a
+            dead socket looks like from here.
+
+    Returns:
+        Results in input order, `None` for anything that failed or was
+        abandoned.
+
+    Raises:
+        CrawlStalledError: If nothing completes within `stall_timeout_s`.
     """
     if not factories:
         return []
@@ -96,11 +147,37 @@ async def _gather_bounded(
         async with semaphore:
             try:
                 return await factory()
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001 - one bad page must not stop a crawl
                 _logger.debug("async_task_failed", extra={"error": str(exc)})
                 return None
 
-    return list(await asyncio.gather(*(run(factory) for factory in factories)))
+    tasks = [asyncio.create_task(run(factory)) for factory in factories]
+    if stall_timeout_s is None:
+        return list(await asyncio.gather(*tasks))
+
+    positions = {task: index for index, task in enumerate(tasks)}
+    results: list[ResultT | None] = [None] * len(tasks)
+    pending = set(tasks)
+
+    while pending:
+        done, pending = await asyncio.wait(
+            pending, timeout=stall_timeout_s, return_when=asyncio.FIRST_COMPLETED
+        )
+        if not done:
+            # Nothing finished in the whole window, so every worker is stuck.
+            # Cancelled rather than awaited: the point of the detector is that
+            # these will not return.
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            raise CrawlStalledError(len(pending), stall_timeout_s)
+
+        for task in done:
+            results[positions[task]] = task.result()
+
+    return results
 
 
 async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> str | None:
@@ -111,7 +188,7 @@ async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> str | None
     between the two paths would break it.
     """
     try:
-        result = await fetcher.afetch(url)
+        result = await asyncio.wait_for(fetcher.afetch(url), timeout=REQUEST_DEADLINE_S)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
@@ -130,7 +207,10 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
     not a page.
     """
     try:
-        result = await fetcher.afetch(url)
+        # Bounded here rather than by httpx: its read timeout measures the gap
+        # between bytes, so a server dribbling data resets it forever and the
+        # worker never returns.
+        result = await asyncio.wait_for(fetcher.afetch(url), timeout=REQUEST_DEADLINE_S)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
@@ -375,9 +455,19 @@ async def _acrawl(
             recent.append(url)
             _notify(on_progress, graph, fetched, recent)
 
-        results = await _gather_bounded(
-            [_factory(_ahtml, graph, fetcher, url, note) for url in crawlable], concurrency
-        )
+        try:
+            results = await _gather_bounded(
+                [_factory(_ahtml, graph, fetcher, url, note) for url in crawlable],
+                concurrency,
+                stall_timeout_s=STALL_TIMEOUT_S,
+            )
+        except CrawlStalledError as exc:
+            # Ends the crawl, it does not fail it. Everything discovered so far
+            # is real and worth returning; the report records why it stopped so
+            # the partial view is never mistaken for a complete one.
+            _logger.warning("crawl_stalled", extra={"url": base_url, "error": str(exc)})
+            graph.stopped_reason = str(exc)
+            break
 
         next_level: list[str] = []
         for item in results:

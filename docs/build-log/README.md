@@ -47,6 +47,7 @@ which, for an AI-assisted codebase, is every session.
 | [0015](0015-navigation-dashboard.md) | 2026-08-11 | Navigation dashboard; browser mode actually works | 949 tests, 95.66% |
 | [0016](0016-crawl-telemetry.md) | 2026-08-11 | Live crawl telemetry: progress, ETA, URL stream | 966 tests, 95.71% |
 | [0017](0017-crawl-speed-and-unlimited-pages.md) | 2026-08-11 | Crawl speed presets; optional page ceiling | 987 tests, 95.74% |
+| [0018](0018-stall-detection-and-partial-results.md) | 2026-08-11 | Bounded requests, stall detection, partial results | 992 tests, 95.75% |
 
 ---
 

@@ -17,6 +17,8 @@ from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.async_discovery import (
     DEFAULT_CONCURRENCY,
     MAX_CONCURRENCY,
+    CrawlStalledError,
+    _gather_bounded,
     adiscover_site,
 )
 from src.modules.seo.page_classifier.discovery import (
@@ -394,3 +396,89 @@ class TestProgressReporting:
     def test_no_sink_is_the_default(self, settings):
         _, report = run_async(settings, DEEP_CHAIN)
         assert report.pages_fetched == CHAIN_LENGTH + 1
+
+
+class TestStallAndPartialResults:
+    """A crawl that stops responding must end, not hang — and keep what it found.
+
+    A worker blocked on a socket is a worker that never returns. With 50 of them
+    the job hangs forever, holds a concurrency slot, and produces nothing. Ending
+    with a partial result an operator can read is strictly better.
+    """
+
+    def test_a_stalled_batch_raises_rather_than_hanging(self, settings):
+        async def scenario() -> None:
+            async def never() -> str:
+                await asyncio.sleep(3600)
+                return "unreachable"
+
+            with pytest.raises(CrawlStalledError):
+                await _gather_bounded([lambda: never()], concurrency=2, stall_timeout_s=0.2)
+
+        asyncio.run(scenario())
+
+    def test_a_slow_but_progressing_batch_is_not_cut_off(self, settings):
+        """The detector fires on *no* progress, not on slowness.
+
+        A large crawl of a slow site is healthy and must be allowed to finish.
+        """
+
+        async def scenario() -> list[int | None]:
+            async def slow(value: int) -> int:
+                await asyncio.sleep(0.05)
+                return value
+
+            return await _gather_bounded(
+                [(lambda v=n: slow(v)) for n in range(10)], concurrency=2, stall_timeout_s=0.3
+            )
+
+        assert asyncio.run(scenario()) == list(range(10))
+
+    def test_results_keep_their_input_order(self, settings):
+        """The stall path rebuilds the list; order must survive it."""
+
+        async def scenario() -> list[int | None]:
+            async def after(delay: float, value: int) -> int:
+                await asyncio.sleep(delay)
+                return value
+
+            return await _gather_bounded(
+                [lambda: after(0.05, 0), lambda: after(0.01, 1), lambda: after(0.03, 2)],
+                concurrency=3,
+                stall_timeout_s=0.5,
+            )
+
+        assert asyncio.run(scenario()) == [0, 1, 2]
+
+    def test_a_stalled_crawl_keeps_the_pages_it_found(self, settings):
+        """The whole point: a partial tree, not a lost crawl."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path in ("/robots.txt", "/sitemap.xml"):
+                return httpx.Response(
+                    200,
+                    text=SITEMAP if request.url.path.endswith(".xml") else ROBOTS,
+                    headers={"content-type": "application/xml"},
+                )
+            raise httpx.ReadTimeout("tarpit")
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+            async_transport=httpx.MockTransport(handler),
+        )
+
+        async def scenario() -> tuple[SiteGraph, DiscoveryReport]:
+            async with fetcher:
+                return await adiscover_site(fetcher, "https://e.com", max_pages=50)
+
+        _, report = asyncio.run(scenario())
+        # The sitemap URLs survived even though every page fetch failed.
+        assert report.total_urls >= 2
+        assert report.from_sitemap >= 2
+
+    def test_stopped_reason_is_none_on_a_clean_crawl(self, settings):
+        """Otherwise every crawl would carry a disclaimer it does not need."""
+        _, report = run_async(settings)
+        assert report.stopped_reason is None

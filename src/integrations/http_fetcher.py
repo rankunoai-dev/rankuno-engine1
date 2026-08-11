@@ -104,9 +104,11 @@ __all__ = [
     "BROWSER_CLIENT_HINTS",
     "BROWSER_USER_AGENT",
     "DEFAULT_MAX_BODY_BYTES",
+    "CONNECT_TIMEOUT_S",
     "DEFAULT_MAX_CONNECTIONS",
     "DEFAULT_MAX_REDIRECTS",
     "MAX_CONNECTIONS",
+    "POOL_TIMEOUT_S",
     "FetchResult",
     "HttpFetcher",
 ]
@@ -119,6 +121,22 @@ DEFAULT_MAX_CONNECTIONS = 20
 Must be at least the caller's concurrency. Below it, requests queue on the
 connection pool instead of on the rate limiter — the configured rate is never
 reached and the crawl is slower than requested for no visible reason.
+"""
+
+CONNECT_TIMEOUT_S = 5.0
+"""Seconds to establish a TCP connection.
+
+Short on purpose. A host that has not accepted a connection in five seconds is
+not going to serve a useful page, and on a wide crawl every worker waiting on
+one is a worker not fetching anything else.
+"""
+
+POOL_TIMEOUT_S = 10.0
+"""Seconds to wait for a free connection from the pool.
+
+Distinct from the network timeouts: exceeding this means the crawl asked for
+more concurrency than the pool holds, which is a configuration problem and
+should surface quickly rather than look like a slow site.
 """
 
 MAX_CONNECTIONS = 100
@@ -280,6 +298,25 @@ class HttpFetcher(BaseAPIClient):
             headers.update(BROWSER_CLIENT_HINTS)
         return headers
 
+    def _timeout(self) -> httpx.Timeout:
+        """Per-phase timeouts rather than one number for all of them.
+
+        A single scalar applies the same value to connect, read, write and pool,
+        which is both too generous for connecting and — importantly — no bound at
+        all on total request duration: the read timeout measures the gap between
+        *bytes*, so a server dribbling one byte every few seconds resets it
+        indefinitely. That is what a tarpit does.
+
+        These timeouts make each phase fail fast. The overall deadline that
+        actually defeats a dribbling server lives in the crawl loop, because it
+        is a property of a request as a whole and httpx has no setting for it.
+        """
+        return httpx.Timeout(
+            self._settings.default_timeout_s,
+            connect=CONNECT_TIMEOUT_S,
+            pool=POOL_TIMEOUT_S,
+        )
+
     def authenticate(self) -> None:
         """No credentials: this client fetches the public web."""
         return
@@ -391,7 +428,7 @@ class HttpFetcher(BaseAPIClient):
             self._client = httpx.Client(
                 http2=False,
                 follow_redirects=False,
-                timeout=self._settings.default_timeout_s,
+                timeout=self._timeout(),
                 headers=self._headers(),
                 limits=httpx.Limits(
                     max_connections=self._max_connections,
@@ -407,7 +444,7 @@ class HttpFetcher(BaseAPIClient):
             self._aclient = httpx.AsyncClient(
                 http2=False,
                 follow_redirects=False,
-                timeout=self._settings.default_timeout_s,
+                timeout=self._timeout(),
                 headers=self._headers(),
                 # Sized to the caller's concurrency. Too small and requests
                 # queue on sockets rather than on the rate limiter, so the
