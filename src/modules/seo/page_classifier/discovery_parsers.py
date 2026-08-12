@@ -42,7 +42,7 @@ from pydantic import Field
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord
-from src.modules.seo.page_classifier.url_rules import safe_split
+from src.modules.seo.page_classifier.url_rules import is_crawlable_url, safe_split
 
 __all__ = [
     "MAX_SITEMAP_ENTRIES",
@@ -74,53 +74,6 @@ _ROOT_CLOSE_RE = {
 }
 
 _SKIP_LINK_PREFIXES = ("#", "javascript:", "mailto:", "tel:", "data:", "sms:")
-
-# Extensions that are never HTML pages. Following them wastes crawl budget and
-# pollutes the graph with nodes that can never be classified.
-_NON_PAGE_SUFFIXES = (
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".webp",
-    ".svg",
-    ".ico",
-    ".bmp",
-    ".css",
-    ".js",
-    ".json",
-    ".xml",
-    ".rss",
-    ".atom",
-    ".zip",
-    ".gz",
-    ".tar",
-    ".rar",
-    ".7z",
-    ".mp4",
-    ".mp3",
-    ".avi",
-    ".mov",
-    ".wav",
-    ".webm",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".eot",
-    ".exe",
-    ".dmg",
-    ".pkg",
-    # Markdown. Observed live: allbirds.com/agents.md entered the graph as a
-    # page and was classified UNKNOWN at 0.0 confidence — crawl budget spent on
-    # something that can never be classified (build-log 0010 §7).
-    ".md",
-    ".markdown",
-)
-"""Extensions that are never HTML pages.
-
-`.txt` is deliberately **absent**. `llms.txt` and `llms-full.txt` are the AI
-crawler manifests Phase 7's answer-readiness audit reads, so excluding `.txt`
-would blind a later phase to files it specifically needs."""
 
 
 class SitemapKind(StrEnum):
@@ -305,16 +258,6 @@ class _AnchorCollector(HTMLParser):
                 return
 
 
-def _is_page_link(url: str) -> bool:
-    """Whether a URL plausibly points at an HTML page."""
-    parts = safe_split(url)
-    if parts is None:
-        # Unparseable, so not a page worth fetching either way.
-        return True
-    path = parts.path.lower()
-    return not path.endswith(_NON_PAGE_SUFFIXES)
-
-
 def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True) -> tuple[str, ...]:
     """Extract outbound page links from a document.
 
@@ -366,7 +309,7 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
             continue
         if same_host_only and parts.netloc.lower() != base_host:
             continue
-        if not _is_page_link(absolute):
+        if not is_crawlable_url(absolute):
             continue
         found[absolute.split("#", 1)[0]] = None
 

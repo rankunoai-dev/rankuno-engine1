@@ -507,7 +507,16 @@
   flex: 1;
   border-radius: 8px;
   display: flex;
-  transition: flex 0.25s;
+  /* `min-height` is animated too: the expanded lane is sized in JS from the
+     number of card rows it holds, and without this it snaps while the others
+     ease. */
+  transition:
+    flex 0.25s,
+    min-height 0.25s;
+  /* Flex items refuse to shrink below their content by default. The lanes hold
+     no flow content — the cards are absolutely positioned above them — so the
+     unexpanded ones must be free to give up room to the expanded one. */
+  min-height: 28px;
 }
 .lane.big {
   flex: 2.2;

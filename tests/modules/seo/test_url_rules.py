@@ -10,6 +10,7 @@ from src.modules.seo.page_classifier.schemas import (
 )
 from src.modules.seo.page_classifier.url_rules import (
     depth_of,
+    is_crawlable_url,
     is_faceted_filter,
     is_tracking_param,
     normalize_path,
@@ -248,3 +249,59 @@ class TestUnsplittableUrls:
     def test_a_valid_url_is_unaffected(self):
         """The guard must not change parsing for anything well-formed."""
         assert normalize_url("https://e.com/a/?utm_source=x") == "https://e.com/a/"
+
+
+class TestIsCrawlableUrl:
+    """Whether a URL addresses an HTML page or a file.
+
+    The filter itself predates this class — it screened DOM links from the
+    start. What it never screened was the sitemap and CMS paths, so a WordPress
+    `attachment-sitemap.xml` put every uploaded image into the graph as a page.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://e.com/wp-content/uploads/2024/01/hero.jpg",
+            "https://e.com/logo.PNG",
+            "https://e.com/a/b/icon.svg",
+            "https://e.com/bundle.js",
+            "https://e.com/theme.css",
+            "https://e.com/demo.mp4",
+            "https://e.com/press-kit.zip",
+            "https://e.com/font.woff2",
+        ],
+    )
+    def test_media_is_refused(self, url):
+        assert is_crawlable_url(url) is False
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://e.com/",
+            "https://e.com/services/",
+            # Dots inside a path segment are not extensions. An API version
+            # prefix is the common case and dropping it would delete a section.
+            "https://e.com/v1.0/details",
+            "https://e.com/v1.0/details/",
+            "https://e.com/index.html",
+            "https://e.com/page.php",
+            "https://e.com/default.aspx",
+            "https://e.com/about.htm",
+            # `.txt` stays: `llms.txt` is a Phase 7 input.
+            "https://e.com/llms.txt",
+            # `.pdf` stays: a whitepaper is a ranking asset.
+            "https://e.com/whitepaper.pdf",
+        ],
+    )
+    def test_pages_are_kept(self, url):
+        assert is_crawlable_url(url) is True
+
+    def test_only_the_path_is_examined(self):
+        """A query string must not be mistaken for an extension, or the reverse."""
+        assert is_crawlable_url("https://e.com/download?file=report.jpg") is True
+        assert is_crawlable_url("https://e.com/hero.jpg?w=800") is False
+
+    def test_an_unparseable_url_is_not_refused_here(self):
+        """It is not media, and it should reach the reporting that surfaces it."""
+        assert is_crawlable_url("http://[abc") is True

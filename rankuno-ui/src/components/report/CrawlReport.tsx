@@ -75,6 +75,14 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
             <td>{discovery.fetch_failures.toLocaleString()}</td>
           </tr>
           <tr>
+            {/* Not a failure. An image sitemap listing 300 uploads is normal;
+                what is misleading is a report that counts them as pages. */}
+            <th>Media skipped</th>
+            <td>{discovery.media_skipped.toLocaleString()}</td>
+            <th>Sitemaps parsed</th>
+            <td>{discovery.sitemaps_fetched.toLocaleString()}</td>
+          </tr>
+          <tr>
             <th>In navigation</th>
             <td>
               {inNav.toLocaleString()}

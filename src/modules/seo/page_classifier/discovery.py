@@ -52,7 +52,11 @@ from src.modules.seo.page_classifier.discovery_parsers import (
     wordpress_total_pages,
 )
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord, PageEvidence
-from src.modules.seo.page_classifier.url_rules import is_faceted_filter, normalize_url
+from src.modules.seo.page_classifier.url_rules import (
+    is_crawlable_url,
+    is_faceted_filter,
+    normalize_url,
+)
 from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
 
 __all__ = [
@@ -262,6 +266,11 @@ class DiscoveryReport(StrictModel):
     sitemaps_fetched: int = Field(default=0, ge=0)
     pages_fetched: int = Field(default=0, ge=0)
     fetch_failures: int = Field(default=0, ge=0)
+    media_skipped: int = Field(default=0, ge=0)
+    """Entries refused because they address a file, not a page.
+
+    Almost always a WordPress `attachment-sitemap.xml`, which lists every
+    uploaded image as though it were a page."""
     truncated: bool = False
     stopped_reason: str | None = None
     """Why the crawl ended early, or `None` if it ran to completion.
@@ -340,6 +349,13 @@ class SiteGraph:
         only one of them, so counting 404s would put a non-zero failure count on
         virtually every healthy crawl and destroy the signal this exists to
         carry. See `is_refusal`."""
+        self.media_skipped = 0
+        """URLs refused because they address a file rather than a page.
+
+        Reported rather than merely dropped: on an image-heavy WordPress site
+        this is the difference between "the sitemap listed 400 pages" and "the
+        sitemap listed 400 entries, 300 of which were uploads", and a reader
+        who cannot see the number has no way to tell those apart."""
 
     def __len__(self) -> int:
         """Node count."""
@@ -368,10 +384,23 @@ class SiteGraph:
         """Insert or update a node, merging discovery sources.
 
         Returns:
-            The node, or `None` if the applicable ceiling refused a new one.
-            Existing nodes are always updatable, so a full graph still records
-            new evidence about URLs it already holds.
+            The node, or `None` if the URL is not a page, or if the applicable
+            ceiling refused a new one. Existing nodes are always updatable, so a
+            full graph still records new evidence about URLs it already holds.
         """
+        # Enforced here rather than in each discovery path because this is the
+        # only function all of them go through. `extract_page_links` screened
+        # DOM links and nothing screened the other two, so a WordPress
+        # `attachment-sitemap.xml` put every uploaded image into the graph as a
+        # page — each one fetched, and each one classified UNKNOWN.
+        #
+        # The crawl root is exempt: an operator who types a URL ending in a
+        # media suffix should get an empty-looking report, not a silently empty
+        # graph with no explanation in it.
+        if url != self.base_url and not is_crawlable_url(url):
+            self.media_skipped += 1
+            return None
+
         key = normalize_url(url)
         existing = self._nodes.get(key)
 
@@ -499,6 +528,7 @@ class SiteGraph:
             dom_only=sum(1 for n in nodes if n.sources.dom_link and not n.sources.sitemap),
             orphans=sum(1 for n in nodes if n.is_orphan),
             fetch_failures=self.fetch_failures,
+            media_skipped=self.media_skipped,
             truncated=self.truncated,
             stopped_reason=self.stopped_reason,
         )

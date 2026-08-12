@@ -18,6 +18,21 @@ const LANE_TAB_WIDTH = 30;
 /** Vertical distance between wrapped rows inside one lane. */
 const ROW_HEIGHT = 52;
 
+/** Breathing room above and below the rows in an expanded lane. */
+const LANE_PADDING = 28;
+
+/** Smallest a collapsed lane may become. Mirrors `.lane { min-height }`. */
+const LANE_MIN_HEIGHT = 28;
+
+/** Gap between lanes, mirroring `.lanes { gap }`. */
+const LANE_GAP = 7;
+
+/** `.lanes { inset: 10px }`, top and bottom. */
+const LANES_INSET = 20;
+
+/** Lanes drawn, one per navigation depth plus OTHERS. */
+const LANE_COUNT = 5;
+
 /**
  * Columns that fit in `width` without overlapping.
  *
@@ -74,10 +89,12 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
 
   const stage = useRef<HTMLDivElement>(null);
   const lanes = useRef<HTMLDivElement>(null);
-  const [geometry, setGeometry] = useState<{ centres: number[]; width: number }>({
-    centres: [],
-    width: 0,
-  });
+  const [geometry, setGeometry] = useState<{
+    centres: number[];
+    heights: number[];
+    width: number;
+    height: number;
+  }>({ centres: [], heights: [], width: 0, height: 0 });
 
   const node = focus === null ? null : model.nodes[focus];
 
@@ -104,6 +121,28 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
 
   const expandedLane = shown.length > 0 ? model.nodes[shown[0]!]!.lv : (node?.lv ?? 0);
 
+  // Computed before layout, because the expanded lane has to be *sized* to the
+  // rows it will hold. A fixed `flex: 2.2` fits one row; a second row of cards
+  // then spilled out of the band and over the lane below it.
+  //
+  // `width` is 0 on the first paint, before the stage has been measured. A
+  // typical stage width is assumed for that one frame so the lane does not
+  // start at its one-column height and visibly jump.
+  const columns = columnsFor(geometry.width || 900, shown.length);
+  const rowCount = Math.max(1, Math.ceil(shown.length / columns));
+  // Capped at exactly what is left once the other lanes take their minimum, so
+  // a tall expanded lane can never push the bottom band out of the stage. A
+  // fractional cap looked safe and was not: at five lanes it still overflowed.
+  const spareForExpanded =
+    (geometry.height || 320) -
+    LANES_INSET -
+    LANE_GAP * (LANE_COUNT - 1) -
+    LANE_MIN_HEIGHT * (LANE_COUNT - 1);
+  const expandedLaneHeight = Math.min(
+    rowCount * ROW_HEIGHT + LANE_PADDING,
+    Math.max(ROW_HEIGHT + LANE_PADDING, spareForExpanded),
+  );
+
   const measure = useCallback(() => {
     const stageElement = stage.current;
     const laneElements = lanes.current?.querySelectorAll(".lane");
@@ -111,11 +150,18 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
 
     const stageBox = stageElement.getBoundingClientRect();
     const centres: number[] = [];
+    const heights: number[] = [];
     laneElements.forEach((lane) => {
       const box = lane.getBoundingClientRect();
       centres.push(box.top - stageBox.top + box.height / 2);
+      heights.push(box.height);
     });
-    setGeometry({ centres, width: stageElement.clientWidth });
+    setGeometry({
+      centres,
+      heights,
+      width: stageElement.clientWidth,
+      height: stageElement.clientHeight,
+    });
   }, []);
 
   // Measured after the browser has laid out the expanded lane, and again when
@@ -128,7 +174,7 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
       cancelAnimationFrame(frame);
       clearTimeout(settle);
     };
-  }, [measure, expandedLane, focus, safePage]);
+  }, [measure, expandedLane, focus, safePage, rowCount]);
 
   useEffect(() => {
     const onResize = (): void => {
@@ -139,7 +185,17 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
   }, [measure]);
 
   const positions = new Map<number, Point>();
-  const { centres, width } = geometry;
+  const { centres, heights, width } = geometry;
+
+  // Derived from the height the lane actually ended up with, not from the
+  // height that was asked for. When the cap above bites, the rows compress to
+  // fit rather than spilling into the lane below — which is what put a second
+  // row of L2 cards on top of the L3 band.
+  const laneHeight = heights[expandedLane] ?? 0;
+  const rowSpacing =
+    laneHeight > 0
+      ? Math.min(ROW_HEIGHT, Math.max(24, (laneHeight - 16) / rowCount))
+      : ROW_HEIGHT;
 
   if (centres.length > 0 && width > 0) {
     chain.forEach((index, position) => {
@@ -155,8 +211,6 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
       positions.set(index, { x: clampX(raw, width), y: centres[lane] ?? 0 });
     });
 
-    const columns = columnsFor(width, shown.length);
-    const rows = Math.ceil(shown.length / columns) || 1;
     const usable = width - LANE_TAB_WIDTH * 2;
 
     shown.forEach((kid, position) => {
@@ -168,7 +222,7 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
       const raw = LANE_TAB_WIDTH + (usable / (columns + 1)) * (column + 1);
       positions.set(kid, {
         x: clampX(raw, width),
-        y: (centres[lane] ?? 0) + (row - (rows - 1) / 2) * ROW_HEIGHT,
+        y: (centres[lane] ?? 0) + (row - (rowCount - 1) / 2) * rowSpacing,
       });
     });
   }
@@ -206,6 +260,9 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
               key={label}
               className={`lane ${LANE_CLASS[lane]}${lane === expandedLane ? " big" : ""}`}
               data-lv={lane}
+              // `minHeight` rather than a flex ratio: the other lanes shrink to
+              // make room, and the band always contains its own cards.
+              style={lane === expandedLane ? { minHeight: expandedLaneHeight } : undefined}
             >
               <div className="tab">{label}</div>
               <div className="band" />
@@ -242,10 +299,7 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
               className="gn pager"
               style={{
                 left: width - 110,
-                top:
-                  (centres[expandedLane] ?? 0) +
-                  (Math.ceil(shown.length / columnsFor(width, shown.length)) * ROW_HEIGHT) / 2 +
-                  ROW_HEIGHT,
+                top: (centres[expandedLane] ?? 0) + (rowCount * rowSpacing) / 2 + 4,
               }}
               onClick={() => focus !== null && nextChildPage(focus, pageCount)}
             >

@@ -151,7 +151,7 @@ resolutions. **Follow the "Ruling" column, not the source documents.**
 | # | Conflict | Ruling |
 | :--- | :--- | :--- |
 | 1 | `_execute_impl(self, args)` vs `execute(self, payload)` | **`execute(self, payload)`**. `SDLC_STEP6` §2.1 is wrong; the code is right. |
-| 2 | "10-step pipeline" vs 7 implemented | The 10-step target is aspirational. Steps 2 (idempotency), 4 (circuit breaker), 8 (checkpoint) are **not yet implemented**. Do not claim they are. |
+| 2 | "10-step pipeline" vs 7 implemented | The 10-step target is aspirational. Steps 2 (idempotency), 4 (circuit breaker), 8 (checkpoint) are **not implemented in the governed pipeline**. Do not claim they are. Crawl-level checkpointing *does* exist (`CrawlCheckpointer`, cycle 0019) — that is a facility of the SEO crawl, not a pipeline step, and the two must not be conflated. |
 | 3 | Enum case `"READ"` vs `"read"` | **Governance enums lowercase** (`RiskClass`, `ApprovalMode`, `ExecutionStatus` — matches shipped code). **Domain taxonomy enums UPPER** (`HierarchyLevel`, `PrimaryPageType`, `SearchIntent` — matches all Phase 1 blueprints). |
 | 4 | `StrictModel` config | `extra="forbid"`, `validate_assignment=True`. **Not** `frozen=True` — it breaks `validate_assignment`. `str_strip_whitespace` to be added with test coverage. |
 | 5 | `PrimaryPageType` membership | **14 members** per `CLAUDE_HANDOFF_DIRECTIVE` §5.2, including `CASE_STUDY` and `TOOL_APPLICATION` (both are referenced by the tree visualizer and the HighRadius record). |
@@ -166,18 +166,24 @@ resolutions. **Follow the "Ruling" column, not the source documents.**
 ## 8. Known gaps — do not describe these as working
 
 - `src/core/circuit_breaker.py` — does not exist.
-- `src/core/state_store.py` — does not exist. Until it does, an interrupted crawl
-  loses its work.
 - Idempotency keys — not implemented anywhere.
 - Rate limiter and cost ledger are **in-process only**. Multi-worker deployment would
   multiply both the API quota and the spend ceiling by the worker count. Blocking for
   hosted deployment; not blocking for local (ADR 0004).
 - `src/integrations/llm_client.py` is an **interface only**. No concrete provider is
   implemented — that needs a live credential and network access.
-- Phase 1 `signals.py`, `pipeline.py`, `tool.py`, `tree_visualizer.py` — not started.
-  Only `schemas.py` exists.
+- Layer 2 (local ML) and Layer 3 (`LlmPageClassifier`) are **protocols with no
+  implementation**. The cascade runs on Layers 0–1 alone.
 - No `Dockerfile`; Railway deployment deferred per ADR 0004.
-- No golden test corpus yet, so the ≥98% accuracy claim is currently unverifiable.
+- The golden corpus exists but holds **13 labels across 1 of 6 archetypes**. That is
+  not enough to validate the ≥98% accuracy claim, which remains **unverified**. 141
+  draft rows await review in `tests/fixtures/corpus/drafts/`.
+- Observed LLM escalation rate is ~50x the assumption in ADR 0005, so the cost model
+  is **not trustworthy** (build-log 0007).
+- A crawl holds its entire graph, including page HTML, in RAM. The 3-crawl
+  concurrency cap is what bounds memory; nothing bounds a single large crawl.
+- Checkpoints are never deleted and hold URLs only — no navigation footprint, and
+  no resume. A checkpoint is for *viewing* what was found (build-log 0019 §6).
 - The SSRF guard resolves and validates addresses but cannot close the **DNS rebinding**
   window on its own. Callers must pin connections to `SafeUrl.resolved_ips`.
 
@@ -193,6 +199,26 @@ These were gaps and are now implemented and tested — do not re-report them:
 - `docs/standards/` STEP1 and STEP4 written; all 8 steps now present.
 - `scripts/drift_check.py` now checks relative links, module documentation, and empty
   skill directories, with path-based rather than substring matching.
+
+Closed in the cycle-0020 audit — these were still listed as gaps long after they
+shipped, which is the drift this register exists to prevent:
+
+- `src/core/state_store.py` — **exists** (`JobRecord`, `JobStore` protocol,
+  `DiskJobStore` with atomic writes, 98% coverage). Jobs persist under `.jobs/` and
+  survive a restart. The claim that "an interrupted crawl loses its work" is
+  **superseded**: crawl checkpoints outlive the process and the partial tree is
+  renderable (build-log 0019 §4).
+- Phase 1 is **not** "only `schemas.py`". The whole page-classifier module shipped.
+  Two of the four names in the old entry never existed under those names, so
+  searching for them found nothing and the entry looked true:
+  - `signals.py` → shipped as **`signal_parsers.py`** (5 structural consensus signals)
+  - `pipeline.py` → shipped as **`cascading_pipeline.py`** (Layer 0–3 cascade)
+  - `tool.py` → shipped, the governed entry point; one run == one crawl job (ADR 0003)
+  - `tree_visualizer.py` → shipped, standalone interactive HTML report
+- Also shipped since that entry was written: `url_rules.py`, `site_profile.py`,
+  `discovery.py` / `async_discovery.py` / `discovery_parsers.py`, `weights.py`,
+  `nav_tree_parser.py`, `logical_hierarchy.py`, `corpus.py` / `corpus_drafts.py`,
+  `evaluation.py`, and `src/api/server.py` with the React UI in `rankuno-ui/`.
 
 ---
 

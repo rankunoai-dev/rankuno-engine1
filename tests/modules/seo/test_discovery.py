@@ -475,3 +475,96 @@ class TestBlockedSite:
         }
         _, report = discover_site(site_fetcher(routes, settings), "https://e.com", max_pages=10)
         assert report.fetch_failures == 0
+
+
+# A WordPress index pointing at both a page sitemap and an attachment sitemap.
+# The attachment sitemap is what put every uploaded image into the graph.
+MEDIA_INDEX = """<?xml version="1.0"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://e.com/page-sitemap.xml</loc></sitemap>
+  <sitemap><loc>https://e.com/attachment-sitemap.xml</loc></sitemap>
+</sitemapindex>"""
+
+PAGE_SITEMAP = """<?xml version="1.0"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://e.com/services/</loc></url>
+  <url><loc>https://e.com/v1.0/details</loc></url>
+</urlset>"""
+
+ATTACHMENT_SITEMAP = """<?xml version="1.0"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://e.com/uploads/hero.jpg</loc></url>
+  <url><loc>https://e.com/uploads/logo.png</loc></url>
+  <url><loc>https://e.com/uploads/brochure.webp</loc></url>
+</urlset>"""
+
+MEDIA_SITE = {
+    "/robots.txt": httpx.Response(200, text=ROBOTS),
+    "/sitemap.xml": xml(MEDIA_INDEX),
+    "/page-sitemap.xml": xml(PAGE_SITEMAP),
+    "/attachment-sitemap.xml": xml(ATTACHMENT_SITEMAP),
+    "/": html("<html><body><a href='/services/'>S</a></body></html>"),
+    "/services/": html(LEAF_HTML),
+    "/v1.0/details": html(LEAF_HTML),
+}
+
+
+class TestNonPageFiltering:
+    """Media must not enter the graph, whichever path found it.
+
+    `extract_page_links` screened DOM links from the start; the sitemap and CMS
+    paths did not, so a WordPress `attachment-sitemap.xml` produced one graph
+    node per uploaded image — fetched, then classified UNKNOWN at 0.0.
+    """
+
+    def test_the_graph_refuses_media_from_any_path(self):
+        graph = SiteGraph("https://e.com")
+        assert graph.add("https://e.com/uploads/hero.jpg", sitemap=True) is None
+        assert graph.add("https://e.com/logo.png", cms_api=True) is None
+        assert graph.add("https://e.com/a.js", dom_link=True) is None
+        assert len(graph) == 0
+        assert graph.media_skipped == 3
+
+    def test_refusing_media_is_not_recorded_as_truncation(self):
+        """Truncation means the ceiling stopped the crawl. This is not that."""
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/hero.jpg", sitemap=True)
+        assert graph.truncated is False
+
+    def test_the_crawl_root_is_exempt(self):
+        """An operator who types a media URL gets a report, not an empty graph."""
+        graph = SiteGraph("https://e.com/hero.jpg")
+        assert graph.add("https://e.com/hero.jpg", dom_link=True) is not None
+
+    def test_pages_with_dotted_paths_still_enter(self):
+        graph = SiteGraph("https://e.com")
+        assert graph.add("https://e.com/v1.0/details", sitemap=True) is not None
+
+    def test_media_sitemap_entries_are_dropped_end_to_end(self, settings):
+        graph, report = discover_site(
+            site_fetcher(MEDIA_SITE, settings),
+            "https://e.com",
+            site_profile=SiteProfile(cms_family=CmsFamily.UNKNOWN),
+            max_pages=50,
+        )
+        urls = {node.url for node in graph.nodes}
+        assert report.media_skipped == 3
+        assert not any(url.endswith((".jpg", ".png", ".webp")) for url in urls)
+
+    def test_a_sitemap_index_is_still_traversed(self, settings):
+        """The regression the obvious fix causes.
+
+        Filtering `<loc>` values inside the sitemap parser hits both document
+        kinds, and an index's entries are child sitemaps ending in `.xml` — a
+        suffix on the non-page list. Applied there, this filter would discard
+        every child sitemap and WordPress discovery would return nothing.
+        """
+        _, report = discover_site(
+            site_fetcher(MEDIA_SITE, settings),
+            "https://e.com",
+            site_profile=SiteProfile(cms_family=CmsFamily.UNKNOWN),
+            max_pages=50,
+        )
+        # index + two children
+        assert report.sitemaps_fetched == 3
+        assert report.from_sitemap == 2

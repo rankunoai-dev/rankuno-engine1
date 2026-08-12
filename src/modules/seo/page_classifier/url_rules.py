@@ -33,9 +33,11 @@ from src.modules.seo.page_classifier.schemas import (
 __all__ = [
     "safe_split",
     "MAX_QUERY_PARAMS",
+    "NON_PAGE_SUFFIXES",
     "TRACKING_PARAM_PREFIXES",
     "TRACKING_PARAMS",
     "depth_of",
+    "is_crawlable_url",
     "is_faceted_filter",
     "is_locale_segment",
     "is_tracking_param",
@@ -44,6 +46,62 @@ __all__ = [
     "strip_locale_prefix",
     "url_fast_path",
 ]
+
+NON_PAGE_SUFFIXES = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".bmp",
+    ".css",
+    ".js",
+    ".json",
+    ".xml",
+    ".rss",
+    ".atom",
+    ".zip",
+    ".gz",
+    ".tar",
+    ".rar",
+    ".7z",
+    ".mp4",
+    ".mp3",
+    ".avi",
+    ".mov",
+    ".wav",
+    ".webm",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".exe",
+    ".dmg",
+    ".pkg",
+    # Markdown. Observed live: allbirds.com/agents.md entered the graph as a
+    # page and was classified UNKNOWN at 0.0 confidence — crawl budget spent on
+    # something that can never be classified (build-log 0010 §7).
+    ".md",
+    ".markdown",
+)
+"""Path endings that are never an HTML page.
+
+`.txt` is deliberately **absent**. `llms.txt` and `llms-full.txt` are the AI
+crawler manifests Phase 7's answer-readiness audit reads, so excluding `.txt`
+would blind a later phase to files it specifically needs.
+
+`.pdf` is also absent, and that is a judgement rather than an oversight: a
+whitepaper or datasheet is an indexable, ranking asset, and an SEO audit that
+cannot see them is missing real surface. They do classify poorly — the pipeline
+parses HTML — so if they become noise the fix is to classify them as a document
+type, not to hide them from discovery.
+
+Lives here rather than in `discovery_parsers` because it is a property of a URL
+string, and because three discovery paths need it. A second copy alongside the
+sitemap parser was the original proposal and would have drifted from this one
+the first time either was edited."""
 
 MAX_QUERY_PARAMS = 5
 """Above this, a URL is a filter permutation rather than a page (Rule 4).
@@ -272,6 +330,33 @@ def safe_split(url: str) -> SplitResult | None:
     except ValueError as exc:
         _logger.debug("url_unsplittable", extra={"url": url[:120], "error": str(exc)})
         return None
+
+
+def is_crawlable_url(url: str) -> bool:
+    """Report whether a URL plausibly addresses an HTML page.
+
+    Tested on the *path* only, so a query string cannot mask an extension and
+    `?download=report.jpg` is not mistaken for an image.
+
+    Matching is a suffix test rather than a parsed extension. `PurePath.suffix`
+    would be equivalent on POSIX and wrong on Windows, where `Path` treats a
+    backslash as a separator and parses drive letters — neither of which is
+    true of a URL.
+    A path with an interior dot such as `/v1.0/details` has no matching suffix
+    and is kept, which is the case that matters.
+
+    Args:
+        url: Absolute or relative URL.
+
+    Returns:
+        True when the URL should be allowed into the graph. Unparseable URLs
+        return True: they are not media, and rejecting them here would hide them
+        from the reporting that exists to surface them.
+    """
+    parts = safe_split(url)
+    if parts is None:
+        return True
+    return not parts.path.lower().endswith(NON_PAGE_SUFFIXES)
 
 
 def normalize_url(

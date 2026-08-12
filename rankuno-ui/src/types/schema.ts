@@ -152,6 +152,7 @@ export interface DiscoveryReport {
   sitemaps_fetched: number;
   pages_fetched: number;
   fetch_failures: number;
+  media_skipped: number;
   truncated: boolean;
   stopped_reason: string | null;
   dom_reserve: number;

@@ -113,9 +113,23 @@
 }
 
 @media print {
+  /* `index.css` pins html/body/#root to `height: 100%` on a dark ground, which
+     is right for a fixed-height app shell and wrong for paper: the report is
+     taller than the viewport and everything past page one was cut off. Releasing
+     the height and forcing a light ground is what makes it paginate. */
+  html,
+  body,
+  #root {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #1d2635 !important;
+  }
+
   /* The app is a fixed-height flex shell with its own scrollers; printed as-is
      it yields one clipped page. Hiding it and promoting the report is the whole
-     mechanism. */
+     mechanism. The report is a sibling of `.rk-dash`, never a descendant —
+     `display: none` on an ancestor would take the report with it. */
   .rk-dash,
   .ant-modal-root,
   .ant-modal-mask,
