@@ -17,17 +17,39 @@ PASSED: Tests
 ALL GATES PASSED.
 ```
 
-Frontend, from `rankuno-ui/`:
+Re-run at the close of the cycle, after `CrawlNotifier` and `lib/url.ts`:
 
 ```
-npx tsc --noEmit    0 errors
-npx vite build      ✓ built in 9.48s
+150 files already formatted
+PASSED: Format
+All checks passed!
+PASSED: Lint
+Success: no issues found in 41 source files
+PASSED: Type check
+Required test coverage of 85.0% reached. Total coverage: 95.67%
+1096 passed, 1 warning in 47.07s
+PASSED: Tests
+ALL GATES PASSED.
 ```
+
+Frontend, from `rankuno-ui/`, run against the local `node_modules/.bin`
+binaries — `npx` is not on this workstation's PATH and node lives at
+`%LOCALAPPDATA%\Programs\nodejs`:
+
+```
+tsc --noEmit    TSC_EXIT=0
+vite build      VITE_EXIT=0   ✓ built in 8.59s
+```
+
+The main bundle is now 1,050 kB (331 kB gzipped), up from 786 kB — antd's
+`notification` and `Table` are the new weight. Vite's 2000 kB warning is not
+tripped by it; the warning that does appear is the 16 MB `synthetic-20000`
+fixture, unchanged from cycle 0020.
 
 Step 8 drift audit:
 
 ```
-PASSED: no drift detected across 65 markdown files.
+PASSED: no drift detected across 66 markdown files.
 ```
 
 ## 2. What landed
@@ -73,6 +95,35 @@ subordinate panel takes the dashboard with it. That is not hypothetical: see §4
 already written; this cycle connected them, and `LiveCrawlProgressModal` was
 deleted rather than repaired — its useful parts had already been extracted, and
 it was `closable={false}` for a crawl's entire lifetime.
+
+### `CrawlNotifier` — the completion toast
+
+The last piece of the non-blocking design, and the one that was nearly shipped
+missing: `watchJob`'s docstring already claimed a finished crawl "posts a
+notification and waits to be asked", and until this component existed that
+sentence was false. Nothing announced completion at all, so a background crawl
+finished silently and the operator had to think to go and look.
+
+It renders `contextHolder` and nothing else, diffing each job's previous status
+to catch the single live→terminal crossing. Three details are load-bearing:
+
+* **The map is seeded on first pass, not left empty.** A reload with a finished
+  job still in `liveJobs` would otherwise fire a toast for a crawl that ended
+  before the component mounted.
+* **A failure toast has `duration: 0`.** A failure the operator does not see is
+  a crawl they sit waiting for. Successes auto-dismiss after 8 seconds.
+* **Nothing navigates on its own.** The toast carries an *Open tree* button, and
+  a job that failed with a checkpoint offers *Open partial tree* via
+  `loadCheckpoint`. Auto-loading would discard whatever analysis was open, which
+  is the behaviour this whole cycle exists to remove.
+
+Kept out of the store deliberately, so `useCrawlStore` stays free of antd — it
+is the one part of this UI that could be tested without a DOM.
+
+### `lib/url.ts`
+
+`hostOf` had been written twice — once in `HeaderBar`, once in the notifier —
+within an hour of each other. Extracted before the second copy could drift.
 
 ## 3. Design decisions
 
@@ -184,6 +235,32 @@ the earlier entry described an open question that is now closed.
 - **The trap rule does not detect a repeated *cycle*, only a repeated segment.**
   A cycle detector would be stricter and slower; the measured false-positive
   count of the simpler rule was zero, so the complexity is not yet earned.
+- **No cancel.** The plan specified a *Cancel crawl* action on every row. There
+  is no endpoint behind it: the API exposes `POST /jobs`, `GET /jobs`,
+  `GET /jobs/{id}`, `/result` and `/checkpoint`, and nothing else. Cancelling
+  needs cooperative interruption inside a crawl loop that runs in a worker
+  thread under `asyncio.run`, which is engine work with its own tests and an
+  ADR, not a button. A control that looks clickable and silently does nothing is
+  the specific failure `NavigationRail` already refuses, so the column ships
+  with *View tree* alone. **A running crawl currently cannot be stopped from the
+  UI** — it ends when it ends, or when the server is killed.
+- **The 2-second poll in the plan was not adopted.** `httpAdapter` keeps its
+  existing 500ms→5s backoff. A fixed 2s interval is ~7,000 requests across a
+  multi-hour 20,000-page crawl, and the backoff was a deliberate cycle-0016
+  decision; overriding it from a UI plan would have reverted that reasoning
+  silently.
+- **Nothing was verified against a live crawl.** The gate, typecheck and build
+  all pass, and the whole feature is about behaviour over a crawl's lifetime —
+  concurrent jobs, the badge count, toast timing, the pill's `+N`. None of that
+  has been watched against a running engine. The manual verification in the plan
+  was not performed.
+- **`CrawlNotifier` has no tests.** There is no frontend test runner in this
+  repository at all; `tsc` and `vite build` are the only automated frontend
+  checks, and neither executes a component.
+- **Live telemetry does not survive a reload.** `liveJobs` is in memory. After a
+  refresh a still-running crawl shows its server status with an empty progress
+  column, because the job-list endpoint returns metadata and not progress. The
+  jobs table says `—` rather than guessing.
 - **Intermediate commits were not individually gated.** The three commits are
   ordered so each is self-consistent, and the final tree is verified; each
   commit was not checked out and built in isolation.
@@ -205,6 +282,18 @@ the earlier entry described an open question that is now closed.
 | `rankuno-ui/src/store/useCrawlStore.ts` | `liveJobs`, `newestLiveJob`, per-job pollers |
 | `rankuno-ui/src/components/layout/HeaderBar.tsx` | New; extracted from the shell |
 | `rankuno-ui/src/components/jobs/CrawlJobsView.tsx` | New |
+| `rankuno-ui/src/components/jobs/CrawlNotifier.tsx` | New; completion toasts |
+| `rankuno-ui/src/components/jobs/jobs.css` | New |
+| `rankuno-ui/src/components/telemetry/UrlTicker.tsx` | New; lifted from the modal |
+| `rankuno-ui/src/lib/duration.ts` | New; clock, ETA, fetched-percent |
+| `rankuno-ui/src/lib/time.ts` | New; crawl timestamps for the selector |
+| `rankuno-ui/src/lib/url.ts` | New; shared `hostOf` |
+| `rankuno-ui/src/store/useUiStore.ts` | New; rail view, no router |
+| `rankuno-ui/src/components/layout/NavigationRail.tsx` | Crawl-jobs tab, glowing badge |
+| `rankuno-ui/src/components/layout/DashboardShell.tsx` | View switch; modal removed |
+| `rankuno-ui/src/adapters/*` | `crawledAt` carried through to the selector |
+| `rankuno-ui/src/styles/design-system.css` | Badge, pill, two-line select row |
+| `.gitignore` | `.claude/` |
 | `rankuno-ui/src/components/telemetry/LiveCrawlProgressModal.tsx` | Deleted |
 | `tests/modules/seo/test_url_rules.py` | `TestSpiderTrap`, `TestSameSite` |
 | `tests/modules/seo/test_discovery.py` | `TestSpiderTrapRefusal` |
