@@ -78,3 +78,18 @@ reports/
 # Local agent tool permissions. Machine-specific: contains absolute paths to
 # one developer's home directory, so it is not shareable.
 .claude/
+
+# A second, self-contained project tree that sits inside this working copy: it
+# has its own src/, tests/, pyproject.toml and .gitignore. It is not part of
+# this package and must never be committed here.
+#
+# `project-standards` is also the stale repo name this project was renamed away
+# from (CLAUDE.md ruling #8), so a directory of that name appearing in history
+# would be actively misleading about which repository it belongs to.
+#
+# This entry does more than keep git clean. `ruff format .` and `ruff check .`
+# in the Step 7 gate walk the whole tree, and ruff honours .gitignore — without
+# this line those 27 Python files are linted as though they were ours, and the
+# gate fails on code from another project. mypy is unaffected: it is scoped to
+# `src`.
+project-standards/
