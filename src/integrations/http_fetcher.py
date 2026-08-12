@@ -257,10 +257,18 @@ class HttpFetcher(BaseAPIClient):
         # An explicit `user_agent` always wins: an operator who named an
         # identity meant it, and silently replacing it would make the audit log
         # disagree with what was actually sent.
+        #
+        # Blank counts as "not named". `PageClassificationInput` enforces
+        # `min_length=1`, but this class is constructed directly by scripts and
+        # by future callers, and an empty token produced an empty `User-Agent`
+        # header — worse than any value, since edges reject it on sight and
+        # matching robots.txt against "" means nothing. Whitespace behaved the
+        # same way and was not caught by an equality test against the default.
+        requested = user_agent.strip()
         self._user_agent = (
             BROWSER_USER_AGENT
-            if browser_headers and user_agent == DEFAULT_USER_AGENT
-            else user_agent
+            if browser_headers and requested in {"", DEFAULT_USER_AGENT}
+            else requested or DEFAULT_USER_AGENT
         )
         self._browser_headers = browser_headers
         self._rate_limit_rps = rate_limit_rps

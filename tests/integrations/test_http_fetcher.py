@@ -377,6 +377,48 @@ class TestBrowserHeaders:
         )
         assert fetcher._respect_robots is True
 
+    @pytest.mark.parametrize("blank", ["", "   ", "	"])
+    def test_a_blank_token_is_treated_as_unset(self, settings, blank):
+        """Blank means "not named", so browser mode substitutes as it should.
+
+        `PageClassificationInput` enforces `min_length=1`, but this class is
+        constructed directly by scripts and by future callers. An empty token
+        used to reach the wire verbatim: browser mode was requested and the
+        equality test against the default did not match, so the crawl went out
+        with an empty `User-Agent` — which edges reject on sight, and which is
+        the opposite of what asking for browser mode means.
+        """
+        fetcher = HttpFetcher(
+            settings=settings,
+            user_agent=blank,
+            browser_headers=True,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._headers()["User-Agent"] == BROWSER_USER_AGENT
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_token_never_reaches_the_wire(self, settings, blank):
+        """Even without browser mode. No header at all is worse than any value.
+
+        An empty `User-Agent` is also unmatchable against robots.txt, so a crawl
+        sending one cannot honestly claim to be obeying it.
+        """
+        fetcher = HttpFetcher(
+            settings=settings,
+            user_agent=blank,
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._headers()["User-Agent"] == DEFAULT_USER_AGENT
+
+    def test_surrounding_whitespace_is_trimmed_from_a_named_token(self, settings):
+        """A pasted token carries whitespace; the wire should not."""
+        fetcher = HttpFetcher(
+            settings=settings,
+            user_agent="  AcmeAudit/1.0  ",
+            transport=httpx.MockTransport(lambda r: httpx.Response(200)),
+        )
+        assert fetcher._headers()["User-Agent"] == "AcmeAudit/1.0"
+
 
 class TestRateLimitReconciliation:
     """A declared `Crawl-delay` and a configured rate combine with `min`.

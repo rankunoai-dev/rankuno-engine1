@@ -59,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--user-agent", default="RankunoBot", help="Product token sent and matched against robots"
     )
     parser.add_argument(
+        "--browser",
+        action="store_true",
+        help="Present as a desktop browser. For edges that refuse unknown clients — some "
+        "return 403 to robots.txt itself, so the site cannot even state what it permits. "
+        "Robots compliance is unaffected: the rules matched are the ones the presented "
+        "token is given.",
+    )
+    parser.add_argument(
         "--no-dom", action="store_true", help="Skip the DOM link crawl (sitemap + CMS only)"
     )
     parser.add_argument(
@@ -165,6 +173,7 @@ def main() -> int:
         dom_reserve_fraction=args.dom_reserve,
         respect_robots=not args.ignore_robots,
         user_agent=args.user_agent,
+        browser_headers=args.browser,
     )
 
     depth_label = "unlimited depth" if args.depth is None else f"depth {args.depth}"
