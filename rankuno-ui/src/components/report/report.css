@@ -144,18 +144,31 @@
     width: auto;
   }
 
-  /* Repeat the column headers on every page, and never split a row across a
-     page break — a URL cut in half is unreadable. */
+  /* Repeat the column headers on every page. */
   .rep-tree thead {
     display: table-header-group;
   }
-  .rep-tree tr {
-    break-inside: avoid;
-    page-break-inside: avoid;
-  }
+
+  /* `break-inside: avoid` is deliberately NOT set on `.rep-tree tr`. It reads
+     as an obvious nicety and is ruinous at scale: the print engine must solve
+     a pagination constraint per row, and across 3,000 rows and ~70 pages the
+     job grew large enough that the Windows print spooler aborted it outright
+     ("Printing failed. Please check your printer"). The rows are single-line,
+     so there is almost nothing to split. The constraint is kept only for the
+     few blocks where a split genuinely destroys meaning. */
   .rep-warn,
   .rep-kpi {
     break-inside: avoid;
+  }
+
+  /* Fixed layout stops the engine measuring 3,000 rows of content to choose
+     column widths — the other half of the cost. */
+  .rep-tree {
+    table-layout: fixed;
+  }
+  .rep-tree td:first-child,
+  .rep-tree th:first-child {
+    width: 52%;
   }
 
   @page {

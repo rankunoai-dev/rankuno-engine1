@@ -35,6 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.core.schemas import ExecutionStatus  # noqa: E402
+from src.modules.seo.page_classifier.discovery import DiscoveryReport  # noqa: E402
 from src.modules.seo.page_classifier.schemas import (  # noqa: E402
     ConsensusMethod,
     ConversionRole,
@@ -314,21 +315,28 @@ def build_synthetic(
             "adaptive_enabled": False,
             "detected_profile_name": "wordpress",
         },
-        "discovery": {
-            "base_url": f"https://{host}",
-            "total_urls": len(pages),
-            "from_sitemap": int(len(pages) * 0.72),
-            "from_dom": int(len(pages) * 0.61),
-            "from_cms": int(len(pages) * 0.34),
-            "sitemap_only": int(len(pages) * 0.21),
-            "dom_only": int(len(pages) * 0.14),
-            "orphans": orphans,
-            "sitemaps_fetched": 18,
-            "pages_fetched": int(len(pages) * 0.58),
-            "truncated": True,
-            "dom_reserve": int(len(pages) * 0.2),
-            "dom_reserve_used": int(len(pages) * 0.14),
-        },
+        # Built through the model rather than as a literal dict. The literal
+        # silently omitted every field added after it was written — the fixture
+        # then disagreed with the generated TypeScript, and the dashboard blanked
+        # on the first component that read one of the missing fields. Going
+        # through `DiscoveryReport` makes that impossible: a new required field
+        # fails here instead of in a browser.
+        "discovery": DiscoveryReport(
+            base_url=f"https://{host}",
+            total_urls=len(pages),
+            from_sitemap=int(len(pages) * 0.72),
+            from_dom=int(len(pages) * 0.61),
+            from_cms=int(len(pages) * 0.34),
+            sitemap_only=int(len(pages) * 0.21),
+            dom_only=int(len(pages) * 0.14),
+            orphans=orphans,
+            sitemaps_fetched=18,
+            pages_fetched=int(len(pages) * 0.58),
+            media_skipped=int(len(pages) * 0.45),
+            truncated=True,
+            dom_reserve=int(len(pages) * 0.2),
+            dom_reserve_used=int(len(pages) * 0.14),
+        ).model_dump(mode="json"),
         "summary": {
             "pages_classified": len(pages),
             "escalated_to_llm": escalated,

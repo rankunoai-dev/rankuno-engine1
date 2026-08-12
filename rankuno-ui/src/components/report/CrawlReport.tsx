@@ -5,6 +5,20 @@ import "./report.css";
 /** Rows included in the printed tree. */
 export const REPORT_ROW_LIMIT = 3_000;
 
+/**
+ * Format a count that a saved result may predate.
+ *
+ * Job results are persisted to disk and re-read months later, so a stored
+ * result can be missing a field the current schema declares — the types
+ * describe what the *engine* emits today, not what is on disk. Calling
+ * `.toLocaleString()` on the resulting `undefined` throws, and a throw in
+ * render blanks the whole dashboard. `media_skipped` did exactly that the day
+ * it was added.
+ */
+function count(value: number | undefined): string {
+  return value === undefined ? "—" : value.toLocaleString();
+}
+
 interface Props {
   model: DashModel;
   result: PageClassificationOutput;
@@ -49,7 +63,7 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
       )}
       {discovery.truncated && (
         <p className="rep-warn">
-          Crawl stopped at its page ceiling of {discovery.total_urls.toLocaleString()} URLs.
+          Crawl stopped at its page ceiling of {count(discovery.total_urls)} URLs.
           This is a partial view of the site.
         </p>
       )}
@@ -64,23 +78,24 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
         <tbody>
           <tr>
             <th>URLs classified</th>
-            <td>{summary.pages_classified.toLocaleString()}</td>
+            <td>{count(summary.pages_classified)}</td>
             <th>Discovered</th>
-            <td>{discovery.total_urls.toLocaleString()}</td>
+            <td>{count(discovery.total_urls)}</td>
           </tr>
           <tr>
             <th>Pages fetched</th>
-            <td>{discovery.pages_fetched.toLocaleString()}</td>
+            <td>{count(discovery.pages_fetched)}</td>
             <th>Refused</th>
-            <td>{discovery.fetch_failures.toLocaleString()}</td>
+            <td>{count(discovery.fetch_failures)}</td>
           </tr>
           <tr>
             {/* Not a failure. An image sitemap listing 300 uploads is normal;
                 what is misleading is a report that counts them as pages. */}
             <th>Media skipped</th>
-            <td>{discovery.media_skipped.toLocaleString()}</td>
-            <th>Sitemaps parsed</th>
-            <td>{discovery.sitemaps_fetched.toLocaleString()}</td>
+            <td>{count(discovery.media_skipped)}</td>
+            {/* A finding about the client's site, not about the crawl. */}
+            <th>Loop URLs skipped</th>
+            <td>{count(discovery.traps_skipped)}</td>
           </tr>
           <tr>
             <th>In navigation</th>
@@ -90,20 +105,20 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
                 ` (${Math.round((inNav / coverage.total_urls) * 100)}%)`}
             </td>
             <th>OTHERS</th>
-            <td>{coverage.unmatched.toLocaleString()}</td>
+            <td>{count(coverage.unmatched)}</td>
           </tr>
           <tr>
             <th>Orphans</th>
-            <td>{summary.orphan_pages.toLocaleString()}</td>
+            <td>{count(summary.orphan_pages)}</td>
             <th>Unclassified</th>
-            <td>{summary.unknown_pages.toLocaleString()}</td>
+            <td>{count(summary.unknown_pages)}</td>
           </tr>
           <tr>
             <th>LLM spend</th>
             <td>${summary.llm_spend_usd.toFixed(2)}</td>
             <th>Escalated</th>
             <td>
-              {summary.escalated_to_llm.toLocaleString()} (
+              {count(summary.escalated_to_llm)} (
               {(summary.escalation_rate * 100).toFixed(2)}%)
             </td>
           </tr>
@@ -114,7 +129,7 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
       <p className="rep-note">
         {coverage.unmatched > 0 ? (
           <>
-            <strong>OTHERS</strong> holds {coverage.unmatched.toLocaleString()} pages no
+            <strong>OTHERS</strong> holds {count(coverage.unmatched)} pages no
             navigation path reaches — pages a visitor cannot browse to.
           </>
         ) : (
