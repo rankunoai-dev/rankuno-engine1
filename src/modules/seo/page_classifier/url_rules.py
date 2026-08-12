@@ -37,12 +37,16 @@ __all__ = [
     "TRACKING_PARAM_PREFIXES",
     "TRACKING_PARAMS",
     "depth_of",
+    "TRAP_SEGMENT_MIN_LENGTH",
     "is_crawlable_url",
     "is_faceted_filter",
+    "is_spider_trap",
     "is_locale_segment",
     "is_tracking_param",
     "normalize_path",
     "normalize_url",
+    "same_site",
+    "site_host",
     "strip_locale_prefix",
     "url_fast_path",
 ]
@@ -56,6 +60,14 @@ NON_PAGE_SUFFIXES = (
     ".svg",
     ".ico",
     ".bmp",
+    # Design sources. Never a landing page and never indexable, but WordPress
+    # media libraries publish them into `attachment-sitemap.xml` alongside the
+    # images. `.ai` is safe as a *suffix* test because it only matches a final
+    # path segment containing a dot — `/solutions/ai/` and `/ai/` are untouched,
+    # and the host is never examined, so an `.ai` domain is unaffected.
+    ".eps",
+    ".ai",
+    ".psd",
     ".css",
     ".js",
     ".json",
@@ -71,6 +83,7 @@ NON_PAGE_SUFFIXES = (
     ".mp3",
     ".avi",
     ".mov",
+    ".wmv",
     ".wav",
     ".webm",
     ".woff",
@@ -92,11 +105,13 @@ NON_PAGE_SUFFIXES = (
 crawler manifests Phase 7's answer-readiness audit reads, so excluding `.txt`
 would blind a later phase to files it specifically needs.
 
-`.pdf` is also absent, and that is a judgement rather than an oversight: a
-whitepaper or datasheet is an indexable, ranking asset, and an SEO audit that
-cannot see them is missing real surface. They do classify poorly — the pipeline
-parses HTML — so if they become noise the fix is to classify them as a document
-type, not to hide them from discovery.
+Document formats — `.pdf`, `.doc(x)`, `.xls(x)`, `.ppt(x)`, `.csv` — are
+deliberately **absent**, ruled on directly by the operator. A whitepaper, ebook
+or datasheet is an indexable B2B asset that ranks, and an audit that cannot see
+them is missing real surface. They do classify poorly, because the pipeline
+parses HTML; the answer to that is a document page type, not hiding them from
+discovery. Design *sources* are a different matter and are excluded above: an
+`.eps` is not something anyone lands on.
 
 Lives here rather than in `discovery_parsers` because it is a property of a URL
 string, and because three discovery paths need it. A second copy alongside the
@@ -357,6 +372,117 @@ def is_crawlable_url(url: str) -> bool:
     if parts is None:
         return True
     return not parts.path.lower().endswith(NON_PAGE_SUFFIXES)
+
+
+TRAP_SEGMENT_MIN_LENGTH = 3
+"""Shortest segment whose repetition is evidence of a trap.
+
+Locale and shorthand segments — `en`, `de`, `fr`, `iki`, `lp` — legitimately
+recur in a path, so only longer segments count. Measured against 55,645 real
+URLs from six sites, this threshold produced no false positive."""
+
+
+def is_spider_trap(url: str) -> bool:
+    """Report whether a URL is a self-referential crawl loop rather than a page.
+
+    A template that emits a *relative* href — `href="software/b2b-payments/"`
+    with no leading slash — resolves against whatever page it appears on. Land
+    on the result and the same href resolves again, one level deeper, forever.
+    `urljoin` is behaving correctly; the site's markup is wrong, and a crawler
+    that follows it generates URLs without limit.
+
+    This is not hypothetical. On a HighRadius crawl 21,242 of 33,447 URLs were
+    this one bug, all descending from `/software/b2b-payments/credit-card-
+    surcharge/`. They fill the page budget, and each one is fetched and
+    classified as though it were a distinct page.
+
+    Two independent triggers:
+
+    * A path segment longer than `TRAP_SEGMENT_MIN_LENGTH` appearing more than
+      once. A real path does not repeat a meaningful segment; `/en-gb/en-gb/…`
+      and `/resources/templates/templates/` are both malformed.
+    * More than `MAX_CRAWL_DEPTH` segments, which is already the ceiling beyond
+      which `url_fast_path` treats a URL as a trap rather than content. Reusing
+      that constant rather than introducing a second one keeps the two from
+      drifting apart.
+
+    Deliberately separate from `is_crawlable_url`: one is about what a URL
+    *addresses*, this is about how it was *constructed*, and counting them
+    together would make the report unable to say which problem a site has.
+
+    Args:
+        url: Absolute or relative URL.
+
+    Returns:
+        True when the URL should be refused. An unparseable URL is not a trap —
+        `safe_split` already reports it, and claiming otherwise would attribute
+        it to the wrong cause.
+    """
+    parts = safe_split(url)
+    if parts is None:
+        return False
+
+    segments = [s for s in (parts.path or "").split("/") if s]
+    if len(segments) > MAX_CRAWL_DEPTH:
+        return True
+
+    counts: dict[str, int] = {}
+    for segment in segments:
+        if len(segment) > TRAP_SEGMENT_MIN_LENGTH:
+            lowered = segment.lower()
+            counts[lowered] = counts.get(lowered, 0) + 1
+            if counts[lowered] > 1:
+                return True
+    return False
+
+
+def site_host(netloc: str) -> str:
+    """Reduce a netloc to the host that identifies the site.
+
+    Drops the port and a leading `www.`, which is a serving convention rather
+    than a different site. Every other subdomain is kept: `blog.example.com` and
+    `shop.example.com` really are separate properties, and folding them would
+    turn a bounded crawl into an unbounded one.
+
+    Args:
+        netloc: Host, optionally with port and credentials.
+
+    Returns:
+        The comparable host, lower-cased.
+    """
+    host = netloc.lower().rsplit("@", 1)[-1]
+    if host.startswith("["):
+        # A bracketed IPv6 literal is full of colons that are not the port
+        # separator. Only one after the closing bracket is.
+        closing = host.find("]")
+        host = host[: closing + 1] if closing != -1 else host
+    else:
+        host = host.split(":", 1)[0]
+    return host[4:] if host.startswith("www.") else host
+
+
+def same_site(a: str, b: str) -> bool:
+    """Whether two URLs belong to the same site.
+
+    `www.example.com` and `example.com` are one site served two ways, and an
+    exact host comparison treats them as two. That is not cosmetic: a crawl
+    seeded at the bare host reads a homepage whose links are all absolute and
+    `www`-qualified, discards every one of them as external, and reports a
+    one-page site. The reverse happens just as easily — most hosts redirect one
+    form to the other, and which form the operator types is arbitrary.
+
+    Args:
+        a: First URL.
+        b: Second URL.
+
+    Returns:
+        True when both resolve to the same site host. An unparseable URL is
+        never the same site as anything, including itself.
+    """
+    first, second = safe_split(a), safe_split(b)
+    if first is None or second is None:
+        return False
+    return site_host(first.netloc) == site_host(second.netloc)
 
 
 def normalize_url(

@@ -315,3 +315,38 @@ class TestMalformedLinkIsolation:
             '<a href="http://[2001:db8::1]/x/">v6</a>', "http://[2001:db8::1]/"
         )
         assert links == ("http://[2001:db8::1]/x/",)
+
+
+class TestWwwEquivalence:
+    """A `www` mismatch must not empty the link graph.
+
+    Real failure shape: an operator types `https://example.com`, the homepage is
+    served with absolute `https://www.example.com/...` links, and an exact host
+    comparison discards all of them. The crawl completes, reports success, and
+    finds one page.
+    """
+
+    HOME = (
+        '<a href="https://www.e.com/services/">www absolute</a>'
+        '<a href="https://e.com/about/">bare absolute</a>'
+        '<a href="/contact/">relative</a>'
+        '<a href="https://blog.e.com/post/">other subdomain</a>'
+        '<a href="https://other.com/x/">external</a>'
+    )
+
+    def test_bare_host_base_keeps_www_links(self):
+        links = extract_page_links(self.HOME, "https://e.com/")
+        assert "https://www.e.com/services/" in links
+        assert "https://e.com/about/" in links
+        assert "https://e.com/contact/" in links
+
+    def test_www_base_keeps_bare_links(self):
+        links = extract_page_links(self.HOME, "https://www.e.com/")
+        assert "https://e.com/about/" in links
+        assert "https://www.e.com/services/" in links
+
+    @pytest.mark.parametrize("base", ["https://e.com/", "https://www.e.com/"])
+    def test_other_subdomains_and_external_hosts_still_excluded(self, base):
+        links = extract_page_links(self.HOME, base)
+        assert not any("blog.e.com" in link for link in links)
+        assert not any("other.com" in link for link in links)

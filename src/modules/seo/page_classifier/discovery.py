@@ -55,6 +55,7 @@ from src.modules.seo.page_classifier.signal_parsers import CmsRecord, PageEviden
 from src.modules.seo.page_classifier.url_rules import (
     is_crawlable_url,
     is_faceted_filter,
+    is_spider_trap,
     normalize_url,
 )
 from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
@@ -271,6 +272,12 @@ class DiscoveryReport(StrictModel):
 
     Almost always a WordPress `attachment-sitemap.xml`, which lists every
     uploaded image as though it were a page."""
+    traps_skipped: int = Field(default=0, ge=0)
+    """URLs refused as self-referential crawl loops.
+
+    A finding about the site rather than the crawl: a template emitting
+    relative hrefs that resolve one level deeper each time they are followed.
+    Observed at 63% of all URLs on one live site."""
     truncated: bool = False
     stopped_reason: str | None = None
     """Why the crawl ended early, or `None` if it ran to completion.
@@ -356,6 +363,12 @@ class SiteGraph:
         this is the difference between "the sitemap listed 400 pages" and "the
         sitemap listed 400 entries, 300 of which were uploads", and a reader
         who cannot see the number has no way to tell those apart."""
+        self.traps_skipped = 0
+        """URLs refused as self-referential crawl loops.
+
+        A large number here is a finding about the *client's site*, not about
+        the crawl: it means a template emits relative hrefs that resolve one
+        level deeper every time they are followed. Worth reporting to them."""
 
     def __len__(self) -> int:
         """Node count."""
@@ -399,6 +412,13 @@ class SiteGraph:
         # graph with no explanation in it.
         if url != self.base_url and not is_crawlable_url(url):
             self.media_skipped += 1
+            return None
+
+        # Counted separately from media: a site drowning in loop artefacts has a
+        # broken template, and a site full of image URLs has a media sitemap.
+        # One number covering both would name neither.
+        if url != self.base_url and is_spider_trap(url):
+            self.traps_skipped += 1
             return None
 
         key = normalize_url(url)
@@ -529,6 +549,7 @@ class SiteGraph:
             orphans=sum(1 for n in nodes if n.is_orphan),
             fetch_failures=self.fetch_failures,
             media_skipped=self.media_skipped,
+            traps_skipped=self.traps_skipped,
             truncated=self.truncated,
             stopped_reason=self.stopped_reason,
         )

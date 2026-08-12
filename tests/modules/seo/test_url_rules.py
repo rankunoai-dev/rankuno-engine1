@@ -12,10 +12,13 @@ from src.modules.seo.page_classifier.url_rules import (
     depth_of,
     is_crawlable_url,
     is_faceted_filter,
+    is_spider_trap,
     is_tracking_param,
     normalize_path,
     normalize_url,
     safe_split,
+    same_site,
+    site_host,
     strip_locale_prefix,
     url_fast_path,
 )
@@ -270,6 +273,11 @@ class TestIsCrawlableUrl:
             "https://e.com/demo.mp4",
             "https://e.com/press-kit.zip",
             "https://e.com/font.woff2",
+            # Design sources. WordPress media libraries publish these into
+            # `attachment-sitemap.xml` beside the images.
+            "https://e.com/uploads/logo.eps",
+            "https://e.com/uploads/brand.ai",
+            "https://e.com/uploads/mockup.psd",
         ],
     )
     def test_media_is_refused(self, url):
@@ -290,8 +298,17 @@ class TestIsCrawlableUrl:
             "https://e.com/about.htm",
             # `.txt` stays: `llms.txt` is a Phase 7 input.
             "https://e.com/llms.txt",
-            # `.pdf` stays: a whitepaper is a ranking asset.
+            # Documents stay: a whitepaper is an indexable B2B asset, ruled on
+            # by the operator in cycle 0020.
             "https://e.com/whitepaper.pdf",
+            "https://e.com/datasheet.docx",
+            "https://e.com/pricing.xlsx",
+            "https://e.com/deck.pptx",
+            # `.ai` as a *section*, not a file. These must survive: an AI
+            # practice page is exactly the sort of thing this site publishes.
+            "https://e.com/ai/",
+            "https://e.com/solutions/ai/",
+            "https://e.com/solutions/ai",
         ],
     )
     def test_pages_are_kept(self, url):
@@ -305,3 +322,111 @@ class TestIsCrawlableUrl:
     def test_an_unparseable_url_is_not_refused_here(self):
         """It is not media, and it should reach the reporting that surfaces it."""
         assert is_crawlable_url("http://[abc") is True
+
+
+class TestSameSite:
+    """`www` is a serving convention, not a different site.
+
+    An exact host comparison made a crawl seeded at the bare host discard every
+    absolute link on its own homepage — most sites emit `www`-qualified ones —
+    and report a one-page site.
+    """
+
+    @pytest.mark.parametrize(
+        ("netloc", "expected"),
+        [
+            ("www.example.com", "example.com"),
+            ("example.com", "example.com"),
+            ("WWW.Example.COM", "example.com"),
+            ("example.com:8443", "example.com"),
+            ("user:pw@www.example.com", "example.com"),
+            ("[::1]:8000", "[::1]"),
+            # Not a `www.` prefix, and must not be truncated as one.
+            ("wwwx.example.com", "wwwx.example.com"),
+        ],
+    )
+    def test_site_host(self, netloc, expected):
+        assert site_host(netloc) == expected
+
+    def test_www_and_bare_host_are_one_site(self):
+        assert same_site("https://e.com/a/", "https://www.e.com/b/") is True
+
+    def test_other_subdomains_stay_separate(self):
+        """Folding them would turn a bounded crawl into an unbounded one."""
+        assert same_site("https://e.com/a/", "https://blog.e.com/b/") is False
+        assert same_site("https://www.e.com/a/", "https://shop.e.com/b/") is False
+
+    def test_different_domains_are_not_the_same_site(self):
+        assert same_site("https://e.com/a/", "https://other.com/a/") is False
+
+    def test_scheme_and_port_do_not_split_a_site(self):
+        assert same_site("http://e.com/a/", "https://e.com:443/b/") is True
+
+    def test_an_unparseable_url_matches_nothing(self):
+        assert same_site("http://[abc", "https://e.com/") is False
+        assert same_site("http://[abc", "http://[abc") is False
+
+
+class TestSpiderTrap:
+    """Self-referential loops from relative hrefs.
+
+    Every URL below is real, taken from stored crawls. The heuristic was chosen
+    by measuring it against 55,645 URLs from six sites: it flagged 21,242 of
+    33,447 on highradius.com, 11 of 17,458 on infosys.com, and none at all on
+    rankuno.com, gep.com or caeliusconsulting.com. Each of the 11 infosys hits
+    was itself malformed, so the measured false-positive count was zero.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # The originating bug: `href="software/b2b-payments/..."` with no
+            # leading slash, resolving one level deeper on every hop.
+            "https://www.highradius.com/resources/Blog/b2b-payments"
+            "/software/b2b-payments/credit-card-surcharge/",
+            "http://www.highradius.com/product/financial-reporting/software"
+            "/record-to-report/software/record-to-report/financial-reporting",
+            # A doubled locale prefix.
+            "https://www.highradius.com/en-gb/en-gb/value-creation/konica-minolta-treasury/",
+            # A doubled listing segment.
+            "https://www.highradius.com/resources/templates/templates/",
+            # A truncated href produced this on infosys.com.
+            "https://www.infosys.com/content/infosys-web/en/content/infosys-web/en/services/cloud",
+        ],
+    )
+    def test_real_traps_are_refused(self, url):
+        assert is_spider_trap(url) is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://e.com/",
+            "https://www.highradius.com/software/order-to-cash/credit-cloud/",
+            "https://www.gep.com/software/procurement/source-to-pay/",
+            "https://www.infosys.com/services/engineering-services/insights/",
+            # Short segments recur legitimately and must not count: a locale
+            # under a locale-scoped section, an `lp` landing-page prefix.
+            "https://e.com/en/products/en/",
+            "https://e.com/lp/demo/lp/",
+            # Distinct segments that merely share a prefix are not repeats.
+            "https://e.com/blog/blog-post-title/",
+            "https://e.com/press/press-releases/press-release-2026/",
+        ],
+    )
+    def test_real_pages_are_kept(self, url):
+        assert is_spider_trap(url) is False
+
+    def test_depth_ceiling_is_the_shared_constant(self):
+        """Reuses `MAX_CRAWL_DEPTH` so a second ceiling cannot drift from it."""
+        deep = "https://e.com/" + "/".join(f"s{i}" for i in range(MAX_CRAWL_DEPTH + 1)) + "/"
+        assert is_spider_trap(deep) is True
+        shallow = "https://e.com/" + "/".join(f"s{i}" for i in range(MAX_CRAWL_DEPTH)) + "/"
+        assert is_spider_trap(shallow) is False
+
+    def test_repetition_is_case_insensitive(self):
+        """`/Blog/blog/` is the same segment twice however it was cased."""
+        assert is_spider_trap("https://e.com/Templates/templates/") is True
+
+    def test_an_unparseable_url_is_not_blamed_on_a_trap(self):
+        """`safe_split` already reports it; this must not misattribute it."""
+        assert is_spider_trap("http://[abc") is False

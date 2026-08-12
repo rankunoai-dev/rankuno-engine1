@@ -111,6 +111,7 @@ def _print_report(output: PageClassificationOutput, elapsed: float) -> None:
     print(f"  sitemaps parsed    {discovery.sitemaps_fetched}")
     print(f"  pages fetched      {discovery.pages_fetched}")
     print(f"  media skipped      {discovery.media_skipped}   (images/assets, not pages)")
+    print(f"  loop URLs skipped  {discovery.traps_skipped}   (relative-href crawl traps)")
     print(f"  truncated          {discovery.truncated}")
 
     exhausted = discovery.dom_reserve and discovery.dom_reserve_used >= discovery.dom_reserve

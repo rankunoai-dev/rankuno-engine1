@@ -42,7 +42,7 @@ from pydantic import Field
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord
-from src.modules.seo.page_classifier.url_rules import is_crawlable_url, safe_split
+from src.modules.seo.page_classifier.url_rules import is_crawlable_url, safe_split, site_host
 
 __all__ = [
     "MAX_SITEMAP_ENTRIES",
@@ -269,8 +269,10 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
     Args:
         html: Raw page HTML.
         base_url: Absolute URL of the page, used to resolve relative links.
-        same_host_only: Drop links leaving the host. External links are not part
+        same_host_only: Drop links leaving the site. External links are not part
             of the site graph and following them would be an unbounded crawl.
+            `www.example.com` and `example.com` count as one site; any other
+            subdomain does not.
 
     Returns:
         Absolute URLs, de-duplicated and order-preserved.
@@ -288,7 +290,7 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
         _logger.debug("link_extraction_partial", extra={"url": base_url, "error": str(exc)})
 
     base_split = safe_split(base_url)
-    base_host = base_split.netloc.lower() if base_split else ""
+    base_host = site_host(base_split.netloc) if base_split else ""
     found: dict[str, None] = {}
 
     for href in collector.hrefs:
@@ -307,7 +309,10 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
             continue
         if parts.scheme not in {"http", "https"}:
             continue
-        if same_host_only and parts.netloc.lower() != base_host:
+        # `site_host` on both sides, so a `www`-qualified absolute link on a
+        # page reached at the bare host is not discarded as external. Every
+        # other subdomain still is.
+        if same_host_only and site_host(parts.netloc) != base_host:
             continue
         if not is_crawlable_url(absolute):
             continue

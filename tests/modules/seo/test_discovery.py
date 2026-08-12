@@ -568,3 +568,45 @@ class TestNonPageFiltering:
         # index + two children
         assert report.sitemaps_fetched == 3
         assert report.from_sitemap == 2
+
+
+class TestSpiderTrapRefusal:
+    """Loop artefacts must not occupy the page budget.
+
+    On a live highradius.com crawl these were 63% of every URL found. Each one
+    was fetched and classified as a distinct page, so the budget bought
+    duplicates of a handful of real ones.
+    """
+
+    TRAP = "https://e.com/resources/blog/b2b-payments/software/b2b-payments/credit-card-surcharge/"
+
+    def test_the_graph_refuses_a_trap_from_any_path(self):
+        graph = SiteGraph("https://e.com")
+        assert graph.add(self.TRAP, sitemap=True) is None
+        assert graph.add(self.TRAP, dom_link=True) is None
+        assert len(graph) == 0
+        assert graph.traps_skipped == 2
+
+    def test_traps_are_counted_apart_from_media(self):
+        """One number for both would name neither problem."""
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/hero.jpg", sitemap=True)
+        graph.add(self.TRAP, dom_link=True)
+        assert graph.media_skipped == 1
+        assert graph.traps_skipped == 1
+
+    def test_refusing_a_trap_is_not_recorded_as_truncation(self):
+        graph = SiteGraph("https://e.com")
+        graph.add(self.TRAP, dom_link=True)
+        assert graph.truncated is False
+
+    def test_ordinary_deep_pages_still_enter(self):
+        graph = SiteGraph("https://e.com")
+        deep = "https://e.com/software/order-to-cash/credit-cloud/features/"
+        assert graph.add(deep, dom_link=True) is not None
+        assert graph.traps_skipped == 0
+
+    def test_the_report_carries_the_count(self):
+        graph = SiteGraph("https://e.com")
+        graph.add(self.TRAP, dom_link=True)
+        assert graph.report().traps_skipped == 1
