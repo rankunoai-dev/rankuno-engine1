@@ -272,3 +272,181 @@ class TestDecorativeAnchors:
     def test_a_real_label_is_never_replaced_by_its_url(self):
         html = "<nav><ul><li><a href='/company/'>Company</a></li></ul></nav>"
         assert labels(parse_navigation(html, BASE)) == ["Company"]
+
+
+# Anthropic's header, reduced to the structure that matters. Taken verbatim in
+# shape from the live page: the tab that opens a dropdown is not a link, not a
+# `<button>`, and carries no `role` or `aria-haspopup` — it is nested `<div>`s.
+# The dropdown panel is its own `<nav>` inside the tab's `<li>`.
+WEBFLOW_DROPDOWN = """
+<header>
+  <a href="/" class="logo"><div class="logo_lottie"></div></a>
+  <nav role="navigation" class="nav_desktop_layout">
+    <ul role="list" class="nav_links_wrap">
+      <li><a href="/research"><div class="nav_links_text">Research</div></a></li>
+      <li><a href="/policy"><div class="nav_links_text">Policy</div></a></li>
+      <li>
+        <div class="nav_dropdown_component w-dropdown">
+          <div class="nav_links_link w-dropdown-toggle">
+            <div class="nav_links_text">Commitments</div>
+            <div class="nav_links_svg"><svg viewBox="0 0 12 24"></svg></div>
+          </div>
+          <nav class="nav_dropdown_main_wrap w-dropdown-list">
+            <div class="nav_dropdown_main_content">
+              <div class="nav_dropdown_eyebrow">Initiatives</div>
+              <ul role="list">
+                <li><a href="/constitution"><div>Constitution</div></a></li>
+                <li><a href="/transparency"><div>Transparency</div></a></li>
+              </ul>
+            </div>
+          </nav>
+        </div>
+      </li>
+      <li><a href="/news"><div class="nav_links_text">News</div></a></li>
+      <li class="nav_buttons_item">
+        <div class="btn_main_wrap">
+          <a href="https://claude.ai/login" data-cta="">Log in to Claude</a>
+        </div>
+      </li>
+      <li>
+        <div class="w-locales-item"><a href="#">This is some text inside of a div block.</a></div>
+      </li>
+    </ul>
+  </nav>
+</header>
+"""
+
+
+class TestNonLinkDropdownTabs:
+    """A top tab that opens a dropdown is often not a link at all.
+
+    Before this, the tab produced no node, and `_build_tree` attached its whole
+    dropdown to the previous tab that did. On anthropic.com that put
+    `Transparency`, `Claude's Constitution` and eleven other pages under
+    `Policy`, and lost the `Commitments`, `Learn` and `Company` tabs entirely.
+
+    The live page has no `<button>`, no `role="button"`, no `role="menuitem"`
+    and no `aria-haspopup` anywhere in its header — the tab is three nested
+    `<div>`s. Anything keyed to those attributes would not have fired.
+    """
+
+    def test_an_unlinked_tab_becomes_a_root(self):
+        tree = parse_navigation(WEBFLOW_DROPDOWN, BASE)
+        # `Home` is the logo anchor, named from its URL because its only content
+        # is an image. Asserted rather than filtered out: a logo inside the
+        # header does become a top-level entry, and that is worth stating so a
+        # later reader is not surprised by it. On the live page the logo sits
+        # outside the nav container, so it does not appear there.
+        assert [root.label for root in tree.roots] == [
+            "Home",
+            "Research",
+            "Policy",
+            "Commitments",
+            "News",
+        ]
+
+    def test_dropdown_children_stay_under_their_own_tab(self):
+        """The reported defect: `Transparency` sat under `Policy`."""
+        tree = parse_navigation(WEBFLOW_DROPDOWN, BASE)
+        by_label = {root.label: root for root in tree.roots}
+
+        assert by_label["Policy"].children == ()
+        urls = {node.url for node in by_label["Commitments"].walk() if node.url}
+        assert urls == {"https://e.com/constitution", "https://e.com/transparency"}
+
+    def test_a_dropdown_group_heading_is_a_level_below_the_tab(self):
+        """`Initiatives` labels a group *inside* Commitments, not beside it.
+
+        It sits at the same list depth as the tabs — only the nested `<nav>`
+        distinguishes them — so without that signal it became a sibling tab and
+        stole the children the tab should have had.
+        """
+        tree = parse_navigation(WEBFLOW_DROPDOWN, BASE)
+        commitments = next(r for r in tree.roots if r.label == "Commitments")
+        assert [child.label for child in commitments.children] == ["Initiatives"]
+        assert commitments.children[0].depth == 1
+        assert [node.label for node in commitments.children[0].children] == [
+            "Constitution",
+            "Transparency",
+        ]
+
+    def test_an_anchor_wrapping_a_div_keeps_its_href(self):
+        """`</div>` inside an open anchor must not close it and strip the URL."""
+        tree = parse_navigation(WEBFLOW_DROPDOWN, BASE)
+        research = next(r for r in tree.roots if r.label == "Research")
+        assert research.url == "https://e.com/research"
+
+
+class TestUnlinkedLeafPruning:
+    """An unlinked node earns its place by naming the section its children sit in.
+
+    One with no children reaches nothing and groups nothing. Pruning them is
+    what makes accepting `<div>` labels safe: a header carries far more unlinked
+    text than menu structure.
+    """
+
+    def test_off_host_call_to_action_is_not_a_section(self):
+        labels = {r.label for r in parse_navigation(WEBFLOW_DROPDOWN, BASE).roots}
+        assert "Log in to Claude" not in labels
+
+    def test_a_fragment_only_placeholder_is_not_a_section(self):
+        """An unfilled Webflow locale switcher, observed live on anthropic.com."""
+        labels = {r.label for r in parse_navigation(WEBFLOW_DROPDOWN, BASE).roots}
+        assert "This is some text inside of a div block." not in labels
+
+    def test_a_heading_with_children_survives(self):
+        labels = {r.label for r in parse_navigation(WEBFLOW_DROPDOWN, BASE).roots}
+        assert "Commitments" in labels
+
+    def test_a_heading_whose_children_were_all_pruned_is_pruned_too(self):
+        """Bottom-up, or an empty wrapper survives its emptied contents."""
+        html = """
+        <header><nav><ul>
+          <li><a href="/real/">Real</a></li>
+          <li><div class="toggle"><div>Ghost</div></div>
+            <nav><ul><li><a href="#">nothing</a></li></ul></nav>
+          </li>
+        </ul></nav></header>
+        """
+        assert [r.label for r in parse_navigation(html, BASE).roots] == ["Real"]
+
+
+class TestDuplicateMenuSuppression:
+    """Most sites render the menu twice, once for desktop and once for mobile."""
+
+    def test_a_repeated_menu_does_not_double_the_tabs(self):
+        one = """
+          <nav><ul>
+            <li><div class="toggle"><div>Commitments</div></div>
+              <nav><ul><li><a href="/transparency">Transparency</a></li></ul></nav>
+            </li>
+          </ul></nav>
+        """
+        tree = parse_navigation("<header>" + one + one + "</header>", BASE)
+        assert [root.label for root in tree.roots] == ["Commitments"]
+
+
+class TestNavNestingDoesNotShiftDepth:
+    """Only a nav opened *inside a list* is a dropdown.
+
+    `<header><nav>` wraps the entire menu and opens before any list. Counting it
+    would push every top tab to depth 1 and leave the tree with no roots at all.
+    """
+
+    def test_header_wrapping_nav_leaves_tabs_at_depth_zero(self):
+        html = """
+        <header><nav><ul>
+          <li><a href="/a/">A</a></li>
+          <li><a href="/b/">B</a></li>
+        </ul></nav></header>
+        """
+        tree = parse_navigation(html, BASE)
+        assert [root.depth for root in tree.roots] == [0, 0]
+
+    def test_depth_stays_within_the_ceiling(self):
+        deep = "<header><nav><ul><li><div><div>T</div></div>"
+        deep += "<nav><ul><li><div>G</div><ul><li><div>S</div>"
+        deep += '<ul><li><a href="/x/">X</a></li></ul></li></ul></li></ul></nav>'
+        deep += "</li></ul></nav></header>"
+        tree = parse_navigation(deep, BASE)
+        assert all(node.depth < MAX_NAV_DEPTH for root in tree.roots for node in root.walk())

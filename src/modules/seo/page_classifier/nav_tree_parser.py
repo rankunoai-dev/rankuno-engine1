@@ -69,12 +69,27 @@ of entries is a parse failure, not a menu.
 _NAV_TAGS = frozenset({"nav", "header"})
 _LIST_TAGS = frozenset({"ul", "ol", "dl"})
 
-_HEADING_TAGS = frozenset({"span", "strong", "h2", "h3", "h4", "h5", "h6"})
-"""Tags that carry an unlinked mega-menu section heading.
+_HEADING_TAGS = frozenset(
+    {"span", "strong", "h2", "h3", "h4", "h5", "h6", "div", "button", "summary"}
+)
+"""Tags that can carry an unlinked mega-menu section heading.
 
-Only honoured inside a list item and outside an anchor. Unrestricted, this would
-also capture the logo text and the icon `<span>`s that live inside menu links —
-the list constraint is what keeps it to menu structure."""
+Only honoured inside a list and outside an anchor. Unrestricted, this would also
+capture the logo text and the icon `<span>`s that live inside menu links — the
+list constraint is what keeps it to menu structure.
+
+`div` and `button` are here because a top tab that opens a dropdown is very
+often not a link at all. Anthropic's `Commitments` tab is
+`<div class="w-dropdown-toggle"><div>Commitments</div></div>` — no anchor, no
+`role`, no `aria-haspopup`. Without a node for it, `_build_tree` attached its
+whole dropdown to the previous tab, which is how `Transparency` came to sit
+under `Policy`.
+
+Admitting `div` is only safe alongside two other rules in this module: an inner
+candidate replaces an outer one, so the innermost text-bearing element wins
+rather than a wrapper swallowing the entire dropdown; and unlinked leaves are
+pruned, so the CTA and placeholder text that this inevitably also catches does
+not survive as a section."""
 _SKIP_HREF_PREFIXES = ("#", "javascript:", "mailto:", "tel:", "data:", "sms:")
 
 _WHITESPACE = re.compile(r"\s+")
@@ -173,9 +188,30 @@ class _NavCollector(HTMLParser):
         self._nav_depth = 0
         self._footer_depth = 0
         self._list_depth = 0
+        self._dropdown_depth = 0
+        """Nested nav containers opened *inside* a list item.
+
+        A dropdown panel is frequently its own `<nav>` inside the `<li>` of the
+        tab that opens it, and its group headings then sit at the same list
+        depth as the tabs themselves. Counting only navs opened inside a list is
+        what separates the two: `<header><nav>` wraps the whole menu and opens
+        before any list, so it must not shift every tab down a level."""
+        self._nav_stack: list[bool] = []
+        """Whether each open `<nav>`/`<header>` counted as a dropdown.
+
+        Only these two tags are tracked. An element carrying
+        `role="navigation"` still gates parsing as before, but is not counted
+        here: matching its close would need a full element stack, and getting
+        that wrong would mis-depth an entire menu."""
         self._current: list[str] | None = None
         self._current_href: str | None = None
         self._current_depth = 0
+        self._anchor_open = False
+        """Whether the open candidate is an `<a>`.
+
+        Tracked separately because an unlinked candidate may be replaced by a
+        nested one and an anchor may not: `<a><div>Research</div></a>` must
+        record the anchor with its href, not a bare `div` that has lost it."""
 
     @property
     def _inside_header_nav(self) -> bool:
@@ -192,6 +228,13 @@ class _NavCollector(HTMLParser):
         if tag in _NAV_TAGS or mapping.get("role") == "navigation":
             if self._nav_depth == 0 and self._footer_depth == 0:
                 self.containers += 1
+            if tag in _NAV_TAGS:
+                counted = self._inside_header_nav and self._list_depth > 0
+                self._nav_stack.append(counted)
+                if counted:
+                    # A dropdown panel. Everything inside it belongs under the
+                    # tab that opens it, not beside that tab.
+                    self._dropdown_depth += 1
             self._nav_depth += 1
             return
 
@@ -203,7 +246,14 @@ class _NavCollector(HTMLParser):
         elif tag == "a":
             self._finish_anchor()
             self._open(mapping.get("href") or None)
-        elif tag in _HEADING_TAGS and self._current is None and self._list_depth > 0:
+            self._anchor_open = True
+        elif tag in _HEADING_TAGS and not self._anchor_open and self._list_depth > 0:
+            # Replaces any open *unlinked* candidate rather than being ignored.
+            # A dropdown toggle is commonly three nested wrappers deep
+            # (`w-dropdown` > `w-dropdown-toggle` > text), and keeping the
+            # outermost would swallow the entire dropdown into one label —
+            # "Commitments Initiatives Claude's Constitution …". The innermost
+            # text-bearing element is the one that holds the tab name.
             self._open(None)
 
     def handle_endtag(self, tag: str) -> None:
@@ -212,13 +262,20 @@ class _NavCollector(HTMLParser):
             self._footer_depth = max(0, self._footer_depth - 1)
             return
         if tag in _NAV_TAGS:
+            self._finish_anchor()
             self._nav_depth = max(0, self._nav_depth - 1)
+            if self._nav_stack and self._nav_stack.pop():
+                self._dropdown_depth = max(0, self._dropdown_depth - 1)
             return
         if not self._inside_header_nav:
             return
         if tag in _LIST_TAGS:
             self._list_depth = max(0, self._list_depth - 1)
-        elif tag == "a" or tag in _HEADING_TAGS:
+        elif tag == "a":
+            self._finish_anchor()
+        elif tag in _HEADING_TAGS and not self._anchor_open:
+            # Guarded: `</div>` inside an open anchor must not close the anchor
+            # early and strip its href.
             self._finish_anchor()
 
     def handle_data(self, data: str) -> None:
@@ -230,7 +287,7 @@ class _NavCollector(HTMLParser):
         """Begin capturing a menu entry at the current list depth."""
         self._current = []
         self._current_href = href
-        self._current_depth = max(0, self._list_depth - 1)
+        self._current_depth = self._dropdown_depth + max(0, self._list_depth - 1)
 
     def _finish_anchor(self) -> None:
         if self._current is None:
@@ -244,6 +301,7 @@ class _NavCollector(HTMLParser):
             self.entries.append((self._current_depth, label, self._current_href))
         self._current = None
         self._current_href = None
+        self._anchor_open = False
 
 
 def _label_from_url(url: str) -> str:
@@ -314,6 +372,37 @@ def _build_tree(entries: list[tuple[int, str, str | None]]) -> tuple[NavNode, ..
 
     collapse(0)
     return tuple(roots)
+
+
+def _prune_unlinked_leaves(nodes: tuple[NavNode, ...]) -> tuple[NavNode, ...]:
+    """Drop nodes that neither link anywhere nor group anything.
+
+    An unlinked node earns its place by being a *heading*: it names the section
+    its children sit in. One with no children names nothing and reaches nothing,
+    so it is noise however it was produced.
+
+    This is what makes accepting `<div>` and `<button>` labels safe. A header
+    carries far more unlinked text than menu structure, and on anthropic.com the
+    rejected set is instructive: `Try Claude`, `Log in to Claude` and
+    `Download app` are call-to-action buttons pointing off-host, and `This is
+    some text inside of a div block.` is an unfilled Webflow locale-switcher
+    placeholder behind `href="#"`. Every one of them was surfacing as a
+    top-level section.
+
+    It also removes the mobile menu's duplicate tabs for free. A site that
+    renders its menu twice has its second copy's links dropped by URL
+    de-duplication, which leaves those headings childless.
+
+    Bottom-up, so a heading whose only children were themselves pruned is pruned
+    in the same pass.
+    """
+    kept: list[NavNode] = []
+    for node in nodes:
+        children = _prune_unlinked_leaves(node.children)
+        if node.url is None and not children:
+            continue
+        kept.append(node.model_copy(update={"children": children}))
+    return tuple(kept)
 
 
 def _parse_jsonld_navigation(html: str, base_url: str, base_host: str) -> tuple[NavNode, ...]:
@@ -416,8 +505,8 @@ def parse_navigation(html: str, base_url: str) -> NavigationTree:
             label = _label_from_url(url)
         resolved.append((depth, label, url))
 
-    if resolved:
-        roots = _build_tree(resolved)
+    roots = _prune_unlinked_leaves(_build_tree(resolved)) if resolved else ()
+    if roots:
         return NavigationTree(
             roots=roots,
             source=NavSource(
