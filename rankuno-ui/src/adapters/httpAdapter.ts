@@ -115,6 +115,10 @@ export class HttpAdapter implements CrawlDataAdapter {
       pagesClassified: cached?.summary.pages_classified ?? 0,
       truncated: record.status === "partial",
       synthetic: false,
+      // `started_at` is when the crawl actually began; `created_at` is when it
+      // was accepted. They differ when a job waits behind the concurrency cap,
+      // and a queued job has no start time at all — hence the fallback.
+      crawledAt: record.started_at ?? record.created_at,
       recoverable: record.has_checkpoint && !record.has_result,
     };
   }

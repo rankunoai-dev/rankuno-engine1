@@ -29,6 +29,14 @@ export interface CrawlJobSummary {
   /** Generated rather than crawled. Never quote a synthetic run as evidence. */
   synthetic: boolean;
   /**
+   * When the crawl started, ISO-8601, or null if the source recorded none.
+   *
+   * Nullable rather than defaulted to "now": a bundled fixture was never
+   * crawled, and giving it a timestamp would make generated data look like a
+   * run that happened.
+   */
+  crawledAt: string | null;
+  /**
    * Partial work survived an interruption and can be rendered.
    *
    * Only meaningful when there is no full result: a finished crawl needs no

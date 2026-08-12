@@ -1,7 +1,7 @@
-import { FilePdfOutlined } from "@ant-design/icons";
-import { Alert, Button, Select, Segmented, Space } from "antd";
+import { Alert, Button, Space } from "antd";
 import { useEffect, useMemo } from "react";
 import { buildDashModel, EMPTY_MODEL } from "../../lib/dashboardModel";
+import { ErrorBoundary } from "../ErrorBoundary";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useDashboardStore } from "../../store/useDashboardStore";
 import { FocusGraphStage } from "../graph/FocusGraphStage";
@@ -11,9 +11,12 @@ import { LevelFilterRow } from "../tree/LevelFilterRow";
 import { TeleportSearch } from "../tree/TeleportSearch";
 import { VirtualizedTree } from "../tree/VirtualizedTree";
 import { CrawlReport } from "../report/CrawlReport";
-import { LiveCrawlProgressModal } from "../telemetry/LiveCrawlProgressModal";
+import { CrawlJobsView } from "../jobs/CrawlJobsView";
+import { CrawlNotifier } from "../jobs/CrawlNotifier";
+import { HeaderBar } from "./HeaderBar";
 import { LiveCrawlModal } from "./LiveCrawlModal";
 import { NavigationRail } from "./NavigationRail";
+import { useUiStore } from "../../store/useUiStore";
 import { useState } from "react";
 
 /**
@@ -29,13 +32,10 @@ export function DashboardShell(): JSX.Element {
   const result = useCrawlStore((state) => state.result);
   const jobs = useCrawlStore((state) => state.jobs);
   const activeJobId = useCrawlStore((state) => state.activeJobId);
-  const selectJob = useCrawlStore((state) => state.selectJob);
   const grouping = useCrawlStore((state) => state.grouping);
-  const setGrouping = useCrawlStore((state) => state.setGrouping);
-  const adapter = useCrawlStore((state) => state.adapter);
   const status = useCrawlStore((state) => state.status);
   const error = useCrawlStore((state) => state.error);
-  const liveMessage = useCrawlStore((state) => state.liveMessage);
+  const view = useUiStore((state) => state.view);
 
   const loadCheckpoint = useCrawlStore((state) => state.loadCheckpoint);
   const setModel = useDashboardStore((state) => state.setModel);
@@ -68,65 +68,19 @@ export function DashboardShell(): JSX.Element {
         <NavigationRail />
 
         <div className="rk-app">
-          <header className="hdr">
-            <h1>
-              Rankuno Engine{" "}
-              <span>— {result ? result.base_url : "no crawl loaded"}</span>
-            </h1>
-
-            <Space size={8}>
-              <Select
-                size="small"
-                style={{ minWidth: 240 }}
-                value={activeJobId ?? undefined}
-                onChange={selectJob}
-                placeholder="Select a crawl"
-                options={jobs.map((job) => ({ value: job.id, label: job.label }))}
-              />
-              {adapter?.startJob !== undefined && (
-                <Button
-                  size="small"
-                  type="primary"
-                  loading={status === "running" || status === "queued"}
-                  onClick={() => setCrawlOpen(true)}
-                >
-                  New crawl
-                </Button>
-              )}
-              {result && (
-                <Button
-                  size="small"
-                  icon={<FilePdfOutlined />}
-                  onClick={() => {
-                    // Stamped before printing so the report carries the moment it
-                    // was produced, not the moment it is read.
-                    setPrintedAt(new Date());
-                    // One frame, so React has committed the report before the
-                    // browser snapshots the page for printing.
-                    requestAnimationFrame(() => window.print());
-                  }}
-                >
-                  PDF
-                </Button>
-              )}
-              <Segmented
-                size="small"
-                value={grouping}
-                onChange={(value) => setGrouping(value as "navigation" | "path")}
-                options={[
-                  { label: "Navigation", value: "navigation", disabled: !navParsed },
-                  { label: "URL path", value: "path" },
-                ]}
-              />
-            </Space>
-
-            <div className={`perf${discovery?.truncated ? " stale" : ""}`}>
-              {liveMessage ??
-                (result
-                  ? `${model.nodes.length.toLocaleString()} nodes · virtual list`
-                  : status.toUpperCase())}
-            </div>
-          </header>
+          <HeaderBar
+            nodeCount={model.nodes.length}
+            navParsed={navParsed}
+            onNewCrawl={() => setCrawlOpen(true)}
+            onPrint={() => {
+              // Stamped before printing so the report carries the moment it was
+              // produced, not the moment it is read.
+              setPrintedAt(new Date());
+              // One frame, so React has committed the report before the browser
+              // snapshots the page for printing.
+              requestAnimationFrame(() => window.print());
+            }}
+          />
 
           {error && (
             <Alert
@@ -151,7 +105,12 @@ export function DashboardShell(): JSX.Element {
             />
           )}
 
-          {active?.synthetic && (
+          {/* Everything below describes the *loaded result*, so it belongs to
+              the visualizer. The error banner above stays on both, because a
+              rejected submission has no job row to be reported against. */}
+          {view === "jobs" && <CrawlJobsView />}
+
+          {view === "visualizer" && active?.synthetic && (
             <Alert
               type="warning"
               banner
@@ -160,7 +119,7 @@ export function DashboardShell(): JSX.Element {
             />
           )}
 
-          {discovery && discovery.pages_fetched === 0 && (
+          {view === "visualizer" && discovery && discovery.pages_fetched === 0 && (
             <Alert
               type="error"
               banner
@@ -176,7 +135,7 @@ export function DashboardShell(): JSX.Element {
           {/* Distinct from truncation. Truncated means the crawl stopped at a
               ceiling it was told about; this means it was abandoned, and there is
               no way to know how much of the site is missing. */}
-          {discovery?.stopped_reason && (
+          {view === "visualizer" && discovery?.stopped_reason && (
             <Alert
               type="warning"
               banner
@@ -185,7 +144,7 @@ export function DashboardShell(): JSX.Element {
             />
           )}
 
-          {discovery?.truncated && (
+          {view === "visualizer" && discovery?.truncated && (
             <Alert
               type="warning"
               banner
@@ -194,7 +153,7 @@ export function DashboardShell(): JSX.Element {
             />
           )}
 
-          {grouping === "navigation" && !navParsed && result && (
+          {view === "visualizer" && grouping === "navigation" && !navParsed && result && (
             <Alert
               type="info"
               banner
@@ -203,6 +162,7 @@ export function DashboardShell(): JSX.Element {
             />
           )}
 
+          {view === "visualizer" && (
           <div className="rk-body">
             {result ? (
               <>
@@ -251,21 +211,27 @@ export function DashboardShell(): JSX.Element {
               </div>
             )}
           </div>
+          )}
         </div>
 
         <LiveCrawlModal open={crawlOpen} onClose={() => setCrawlOpen(false)} />
-        <LiveCrawlProgressModal />
+        {/* Renders nothing. Announces background crawls as they finish, from
+            above the view switch so a crawl that ends while the operator is on
+            the jobs tab is still offered. */}
+        <CrawlNotifier />
       </div>
 
       {/* Always mounted, revealed only by `@media print`. The on-screen tree is
           virtualized, so printing the page would capture the ~25 rows that
           happen to be in the DOM. */}
       {result && model.nodes.length > 0 && (
-        <CrawlReport
-          model={model}
-          result={result}
-          generatedAt={printedAt ?? new Date()}
-        />
+        <ErrorBoundary label="The printable report">
+          <CrawlReport
+            model={model}
+            result={result}
+            generatedAt={printedAt ?? new Date()}
+          />
+        </ErrorBoundary>
       )}
     </>
   );

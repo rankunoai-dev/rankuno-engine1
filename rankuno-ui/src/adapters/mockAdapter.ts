@@ -71,6 +71,10 @@ export class MockAdapter implements CrawlDataAdapter {
             pagesClassified: cached.summary.pages_classified,
             truncated: cached.discovery.truncated,
             synthetic: cached.synthetic,
+            // A fixture is a file on disk, not a crawl that ran. Its mtime is
+            // when the bundle was built, which is not an answer to "when was
+            // this crawled" — so the list says so rather than implying one.
+            crawledAt: null,
             recoverable: false,
           };
         }
@@ -86,6 +90,7 @@ export class MockAdapter implements CrawlDataAdapter {
           pagesClassified: Number.isFinite(approximate) ? approximate : 0,
           truncated: false,
           synthetic,
+          crawledAt: null,
           recoverable: false,
         };
       }),

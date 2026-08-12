@@ -11,6 +11,56 @@ import type {
   PageClassificationOutput,
 } from "../types/schema";
 
+/**
+ * A crawl this browser session started and is still watching.
+ *
+ * Separate from `CrawlJobSummary`, which is what the server reports about every
+ * job that ever ran. This is the live half: telemetry the job list does not
+ * carry, and a start time that belongs to the session rather than the record.
+ */
+export interface LiveJob {
+  id: string;
+  /** The crawl target, shown before the server has a label for it. */
+  label: string;
+  status: JobStatus;
+  message: string;
+  telemetry: JobTelemetry | null;
+  /** `Date.now()` at submission, for the elapsed clock. */
+  startedAt: number;
+  /** Set once the job reaches a terminal status, for the elapsed clock. */
+  endedAt: number | null;
+  /** Failure reason, when the crawl ended badly. */
+  error: string | null;
+}
+
+/** Statuses a job can still leave. */
+const LIVE: ReadonlySet<JobStatus> = new Set<JobStatus>(["queued", "running"]);
+
+/** Whether a job is still going. */
+export function isLive(job: LiveJob): boolean {
+  return LIVE.has(job.status);
+}
+
+/**
+ * The most recently started crawl still running, or `null`.
+ *
+ * Returns the stored entry itself rather than a derived object, so a zustand
+ * selector wrapping this compares by reference and does not re-render every
+ * subscriber on each unrelated store write.
+ *
+ * The header shows one crawl, not all of them: three concurrent runs in a
+ * header strip is a status board, and the jobs view is where that belongs. The
+ * newest is chosen because it is the one the operator just started and is
+ * waiting on.
+ */
+export function newestLiveJob(liveJobs: Readonly<Record<string, LiveJob>>): LiveJob | null {
+  let newest: LiveJob | null = null;
+  for (const job of Object.values(liveJobs)) {
+    if (isLive(job) && (newest === null || job.startedAt > newest.startedAt)) newest = job;
+  }
+  return newest;
+}
+
 interface CrawlState {
   adapter: CrawlDataAdapter | null;
 
@@ -23,17 +73,25 @@ interface CrawlState {
   /** How the tree is grouped. Navigation mirrors the site's own header menu. */
   grouping: "navigation" | "path";
 
-  /** Message shown while a live crawl runs, or null when none is running. */
-  liveMessage: string | null;
-  /** Live counters while a crawl runs. Null when none is. */
-  telemetry: JobTelemetry | null;
-  /** Wall-clock seconds since the running crawl was submitted. */
-  startedAt: number | null;
+  /**
+   * Crawls started this session, keyed by job id.
+   *
+   * A map rather than a single "the running crawl", because the engine permits
+   * three concurrent jobs and the operator can start all three. The previous
+   * single-slot model silently overwrote the first crawl's telemetry with the
+   * second's, which looked like the first one stalling.
+   *
+   * Entries are kept after completion: they hold the only copy of the live
+   * telemetry, and the jobs view shows a run that just finished alongside the
+   * ones still going.
+   */
+  liveJobs: Record<string, LiveJob>;
 
   setGrouping: (grouping: "navigation" | "path") => void;
   init: (adapter: CrawlDataAdapter) => Promise<void>;
   selectJob: (jobId: string) => Promise<void>;
-  startCrawl: (request: PageClassificationInput) => Promise<void>;
+  /** Submit a crawl and return its id. Resolves at submission, not completion. */
+  startCrawl: (request: PageClassificationInput) => Promise<string | null>;
   refreshJobs: () => Promise<void>;
   loadCheckpoint: (jobId: string) => Promise<void>;
 }
@@ -46,6 +104,16 @@ interface CrawlState {
  *
  * The split matters because the derived structures are expensive at 20,000
  * pages. Keeping them here meant rebuilding them on every job-status change.
+ *
+ * Two lifecycles, deliberately not one
+ * ------------------------------------
+ * `status`/`result`/`activeJobId` describe **what is on screen**. `liveJobs`
+ * describes **what is running**. They used to be the same fields, which is why
+ * starting a crawl blanked the dashboard: `startCrawl` set `result: null` and
+ * drove the global status through the crawl's whole lifetime, so a twenty-minute
+ * crawl meant twenty minutes of being unable to read the site you crawled
+ * yesterday. Keeping them apart is the whole of the non-blocking change; the
+ * modal was only the visible symptom.
  */
 
 export const useCrawlStore = create<CrawlState>((set, get) => ({
@@ -55,9 +123,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
   activeJobId: null,
   status: "idle",
   error: null,
-  liveMessage: null,
-  telemetry: null,
-  startedAt: null,
+  liveJobs: {},
 
   result: null,
   grouping: "navigation",
@@ -121,57 +187,37 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     const adapter = get().adapter;
     if (!adapter?.startJob) {
       set({ error: "This data source cannot start crawls." });
-      return;
+      return null;
     }
 
-    set({
+    let jobId: string;
+    try {
+      jobId = await adapter.startJob(request);
+    } catch (cause) {
+      // A rejected submission is the one crawl error that belongs on the
+      // dashboard: there is no job yet, so the jobs view has nothing to show it
+      // against. Everything after this point is reported on the job's own row.
+      set({ error: describe(cause) });
+      return null;
+    }
+
+    patchLiveJob(jobId, {
+      label: request.base_url,
       status: "queued",
-      error: null,
-      liveMessage: "Submitting…",
-      result: null,
+      message: "Waiting for a free crawl slot.",
       telemetry: null,
       startedAt: Date.now(),
+      endedAt: null,
+      error: null,
     });
+    await get().refreshJobs();
 
-    try {
-      const jobId = await adapter.startJob(request);
-      set({ activeJobId: jobId });
-      await get().refreshJobs();
+    // Deliberately not awaited. This is the line that makes crawling
+    // non-blocking: the caller — a modal's submit handler — returns now, and
+    // the poll below keeps running against the store for the crawl's lifetime.
+    void watchJob(get, adapter, jobId);
 
-      // Polling is delegated to the adapter, which owns the backoff schedule.
-      // Duplicating the interval here would let the two drift apart.
-      const progress =
-        adapter instanceof HttpAdapter
-          ? await adapter.waitForCompletion(jobId, (update) => {
-              set({
-                status: update.status,
-                liveMessage: update.message,
-                telemetry: update.telemetry ?? null,
-              });
-            })
-          : await adapter.getProgress(jobId);
-
-      set({ liveMessage: null, telemetry: null, startedAt: null });
-
-      if (progress.status === "failed") {
-        set({ status: "failed", error: progress.message });
-        await get().refreshJobs();
-        return;
-      }
-
-      // `selectJob` fetches the result and rebuilds every derived structure, so
-      // a finished live crawl lands in exactly the same state as a selected one.
-      await get().selectJob(jobId);
-      await get().refreshJobs();
-    } catch (cause) {
-      set({
-        status: "failed",
-        error: describe(cause),
-        liveMessage: null,
-        telemetry: null,
-        startedAt: null,
-      });
-    }
+    return jobId;
   },
 
   async loadCheckpoint(jobId) {
@@ -203,5 +249,84 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
 
 function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+type Getter = () => CrawlState;
+
+/**
+ * Merge a patch into one live job without disturbing the others.
+ *
+ * Uses `setState`'s functional form rather than the closed-over `set`, because
+ * two concurrent crawls have two independent pollers writing to this map: a
+ * read-modify-write over a captured snapshot would let the slower one restore
+ * the faster one's previous telemetry.
+ *
+ * A fresh object per update, because zustand compares by reference and
+ * mutating the entry in place would leave every subscriber unrendered — the
+ * progress bar would sit still while the numbers behind it moved.
+ */
+function patchLiveJob(jobId: string, patch: Partial<LiveJob>): void {
+  useCrawlStore.setState((state) => {
+    const existing = state.liveJobs[jobId];
+    const next: LiveJob = existing
+      ? { ...existing, ...patch }
+      : {
+          id: jobId,
+          label: patch.label ?? jobId,
+          status: patch.status ?? "queued",
+          message: patch.message ?? "",
+          telemetry: patch.telemetry ?? null,
+          startedAt: patch.startedAt ?? Date.now(),
+          endedAt: patch.endedAt ?? null,
+          error: patch.error ?? null,
+        };
+    return { liveJobs: { ...state.liveJobs, [jobId]: next } };
+  });
+}
+
+/**
+ * Poll one crawl to completion, writing progress onto its own entry.
+ *
+ * Never touches `result` or the global `status`. A crawl finishing does not
+ * change what the operator is looking at; it posts a notification and waits to
+ * be asked. Jumping the view to a freshly finished crawl would discard whatever
+ * analysis was in progress, which is the behaviour this replaced.
+ */
+async function watchJob(
+  get: Getter,
+  adapter: CrawlDataAdapter,
+  jobId: string,
+): Promise<void> {
+  try {
+    const progress =
+      adapter instanceof HttpAdapter
+        ? await adapter.waitForCompletion(jobId, (update) => {
+            patchLiveJob(jobId, {
+              status: update.status,
+              message: update.message,
+              telemetry: update.telemetry ?? null,
+            });
+          })
+        : await adapter.getProgress(jobId);
+
+    patchLiveJob(jobId, {
+      status: progress.status,
+      message: progress.message,
+      telemetry: progress.telemetry ?? null,
+      endedAt: Date.now(),
+      error: progress.status === "failed" ? progress.message : null,
+    });
+  } catch (cause) {
+    patchLiveJob(jobId, {
+      status: "failed",
+      message: describe(cause),
+      endedAt: Date.now(),
+      error: describe(cause),
+    });
+  }
+  // Refreshed whichever way the crawl ended, so the row picks up
+  // `recoverable` and the server's own status for a job that failed with a
+  // checkpoint on disk.
+  await get().refreshJobs();
 }
 

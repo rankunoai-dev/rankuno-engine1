@@ -131,6 +131,56 @@
   background: var(--blue-bg);
   color: var(--blue);
 }
+.rit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.rit:disabled:hover {
+  background: none;
+}
+
+/* Running-crawl count. Anchored to the rail item, which needed a positioning
+   context it did not previously have. */
+.rit {
+  position: relative;
+}
+.rit-badge {
+  position: absolute;
+  top: 4px;
+  right: 9px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--ok);
+  color: #04150c;
+  font-size: 9.5px;
+  font-weight: 800;
+  line-height: 15px;
+  text-align: center;
+  /* The glow is what carries "something is happening" from the corner of the
+     eye while the operator is working in another tab. */
+  box-shadow: 0 0 0 0 rgba(77, 201, 134, 0.65);
+  animation: rit-glow 1.8s ease-out infinite;
+}
+@keyframes rit-glow {
+  0% {
+    box-shadow: 0 0 0 0 rgba(77, 201, 134, 0.65);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(77, 201, 134, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(77, 201, 134, 0);
+  }
+}
+/* Decoration, and for some people a genuine accessibility problem. The count
+   itself still reads, which is the part that carries the information. */
+@media (prefers-reduced-motion: reduce) {
+  .rit-badge {
+    animation: none;
+  }
+}
 
 /* ===== shell ===== */
 .rk-app {
@@ -158,6 +208,98 @@
   color: var(--dim);
   font-weight: 500;
 }
+/* One row of the crawl selector. Two lines, because the same site is crawled
+   repeatedly while settings are tuned and the URL alone does not distinguish
+   the runs. */
+.job-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.35;
+}
+.job-opt-label {
+  /* A long URL must ellipsize rather than widen the dropdown. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job-opt-time {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+}
+/* Background crawl progress. Occupies the same header slot as `.perf`, which
+   it replaces while a crawl runs — the two never appear together, so the slot
+   does not need to hold both and the header keeps its height. */
+.bgpill {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 6px 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--blue);
+  background: var(--blue-bg);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--blue);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bgpill:hover {
+  filter: brightness(0.97);
+}
+.bgpill-spark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue);
+  flex: none;
+  animation: bgpill-pulse 1.4s ease-in-out infinite;
+}
+.bgpill-host {
+  font-weight: 700;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bgpill-pct {
+  font-weight: 700;
+}
+.bgpill-count,
+.bgpill-eta {
+  opacity: 0.8;
+}
+/* A second and third crawl are counted rather than drawn. */
+.bgpill-more {
+  padding: 0 5px;
+  border-radius: 7px;
+  background: var(--blue);
+  color: var(--panel);
+  font-weight: 700;
+}
+.bgpill-cta {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--blue);
+  color: var(--panel);
+  font-weight: 700;
+}
+@keyframes bgpill-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bgpill-spark {
+    animation: none;
+  }
+}
+
 .perf {
   margin-left: auto;
   font-family: var(--mono);
@@ -718,3 +860,17 @@ svg.wires {
   color: var(--dim);
   font-size: 12px;
 }
+
+/* Shown when a panel's render is contained by an ErrorBoundary. Deliberately
+   loud: a silently degraded screen is what the boundary exists to prevent. */
+.rk-boundary {
+  margin: 10px;
+  padding: 10px 12px;
+  border: 1px solid #7f1d1d;
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: #1a1013;
+  color: #fca5a5;
+  font-size: 12px;
+}
+

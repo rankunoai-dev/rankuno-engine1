@@ -1,0 +1,113 @@
+/*
+ * Crawl jobs table.
+ *
+ * Rendered inside `.rk-dash`, so the design-system tokens apply here — unlike
+ * `telemetry.css`, which had to declare its own colours because it lived in a
+ * modal mounted outside that subtree.
+ */
+
+.jb-wrap {
+  padding: 14px 18px 20px;
+  overflow: auto;
+  height: 100%;
+}
+
+.jb-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.jb-head h2 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.jb-sub {
+  font-size: 11.5px;
+  color: var(--dim);
+  margin-right: auto;
+}
+
+.jb-target {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.jb-url {
+  font-weight: 600;
+  font-size: 12.5px;
+  word-break: break-all;
+}
+
+.jb-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.jb-when {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+/* The row whose tree is currently on screen, so the table and the visualizer
+   cannot be read as showing different sites. */
+.jb-viewing {
+  background: var(--l3bg);
+  border-color: transparent;
+  color: var(--ok);
+}
+
+.jb-status {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+
+.jb-clock {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.jb-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.jb-numbers {
+  display: flex;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.jb-count {
+  color: var(--ink);
+  cursor: help;
+}
+
+.jb-eta {
+  color: var(--dim);
+  margin-left: auto;
+}
+
+.jb-dim {
+  color: var(--dim);
+  font-size: 10.5px;
+}
+
+.jb-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 0 6px;
+}

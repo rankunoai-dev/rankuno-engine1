@@ -33,6 +33,12 @@
   margin: 6px 0 2px;
 }
 
+/* Shorter inside a table row, where the stream is one detail among several
+   rather than the whole of what the screen is showing. */
+.tel-stream.tel-compact {
+  height: 108px;
+}
+
 .tel-stream {
   height: 168px;
   overflow-y: auto;

@@ -50,6 +50,7 @@ which, for an AI-assisted codebase, is every session.
 | [0018](0018-stall-detection-and-partial-results.md) | 2026-08-11 | Bounded requests, stall detection, partial results | 992 tests, 95.75% |
 | [0019](0019-checkpoints-and-partial-recovery.md) | 2026-08-11 | Crawl checkpoints, IPv6 parse fix, partial-tree recovery | 1,010 tests, 95.69% |
 | [0020](0020-non-page-url-filtering.md) | 2026-08-12 | Media URLs stop entering the graph as pages; PDF export | 1,050 tests, 95.62% |
+| [0021](0021-crawl-traps-and-background-jobs.md) | 2026-08-12 | Spider-trap refusal, www site identity, background jobs | 1,096 tests, 95.67% |
 
 ---
 
