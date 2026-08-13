@@ -42,6 +42,7 @@ from pydantic import Field
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.integrations.http_fetcher import HttpFetcher
+from src.modules.seo.page_classifier.breadcrumb_parser import extract_breadcrumb
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
     parse_link_header,
@@ -517,19 +518,28 @@ class SiteGraph:
             One `PageEvidence` per node.
         """
         size = total_pages if total_pages is not None else len(self._nodes)
-        return tuple(
-            PageEvidence(
-                url=node.url,
-                normalized_path=node.normalized,
-                html=self._html.get(node.normalized),
-                sitemap_source=node.sitemap_source,
-                cms_record=node.cms_record,
-                inbound_internal_links=node.inbound_links,
-                outbound_internal_links=node.outbound_links,
-                total_pages_in_crawl=size,
+        evidence: list[PageEvidence] = []
+        for node in self._nodes.values():
+            html = self._html.get(node.normalized)
+            # The page's own statement about where it sits. Extracted here
+            # because this is the one place that holds both the URL and the
+            # body, and because a trail is per-page evidence — unlike the header
+            # menu, which is read once from the homepage.
+            trail = extract_breadcrumb(html, node.url) if html else None
+            evidence.append(
+                PageEvidence(
+                    url=node.url,
+                    normalized_path=node.normalized,
+                    html=html,
+                    sitemap_source=node.sitemap_source,
+                    cms_record=node.cms_record,
+                    inbound_internal_links=node.inbound_links,
+                    outbound_internal_links=node.outbound_links,
+                    total_pages_in_crawl=size,
+                    breadcrumb_path=trail.labels if trail else (),
+                )
             )
-            for node in self._nodes.values()
-        )
+        return tuple(evidence)
 
     def report(self) -> DiscoveryReport:
         """Summarise what each path contributed."""

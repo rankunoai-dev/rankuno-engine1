@@ -57,7 +57,7 @@ export function DashboardShell(): JSX.Element {
 
   const active = jobs.find((job) => job.id === activeJobId);
   const discovery = result?.discovery;
-  const navParsed = (result?.navigation.roots.length ?? 0) > 0;
+  const navParsed = (result?.navigation?.roots.length ?? 0) > 0;
 
   return (
     // The report is a *sibling* of `.rk-dash`, not a child. Printing hides
@@ -153,12 +153,21 @@ export function DashboardShell(): JSX.Element {
             />
           )}
 
-          {view === "visualizer" && grouping === "navigation" && !navParsed && result && (
+          {/* Not gated on `grouping === "navigation"`. `selectJob` switches the
+              grouping to "path" the moment it sees an unparsed menu, so that
+              condition was false exactly when this needed to be said — the
+              banner could never fire. It is the fallback itself that has to be
+              announced, not the toggle position. */}
+          {view === "visualizer" && result && !navParsed && (
             <Alert
-              type="info"
+              type="warning"
               banner
               showIcon
-              message="No header menu could be parsed, so lanes show URL-path depth rather than navigation depth."
+              message={
+                discovery?.pages_fetched === 0
+                  ? "No header menu was parsed because no page was fetched. The tree below groups by URL path, and its lane numbers are path depth — not navigation depth. Each row's badge shows the level the engine classified, which is the reliable figure."
+                  : "No header menu could be parsed, so the tree groups by URL path. Lane numbers are path depth, not navigation depth. Each row's badge shows the level the engine classified."
+              }
             />
           )}
 

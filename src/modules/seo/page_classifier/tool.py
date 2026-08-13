@@ -424,18 +424,22 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         navigation = parse_navigation(homepage_html, base_url)
         assignments, coverage = assign_navigation(navigation, pages)
 
-        placed = tuple(
-            page.model_copy(
-                update={
-                    "nav_parent_url": assignment.nav_parent_url,
-                    "breadcrumb_path": assignment.nav_path,
-                }
-            )
-            if (assignment := assignments.get(page.url)) is not None
-            else page
-            for page in pages
-        )
-        return navigation, coverage, placed
+        # A page that publishes its own breadcrumb keeps it. The menu is a
+        # site-wide structure inherited by URL prefix; a breadcrumb is the site's
+        # statement about *this* page, so per-page evidence outranks inherited
+        # evidence. Menu inheritance still covers every page without one, which
+        # on a large site is most of them.
+        placed: list[FullPageIntelligenceProfile] = []
+        for page in pages:
+            assignment = assignments.get(page.url)
+            if assignment is None:
+                placed.append(page)
+                continue
+            update: dict[str, object] = {"nav_parent_url": assignment.nav_parent_url}
+            if not page.breadcrumb_path:
+                update["breadcrumb_path"] = assignment.nav_path
+            placed.append(page.model_copy(update=update))
+        return navigation, coverage, tuple(placed)
 
     # -- internals ---------------------------------------------------------
 

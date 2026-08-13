@@ -47,9 +47,15 @@ from src.modules.seo.page_classifier.schemas import (  # noqa: E402
     SignalSource,
 )
 from src.modules.seo.page_classifier.tool import (  # noqa: E402
+    CrawlSummary,
     PageClassificationInput,
     PageClassificationOutput,
     PageClassificationTool,
+)
+from src.modules.seo.page_classifier.weights import (  # noqa: E402
+    CmsFamily,
+    SiteProfile,
+    WeightProfileReport,
 )
 
 FIXTURES_DIR = REPO_ROOT / "rankuno-ui" / "src" / "data"
@@ -300,28 +306,30 @@ def build_synthetic(
     orphans = sum(1 for page in pages if page.inbound_internal_links_count == 0)
     escalated = sum(1 for page in pages if page.escalated_to_llm)
 
-    return {
-        "synthetic": True,
-        "label": f"Synthetic site ({len(pages):,} pages)",
-        "base_url": f"https://{host}",
-        "site_profile": {
-            "cms_family": "WORDPRESS",
-            "renders_client_side": False,
-            "has_catalogue": True,
-            "locale_prefixes": [],
-        },
-        "weight_profile": {
-            "profile_name": "default",
-            "adaptive_enabled": False,
-            "detected_profile_name": "wordpress",
-        },
-        # Built through the model rather than as a literal dict. The literal
-        # silently omitted every field added after it was written — the fixture
-        # then disagreed with the generated TypeScript, and the dashboard blanked
-        # on the first component that read one of the missing fields. Going
-        # through `DiscoveryReport` makes that impossible: a new required field
-        # fails here instead of in a browser.
-        "discovery": DiscoveryReport(
+    # The *whole* payload goes through `PageClassificationOutput`, not just the
+    # parts that were convenient. A hand-written dict silently omits every field
+    # added after it was written, and the omission only shows up as a runtime
+    # error in a browser — `navigation` and `nav_coverage` were added in cycle
+    # 0014 and never reached this builder, so `result.navigation.roots` threw and
+    # took the dashboard with it. Building the model means a field added
+    # tomorrow either has a default or fails here.
+    #
+    # An earlier fix did this for `discovery` alone. That closed one field and
+    # left the same defect in the object containing it, which is why it recurred.
+    output = PageClassificationOutput(
+        base_url=f"https://{host}",
+        site_profile=SiteProfile(
+            cms_family=CmsFamily.WORDPRESS,
+            renders_client_side=False,
+            has_catalogue=True,
+            locale_prefixes=(),
+        ),
+        weight_profile=WeightProfileReport(
+            profile_name="default",
+            adaptive_enabled=False,
+            detected_profile_name="wordpress",
+        ),
+        discovery=DiscoveryReport(
             base_url=f"https://{host}",
             total_urls=len(pages),
             from_sitemap=int(len(pages) * 0.72),
@@ -333,22 +341,36 @@ def build_synthetic(
             sitemaps_fetched=18,
             pages_fetched=int(len(pages) * 0.58),
             media_skipped=int(len(pages) * 0.45),
+            traps_skipped=int(len(pages) * 0.05),
             truncated=True,
             dom_reserve=int(len(pages) * 0.2),
             dom_reserve_used=int(len(pages) * 0.14),
-        ).model_dump(mode="json"),
-        "summary": {
-            "pages_classified": len(pages),
-            "escalated_to_llm": escalated,
-            "escalation_rate": round(escalated / len(pages), 5) if pages else 0.0,
-            "unknown_pages": sum(
+        ),
+        summary=CrawlSummary(
+            pages_classified=len(pages),
+            escalated_to_llm=escalated,
+            escalation_rate=round(escalated / len(pages), 5) if pages else 0.0,
+            unknown_pages=sum(
                 1 for page in pages if page.primary_page_type is PrimaryPageType.UNKNOWN
             ),
-            "low_confidence_pages": sum(1 for page in pages if not page.is_confidently_classified),
-            "orphan_pages": orphans,
-            "llm_spend_usd": 0.0,
-        },
-        "pages": [page.model_dump(mode="json") for page in pages],
+            low_confidence_pages=sum(1 for page in pages if not page.is_confidently_classified),
+            orphan_pages=orphans,
+            llm_spend_usd=0.0,
+        ),
+        pages=tuple(pages),
+        # `navigation` and `nav_coverage` keep their defaults: an empty tree and
+        # zeroed coverage. Deliberate, not laziness — a generated dataset has no
+        # header menu, and inventing one would make navigation grouping look
+        # exercised when it has never been tested against this fixture. The
+        # dashboard already falls back to path grouping when no menu was parsed.
+    )
+
+    # `synthetic` and `label` are not part of the contract; they belong to the
+    # fixture file, and the mock adapter reads them to label and flag the row.
+    return {
+        "synthetic": True,
+        "label": f"Synthetic site ({len(pages):,} pages)",
+        **output.model_dump(mode="json"),
     }
 
 

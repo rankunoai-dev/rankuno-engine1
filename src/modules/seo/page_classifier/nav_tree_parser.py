@@ -39,6 +39,7 @@ from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.modules.seo.page_classifier.breadcrumb_parser import is_breadcrumb_container
 from src.modules.seo.page_classifier.url_rules import safe_split
 
 __all__ = [
@@ -187,6 +188,15 @@ class _NavCollector(HTMLParser):
         self.containers = 0
         self._nav_depth = 0
         self._footer_depth = 0
+        self._crumb_depth = 0
+        """Open breadcrumb containers.
+
+        A breadcrumb is frequently marked `role="navigation"`, which made it
+        indistinguishable from the site menu: allbirds.com publishes
+        `<nav role='navigation' aria-label='breadcrumbs'>`, and its `Home` and
+        `Men's Shoes` crumbs were parsed as top-level tabs beside the real
+        ones. A breadcrumb describes one page's ancestry, not the site's menu,
+        so it is excluded here and read by `breadcrumb_parser` instead."""
         self._list_depth = 0
         self._dropdown_depth = 0
         """Nested nav containers opened *inside* a list item.
@@ -196,6 +206,8 @@ class _NavCollector(HTMLParser):
         depth as the tabs themselves. Counting only navs opened inside a list is
         what separates the two: `<header><nav>` wraps the whole menu and opens
         before any list, so it must not shift every tab down a level."""
+        self._crumb_tags: list[str] = []
+        """Tag names of the open breadcrumb containers, to close the right one."""
         self._nav_stack: list[bool] = []
         """Whether each open `<nav>`/`<header>` counted as a dropdown.
 
@@ -215,7 +227,7 @@ class _NavCollector(HTMLParser):
 
     @property
     def _inside_header_nav(self) -> bool:
-        return self._nav_depth > 0 and self._footer_depth == 0
+        return self._nav_depth > 0 and self._footer_depth == 0 and self._crumb_depth == 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Track nav/footer/list nesting and open anchors."""
@@ -223,6 +235,11 @@ class _NavCollector(HTMLParser):
 
         if tag == "footer" or mapping.get("role") == "contentinfo":
             self._footer_depth += 1
+            return
+
+        if is_breadcrumb_container(mapping):
+            self._crumb_depth += 1
+            self._crumb_tags.append(tag)
             return
 
         if tag in _NAV_TAGS or mapping.get("role") == "navigation":
@@ -260,6 +277,10 @@ class _NavCollector(HTMLParser):
         """Close the matching nesting level."""
         if tag == "footer":
             self._footer_depth = max(0, self._footer_depth - 1)
+            return
+        if self._crumb_tags and self._crumb_tags[-1] == tag:
+            self._crumb_tags.pop()
+            self._crumb_depth = max(0, self._crumb_depth - 1)
             return
         if tag in _NAV_TAGS:
             self._finish_anchor()

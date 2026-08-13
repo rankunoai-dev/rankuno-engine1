@@ -1,6 +1,7 @@
 import type {
   ConsensusMethod,
   FullPageIntelligenceProfile,
+  HierarchyLevel,
   PageClassificationOutput,
 } from "../types/schema";
 import { buildNavTree, OTHERS_LABEL } from "./navTree";
@@ -42,6 +43,22 @@ export interface DashModel {
 
 export const OTHERS_LANE = 4;
 
+/**
+ * Whether a result has any published structure to group by.
+ *
+ * True when a header menu was parsed, or when any page carries its own
+ * breadcrumb trail. The second half is what makes the structural view work on
+ * sites whose menu cannot be read — a Shopify storefront publishes no parseable
+ * menu and a breadcrumb on every product page.
+ *
+ * Scans until it finds one rather than counting: at 20,000 pages this runs on
+ * every model rebuild, and the answer is a boolean.
+ */
+export function hasStructure(result: PageClassificationOutput): boolean {
+  if ((result.navigation?.roots.length ?? 0) > 0) return true;
+  return result.pages.some((page) => page.breadcrumb_path.length > 0);
+}
+
 /** Lane labels. Nav depth, not `HierarchyLevel` — those are different things. */
 export const LANE_LABELS = ["L0", "L1", "L2", "L3", "OTH"] as const;
 
@@ -52,6 +69,41 @@ export const LANE_DESCRIPTIONS = [
   "L3 · page beneath a menu item",
   "OTHERS · reachable by no navigation path",
 ] as const;
+
+/**
+ * Lane descriptions for a tree built from URL paths rather than a menu.
+ *
+ * The navigation wording above is a *claim*, and in path mode it is false: a
+ * lane number there is how many slashes are in the URL, and nothing about the
+ * site's menu. Saying "top navigation tab" over a flat site put every
+ * single-segment URL — `/about`, `/contact-sales`, `/api-scale-tier` — under a
+ * label asserting it was a top-level navigation tab, when the engine had in
+ * fact classified 1,569 of openai.com's 1,575 pages as `L3_LEAF_PAGE`.
+ */
+export const PATH_LANE_DESCRIPTIONS = [
+  "Path depth 0 · one URL segment",
+  "Path depth 1 · two URL segments",
+  "Path depth 2 · three URL segments",
+  "Path depth 3+ · four or more URL segments",
+  "OTHERS · reachable by no navigation path",
+] as const;
+
+/**
+ * The engine's own classification, as a short badge.
+ *
+ * Distinct from the lane. A lane says *where this node sits in the tree on
+ * screen*; this says *what the engine decided the page is*. They coincide when
+ * a header menu was parsed and diverge sharply when one was not — which is
+ * exactly when showing only the lane misleads, because the lane then carries
+ * URL-path depth while looking like a classification.
+ */
+export const LEVEL_BADGE: Record<HierarchyLevel, { label: string; lane: number }> = {
+  L0_HOMEPAGE: { label: "L0", lane: 0 },
+  L1_PRIMARY_NAV_HUB: { label: "L1", lane: 1 },
+  L2_SUB_NAV_HUB: { label: "L2", lane: 2 },
+  L3_LEAF_PAGE: { label: "L3", lane: 3 },
+  UTILITY_PAGE: { label: "UTIL", lane: 4 },
+};
 
 /**
  * Human names for the cascade layers, keyed by `ConsensusMethod`.
@@ -101,7 +153,12 @@ export function buildDashModel(
   result: PageClassificationOutput,
   grouping: "navigation" | "path",
 ): DashModel {
-  const useNav = grouping === "navigation" && result.navigation.roots.length > 0;
+  // Gated on the pages actually carrying a trail, not on the menu having been
+  // parsed. A page's own breadcrumb now fills `breadcrumb_path` too, so a site
+  // with breadcrumbs and an unreadable menu — a Shopify storefront, a React
+  // marketing site — has real structure to group by even though `navigation`
+  // is empty. Keying this off `navigation.roots` discarded it.
+  const useNav = grouping === "navigation" && hasStructure(result);
   const root = useNav ? buildNavTree(result.pages) : buildTree(result.pages);
 
   const nodes: DashNode[] = [];

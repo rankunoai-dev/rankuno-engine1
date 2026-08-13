@@ -1,11 +1,14 @@
 import {
   LANE_DESCRIPTIONS,
+  LEVEL_BADGE,
+  PATH_LANE_DESCRIPTIONS,
   LANE_LABELS,
   METHOD_LABELS,
   METHOD_ORDER,
   UNAVAILABLE_METHODS,
   type DashModel,
 } from "../../lib/dashboardModel";
+import { useCrawlStore } from "../../store/useCrawlStore";
 import { useDashboardStore } from "../../store/useDashboardStore";
 
 const LANE_CLASS = ["p0", "p1", "p2", "p3", "po"];
@@ -25,6 +28,11 @@ interface Props {
 export function NodeInspector({ model }: Props): JSX.Element {
   const focus = useDashboardStore((state) => state.focus);
   const node = focus === null ? null : model.nodes[focus];
+  // Whether the tree on screen came from a menu. When it did not, the lane
+  // numbers are URL-path depth and must not be described as menu positions.
+  const navGrouped = useCrawlStore(
+    (state) => state.grouping === "navigation" && (state.result?.navigation?.roots.length ?? 0) > 0,
+  );
 
   if (!node) {
     return <div className="inspect" />;
@@ -39,13 +47,29 @@ export function NodeInspector({ model }: Props): JSX.Element {
           <dt>URL</dt>
           <dd>{node.url}</dd>
         </div>
+        {/* Two separate facts, deliberately on two rows. "Position" is where
+            the node sits in the tree currently on screen; "Classified" is what
+            the engine decided the page is. Collapsing them into one chip is
+            what made a flat site read as though every page were a top-level
+            navigation tab. */}
         <div>
           <dt>Position</dt>
           <dd>
             <span className={`lvchip ${LANE_CLASS[node.lv]}`}>{LANE_LABELS[node.lv]}</span>
-            &nbsp;{LANE_DESCRIPTIONS[node.lv]}
+            &nbsp;{(navGrouped ? LANE_DESCRIPTIONS : PATH_LANE_DESCRIPTIONS)[node.lv]}
           </dd>
         </div>
+        {profile && (
+          <div>
+            <dt>Classified</dt>
+            <dd>
+              <span className={`lvchip ${LANE_CLASS[LEVEL_BADGE[profile.hierarchy_level].lane]}`}>
+                {LEVEL_BADGE[profile.hierarchy_level].label}
+              </span>
+              &nbsp;{profile.hierarchy_level}
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Subtree</dt>
           <dd>

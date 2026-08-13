@@ -18,6 +18,7 @@ worse than no gate.
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,11 +36,33 @@ _EXTERNAL_PREFIXES = ("http://", "https://", "mailto:", "#")
 
 
 def _iter_markdown_files() -> list[Path]:
-    """Every tracked markdown file, excluding caches and virtualenvs."""
-    skip = {".venv", "node_modules", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".git"}
-    return sorted(
-        path for path in REPO_ROOT.rglob("*.md") if not any(part in skip for part in path.parts)
-    )
+    """Every **tracked** markdown file.
+
+    Asks git rather than walking the filesystem, which is what the audit has
+    always claimed to do. Walking picked up `project-standards/` — a stale copy
+    of this repo that `.gitignore` excludes precisely because it is stale (see
+    CLAUDE.md §7, ruling 8) — and failed the gate on broken links in documents
+    nobody maintains and nothing ships.
+
+    The filesystem walk survives as a fallback for a source tree that is not a
+    git checkout, where the skip list is the best available approximation.
+    """
+    try:
+        listed = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+            ["git", "ls-files", "-z", "*.md"],  # noqa: S607 - git resolved from PATH
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        skip = {".venv", "node_modules", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".git"}
+        return sorted(
+            path for path in REPO_ROOT.rglob("*.md") if not any(part in skip for part in path.parts)
+        )
+
+    return sorted(REPO_ROOT / name for name in listed.split("\0") if name)
 
 
 def check_links() -> list[str]:

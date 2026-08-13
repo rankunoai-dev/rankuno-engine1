@@ -450,3 +450,39 @@ class TestNavNestingDoesNotShiftDepth:
         deep += "</li></ul></nav></header>"
         tree = parse_navigation(deep, BASE)
         assert all(node.depth < MAX_NAV_DEPTH for root in tree.roots for node in root.walk())
+
+
+class TestBreadcrumbIsNotTheMenu:
+    """A breadcrumb marked `role="navigation"` is not the site menu.
+
+    Allbirds publishes `<nav role='navigation' aria-label='breadcrumbs'>`, and
+    its `Home` and `Men's Shoes` crumbs were parsed as top-level tabs beside the
+    real ones — on every product page, each with a different trail. A breadcrumb
+    describes one page's ancestry; the menu describes the site.
+    """
+
+    MIXED = """
+    <header><nav><ul><li><a href="/shop">Shop</a></li></ul></nav></header>
+    <nav role="navigation" aria-label="breadcrumbs">
+      <ol>
+        <li><a href="/">Home</a></li>
+        <li><a href="/mens">Mens</a></li>
+        <li><a href="/mens/shoes">Shoes</a></li>
+      </ol>
+    </nav>
+    """
+
+    def test_crumbs_do_not_become_tabs(self):
+        tree = parse_navigation(self.MIXED, BASE)
+        assert [root.label for root in tree.roots] == ["Shop"]
+
+    def test_the_real_menu_still_parses(self):
+        tree = parse_navigation(self.MIXED, BASE)
+        assert tree.roots[0].url == "https://e.com/shop"
+
+    def test_a_class_named_breadcrumb_is_excluded_too(self):
+        html = """
+        <header><nav><ul><li><a href="/shop">Shop</a></li></ul></nav></header>
+        <div class="breadcrumbs"><a href="/">Home</a><a href="/mens">Mens</a></div>
+        """
+        assert [root.label for root in parse_navigation(html, BASE).roots] == ["Shop"]

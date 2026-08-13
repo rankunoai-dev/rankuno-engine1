@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LANE_LABELS, type DashModel } from "../../lib/dashboardModel";
+import { LANE_LABELS, LEVEL_BADGE, type DashModel, type DashNode } from "../../lib/dashboardModel";
 import { useDashboardStore } from "../../store/useDashboardStore";
 
 /** Row height in pixels. Fixed, which is what makes the window arithmetic O(1). */
@@ -101,7 +101,7 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
         >
           {hasChildren ? "▶" : ""}
         </span>
-        <span className={`lvchip ${LANE_CLASS[node.lv]}`}>{LANE_LABELS[node.lv]}</span>
+        <LevelChip node={node} />
         <span className="tlbl">{node.label}</span>
         {hasChildren && <span className="tcnt">{node.cnt.toLocaleString()}</span>}
       </button>,
@@ -122,5 +122,34 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
         </span>
       </div>
     </>
+  );
+}
+
+/**
+ * The level badge for one row.
+ *
+ * Reads the engine's `hierarchy_level` when the page was classified, and falls
+ * back to the lane only for a node the crawl never produced a profile for —
+ * an intermediate path segment that is not itself a page.
+ *
+ * This used to render the lane unconditionally. With no header menu the lane is
+ * URL-path depth, so every single-segment URL on a flat site showed `L0` while
+ * the engine had classified it `L3_LEAF_PAGE`. The correct answer was already
+ * in the payload; the row was showing a different number.
+ */
+function LevelChip({ node }: { node: DashNode }): JSX.Element {
+  const level = node.profile?.hierarchy_level;
+  if (level === undefined) {
+    return (
+      <span className={`lvchip ${LANE_CLASS[node.lv]}`} title="Not a crawled page — a URL path segment">
+        {LANE_LABELS[node.lv]}
+      </span>
+    );
+  }
+  const badge = LEVEL_BADGE[level];
+  return (
+    <span className={`lvchip ${LANE_CLASS[badge.lane]}`} title={`Classified ${level}`}>
+      {badge.label}
+    </span>
   );
 }

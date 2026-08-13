@@ -162,7 +162,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
         // view when none was parsed is the honest default: with no menu there is
         // no published structure, and one OTHERS bucket holding the whole site
         // is worse than the path view it replaced.
-        grouping: result.navigation.roots.length > 0 ? get().grouping : "path",
+        grouping: (result.navigation?.roots.length ?? 0) > 0 ? get().grouping : "path",
         // `partial` is not an error. Every live crawl so far hit a ceiling, and
         // presenting truncated data as complete is the failure mode that
         // matters here.
