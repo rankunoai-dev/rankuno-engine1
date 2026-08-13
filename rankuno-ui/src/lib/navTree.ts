@@ -90,9 +90,14 @@ export function buildNavTree(
 /** The last meaningful URL segment, for labelling a leaf under its section. */
 function leafSegment(url: string): string {
   try {
-    const { pathname } = new URL(url);
+    const { pathname, search } = new URL(url);
     const parts = pathname.split("/").filter(Boolean);
-    return parts[parts.length - 1] ?? "/";
+    const last = parts[parts.length - 1] ?? "/";
+    // The query is part of the label, not decoration. Dropping it made eleven
+    // distinct URLs — `/company/awards-and-recognition` and its `?page=1`…`10`
+    // variants — render as eleven identical rows, which reads as a duplication
+    // bug and hides a real finding: ten paginated URLs indexed separately.
+    return search ? `${last}${search}` : last;
   } catch {
     return url;
   }

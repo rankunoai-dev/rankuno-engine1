@@ -92,7 +92,8 @@
 .rep-tree td:nth-child(2),
 .rep-tree td:nth-child(3),
 .rep-tree td:nth-child(4),
-.rep-tree td:nth-child(5) {
+.rep-tree td:nth-child(5),
+.rep-tree td:nth-child(6) {
   font-family: "JetBrains Mono", ui-monospace, monospace;
   white-space: nowrap;
 }
@@ -166,9 +167,35 @@
   .rep-tree {
     table-layout: fixed;
   }
-  .rep-tree td:first-child,
-  .rep-tree th:first-child {
-    width: 52%;
+  /* Every column sized explicitly. `table-layout: fixed` divides whatever is
+     left equally, so adding the Depth column silently squeezed TYPE — and
+     `SERVICE_CATEGORY_HUB` is twenty characters. With `white-space: nowrap`
+     above it did not wrap, it overflowed into the confidence column and
+     printed as `SERVICE_CAT7E2G%ORY_HUB`. Unreadable, and worse, it looked
+     like corrupted data rather than a layout fault. */
+  .rep-tree th:nth-child(1) {
+    width: 42%;
+  }
+  .rep-tree th:nth-child(2) {
+    width: 7%;
+  }
+  .rep-tree th:nth-child(3) {
+    width: 7%;
+  }
+  .rep-tree th:nth-child(4) {
+    width: 27%;
+  }
+  .rep-tree th:nth-child(5) {
+    width: 8%;
+  }
+  .rep-tree th:nth-child(6) {
+    width: 9%;
+  }
+
+  /* The page-type column is the one that can legitimately need two lines. */
+  .rep-tree td:nth-child(4) {
+    white-space: normal;
+    word-break: break-all;
   }
 
   @page {

@@ -38,7 +38,9 @@ interface Props {
  */
 export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element {
   const { summary, discovery, nav_coverage: coverage } = result;
-  const inNav = coverage.exact_matches + coverage.inherited_matches;
+  // What the tree actually shows, which is what a reader is looking at.
+  const inOthers = model.laneCounts[OTHERS_LANE] ?? 0;
+  const placed = model.nodes.length - inOthers;
   const rows = flatten(model, REPORT_ROW_LIMIT);
   const omitted = model.nodes.length - rows.length;
 
@@ -98,14 +100,29 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
             <td>{count(discovery.traps_skipped)}</td>
           </tr>
           <tr>
-            <th>In navigation</th>
+            {/* Counted from the tree this report is printing, not from
+                `nav_coverage`. That field is computed from the header menu
+                alone and knows nothing about breadcrumbs, so once pages began
+                being placed by their own trail the two diverged: it reported
+                5,834 in OTHERS on gep.com while the tree below held 1,210. A
+                headline number contradicting the table under it is worse than
+                no headline number. */}
+            <th>Placed in a section</th>
             <td>
-              {inNav.toLocaleString()}
-              {coverage.total_urls > 0 &&
-                ` (${Math.round((inNav / coverage.total_urls) * 100)}%)`}
+              {placed.toLocaleString()}
+              {model.nodes.length > 0 &&
+                ` (${Math.round((placed / (placed + inOthers || 1)) * 100)}%)`}
             </td>
             <th>OTHERS</th>
-            <td>{count(coverage.unmatched)}</td>
+            <td>{inOthers.toLocaleString()}</td>
+          </tr>
+          <tr>
+            {/* Kept, but named for what it measures. The header menu is one
+                source of placement and no longer the only one. */}
+            <th>In header menu</th>
+            <td>{count(coverage.exact_matches + coverage.inherited_matches)}</td>
+            <th>Menu entries</th>
+            <td>{count(coverage.nav_entries)}</td>
           </tr>
           <tr>
             <th>Orphans</th>
@@ -127,10 +144,10 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
 
       <h2>Sections</h2>
       <p className="rep-note">
-        {coverage.unmatched > 0 ? (
+        {inOthers > 0 ? (
           <>
-            <strong>OTHERS</strong> holds {count(coverage.unmatched)} pages no
-            navigation path reaches — pages a visitor cannot browse to.
+            <strong>OTHERS</strong> holds {inOthers.toLocaleString()} pages that neither
+            the header menu nor a page's own breadcrumb places in a section.
           </>
         ) : (
           "Every page sits under a navigation section."
