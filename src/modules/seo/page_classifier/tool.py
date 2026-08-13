@@ -171,6 +171,17 @@ class PageClassificationInput(StrictModel):
     identity after a refusal: re-sending a rejected request as something else is
     working around the refusal, not configuring a client. Use it on sites you own
     or have permission to crawl. robots.txt is still obeyed either way."""
+    seed_urls: tuple[str, ...] = ()
+    """Extra URLs to start the link crawl from, alongside the site root.
+
+    Set when resuming an interrupted crawl: these are the URLs the previous run
+    discovered but never fetched. Without them the resumed crawl would walk the
+    same links in the same order and stop in the same place.
+
+    Not a way to crawl a list of URLs in isolation. The site root is always
+    crawled too, sitemap and CMS discovery still run, and a seed the graph
+    refuses — a media file, a loop artefact, a URL past the page ceiling — is
+    dropped like any other."""
     concurrency: int = Field(default=DEFAULT_CONCURRENCY, ge=1, le=MAX_CONCURRENCY)
     """Simultaneous in-flight requests. Bounds local resources only — per-host
     politeness is enforced by the fetcher's token bucket regardless, so raising
@@ -465,6 +476,11 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             "dom_reserve_fraction": payload.dom_reserve_fraction,
             "on_progress": self._progress_sink,
             "on_checkpoint": self._checkpoint_sink,
+            # Passed to both paths, not just the async one. The serial path is
+            # the documented fallback when a loop is already running, and a
+            # resumed crawl that silently restarted from the homepage there
+            # would look like the resume feature simply not working.
+            "seed_urls": payload.seed_urls,
         }
 
         if payload.use_async_crawl and not _event_loop_running():

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LANE_LABELS, LEVEL_BADGE, type DashModel, type DashNode } from "../../lib/dashboardModel";
+import { LEVEL_BADGE, type DashModel, type DashNode } from "../../lib/dashboardModel";
 import { useDashboardStore } from "../../store/useDashboardStore";
 
 /** Row height in pixels. Fixed, which is what makes the window arithmetic O(1). */
@@ -139,13 +139,28 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
  */
 function LevelChip({ node }: { node: DashNode }): JSX.Element {
   const level = node.profile?.hierarchy_level;
+
+  // No profile means no page was crawled at this URL — it is a path segment
+  // the tree needed in order to hold its children. It gets a neutral mark, not
+  // a level.
+  //
+  // It used to fall back to the lane number, which produced the collision that
+  // exposed this: under `global-presence`, the crawled entries showed `L3`
+  // (their classification) while the uncrawled `asia` showed `L1` (its depth).
+  // Two different scales in identically-shaped chips reads as a hierarchy
+  // error, and there is no way to tell from the chip which scale you are
+  // looking at.
   if (level === undefined) {
     return (
-      <span className={`lvchip ${LANE_CLASS[node.lv]}`} title="Not a crawled page — a URL path segment">
-        {LANE_LABELS[node.lv]}
+      <span
+        className="lvchip lvpath"
+        title="URL path segment — no page was crawled at this address"
+      >
+        ·
       </span>
     );
   }
+
   const badge = LEVEL_BADGE[level];
   return (
     <span className={`lvchip ${LANE_CLASS[badge.lane]}`} title={`Classified ${level}`}>

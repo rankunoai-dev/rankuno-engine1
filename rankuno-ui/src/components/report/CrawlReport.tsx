@@ -1,5 +1,5 @@
 import type { PageClassificationOutput } from "../../types/schema";
-import { OTHERS_LANE, LANE_LABELS, type DashModel } from "../../lib/dashboardModel";
+import { OTHERS_LANE, LEVEL_BADGE, type DashModel } from "../../lib/dashboardModel";
 import "./report.css";
 
 /** Rows included in the printed tree. */
@@ -151,6 +151,7 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
           <tr>
             <th>Path</th>
             <th>Level</th>
+            <th>Depth</th>
             <th>Type</th>
             <th>Conf.</th>
             <th>In</th>
@@ -166,7 +167,16 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
                   {node.label}
                   {!profile && <span className="rep-dim"> · not crawled</span>}
                 </td>
-                <td>{LANE_LABELS[node.lv]}</td>
+                {/* The engine's classification, matching the on-screen tree.
+                    Showing the lane here instead made the two disagree: the
+                    same node read `L1` in the PDF and `L3` on screen. */}
+                <td>{profile ? LEVEL_BADGE[profile.hierarchy_level].label : "—"}</td>
+                {/* Level is a *role* — hub or leaf — and says nothing about how
+                    deep a page sits. On gep.com 4,386 pages are leaves at depths
+                    4 to 7, and reading level alone made that look like a tree
+                    three levels tall. The engine records depth to 15; this is
+                    where it becomes visible. */}
+                <td>{profile ? profile.depth_from_l0 : "—"}</td>
                 <td>{profile?.primary_page_type ?? "—"}</td>
                 <td>
                   {profile ? `${Math.round(profile.final_confidence_score * 100)}%` : "—"}

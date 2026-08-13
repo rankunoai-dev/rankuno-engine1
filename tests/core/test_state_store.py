@@ -128,6 +128,24 @@ class TestPersistence:
         store.finish(store.create(TOOL, REQUEST).id, RESULT)
         assert len(store.list_jobs()) == 1
 
+    def test_checkpoints_are_not_listed_as_jobs(self, store):
+        """The exclusion list was already wrong once.
+
+        `.result.json` was skipped and `.checkpoint.json` was not, so every
+        checkpoint was read in full and rejected on each call — 102 MB of disk
+        read per `GET /jobs` on live data, on an endpoint the UI polls, plus a
+        spurious warning per file that would hide a genuinely corrupt record.
+        """
+        job_id = store.create(TOOL, REQUEST).id
+        store.write_checkpoint(job_id, {"urls": ["https://e.com/"]})
+        assert [record.id for record in store.list_jobs()] == [job_id]
+
+    def test_a_future_sidecar_is_excluded_without_being_named(self, store):
+        """The rule is structural, so the next sidecar cannot reintroduce this."""
+        job_id = store.create(TOOL, REQUEST).id
+        (store.root / f"{job_id}.something-new.json").write_text("{}", encoding="utf-8")
+        assert [record.id for record in store.list_jobs()] == [job_id]
+
 
 class TestMissingAndCorrupt:
     def test_reading_an_unknown_job_raises(self, store):

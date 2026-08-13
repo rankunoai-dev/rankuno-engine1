@@ -874,3 +874,13 @@ svg.wires {
   font-size: 12px;
 }
 
+
+/* A tree row that is a URL path segment rather than a crawled page. Neutral on
+   purpose: it must not be mistakable for one of the L0–L3 level chips beside
+   it, because it is measured on a different scale entirely. */
+.lvchip.lvpath {
+  background: transparent;
+  border: 1px dashed var(--line2);
+  color: var(--faint);
+  font-weight: 400;
+}

@@ -369,7 +369,20 @@ class DiskJobStore:
         records: list[JobRecord] = []
         with self._lock:
             for path in self._root.glob("*.json"):
-                if path.name.endswith(".result.json"):
+                # A record is `<id>.json`; every sidecar is `<id>.<kind>.json`.
+                # Tested by dot count rather than by listing the known suffixes,
+                # because the list was already wrong once: `.result.json` was
+                # excluded and `.checkpoint.json` was not, so every checkpoint
+                # was read in full and rejected on each call. With 13 of them
+                # that was 102 MB of disk read per `GET /jobs`, on an endpoint
+                # the UI polls — and 13 spurious `job_record_unreadable`
+                # warnings, which is the noise that would hide a genuinely
+                # corrupt record.
+                #
+                # A future sidecar cannot reintroduce it: it will have two dots
+                # like the others and be skipped without anyone remembering to
+                # add it here.
+                if path.name.count(".") != 1:
                     continue
                 try:
                     records.append(JobRecord.model_validate_json(path.read_text(encoding="utf-8")))

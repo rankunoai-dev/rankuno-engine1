@@ -238,6 +238,7 @@ export interface PageClassificationInput {
   rate_limit_rps: number | null;
   user_agent: string;
   browser_headers: boolean;
+  seed_urls: string[];
   concurrency: number;
   use_async_crawl: boolean;
   dom_reserve_fraction: number;

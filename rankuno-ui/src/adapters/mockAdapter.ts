@@ -75,6 +75,7 @@ export class MockAdapter implements CrawlDataAdapter {
             // when the bundle was built, which is not an answer to "when was
             // this crawled" — so the list says so rather than implying one.
             crawledAt: null,
+            hasCheckpoint: false,
             recoverable: false,
           };
         }
@@ -91,6 +92,7 @@ export class MockAdapter implements CrawlDataAdapter {
           truncated: false,
           synthetic,
           crawledAt: null,
+          hasCheckpoint: false,
           recoverable: false,
         };
       }),

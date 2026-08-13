@@ -25,6 +25,7 @@ interface JobRow {
   summary: CrawlJobSummary | null;
   crawledAt: string | null;
   recoverable: boolean;
+  hasCheckpoint: boolean;
   synthetic: boolean;
 }
 
@@ -55,6 +56,10 @@ export function CrawlJobsView(): JSX.Element {
   const selectJob = useCrawlStore((state) => state.selectJob);
   const loadCheckpoint = useCrawlStore((state) => state.loadCheckpoint);
   const refreshJobs = useCrawlStore((state) => state.refreshJobs);
+  const relaunch = useCrawlStore((state) => state.relaunch);
+  // Fixtures cannot crawl, so the buttons are hidden rather than offered and
+  // then failing on click.
+  const canRelaunch = useCrawlStore((state) => state.adapter?.startJob !== undefined);
   const setView = useUiStore((state) => state.setView);
 
   // Drives the elapsed clocks only. The crawl's own numbers arrive on the
@@ -113,9 +118,14 @@ export function CrawlJobsView(): JSX.Element {
     {
       title: "",
       key: "actions",
-      width: 132,
+      width: 210,
       render: (_value, row) => (
-        <ActionCell row={row} onOpen={() => openTree(row)} />
+        <ActionCell
+          row={row}
+          onOpen={() => openTree(row)}
+          onRelaunch={(mode) => void relaunch(row.id, mode, `${row.label} (${mode})`)}
+          canRelaunch={canRelaunch}
+        />
       ),
     },
   ];
@@ -201,23 +211,58 @@ function describeEta(live: LiveJob): string {
   return "discovering URLs…";
 }
 
-/** View / recover buttons for one row. */
-function ActionCell({ row, onOpen }: { row: JobRow; onOpen: () => void }): JSX.Element {
-  if (row.recoverable) {
-    return (
-      <Tooltip title="This crawl failed, but the URLs it found were checkpointed. The tree is real; the classifications in it are placeholders.">
-        <Button size="small" onClick={onOpen}>
-          Partial tree
-        </Button>
-      </Tooltip>
-    );
-  }
-
+/** View, recover, retry and resume buttons for one row. */
+function ActionCell({
+  row,
+  onOpen,
+  onRelaunch,
+  canRelaunch,
+}: {
+  row: JobRow;
+  onOpen: () => void;
+  onRelaunch: (mode: "retry" | "resume") => void;
+  canRelaunch: boolean;
+}): JSX.Element {
   const ready = row.status === "succeeded" || row.status === "partial";
+  const finished = ready || row.status === "failed";
+
+  // Deliberately NOT `discovered > fetched`. Every healthy crawl satisfies
+  // that — a sitemap lists pages no link reaches, and faceted filters are
+  // declined on purpose — so keying off it would put a "resume" button
+  // promising work on every completed crawl. A crawl that genuinely stopped
+  // early is one that failed or hit its ceiling, and left a checkpoint.
+  const stoppedEarly = row.hasCheckpoint && (row.status === "failed" || row.status === "partial");
+
   return (
-    <Button size="small" type={ready ? "primary" : "default"} disabled={!ready} onClick={onOpen}>
-      View tree
-    </Button>
+    <div className="jb-actions">
+      {row.recoverable ? (
+        <Tooltip title="This crawl failed, but the URLs it found were checkpointed. The tree is real; the classifications in it are placeholders.">
+          <Button size="small" onClick={onOpen}>
+            Partial tree
+          </Button>
+        </Tooltip>
+      ) : (
+        <Button size="small" type={ready ? "primary" : "default"} disabled={!ready} onClick={onOpen}>
+          View tree
+        </Button>
+      )}
+
+      {canRelaunch && stoppedEarly && (
+        <Tooltip title="Crawl the URLs this run discovered but never fetched. Starts a separate job — the results are not merged into this one, because inbound-link counts and orphan flags are properties of the whole graph.">
+          <Button size="small" onClick={() => onRelaunch("resume")}>
+            Resume
+          </Button>
+        </Tooltip>
+      )}
+
+      {canRelaunch && finished && (
+        <Tooltip title="Run this crawl again from scratch with the settings it originally used. The original job is kept.">
+          <Button size="small" type="text" onClick={() => onRelaunch("retry")}>
+            Retry
+          </Button>
+        </Tooltip>
+      )}
+    </div>
   );
 }
 
@@ -263,6 +308,7 @@ function buildRows(
       summary: job,
       crawledAt: job.crawledAt,
       recoverable: job.recoverable === true,
+      hasCheckpoint: job.hasCheckpoint === true,
       synthetic: job.synthetic,
     };
   });
@@ -282,6 +328,7 @@ function buildRows(
       summary: null,
       crawledAt: new Date(live.startedAt).toISOString(),
       recoverable: false,
+      hasCheckpoint: false,
       synthetic: false,
     });
   }

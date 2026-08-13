@@ -1,15 +1,24 @@
 /*
  * Crawl jobs table.
  *
- * Rendered inside `.rk-dash`, so the design-system tokens apply here — unlike
- * `telemetry.css`, which had to declare its own colours because it lived in a
- * modal mounted outside that subtree.
+ * Colours are declared here rather than taken from the design system, and that
+ * is not duplication. `main.tsx` configures antd with `theme.darkAlgorithm`, so
+ * this table paints itself on a dark ground, while the design-system palette is
+ * a light one — `--ink` is #1d2635, a near-black. Using it here rendered the
+ * progress counts as dark text on a dark row: the numbers were present, sized
+ * and positioned correctly, and invisible unless you selected them.
+ *
+ * The two tokens below are the dark-ground equivalents of `--ink` and `--dim`,
+ * scoped to this view so nothing outside it is affected.
  */
 
 .jb-wrap {
   padding: 14px 18px 20px;
   overflow: auto;
   height: 100%;
+
+  --jb-ink: #e6edf7;
+  --jb-dim: #94a3b8;
 }
 
 .jb-head {
@@ -23,11 +32,12 @@
   font-size: 14px;
   font-weight: 700;
   margin: 0;
+  color: var(--jb-ink);
 }
 
 .jb-sub {
   font-size: 11.5px;
-  color: var(--dim);
+  color: var(--jb-dim);
   margin-right: auto;
 }
 
@@ -41,6 +51,7 @@
   font-weight: 600;
   font-size: 12.5px;
   word-break: break-all;
+  color: var(--jb-ink);
 }
 
 .jb-meta {
@@ -53,7 +64,7 @@
 .jb-when {
   font-family: var(--mono);
   font-size: 10.5px;
-  color: var(--dim);
+  color: var(--jb-dim);
 }
 
 /* The row whose tree is currently on screen, so the table and the visualizer
@@ -74,7 +85,7 @@
 .jb-clock {
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--dim);
+  color: var(--jb-dim);
 }
 
 .jb-progress {
@@ -91,17 +102,21 @@
 }
 
 .jb-count {
-  color: var(--ink);
+  /* The headline number of this table — how far a crawl has got. Weighted up
+     as well as brightened: at 10.5px monospace on a dark row, colour alone was
+     not enough separation from the ETA beside it. */
+  color: var(--jb-ink);
+  font-weight: 600;
   cursor: help;
 }
 
 .jb-eta {
-  color: var(--dim);
+  color: var(--jb-dim);
   margin-left: auto;
 }
 
 .jb-dim {
-  color: var(--dim);
+  color: var(--jb-dim);
   font-size: 10.5px;
 }
 
@@ -110,4 +125,11 @@
   flex-direction: column;
   gap: 6px;
   padding: 2px 0 6px;
+}
+
+.jb-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
 }

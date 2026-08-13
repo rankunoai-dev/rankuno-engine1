@@ -495,6 +495,27 @@ class SiteGraph:
         """
         return tuple(node.url for node in self._nodes.values())
 
+    def unfetched_urls(self) -> tuple[str, ...]:
+        """URLs in the graph whose body was never retrieved.
+
+        Stored HTML is the definition of "fetched": `store_html` is called only
+        after a successful retrieval, so the absence of a body is exactly the
+        absence of a fetch. No separate flag is needed and none is kept, because
+        a second source of truth would be one that could disagree.
+
+        The *unfetched* set is returned rather than the fetched one because it
+        is what a resumed crawl needs and, on a healthy crawl, much the smaller
+        of the two — a checkpoint already writes every discovered URL, and
+        writing the fetched set beside it would roughly double a file that is
+        rewritten every ten seconds.
+
+        A URL here is not necessarily *work remaining*. A sitemap-only page no
+        link reaches, and a faceted filter the crawler deliberately declined to
+        fetch, both appear. Callers deciding whether a crawl has unfinished work
+        must consult `truncated` and `stopped_reason`, not this length.
+        """
+        return tuple(node.url for node in self._nodes.values() if node.normalized not in self._html)
+
     def html_for(self, url: str) -> str | None:
         """Retrieve a stored page body, or `None` if it was never fetched.
 
@@ -576,6 +597,7 @@ def discover_site(
     dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
     on_progress: ProgressSink | None = None,
     on_checkpoint: CheckpointSink | None = None,
+    seed_urls: tuple[str, ...] = (),
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths and merge them into one graph.
 
@@ -595,6 +617,10 @@ def discover_site(
         on_progress: Optional observability hook, called as pages are fetched.
         on_checkpoint: Optional durability hook, offered the graph so partial
             work survives an interruption. Implementations must throttle.
+        seed_urls: Extra URLs to start the link crawl from, alongside the site
+            root. Set when resuming an interrupted crawl. Seeds the graph
+            refuses — media, loop artefacts, URLs past the ceiling — are dropped
+            like any other.
 
     Returns:
         The merged graph and its report.
@@ -615,7 +641,7 @@ def discover_site(
     if crawl_dom:
         try:
             pages_fetched = _crawl_dom(
-                fetcher, base_url, graph, max_depth, on_progress, on_checkpoint
+                fetcher, base_url, graph, max_depth, on_progress, on_checkpoint, seed_urls
             )
         except Exception as exc:  # noqa: BLE001 - a partial graph beats no graph
             _logger.exception("dom_crawl_aborted", extra={"url": base_url})
@@ -762,6 +788,7 @@ def _crawl_dom(
     max_depth: int | None,
     on_progress: ProgressSink | None = None,
     on_checkpoint: CheckpointSink | None = None,
+    seed_urls: tuple[str, ...] = (),
 ) -> int:
     """Path B — breadth-first link traversal from the root.
 
@@ -778,6 +805,24 @@ def _crawl_dom(
     graph.add(base_url, dom_link=True, depth=0)
     frontier: deque[tuple[str, int]] = deque([(base_url, 0)])
     seen: set[str] = {normalize_url(base_url)}
+
+    # A resumed crawl begins from what the interrupted one never reached. Kept
+    # identical to the async path deliberately: the two are documented as
+    # behaviourally indistinguishable, and a resumed crawl that silently fell
+    # back to the serial path would otherwise restart from the homepage.
+    #
+    # The `seen` check is load-bearing, not tidiness. A checkpoint's unfetched
+    # set can contain a URL this crawl also reaches by link — the site root
+    # itself, most obviously — and without the guard it is queued twice, fetched
+    # twice, and counted twice. That is a duplicate request against someone
+    # else's server and a `pages_fetched` that no longer matches the pages held.
+    for seed in seed_urls:
+        key = normalize_url(seed)
+        if key in seen:
+            continue
+        seen.add(key)
+        if graph.add(seed, dom_link=True, depth=0) is not None:
+            frontier.append((seed, 0))
     fetched = 0
     recent: list[str] = []
 

@@ -565,3 +565,195 @@ class TestCheckpointEndpoint:
 
     def test_an_unknown_job_is_404(self, client):
         assert client.get(f"{API_PREFIX}/jobs/nope/checkpoint").status_code == 404
+
+
+class TestRetry:
+    """Re-running a job's crawl with the settings it originally used.
+
+    A new job every time, never a mutation of the old one: the original record
+    is the evidence of what happened and when, and a failed crawl is frequently
+    the finding itself.
+    """
+
+    def test_starts_a_new_job(self, client, store, stub_tool):
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+
+        response = client.post(f"{API_PREFIX}/jobs/{original}/retry")
+        assert response.status_code == 202, response.text
+        assert response.json()["id"] != original
+
+    def test_the_original_job_is_untouched(self, client, store, stub_tool):
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        before = store.get(original)
+
+        client.post(f"{API_PREFIX}/jobs/{original}/retry")
+
+        after = store.get(original)
+        assert after.status == before.status
+        assert after.finished_at == before.finished_at
+
+    def test_it_reuses_the_original_settings(self, client, store, stub_tool):
+        """Not the defaults. A retry at different settings is a different crawl."""
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store, max_pages=7, crawl_dom=False, concurrency=2)
+
+        retried = client.post(f"{API_PREFIX}/jobs/{original}/retry").json()["id"]
+
+        request = store.get(retried).request
+        assert request["max_pages"] == 7
+        assert request["concurrency"] == 2
+        assert request["crawl_dom"] is False
+
+    def test_a_failed_job_can_be_retried(self, client, store, stub_tool):
+        """The case this exists for: openai.com returning 403."""
+        stub_tool.result = StubResult(ok=False, error="403 from the target")
+        original = run_job(client, store)
+        assert store.get(original).status is JobStatus.FAILED
+
+        assert client.post(f"{API_PREFIX}/jobs/{original}/retry").status_code == 202
+
+    def test_a_successful_job_can_also_be_retried(self, client, store, stub_tool):
+        """Re-crawling to pick up site changes is as legitimate as retrying."""
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+
+        assert client.post(f"{API_PREFIX}/jobs/{original}/retry").status_code == 202
+
+    def test_an_unknown_job_is_404(self, client):
+        assert client.post(f"{API_PREFIX}/jobs/nope/retry").status_code == 404
+
+    def test_a_job_with_no_stored_request_is_409(self, client, store):
+        """Records written before the request was kept, or by another tool."""
+        record = store.create("some.other.tool", {}, label="legacy")
+        response = client.post(f"{API_PREFIX}/jobs/{record.id}/retry")
+        assert response.status_code == 409
+        assert "cannot be re-run" in response.json()["detail"]
+
+    def test_settings_this_build_rejects_are_409_not_500(self, client, store):
+        """A schema change must not reach the operator as a traceback.
+
+        A record written before the change is refused with an explanation
+        instead of a pydantic error nobody can act on.
+        """
+        record = store.create(server_module.TOOL_NAME, {"base_url": SAFE_URL, "max_pages": -5})
+        response = client.post(f"{API_PREFIX}/jobs/{record.id}/retry")
+        assert response.status_code == 409
+        assert "no longer accepts" in response.json()["detail"]
+
+    def test_the_url_is_revalidated_at_retry(self, client, store):
+        """A stored payload is not automatically still safe.
+
+        DNS moves. A host that resolved publicly when the job first ran may
+        resolve to a private address today, and replaying the payload without
+        re-checking would turn a stored record into an SSRF primitive.
+        """
+        record = store.create(
+            server_module.TOOL_NAME, {"base_url": "http://127.0.0.1/", "max_pages": 5}
+        )
+        response = client.post(f"{API_PREFIX}/jobs/{record.id}/retry")
+        assert response.status_code == 400
+
+
+class TestResume:
+    """Crawling the URLs an interrupted job discovered but never fetched."""
+
+    def _checkpoint(self, store, job_id: str, unfetched: list[str]) -> None:
+        store.write_checkpoint(
+            job_id,
+            {
+                "base_url": SAFE_URL,
+                "urls": [SAFE_URL, *unfetched],
+                "unfetched": unfetched,
+                "saved_at_count": 1 + len(unfetched),
+            },
+        )
+
+    def test_seeds_the_new_crawl_with_what_was_missed(self, client, store, stub_tool):
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        self._checkpoint(store, original, [f"{SAFE_URL}a", f"{SAFE_URL}b"])
+
+        response = client.post(f"{API_PREFIX}/jobs/{original}/resume")
+        assert response.status_code == 202, response.text
+
+        request = store.get(response.json()["id"]).request
+        assert request["seed_urls"] == [f"{SAFE_URL}a", f"{SAFE_URL}b"]
+
+    def test_the_label_states_how_much_is_left(self, client, store, stub_tool):
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        self._checkpoint(store, original, [f"{SAFE_URL}{n}" for n in range(3)])
+
+        label = client.post(f"{API_PREFIX}/jobs/{original}/resume").json()["label"]
+        assert "resumed +3" in label
+
+    def test_a_job_with_no_checkpoint_is_404(self, client, store, stub_tool):
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        response = client.post(f"{API_PREFIX}/jobs/{original}/resume")
+        assert response.status_code == 404
+
+    def test_a_checkpoint_predating_the_feature_is_409(self, client, store, stub_tool):
+        """A checkpoint without an unfetched set cannot be resumed.
+
+        The discovered set alone cannot separate fetched from unfetched, so
+        resuming would silently re-fetch everything — which is `retry`.
+        """
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        store.write_checkpoint(
+            original,
+            {"base_url": SAFE_URL, "urls": [SAFE_URL], "saved_at_count": 1},
+        )
+
+        response = client.post(f"{API_PREFIX}/jobs/{original}/resume")
+        assert response.status_code == 409
+        assert "retry it instead" in response.json()["detail"]
+
+    def test_nothing_left_to_fetch_is_409(self, client, store, stub_tool):
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        self._checkpoint(store, original, [])
+
+        response = client.post(f"{API_PREFIX}/jobs/{original}/resume")
+        assert response.status_code == 409
+        assert "every URL it discovered" in response.json()["detail"]
+
+    def test_a_running_job_cannot_be_resumed(self, client, store):
+        """A running job offers no stable delta.
+
+        Its checkpoint is still moving, so anything read now is stale before the
+        resumed crawl starts.
+        """
+        record = store.create(server_module.TOOL_NAME, {"base_url": SAFE_URL, "max_pages": 5})
+        store.mark_running(record.id)
+        self._checkpoint(store, record.id, [f"{SAFE_URL}a"])
+
+        response = client.post(f"{API_PREFIX}/jobs/{record.id}/resume")
+        assert response.status_code == 409
+        assert "still running" in response.json()["detail"]
+
+    def test_an_unknown_job_is_404(self, client):
+        assert client.post(f"{API_PREFIX}/jobs/nope/resume").status_code == 404
+
+    def test_the_original_result_is_left_alone(self, client, store, stub_tool):
+        """Resume produces a separate result and never edits the original.
+
+        Merging is not attempted: inbound counts and orphan flags are properties
+        of the whole graph, and a checkpoint holds URLs only.
+        """
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        self._checkpoint(store, original, [f"{SAFE_URL}a"])
+
+        before = store.get(original)
+        resumed = client.post(f"{API_PREFIX}/jobs/{original}/resume").json()["id"]
+        after = store.get(original)
+
+        assert resumed != original
+        # The whole record, not one field: resume must not touch the original at
+        # all, and asserting on a single attribute would miss a status or
+        # telemetry rewrite.
+        assert after == before

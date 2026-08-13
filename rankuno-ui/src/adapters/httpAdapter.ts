@@ -119,6 +119,7 @@ export class HttpAdapter implements CrawlDataAdapter {
       // was accepted. They differ when a job waits behind the concurrency cap,
       // and a queued job has no start time at all — hence the fallback.
       crawledAt: record.started_at ?? record.created_at,
+      hasCheckpoint: record.has_checkpoint,
       recoverable: record.has_checkpoint && !record.has_result,
     };
   }
@@ -172,6 +173,35 @@ export class HttpAdapter implements CrawlDataAdapter {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
+    });
+    return accepted.id;
+  }
+
+  /**
+   * Run a finished job's crawl again with the settings it originally used.
+   *
+   * Returns the *new* job's id. The engine never mutates the original: its
+   * record is the evidence of what ran and when, and a failed crawl is often
+   * the finding itself.
+   */
+  async retryJob(jobId: string): Promise<string> {
+    const accepted = await this.request<{ id: string }>(`/jobs/${jobId}/retry`, {
+      method: "POST",
+    });
+    return accepted.id;
+  }
+
+  /**
+   * Crawl the URLs an interrupted job discovered but never fetched.
+   *
+   * Returns a new job id. This does **not** merge into the original result —
+   * inbound link counts and orphan flags are properties of the whole graph, and
+   * a checkpoint holds URLs only, so a merged report would carry wrong numbers
+   * for the finding operators rely on most.
+   */
+  async resumeJob(jobId: string): Promise<string> {
+    const accepted = await this.request<{ id: string }>(`/jobs/${jobId}/resume`, {
+      method: "POST",
     });
     return accepted.id;
   }

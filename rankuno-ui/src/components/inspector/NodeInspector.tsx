@@ -67,6 +67,9 @@ export function NodeInspector({ model }: Props): JSX.Element {
                 {LEVEL_BADGE[profile.hierarchy_level].label}
               </span>
               &nbsp;{profile.hierarchy_level}
+              <span className="dim">
+                &nbsp;· {profile.depth_from_l0} levels below the root
+              </span>
             </dd>
           </div>
         )}

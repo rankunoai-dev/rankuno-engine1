@@ -94,6 +94,13 @@ interface CrawlState {
   startCrawl: (request: PageClassificationInput) => Promise<string | null>;
   refreshJobs: () => Promise<void>;
   loadCheckpoint: (jobId: string) => Promise<void>;
+  /**
+   * Re-run a job, or continue one that stopped early.
+   *
+   * Both produce a *new* job, so both are watched exactly like a fresh crawl —
+   * the header pill and the jobs table need no special case for them.
+   */
+  relaunch: (jobId: string, mode: "retry" | "resume", label: string) => Promise<string | null>;
 }
 
 /*
@@ -237,6 +244,35 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     } catch (cause) {
       set({ status: "failed", error: describe(cause) });
     }
+  },
+
+  async relaunch(jobId, mode, label) {
+    const adapter = get().adapter;
+    if (!(adapter instanceof HttpAdapter)) return null;
+
+    let newId: string;
+    try {
+      newId = mode === "retry" ? await adapter.retryJob(jobId) : await adapter.resumeJob(jobId);
+    } catch (cause) {
+      // The engine refuses these for specific, stateful reasons — nothing left
+      // to fetch, a checkpoint that predates the feature, no free slot. Its
+      // wording is more use than anything this layer could invent.
+      set({ error: describe(cause) });
+      return null;
+    }
+
+    patchLiveJob(newId, {
+      label,
+      status: "queued",
+      message: mode === "retry" ? "Re-running the crawl." : "Continuing where the crawl stopped.",
+      telemetry: null,
+      startedAt: Date.now(),
+      endedAt: null,
+      error: null,
+    });
+    await get().refreshJobs();
+    void watchJob(get, adapter, newId);
+    return newId;
   },
 
   setGrouping(grouping) {

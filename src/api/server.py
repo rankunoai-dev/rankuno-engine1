@@ -43,7 +43,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from src.core.errors import UnsafeUrlError
 from src.core.logger import get_logger
@@ -182,13 +182,23 @@ class CrawlCheckpointer:
             self._last_write = now
             self._last_count = count
             # Materialised inside the throttle, never outside it: at 20,000
-            # nodes building this tuple is the expensive part of a checkpoint.
+            # nodes building these tuples is the expensive part of a checkpoint.
             urls = graph.all_urls()
+            unfetched = graph.unfetched_urls()
 
         try:
             self._store.write_checkpoint(
                 self._job_id,
-                {"base_url": self._base_url, "urls": list(urls), "saved_at_count": count},
+                {
+                    "base_url": self._base_url,
+                    "urls": list(urls),
+                    # What a resumed crawl would still have to fetch. Recorded
+                    # here because it cannot be recovered afterwards: the result
+                    # holds a row for every *discovered* URL, fetched or not, so
+                    # nothing downstream can tell the two apart.
+                    "unfetched": list(unfetched),
+                    "saved_at_count": count,
+                },
             )
         except JobNotFoundError:
             _logger.debug("checkpoint_job_missing", extra={"job_id": self._job_id})
@@ -490,29 +500,7 @@ def create_app(
             HTTPException: `400` if the URL fails SSRF validation, `429` if no
                 concurrency slot is free.
         """
-        try:
-            state.url_policy.validate(payload.base_url)
-        except UnsafeUrlError as exc:
-            # Rejected at admission rather than letting the crawl fail later, so
-            # the operator sees the reason instead of a job that dies quietly.
-            _logger.warning("job_rejected_unsafe_url", extra={"url": payload.base_url})
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-        record = state.store.create(
-            TOOL_NAME,
-            payload.model_dump(mode="json"),
-            label=payload.base_url,
-        )
-
-        if not state.try_reserve(record.id):
-            state.store.mark_failed(record.id, "server is at its concurrent crawl limit")
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"at most {state.max_concurrent_jobs} crawls may run at once",
-            )
-
-        state.track(asyncio.create_task(_dispatch(state, record.id, payload)))
-        return JobAccepted(id=record.id, status=record.status.value, label=record.label)
+        return _start(payload, payload.base_url)
 
     @app.get(f"{API_PREFIX}/jobs", response_model=list[JobRecord])
     def list_jobs() -> list[JobRecord]:
@@ -582,6 +570,153 @@ def create_app(
                 status.HTTP_404_NOT_FOUND, detail=f"job {job_id} saved no partial work"
             )
         return _checkpoint_as_output(checkpoint).model_dump(mode="json")
+
+    def _start(payload: PageClassificationInput, label: str) -> JobAccepted:
+        """Admit a crawl, reserve a slot, and dispatch it.
+
+        Shared by every endpoint that starts work so admission cannot drift
+        between them. SSRF validation in particular must not become something
+        one entry point does and another forgets — a retry re-runs a stored
+        payload, and a stored payload is not automatically still safe: DNS moves,
+        and a host that resolved publicly last week may resolve to a private
+        address today.
+        """
+        try:
+            state.url_policy.validate(payload.base_url)
+        except UnsafeUrlError as exc:
+            _logger.warning("job_rejected_unsafe_url", extra={"url": payload.base_url})
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        record = state.store.create(TOOL_NAME, payload.model_dump(mode="json"), label=label)
+        if not state.try_reserve(record.id):
+            state.store.mark_failed(record.id, "server is at its concurrent crawl limit")
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"at most {state.max_concurrent_jobs} crawls may run at once",
+            )
+        state.track(asyncio.create_task(_dispatch(state, record.id, payload)))
+        return JobAccepted(id=record.id, status=record.status.value, label=record.label)
+
+    def _stored_payload(job_id: str) -> PageClassificationInput:
+        """Rebuild the input a job was started with.
+
+        Raises:
+            HTTPException: `404` if there is no such job, `409` if its stored
+                request cannot be replayed.
+        """
+        try:
+            record = state.store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+
+        if not record.request:
+            # Jobs created before the request was stored, and any record written
+            # by a different tool. Refused rather than guessed at: inventing a
+            # payload would crawl with settings the operator never chose.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"job {job_id} did not record the request it ran, so it cannot be re-run",
+            )
+        try:
+            return PageClassificationInput.model_validate(record.request)
+        except ValidationError as exc:
+            # A record written before a schema change. Says so plainly instead
+            # of surfacing a pydantic traceback to the operator.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"job {job_id} was run with settings this build no longer accepts",
+            ) from exc
+
+    @app.post(
+        f"{API_PREFIX}/jobs/{{job_id}}/retry",
+        response_model=JobAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def retry_job(job_id: str) -> JobAccepted:
+        """Run a job's crawl again from scratch, with its original settings.
+
+        A new job, never a mutation of the old one. The original record is the
+        evidence of what happened and when; overwriting it would destroy the
+        history an audit depends on, and a failed crawl is often the finding.
+
+        Deliberately unrestricted by the original job's outcome: re-running a
+        *successful* crawl to pick up site changes is as legitimate as retrying
+        a failed one.
+
+        Raises:
+            HTTPException: `404` if there is no such job, `409` if its settings
+                cannot be replayed, `400` if the URL no longer passes SSRF
+                validation, `429` if no concurrency slot is free.
+        """
+        payload = _stored_payload(job_id)
+        return _start(payload, f"{payload.base_url} (retry)")
+
+    @app.post(
+        f"{API_PREFIX}/jobs/{{job_id}}/resume",
+        response_model=JobAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def resume_job(job_id: str) -> JobAccepted:
+        """Crawl the URLs an interrupted job discovered but never fetched.
+
+        A separate job producing a separate result — **not** a merge into the
+        original. Merging is not a matter of appending pages: inbound link
+        counts, orphan flags and navigation coverage are properties of the whole
+        graph, and a checkpoint stores URLs only. Classifying the remainder
+        against a graph missing the pages already crawled would produce wrong
+        in-degrees and wrong orphan flags, and orphan detection is a headline
+        finding in these reports.
+
+        Refused unless the original crawl genuinely stopped early. A crawl that
+        ran to completion still shows more URLs discovered than fetched — a
+        sitemap lists pages no link reaches, and faceted filters are declined on
+        purpose — so `discovered > fetched` is normal and is not unfinished
+        work. `truncated` and `stopped_reason` are what distinguish the two.
+
+        Raises:
+            HTTPException: `404` if there is no such job or it saved no partial
+                work, `409` if it did not stop early, is still running, or has
+                nothing left to fetch, and the codes `retry` can raise.
+        """
+        payload = _stored_payload(job_id)
+        record = state.store.get(job_id)
+
+        if not record.is_terminal:
+            # Its checkpoint is still moving, so any delta read now is stale
+            # before the resumed crawl starts.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"job {job_id} is still {record.status.value}",
+            )
+
+        checkpoint = state.store.read_checkpoint(job_id)
+        if checkpoint is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"job {job_id} saved no partial work"
+            )
+
+        unfetched = checkpoint.get("unfetched")
+        if not isinstance(unfetched, list):
+            # Written before checkpoints recorded this. The discovered set alone
+            # cannot tell fetched from unfetched, so resuming would re-fetch
+            # everything — which is what `retry` is, said honestly.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    f"job {job_id} predates resumable checkpoints and cannot be "
+                    "resumed; retry it instead"
+                ),
+            )
+
+        remaining = tuple(url for url in unfetched if isinstance(url, str))
+        if not remaining:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"job {job_id} fetched every URL it discovered",
+            )
+
+        resumed = payload.model_copy(update={"seed_urls": remaining})
+        return _start(resumed, f"{payload.base_url} (resumed +{len(remaining):,})")
 
     return app
 

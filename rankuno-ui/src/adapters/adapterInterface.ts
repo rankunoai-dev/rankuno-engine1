@@ -37,6 +37,15 @@ export interface CrawlJobSummary {
    */
   crawledAt: string | null;
   /**
+   * Partial work was saved, whether or not a result also exists.
+   *
+   * Distinct from `recoverable`, which means "saved work and *no* result, so
+   * offer the partial tree". A crawl that hit its ceiling has both a result and
+   * a checkpoint: there is nothing to recover, but there is something to
+   * resume.
+   */
+  hasCheckpoint: boolean;
+  /**
    * Partial work survived an interruption and can be rendered.
    *
    * Only meaningful when there is no full result: a finished crawl needs no
@@ -147,6 +156,11 @@ export const CRAWL_SPEEDS: readonly CrawlSpeed[] = [
  */
 export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   base_url: "",
+  // Empty for an operator-started crawl. Only a resume supplies these, and the
+  // engine builds that request itself from the original job's checkpoint —
+  // there is no UI control for it, and there should not be: a hand-typed seed
+  // list is not a resume, it is a different crawl.
+  seed_urls: [],
   max_pages: 500,
   rate_limit_rps: null,
   max_depth: null,

@@ -610,3 +610,115 @@ class TestSpiderTrapRefusal:
         graph = SiteGraph("https://e.com")
         graph.add(self.TRAP, dom_link=True)
         assert graph.report().traps_skipped == 1
+
+
+class TestUnfetchedUrls:
+    """What a resumed crawl would still have to fetch.
+
+    Stored HTML is the definition of fetched — `store_html` runs only after a
+    successful retrieval — so no separate flag exists, and none should: a second
+    source of truth is one that can disagree with the first.
+    """
+
+    def test_a_node_with_no_body_is_unfetched(self):
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/a/", sitemap=True)
+        assert graph.unfetched_urls() == ("https://e.com/a/",)
+
+    def test_a_node_with_a_body_is_not(self):
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/a/", dom_link=True)
+        graph.store_html("https://e.com/a/", "<html></html>")
+        assert graph.unfetched_urls() == ()
+
+    def test_it_reports_the_original_url_not_the_dedup_key(self):
+        """A resumed crawl fetches these, so they have to be requestable."""
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/A/?utm_source=x", sitemap=True)
+        assert graph.unfetched_urls() == ("https://e.com/A/?utm_source=x",)
+
+    def test_a_sitemap_only_page_appears_even_on_a_complete_crawl(self):
+        """An unfetched URL is not the same as unfinished work.
+
+        Which is why callers gate resume on `truncated`/`stopped_reason` rather
+        than on this being non-empty: a URL no link reaches was never reachable,
+        and the DOM crawl structurally cannot get to it.
+        """
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/", dom_link=True)
+        graph.store_html("https://e.com/", "<html></html>")
+        graph.add("https://e.com/orphan/", sitemap=True)
+        assert graph.unfetched_urls() == ("https://e.com/orphan/",)
+
+
+class TestResumeSeeding:
+    """A resumed crawl starts from what the interrupted one never reached."""
+
+    SEED_SITE = {
+        "/robots.txt": httpx.Response(200, text=ROBOTS),
+        "/": html('<html><body><a href="/a/">A</a></body></html>'),
+        "/a/": html(LEAF_HTML),
+        # Reachable only if seeded: nothing links to it.
+        "/missed/": html('<html><body><a href="/missed/deeper/">Deeper</a></body></html>'),
+        "/missed/deeper/": html(LEAF_HTML),
+    }
+
+    def test_a_seed_no_link_reaches_is_crawled(self, settings):
+        graph, _ = discover_site(
+            site_fetcher(self.SEED_SITE, settings),
+            "https://e.com",
+            seed_urls=("https://e.com/missed/",),
+        )
+        assert graph.html_for("https://e.com/missed/") is not None
+
+    def test_links_found_from_a_seed_are_followed(self, settings):
+        """Seeds are crawl roots, not a fetch list.
+
+        The point of resuming is to reach what lies beyond the URLs that were
+        missed, not merely to retrieve them.
+        """
+        graph, _ = discover_site(
+            site_fetcher(self.SEED_SITE, settings),
+            "https://e.com",
+            seed_urls=("https://e.com/missed/",),
+        )
+        assert graph.html_for("https://e.com/missed/deeper/") is not None
+
+    def test_the_site_root_is_still_crawled(self, settings):
+        """Seeding narrows nothing. Sitemap and CMS discovery still run too."""
+        graph, _ = discover_site(
+            site_fetcher(self.SEED_SITE, settings),
+            "https://e.com",
+            seed_urls=("https://e.com/missed/",),
+        )
+        assert graph.html_for("https://e.com/") is not None
+        assert graph.html_for("https://e.com/a/") is not None
+
+    def test_a_seed_that_duplicates_the_root_is_not_crawled_twice(self, settings):
+        graph, report = discover_site(
+            site_fetcher(self.SEED_SITE, settings),
+            "https://e.com",
+            seed_urls=("https://e.com/",),
+        )
+        assert report.pages_fetched == len([n for n in graph.nodes if graph.html_for(n.url)])
+
+    def test_a_seed_the_graph_refuses_is_dropped(self, settings):
+        """A seed is admitted on the same terms as any other URL.
+
+        Media, loop artefacts and over-ceiling URLs are refused at the graph
+        boundary. A stale checkpoint must not smuggle them past it.
+        """
+        graph, _ = discover_site(
+            site_fetcher(self.SEED_SITE, settings),
+            "https://e.com",
+            seed_urls=("https://e.com/logo.png", "https://e.com/a/b/a/b/a/b/"),
+        )
+        urls = {node.url for node in graph.nodes}
+        assert "https://e.com/logo.png" not in urls
+
+    def test_no_seeds_behaves_exactly_as_before(self, settings):
+        plain, _ = discover_site(site_fetcher(self.SEED_SITE, settings), "https://e.com")
+        seeded, _ = discover_site(
+            site_fetcher(self.SEED_SITE, settings), "https://e.com", seed_urls=()
+        )
+        assert {n.url for n in plain.nodes} == {n.url for n in seeded.nodes}
