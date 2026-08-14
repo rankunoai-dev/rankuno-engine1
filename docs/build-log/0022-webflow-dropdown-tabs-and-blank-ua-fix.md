@@ -1,9 +1,9 @@
 # Cycle 0022: Breadcrumb Hierarchy Extraction, Webflow Dropdown Tabs, and UI Badging Fixes
 
-- **Date**: 2026-08-13
-- **Scope**: Dual JSON-LD + DOM breadcrumb hierarchy extraction (`breadcrumb_parser.py`); exclude breadcrumbs from header nav parsing; Webflow nested `div`/`button` dropdown toggles; UI `profile.hierarchy_level` badging & inspector split; blank-UA fix.
-- **Commit**: (Pending commit for cycle 0022)
-- **Quality gate**: `1150 passed, 0 warnings in 42.15s` / `Total coverage: 95.54%`
+- **Date**: 2026-08-14
+- **Scope**: Dual JSON-LD + DOM breadcrumb hierarchy extraction (`breadcrumb_parser.py`); Webflow dropdown toggles; Specificity Win precedence rule; URL variant folding (`www.` / `scheme`); Dedicated Audit View tab on NavigationRail (5 findings); Analyst confidence chips; inspector Menu vs URL path disagreement flagging.
+- **Commit**: `acdcda5`
+- **Quality gate**: `1,189 passed, 0 warnings in 44.12s` / `Total coverage: 95.40%`
 
 ---
 
