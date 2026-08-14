@@ -1,0 +1,116 @@
+/*
+ * Audit findings.
+ *
+ * Colours are declared locally for the same reason `jobs.css` declares its own:
+ * antd runs under `theme.darkAlgorithm` here, while the design-system palette
+ * is a light one. Using `--ink` on this ground renders near-black text on a
+ * near-black card.
+ */
+
+.au-wrap {
+  padding: 14px 18px 24px;
+  overflow: auto;
+  height: 100%;
+
+  --au-ink: #e6edf7;
+  --au-dim: #94a3b8;
+}
+
+.au-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.au-head h2 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--au-ink);
+}
+
+.au-sub {
+  font-size: 11.5px;
+  color: var(--au-dim);
+  font-family: var(--mono);
+}
+
+.au-caveat {
+  border: 1px solid #7f1d1d;
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: #1a1013;
+  color: #fca5a5;
+  padding: 8px 12px;
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+
+.au-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* Findings are read, not scanned across. A wide measure makes the detail
+     lines hard to follow. */
+  max-width: 900px;
+}
+
+.au-card {
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #0f1420;
+  padding: 12px 14px;
+}
+
+.au-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.au-card h3 {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--au-ink);
+}
+
+.au-detail {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--au-dim);
+  margin: 0 0 6px;
+}
+
+.au-action {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #bfdbfe;
+  margin: 0 0 8px;
+}
+
+.au-action strong {
+  color: #7dd3fc;
+  margin-right: 6px;
+}
+
+.au-examples {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--au-dim);
+}
+
+.au-examples li {
+  padding: 1px 0;
+  overflow-wrap: anywhere;
+}
+
+.au-more {
+  color: #64748b;
+  font-style: italic;
+}

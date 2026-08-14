@@ -523,8 +523,23 @@ def normalize_url(
     ]
     query = urlencode(sorted(kept))
 
+    # `http://x`, `https://x`, `https://www.x` and `http://www.x` are one page
+    # served four ways, and each was becoming its own graph node with its own
+    # trail. On highradius.com that split `/resources/?ps=templates` into three
+    # nodes and left 11 header-menu links unmatchable against the page set.
+    #
+    # Only the `www.` label is folded, never another subdomain: `blog.x.com` is
+    # a different property and merging it would collapse a real distinction. The
+    # port is kept — `localhost:8000` and `localhost:9000` are different servers
+    # — which is why `site_host` cannot be reused here; it drops the port for
+    # same-site comparison, which is a different question.
     netloc = parts.netloc.lower()
-    return urlunsplit((parts.scheme.lower(), netloc, path, query, ""))
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    scheme = parts.scheme.lower()
+    if scheme in {"http", "https"}:
+        scheme = "https"
+    return urlunsplit((scheme, netloc, path, query, ""))
 
 
 def depth_of(

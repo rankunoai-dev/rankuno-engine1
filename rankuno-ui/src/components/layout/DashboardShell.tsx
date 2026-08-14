@@ -11,6 +11,7 @@ import { LevelFilterRow } from "../tree/LevelFilterRow";
 import { TeleportSearch } from "../tree/TeleportSearch";
 import { VirtualizedTree } from "../tree/VirtualizedTree";
 import { CrawlReport } from "../report/CrawlReport";
+import { AuditView } from "../audit/AuditView";
 import { CrawlJobsView } from "../jobs/CrawlJobsView";
 import { CrawlNotifier } from "../jobs/CrawlNotifier";
 import { HeaderBar } from "./HeaderBar";
@@ -109,6 +110,7 @@ export function DashboardShell(): JSX.Element {
               the visualizer. The error banner above stays on both, because a
               rejected submission has no job row to be reported against. */}
           {view === "jobs" && <CrawlJobsView />}
+          {view === "audit" && <AuditView />}
 
           {view === "visualizer" && active?.synthetic && (
             <Alert

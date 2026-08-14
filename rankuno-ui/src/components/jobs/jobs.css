@@ -125,6 +125,11 @@
   flex-direction: column;
   gap: 6px;
   padding: 2px 0 6px;
+  /* Bounded, because the ticker holds the last 20 URLs and HighRadius URLs run
+     past 120 characters — unbounded, the expanded row grew taller than the
+     viewport and pushed the rest of the table off screen. */
+  max-height: 220px;
+  overflow: hidden;
 }
 
 .jb-actions {

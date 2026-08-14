@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 /** Which rail destination is on screen. */
-export type RailView = "visualizer" | "jobs";
+export type RailView = "visualizer" | "jobs" | "audit";
 
 interface UiState {
   view: RailView;

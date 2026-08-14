@@ -198,11 +198,23 @@
   align-items: center;
   gap: 14px;
   padding: 0 20px;
+  /* Nothing escapes the header. Its children are a title that grows with the
+     site URL and a progress pill that grows with the page count, and on a
+     14,000-page crawl the two met in the middle and overlapped. */
+  overflow: hidden;
 }
 .hdr h1 {
   font-size: 15px;
   font-weight: 700;
   margin: 0;
+  /* The title yields first: it is the one element whose tail can be inferred.
+     `min-width: 0` is required — a flex item will not shrink below its content
+     without it, which is why `overflow: hidden` alone did not help. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hdr h1 span {
   color: var(--dim);
@@ -233,6 +245,10 @@
    does not need to hold both and the header keeps its height. */
 .bgpill {
   margin-left: auto;
+  /* Never shrinks and never grows past this. A crawl at 7,232 / 9,690 with a
+     long host and an ETA is the widest this gets. */
+  flex: none;
+  max-width: 360px;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -269,6 +285,21 @@
 .bgpill-count,
 .bgpill-eta {
   opacity: 0.8;
+}
+
+/* Below this the header cannot hold host + percent + counts + ETA + button.
+   The raw counts go first — the percentage says the same thing in less space,
+   and the exact figures are one click away in the jobs table. */
+@media (max-width: 1500px) {
+  .bgpill-count {
+    display: none;
+  }
+}
+@media (max-width: 1180px) {
+  .bgpill-eta,
+  .bgpill-host {
+    display: none;
+  }
 }
 /* A second and third crawl are counted rather than drawn. */
 .bgpill-more {
@@ -814,6 +845,12 @@ svg.wires {
 }
 .kv .ok { color: var(--ok); font-weight: 600; }
 .kv .warn { color: var(--warn); font-weight: 600; }
+/* Secondary line inside a value — the agreement note, the depth annotation.
+   Present but not competing with the value it qualifies. */
+.kv .dim {
+  color: var(--dim);
+  font-weight: 400;
+}
 .trace h5 {
   font-size: 9px;
   letter-spacing: 0.12em;

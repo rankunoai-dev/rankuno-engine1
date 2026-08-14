@@ -38,9 +38,12 @@ interface Props {
  */
 export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element {
   const { summary, discovery, nav_coverage: coverage } = result;
-  // What the tree actually shows, which is what a reader is looking at.
-  const inOthers = model.laneCounts[OTHERS_LANE] ?? 0;
-  const placed = model.nodes.length - inOthers;
+  // Counted over *pages*, not tree nodes. `model.nodes` includes the section
+  // nodes the tree needs to hold its children — 14,500 nodes for 10,816 pages on
+  // highradius — so subtracting from it produced "13,871 placed (96%)" against
+  // 10,816 classified. A headline larger than the total it is a share of.
+  const inOthers = model.nodes.filter((n) => n.profile && n.lv === OTHERS_LANE).length;
+  const placed = model.nodes.filter((n) => n.profile).length - inOthers;
   const rows = flatten(model, REPORT_ROW_LIMIT);
   const omitted = model.nodes.length - rows.length;
 
@@ -110,8 +113,8 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
             <th>Placed in a section</th>
             <td>
               {placed.toLocaleString()}
-              {model.nodes.length > 0 &&
-                ` (${Math.round((placed / (placed + inOthers || 1)) * 100)}%)`}
+              {placed + inOthers > 0 &&
+                ` (${Math.round((placed / (placed + inOthers)) * 100)}%)`}
             </td>
             <th>OTHERS</th>
             <td>{inOthers.toLocaleString()}</td>

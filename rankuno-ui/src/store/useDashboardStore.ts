@@ -1,6 +1,11 @@
 import { create } from "zustand";
-import type { ConsensusMethod } from "../types/schema";
-import { OTHERS_LANE, type DashModel, type DashNode } from "../lib/dashboardModel";
+import {
+  confidenceBand,
+  OTHERS_LANE,
+  type ConfidenceBand,
+  type DashModel,
+  type DashNode,
+} from "../lib/dashboardModel";
 
 /** One row of the flattened, filtered view-model the virtual list renders. */
 export interface FlatRow {
@@ -13,7 +18,7 @@ interface DashboardState {
   open: Set<number>;
   focus: number | null;
   laneFilter: Set<number>;
-  methodFilter: Set<ConsensusMethod>;
+  bandFilter: Set<ConfidenceBand>;
   /** Page number per parent, for the focus graph's child pager. */
   childPage: Record<number, number>;
   /** Rebuilt only when the model or a filter changes, never per scroll frame. */
@@ -23,7 +28,7 @@ interface DashboardState {
   toggleOpen: (index: number, model: DashModel) => void;
   setFocus: (index: number, model: DashModel) => void;
   toggleLane: (lane: number, model: DashModel) => void;
-  toggleMethod: (method: ConsensusMethod, model: DashModel) => void;
+  toggleBand: (band: ConfidenceBand, model: DashModel) => void;
   nextChildPage: (index: number, total: number) => void;
   expandAll: (model: DashModel, toDepth: number) => void;
   collapseAll: (model: DashModel) => void;
@@ -32,20 +37,20 @@ interface DashboardState {
 function passes(
   node: DashNode,
   laneFilter: Set<number>,
-  methodFilter: Set<ConsensusMethod>,
+  bandFilter: Set<ConfidenceBand>,
 ): boolean {
   if (!laneFilter.has(node.lv)) return false;
   // A structural grouping node has no classification of its own. Hiding it
-  // because it lacks a consensus method would hide the whole branch beneath it.
+  // because it has no confidence score would hide the whole branch beneath it.
   if (!node.profile) return true;
-  return methodFilter.has(node.profile.consensus_method);
+  return bandFilter.has(confidenceBand(node.profile));
 }
 
 function flatten(
   model: DashModel,
   open: Set<number>,
   laneFilter: Set<number>,
-  methodFilter: Set<ConsensusMethod>,
+  bandFilter: Set<ConfidenceBand>,
 ): FlatRow[] {
   const rows: FlatRow[] = [];
   // Explicit stack rather than recursion: 20,000 nodes can nest arbitrarily.
@@ -57,7 +62,7 @@ function flatten(
   while (stack.length > 0) {
     const row = stack.pop()!;
     const node = model.nodes[row.i]!;
-    if (!passes(node, laneFilter, methodFilter)) continue;
+    if (!passes(node, laneFilter, bandFilter)) continue;
 
     rows.push(row);
     if (!open.has(row.i)) continue;
@@ -74,7 +79,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   open: new Set<number>(),
   focus: null,
   laneFilter: new Set(ALL_LANES),
-  methodFilter: new Set<ConsensusMethod>(),
+  bandFilter: new Set<ConfidenceBand>(["high", "review"]),
   childPage: {},
   flat: [],
 
@@ -83,15 +88,15 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     // default produces a 20,000-row view-model on first paint for a list nobody
     // has scrolled yet.
     const open = new Set(model.roots);
-    const methodFilter = new Set(model.methodsPresent);
+    const bandFilter = new Set<ConfidenceBand>(["high", "review"]);
     const laneFilter = new Set(ALL_LANES);
     set({
       open,
-      methodFilter,
+      bandFilter,
       laneFilter,
       childPage: {},
       focus: model.roots[0] ?? null,
-      flat: flatten(model, open, laneFilter, methodFilter),
+      flat: flatten(model, open, laneFilter, bandFilter),
     });
   },
 
@@ -99,7 +104,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     const open = new Set(get().open);
     if (open.has(index)) open.delete(index);
     else open.add(index);
-    set({ open, flat: flatten(model, open, get().laneFilter, get().methodFilter) });
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
   },
 
   setFocus(index, model) {
@@ -113,7 +118,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     set({
       focus: index,
       open,
-      flat: flatten(model, open, get().laneFilter, get().methodFilter),
+      flat: flatten(model, open, get().laneFilter, get().bandFilter),
     });
   },
 
@@ -121,14 +126,14 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     const laneFilter = new Set(get().laneFilter);
     if (laneFilter.has(lane)) laneFilter.delete(lane);
     else laneFilter.add(lane);
-    set({ laneFilter, flat: flatten(model, get().open, laneFilter, get().methodFilter) });
+    set({ laneFilter, flat: flatten(model, get().open, laneFilter, get().bandFilter) });
   },
 
-  toggleMethod(method, model) {
-    const methodFilter = new Set(get().methodFilter);
-    if (methodFilter.has(method)) methodFilter.delete(method);
-    else methodFilter.add(method);
-    set({ methodFilter, flat: flatten(model, get().open, get().laneFilter, methodFilter) });
+  toggleBand(band, model) {
+    const bandFilter = new Set(get().bandFilter);
+    if (bandFilter.has(band)) bandFilter.delete(band);
+    else bandFilter.add(band);
+    set({ bandFilter, flat: flatten(model, get().open, get().laneFilter, bandFilter) });
   },
 
   nextChildPage(index, total) {
@@ -149,11 +154,11 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         stack.push({ i: kid, depth: row.depth + 1 });
       }
     }
-    set({ open, flat: flatten(model, open, get().laneFilter, get().methodFilter) });
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
   },
 
   collapseAll(model) {
     const open = new Set(model.roots);
-    set({ open, flat: flatten(model, open, get().laneFilter, get().methodFilter) });
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
   },
 }));

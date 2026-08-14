@@ -65,6 +65,7 @@ from src.modules.seo.page_classifier.discovery import (
     discover_site,
 )
 from src.modules.seo.page_classifier.logical_hierarchy import (
+    OTHERS_LABEL,
     NavCoverageReport,
     assign_navigation,
 )
@@ -435,11 +436,6 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         navigation = parse_navigation(homepage_html, base_url)
         assignments, coverage = assign_navigation(navigation, pages)
 
-        # A page that publishes its own breadcrumb keeps it. The menu is a
-        # site-wide structure inherited by URL prefix; a breadcrumb is the site's
-        # statement about *this* page, so per-page evidence outranks inherited
-        # evidence. Menu inheritance still covers every page without one, which
-        # on a large site is most of them.
         placed: list[FullPageIntelligenceProfile] = []
         for page in pages:
             assignment = assignments.get(page.url)
@@ -447,8 +443,9 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 placed.append(page)
                 continue
             update: dict[str, object] = {"nav_parent_url": assignment.nav_parent_url}
-            if not page.breadcrumb_path:
-                update["breadcrumb_path"] = assignment.nav_path
+            trail = _better_trail(page.breadcrumb_path, assignment.nav_path)
+            if trail != page.breadcrumb_path:
+                update["breadcrumb_path"] = trail
             placed.append(page.model_copy(update=update))
         return navigation, coverage, tuple(placed)
 
@@ -642,3 +639,48 @@ def register_tools() -> None:
     from src.core.registry import registry
 
     registry.register(PageClassificationTool)
+
+
+def _menu_depth(nav_path: tuple[str, ...]) -> int:
+    """How specifically the header menu places a page.
+
+    Zero for a page the menu does not reach. `assign_navigation` gives those a
+    two-element path — `(OTHERS, <page type>)` — which *looks* as specific as a
+    real two-crumb trail and would beat one on a length comparison. Treating it
+    as no placement at all is the whole reason this function exists.
+    """
+    if not nav_path or nav_path[0] == OTHERS_LABEL:
+        return 0
+    return len(nav_path)
+
+
+def _better_trail(breadcrumb: tuple[str, ...], nav_path: tuple[str, ...]) -> tuple[str, ...]:
+    """Choose between a page's own breadcrumb and its header-menu position.
+
+    Whichever places the page **more specifically** wins, and a tie goes to the
+    menu. Neither source is reliably better, which is why an unconditional rule
+    fails on real sites in both directions:
+
+    * highradius.com publishes breadcrumbs that omit a level. `/resources/
+      ?ps=templates` carries the trail `("Home",)` — no information at all —
+      while the menu places it at `Resources > Learn & Transform > Templates`.
+      Seven header-menu pages, every one of them under Resources, were landing
+      under Home because presence beat quality.
+    * gep.com has the opposite shape: 153 menu entries for 7,287 pages, and
+      breadcrumbs that correctly place 6,003 of them. Preferring the menu there
+      would discard almost all of it.
+
+    The tie-break favours the menu because it is also the more *stable* source.
+    It is parsed once from the homepage, so it does not depend on which pages a
+    given crawl happened to fetch — and that dependence is what made 6% of URLs
+    move between two runs of the same site.
+    """
+    menu = _menu_depth(nav_path)
+    if menu and menu >= len(breadcrumb):
+        return nav_path
+    if breadcrumb:
+        return breadcrumb
+    # Neither source placed it. `OTHERS` is still a real bucket — sub-grouped by
+    # page type — and returning nothing here would drop that sub-grouping and
+    # leave `nav_coverage` disagreeing with the tree.
+    return nav_path

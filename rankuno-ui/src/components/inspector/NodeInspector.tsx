@@ -73,6 +73,28 @@ export function NodeInspector({ model }: Props): JSX.Element {
             </dd>
           </div>
         )}
+        {profile && (
+          <div>
+            <dt>Menu vs URL</dt>
+            <dd>
+              <div>{urlPath(profile.url)}</div>
+              {siloMismatch(profile.url, profile.breadcrumb_path) ? (
+                /* Worth surfacing, not hiding. HighRadius serves
+                   `/software/speed-to-value/` from the Resources menu, and
+                   1,113 pages sit under `/software/` with no `Software` tab at
+                   all. Google infers a silo from the URL; a visitor is offered
+                   a different one. That divergence is the finding. */
+                <div className="warn">
+                  URL silo <strong>/{firstSegment(profile.url)}/</strong> does not appear in
+                  this page's menu path — search engines and visitors see different
+                  structures.
+                </div>
+              ) : (
+                <div className="dim">Menu path and URL structure agree.</div>
+              )}
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Subtree</dt>
           <dd>
@@ -159,4 +181,46 @@ export function NodeInspector({ model }: Props): JSX.Element {
       </div>
     </div>
   );
+}
+
+/** Path only — the host is on every row and repeating it wastes the column. */
+function urlPath(url: string): string {
+  try {
+    const { pathname, search } = new URL(url);
+    return `${pathname}${search}`;
+  } catch {
+    return url;
+  }
+}
+
+/** First path segment, which is the silo a search engine infers. */
+function firstSegment(url: string): string {
+  try {
+    return new URL(url).pathname.split("/").filter(Boolean)[0] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Whether the URL's top-level silo is absent from the page's menu path.
+ *
+ * Compared loosely — segment against label, case- and separator-insensitive —
+ * because the two are written by different people for different audiences:
+ * `/order-to-cash/` against "Order To Cash". An exact match would report a
+ * mismatch on almost every page and the signal would be worthless.
+ *
+ * A single-segment URL is never a mismatch: it has no silo to disagree with.
+ */
+function siloMismatch(url: string, trail: readonly string[]): boolean {
+  const segment = firstSegment(url);
+  if (!segment || trail.length === 0) return false;
+  try {
+    if (new URL(url).pathname.split("/").filter(Boolean).length < 2) return false;
+  } catch {
+    return false;
+  }
+  const flat = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const needle = flat(segment);
+  return !trail.some((label) => flat(label).includes(needle) || needle.includes(flat(label)));
 }

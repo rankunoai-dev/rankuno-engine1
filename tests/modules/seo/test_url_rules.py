@@ -51,7 +51,8 @@ class TestNormalizeUrl:
     def test_amazon_style_url_collapses(self):
         """The worked example from the Amazon-scale specification."""
         raw = "https://www.amazon.com/dp/B0001234?color=red&size=xl&ref=nav_1&qid=1723456&sr=8-1"
-        assert normalize_url(raw) == "https://www.amazon.com/dp/b0001234/?color=red&size=xl"
+        # `www.` is folded out of the dedup key — see `TestHostVariantFolding`.
+        assert normalize_url(raw) == "https://amazon.com/dp/b0001234/?color=red&size=xl"
 
     def test_folds_locale_variants_onto_one_key(self):
         assert normalize_url("https://e.com/de/software/") == normalize_url(
@@ -65,6 +66,38 @@ class TestNormalizeUrl:
 
     def test_trailing_slash_is_unified(self):
         assert normalize_url("https://e.com/a/b") == normalize_url("https://e.com/a/b/")
+
+    def test_host_variants_share_one_key(self):
+        """One page served four ways was becoming four graph nodes.
+
+        On highradius.com that split `/resources/?ps=templates` into three
+        separate nodes with three different trails, and left 11 header-menu
+        links unmatchable against the page set.
+        """
+        keys = {
+            normalize_url("https://www.e.com/a/"),
+            normalize_url("https://e.com/a/"),
+            normalize_url("http://e.com/a/"),
+            normalize_url("http://www.e.com/a/"),
+        }
+        assert len(keys) == 1
+
+    def test_other_subdomains_are_not_folded(self):
+        """`blog.e.com` is a different property; merging it loses a real one."""
+        assert normalize_url("https://blog.e.com/a/") != normalize_url("https://e.com/a/")
+
+    def test_a_host_merely_starting_with_www_is_untouched(self):
+        assert "wwwx.e.com" in normalize_url("https://wwwx.e.com/a/")
+
+    def test_the_port_is_kept(self):
+        """`site_host` drops it for same-site comparison; a dedup key must not.
+
+        `localhost:8000` and `localhost:9000` are different servers, and fixture
+        crawls run against both.
+        """
+        assert normalize_url("http://localhost:8000/a/") != normalize_url(
+            "http://localhost:9000/a/"
+        )
 
     def test_host_and_scheme_are_lowercased(self):
         assert normalize_url("HTTPS://E.COM/A/") == "https://e.com/a/"

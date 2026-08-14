@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { LANE_LABELS, OTHERS_LANE, type DashModel } from "../../lib/dashboardModel";
+import {
+  confidenceBand,
+  LANE_LABELS,
+  OTHERS_LANE,
+  type DashModel,
+} from "../../lib/dashboardModel";
 import { useDashboardStore } from "../../store/useDashboardStore";
 import { BreadcrumbBar } from "./BreadcrumbBar";
 
@@ -82,7 +87,7 @@ interface Props {
 export function FocusGraphStage({ model }: Props): JSX.Element {
   const focus = useDashboardStore((state) => state.focus);
   const laneFilter = useDashboardStore((state) => state.laneFilter);
-  const methodFilter = useDashboardStore((state) => state.methodFilter);
+  const bandFilter = useDashboardStore((state) => state.bandFilter);
   const setFocus = useDashboardStore((state) => state.setFocus);
   const childPage = useDashboardStore((state) => state.childPage);
   const nextChildPage = useDashboardStore((state) => state.nextChildPage);
@@ -110,7 +115,7 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
   const visibleKids = (node?.kids ?? []).filter((kid) => {
     const child = model.nodes[kid];
     if (!child || !laneFilter.has(child.lv)) return false;
-    return !child.profile || methodFilter.has(child.profile.consensus_method);
+    return !child.profile || bandFilter.has(confidenceBand(child.profile));
   });
 
   const page = (focus !== null ? childPage[focus] : 0) ?? 0;

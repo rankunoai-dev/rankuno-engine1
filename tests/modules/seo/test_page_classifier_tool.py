@@ -15,6 +15,7 @@ from src.core.registry import registry
 from src.core.schemas import ExecutionStatus, RiskClass
 from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import HttpFetcher
+from src.modules.seo.page_classifier.logical_hierarchy import OTHERS_LABEL
 from src.modules.seo.page_classifier.schemas import (
     HierarchyLevel,
     PrimaryPageType,
@@ -26,6 +27,7 @@ from src.modules.seo.page_classifier.tool import (
     PageClassificationInput,
     PageClassificationOutput,
     PageClassificationTool,
+    _better_trail,
     register_tools,
 )
 
@@ -457,3 +459,62 @@ class TestRateLimitInput:
     def test_the_default_is_unset_not_fast(self):
         """The polite configured default applies unless asked otherwise."""
         assert PageClassificationInput(base_url="https://e.com").rate_limit_rps is None
+
+
+class TestTrailPrecedence:
+    """Choosing between a page's own breadcrumb and its header-menu position.
+
+    Neither source is reliably better, which is why an unconditional rule fails
+    on real sites in both directions — see `_better_trail`.
+    """
+
+    def test_the_menu_wins_when_it_is_more_specific(self):
+        """Highradius `/resources/?ps=templates`.
+
+        Its breadcrumb is `("Home",)` — no information — and the menu places it
+        three levels deep. Presence beating quality put seven Resources pages
+        under Home.
+        """
+        assert _better_trail(("Home",), ("Resources", "Learn & Transform", "Templates")) == (
+            "Resources",
+            "Learn & Transform",
+            "Templates",
+        )
+
+    def test_the_breadcrumb_wins_when_it_is_more_specific(self):
+        """Gep `/newsroom/x`: no menu match, a three-crumb trail of its own."""
+        assert _better_trail(("HOME", "NEWS AND UPDATES", "A Release"), ()) == (
+            "HOME",
+            "NEWS AND UPDATES",
+            "A Release",
+        )
+
+    def test_a_tie_goes_to_the_menu(self):
+        """Highradius `/finsider/`: both two deep, and the menu is right.
+
+        The menu is also the more *stable* source — parsed once from the
+        homepage, so it does not depend on which pages a crawl reached.
+        """
+        assert _better_trail(("Home", "FINsider"), ("Resources", "FINsider")) == (
+            "Resources",
+            "FINsider",
+        )
+
+    def test_an_unmatched_menu_assignment_never_wins(self):
+        """The edge case that would have silently broken this.
+
+        `assign_navigation` gives unmatched pages `(OTHERS, <page type>)` — two
+        elements, which *looks* as specific as a real two-crumb trail and would
+        beat one on a naive length comparison.
+        """
+        assert _better_trail(("Home", "News"), (OTHERS_LABEL, "BLOG_ARTICLE")) == (
+            "Home",
+            "News",
+        )
+
+    def test_others_still_applies_when_there_is_no_breadcrumb(self):
+        """It is a real bucket, not a null — a page with nothing else lands there."""
+        assert _better_trail((), (OTHERS_LABEL, "UNKNOWN")) == (OTHERS_LABEL, "UNKNOWN")
+
+    def test_no_evidence_either_way_stays_empty(self):
+        assert _better_trail((), ()) == ()

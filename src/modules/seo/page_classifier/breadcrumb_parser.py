@@ -41,6 +41,7 @@ retitling those would put words in a client's mouth in a report they will read.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from html.parser import HTMLParser
@@ -201,7 +202,11 @@ def _step_from_list_item(item: dict[str, object], base_url: str) -> BreadcrumbSt
         if safe_split(absolute) is not None and absolute:
             resolved = absolute
 
-    return BreadcrumbStep(label=" ".join(name.split()), url=resolved)
+    # `html.unescape` because JSON-LD carries raw markup entities: highradius
+    # publishes "Treasury &amp; AR Insights", which reached the tree, the report
+    # and the PDF verbatim. The DOM extractor gets this free from HTMLParser's
+    # `convert_charrefs`; this path had no equivalent.
+    return BreadcrumbStep(label=" ".join(html.unescape(name).split()), url=resolved)
 
 
 def _position_of(item: dict[str, object]) -> int | None:

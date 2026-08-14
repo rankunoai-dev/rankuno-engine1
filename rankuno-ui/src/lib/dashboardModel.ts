@@ -37,11 +37,40 @@ export interface DashModel {
   index: string[];
   /** Counts per lane, 0–3 then OTHERS. */
   laneCounts: [number, number, number, number, number];
-  /** Consensus methods actually present, so no filter chip is a dead control. */
-  methodsPresent: ConsensusMethod[];
+  /** Pages per confidence band, for the filter chips. */
+  bandCounts: Record<ConfidenceBand, number>;
 }
 
 export const OTHERS_LANE = 4;
+
+/**
+ * Confidence at or above which a classification is treated as settled.
+ *
+ * The same threshold the inspector already used to colour its confidence value,
+ * lifted here so the filter and the readout cannot disagree about what "high"
+ * means.
+ */
+export const CONFIDENCE_THRESHOLD = 0.85;
+
+export type ConfidenceBand = "high" | "review";
+
+/**
+ * Which band a page falls in.
+ *
+ * This replaced a filter on `consensus_method` — the cascade layer that
+ * resolved the page. That is an engine internal: it tells an analyst which code
+ * path ran, not whether the answer can be trusted. Two of its four values could
+ * never appear at all, because Layers 2 and 3 have no implementation, so the
+ * control offered chips that could only ever filter to nothing.
+ */
+export function confidenceBand(profile: FullPageIntelligenceProfile): ConfidenceBand {
+  return profile.final_confidence_score >= CONFIDENCE_THRESHOLD ? "high" : "review";
+}
+
+export const BAND_LABELS: Record<ConfidenceBand, string> = {
+  high: "High confidence",
+  review: "Needs review",
+};
 
 /**
  * Whether a result has any published structure to group by.
@@ -216,12 +245,12 @@ export function buildDashModel(
   }
 
   const laneCounts: [number, number, number, number, number] = [0, 0, 0, 0, 0];
-  const methods = new Set<ConsensusMethod>();
+  const bandCounts: Record<ConfidenceBand, number> = { high: 0, review: 0 };
   for (const node of nodes) {
     // `lv` is clamped to 0..4 at construction, but `noUncheckedIndexedAccess`
     // cannot know that from the tuple type.
     laneCounts[node.lv] = (laneCounts[node.lv] ?? 0) + 1;
-    if (node.profile) methods.add(node.profile.consensus_method);
+    if (node.profile) bandCounts[confidenceBand(node.profile)] += 1;
   }
 
   return {
@@ -229,7 +258,7 @@ export function buildDashModel(
     roots,
     index: nodes.map((node) => `${node.label} ${node.url}`.toLowerCase()),
     laneCounts,
-    methodsPresent: METHOD_ORDER.filter((method) => methods.has(method)),
+    bandCounts,
   };
 }
 
@@ -238,5 +267,5 @@ export const EMPTY_MODEL: DashModel = {
   roots: [],
   index: [],
   laneCounts: [0, 0, 0, 0, 0],
-  methodsPresent: [],
+  bandCounts: { high: 0, review: 0 },
 };
