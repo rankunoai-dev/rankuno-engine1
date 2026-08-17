@@ -274,9 +274,16 @@ class TestSectionLabels:
     ROOT = "https://e.com/"
 
     def test_a_leading_root_crumb_is_dropped(self):
+        """`Home > Services > Cloud` on `/services/cloud/` places it under Services.
+
+        `Cloud` is the page — unlinked, in final position — so it is not part of
+        its own ancestry. The tree renders the page as a leaf under `Services`;
+        keeping the crumb would put it under a `Cloud` section containing only
+        `Cloud`.
+        """
         trail = extract_breadcrumb(YOAST, BASE)
         assert trail.labels[0] == "Home"
-        assert trail.section_labels(self.ROOT) == ("Services", "Cloud")
+        assert trail.section_labels(self.ROOT) == ("Services",)
 
     def test_a_trail_that_does_not_start_at_the_root_is_untouched(self):
         """Infosys starts at `Services`; there is nothing to strip."""
@@ -357,8 +364,12 @@ class TestSectionLabels:
         )
         assert labels == ("Resources",)
 
-    def test_two_surviving_crumbs_are_untouched_even_when_the_last_is_the_page(self):
-        """`Home > Blog > Article` still places the article under Blog."""
+    def test_the_page_is_dropped_from_a_longer_trail_too(self):
+        """`Home > Blog > Article` places the article under Blog, not under itself.
+
+        The narrower rule this replaces fired only on a *lone* surviving crumb,
+        so `Article` survived here and became a section of one.
+        """
         html = """<script type="application/ld+json">
         {"@type":"BreadcrumbList","itemListElement":[
           {"@type":"ListItem","position":1,"name":"Home","item":"https://e.com/"},
@@ -366,7 +377,34 @@ class TestSectionLabels:
           {"@type":"ListItem","position":3,"name":"Article"}]}
         </script>"""
         labels = extract_breadcrumb(html, BASE).section_labels(self.ROOT, "https://e.com/blog/a/")
-        assert labels == ("Blog", "Article")
+        assert labels == ("Blog",)
+
+    def test_an_unlinked_middle_crumb_is_a_section_and_survives(self):
+        """The linear.app shape: `Agents > <page title>`, `Agents` unlinked.
+
+        `Agents` has no href because it is a docs sidebar group with no page of
+        its own, and it is the only ancestry those pages have. A rule that
+        dropped unlinked crumbs by their lack of a link rather than by their
+        position would delete precisely the label worth keeping.
+        """
+        html = """<nav aria-label="breadcrumb">
+          <span>Agents</span>
+          <a href="https://e.com/developers/aig">Agent Interaction Guidelines (AIG)</a>
+        </nav>"""
+        labels = extract_breadcrumb(html, "https://e.com/developers/aig").section_labels(
+            self.ROOT, "https://e.com/developers/aig"
+        )
+        assert labels == ("Agents",)
+
+    def test_a_linked_self_crumb_needs_the_page_url_to_be_recognised(self):
+        """AEM links its final crumb, so position alone cannot identify it.
+
+        Without the page URL the crumb is indistinguishable from a real parent
+        and is kept — the honest answer, not a guess.
+        """
+        trail = extract_breadcrumb(AEM, BASE)
+        assert trail.section_labels(self.ROOT) == ("Services", "Cobalt")
+        assert trail.section_labels(self.ROOT, "https://e.com/services/cloud.html") == ("Services",)
 
     def test_www_and_scheme_differences_still_match(self):
         """The crumb links to `https://www.e.com/`; the crawl root has neither."""

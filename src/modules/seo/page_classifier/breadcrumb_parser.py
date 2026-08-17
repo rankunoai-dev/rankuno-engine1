@@ -150,21 +150,33 @@ class BreadcrumbTrail(StrictModel):
         evidence it is the root, and guessing from the label is the thing this
         avoids.
 
-        A trail that reduces to **one step naming the page itself** is then
-        dropped as well. `rankuno.com` publishes `Home > <article title>` on
-        every blog post and nothing else — no `Blog` crumb, no section. Stripping
-        the root leaves a single crumb that is the page, which is not ancestry:
-        it made each of 38 pages its own top-level section containing only
-        itself, and counted all 38 as reached by navigation when nothing in the
-        menu points at them.
+        Crumbs naming **the page itself** are then dropped, however long the
+        trail. A breadcrumb states where a page sits; the page is not its own
+        ancestor, and the tree already renders it as a leaf. Kept, it becomes a
+        level of its own — `linear.app/developers/aig` sat under a section named
+        `Agent Interaction Guidelines (AIG)` that contained nothing but that one
+        page. rankuno.com shows the degenerate case: `Home > <article title>` and
+        nothing else, which made each of 38 pages its own top-level section and
+        counted all 38 as reached by navigation when nothing in the menu points
+        at them.
 
-        The last crumb of a `BreadcrumbList` is by definition the current page,
-        so a lone survivor is normally it. That is still checked rather than
-        assumed: a truncated trail such as `Home > Resources` on
-        `/resources/foo/` leaves one crumb that is a *real* parent, and throwing
-        that away would lose the only placement the page has. The crumb is
-        dropped only when it is unlinked — the conventional markup for "you are
-        here" — or when its URL is this page's.
+        Self-reference is proved, not assumed, and two different proofs are
+        needed because sites publish the final crumb two ways:
+
+        * **A crumb whose URL is this page's** — dropped wherever it appears.
+        * **An unlinked crumb in final position** — the conventional "you are
+          here" markup, dropped only there.
+
+        Position matters for the second rule and the distinction is load-bearing.
+        A *middle* unlinked crumb is not the page: `Agents` on linear.app has no
+        href because it is a docs section with no page of its own, and it is the
+        only ancestry those seven pages have. Dropping unlinked crumbs
+        indiscriminately would delete exactly the label worth keeping.
+
+        What survives is a real parent. A truncated trail such as
+        `Home > Resources` on `/resources/foo/` keeps `Resources`: its URL is not
+        this page's and it is linked, so neither rule fires. That is the only
+        placement such a page has and losing it would trade one bug for another.
 
         Args:
             site_root: The crawl root, for recognising the leading Home crumb.
@@ -176,22 +188,30 @@ class BreadcrumbTrail(StrictModel):
             return ()
         first = self.steps[0]
         steps = self.steps[1:] if self._is_root_crumb(first, site_root) else self.steps
-        if len(steps) == 1 and self._is_self_crumb(steps[0], page_url):
-            return ()
-        return tuple(step.label for step in steps)
+
+        target = normalize_url(page_url) if page_url is not None else None
+        # Positions are read from the trail as published. Filtering first and
+        # then asking "is this crumb last?" promotes a middle crumb into final
+        # position and deletes it: on `Agents > AIG`, dropping the self-linked
+        # `AIG` left `Agents` last and unlinked, and the trail emptied.
+        final = len(steps) - 1
+
+        kept: list[str] = []
+        for index, step in enumerate(steps):
+            if step.url is None:
+                # Unlinked *and* last is the conventional "you are here" crumb.
+                # Unlinked anywhere else is a section with no page of its own,
+                # which is ancestry and the only ancestry some sites publish.
+                if index == final:
+                    continue
+            elif target is not None and normalize_url(step.url) == target:
+                continue
+            kept.append(step.label)
+        return tuple(kept)
 
     @staticmethod
     def _is_root_crumb(step: BreadcrumbStep, site_root: str) -> bool:
         return step.url is not None and normalize_url(step.url) == normalize_url(site_root)
-
-    @staticmethod
-    def _is_self_crumb(step: BreadcrumbStep, page_url: str | None) -> bool:
-        """Whether a crumb names the page it was extracted from."""
-        if step.url is None:
-            return True
-        if page_url is None:
-            return False
-        return normalize_url(step.url) == normalize_url(page_url)
 
 
 def _as_list(value: object) -> list[object]:
