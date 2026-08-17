@@ -5,6 +5,43 @@ import type { TreeNode } from "./tree";
 export const OTHERS_LABEL = "OTHERS";
 
 /**
+ * Locale codes recognised in a leading path segment.
+ *
+ * Mirrors `_ISO_639_1` in `url_rules.py`, including its two deliberate
+ * omissions: `it` and `hr` collide with extremely common English sections —
+ * `/it/` for IT services, `/hr/` for human resources — and mistaking a content
+ * section for a language is a worse failure than missing a locale.
+ */
+const LOCALES = new Set([
+  "ar", "bg", "bn", "cs", "da", "de", "el", "en", "es", "et", "fa", "fi", "fr",
+  "he", "hi", "hu", "id", "is", "ja", "ko", "lt", "lv", "ms", "nl", "no", "pl",
+  "pt", "ro", "ru", "sk", "sl", "sr", "sv", "th", "tr", "uk", "ur", "vi", "zh",
+]);
+
+/** A region-qualified locale — `en-gb`, `pt_BR` — is unambiguous by shape. */
+const REGIONAL = /^[a-z]{2}[-_][a-z]{2,4}$/i;
+
+/**
+ * The locale a URL is served under, or `null` for the default language.
+ *
+ * Read from the URL rather than from breadcrumb labels, because the labels are
+ * themselves translated: HighRadius publishes `Home`, `Accueil` and
+ * `Startseite` as three roots for one concept, and 481 of its 917 localised
+ * pages had no localised root at all — they scattered into OTHERS and into the
+ * English tree. The path prefix is the one unambiguous signal.
+ */
+export function localeOf(url: string): string | null {
+  try {
+    const first = new URL(url).pathname.split("/").filter(Boolean)[0];
+    if (!first) return null;
+    const lower = first.toLowerCase();
+    return LOCALES.has(lower) || REGIONAL.test(lower) ? lower : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Group pages by the site's own header menu instead of by URL path.
  *
  * A URL-path tree answers "where does this file live?". The header menu answers
@@ -37,10 +74,18 @@ export function buildNavTree(
     // A page the engine could not place carries no breadcrumb. It still has to
     // appear somewhere — dropping it would make the tree disagree with the page
     // count shown in the header.
-    const trail =
+    const base =
       profile.breadcrumb_path.length > 0
         ? profile.breadcrumb_path
         : [OTHERS_LABEL];
+
+    // A localised page is rooted under its locale. Without this the French and
+    // German sections of a site are not represented at all: their pages sit
+    // beside English ones under a translated root, or fall into OTHERS, and the
+    // site's language structure — separately indexed, separately ranked — is
+    // invisible in the tree that is supposed to describe the architecture.
+    const locale = localeOf(profile.url);
+    const trail = locale === null ? base : [locale, ...base];
 
     let parent = root;
     let accumulated = "";

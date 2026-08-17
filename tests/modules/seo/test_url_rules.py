@@ -54,13 +54,21 @@ class TestNormalizeUrl:
         # `www.` is folded out of the dedup key — see `TestHostVariantFolding`.
         assert normalize_url(raw) == "https://amazon.com/dp/b0001234/?color=red&size=xl"
 
-    def test_folds_locale_variants_onto_one_key(self):
-        assert normalize_url("https://e.com/de/software/") == normalize_url(
+    def test_locale_variants_are_distinct_pages(self):
+        """`/de/pricing/` is a URL Google indexes and ranks on its own.
+
+        Folding them was the original default and it cost real reporting: on
+        highradius.com `/de/software/order-to-cash/` shared a key with the
+        English page, so the surviving node's language depended on which variant
+        was crawled first — a German `Startseite` root inside an English tree.
+        """
+        assert normalize_url("https://e.com/de/software/") != normalize_url(
             "https://e.com/software/"
         )
 
-    def test_locale_folding_can_be_disabled(self):
-        assert normalize_url("https://e.com/de/x/", strip_locale=False) != normalize_url(
+    def test_locale_folding_is_still_available(self):
+        """Kept for the different question: duplicate *content* across locales."""
+        assert normalize_url("https://e.com/de/x/", strip_locale=True) == normalize_url(
             "https://e.com/x/"
         )
 

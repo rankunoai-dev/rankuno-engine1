@@ -371,14 +371,30 @@ def _build_tree(entries: list[tuple[int, str, str | None]]) -> tuple[NavNode, ..
     A stack rather than recursion: the input is already in document order, and a
     depth that jumps by more than one — common in hand-written menus — must
     attach to the nearest available parent instead of raising.
+
+    Gaps in the incoming depths are closed by *rank*, not by clamping against
+    the stack height. A mega-menu opens its panel in a wrapper the collector
+    counts, so rankuno.com's Our Expertise arrives as `0, 2, 3, 3, 2, 2, 3` — the
+    tab, a column heading, its items, then the next heading. Clamping each entry
+    to `len(stack)` closed that 0→2 jump for the first heading only: it dropped
+    to 1, and every heading after it kept depth 2 and became a *child* of the
+    first instead of its sibling. The whole dropdown collapsed into one chain,
+    with `SEO` beside `Digital Channels` rather than under it and `Perspective`
+    given a parent it does not have on the site.
+
+    Comparing raw depths against each other keeps entries at the same incoming
+    depth at the same outgoing depth, however wide the jump that preceded them.
     """
     roots: list[NavNode] = []
     # Each stack slot holds the node at that depth and its accumulating children.
     stack: list[tuple[NavNode, list[NavNode]]] = []
+    # The raw depth of each open slot, so a later entry can be ranked against it.
+    open_raw: list[int] = []
 
     def collapse(to_depth: int) -> None:
         while len(stack) > to_depth:
             node, children = stack.pop()
+            open_raw.pop()
             finished = node.model_copy(update={"children": tuple(children)})
             if stack:
                 stack[-1][1].append(finished)
@@ -386,10 +402,18 @@ def _build_tree(entries: list[tuple[int, str, str | None]]) -> tuple[NavNode, ..
                 roots.append(finished)
 
     for raw_depth, label, url in entries:
-        depth = min(raw_depth, MAX_NAV_DEPTH - 1)
-        depth = min(depth, len(stack))  # Cannot open a level with no parent.
+        # Close every open level at or below this entry's own depth; what is
+        # left open is its ancestry, and its rank among them is its depth.
+        rank = len(open_raw)
+        while rank > 0 and open_raw[rank - 1] >= raw_depth:
+            rank -= 1
+        depth = min(rank, MAX_NAV_DEPTH - 1)
         collapse(depth)
         stack.append((NavNode(label=label, url=url, depth=depth), []))
+        # The raw depth is recorded, not the clamped one. Past MAX_NAV_DEPTH
+        # several raw levels share one slot, and ranking on the clamped value
+        # would make a deeper entry look like a sibling of its own parent.
+        open_raw.append(raw_depth)
 
     collapse(0)
     return tuple(roots)

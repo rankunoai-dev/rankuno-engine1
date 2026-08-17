@@ -11,6 +11,7 @@ import pytest
 from src.modules.seo.page_classifier.nav_tree_parser import (
     MAX_NAV_DEPTH,
     NavigationTree,
+    NavNode,
     parse_navigation,
 )
 
@@ -450,6 +451,59 @@ class TestNavNestingDoesNotShiftDepth:
         deep += "</li></ul></nav></header>"
         tree = parse_navigation(deep, BASE)
         assert all(node.depth < MAX_NAV_DEPTH for root in tree.roots for node in root.walk())
+
+
+class TestSiblingHeadingsStaySiblings:
+    """A mega-menu's column headings are siblings, not a chain.
+
+    rankuno.com's Our Expertise panel sits behind a wrapper the collector
+    counts, so its entries arrive as `0, 2, 3, 3, 2, 2, 3` — the tab, a column
+    heading, its items, the next heading. Clamping each entry against the stack
+    height closed that 0→2 jump for the *first* heading only: it dropped to 1
+    and every heading after it stayed at 2, becoming its child. Live, that put
+    all six columns under `Marketing Strategy & Transformation`, left `SEO`
+    beside `Digital Channels` instead of under it, and gave `/perspective/` a
+    two-step menu ancestry it does not have on the site.
+    """
+
+    MEGA_MENU = """
+    <header><nav><ul>
+      <li><a href="/expertise/">Expertise</a>
+        <ul><li><ul>
+          <li><a href="/strategy/">Strategy</a>
+            <ul><li><a href="/strategy/roadmap/">Roadmap</a></li></ul>
+          </li>
+          <li><a href="/channels/">Channels</a>
+            <ul><li><a href="/channels/seo/">SEO</a></li></ul>
+          </li>
+          <li><a href="/perspective/">Perspective</a></li>
+        </ul></li></ul>
+      </li>
+    </ul></nav></header>
+    """
+
+    def _tab(self) -> NavNode:
+        tree = parse_navigation(self.MEGA_MENU, BASE)
+        assert len(tree.roots) == 1
+        return tree.roots[0]
+
+    def test_every_column_heading_is_a_child_of_the_tab(self):
+        assert [child.label for child in self._tab().children] == [
+            "Strategy",
+            "Channels",
+            "Perspective",
+        ]
+
+    def test_each_heading_keeps_its_own_items(self):
+        strategy, channels, perspective = self._tab().children
+        assert [node.label for node in strategy.children] == ["Roadmap"]
+        assert [node.label for node in channels.children] == ["SEO"]
+        assert perspective.children == ()
+
+    def test_a_promo_column_gets_a_one_step_ancestry(self):
+        """`/perspective/` sits under the tab, not under another column."""
+        perspective = self._tab().children[2]
+        assert perspective.depth == 1
 
 
 class TestBreadcrumbIsNotTheMenu:

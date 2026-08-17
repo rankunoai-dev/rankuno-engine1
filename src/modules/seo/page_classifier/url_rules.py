@@ -8,8 +8,12 @@ by fetching them has already lost. Dropping them costs nothing here.
 Two jobs:
 
 1. **Normalise** a URL to a canonical dedup key — strip tracking parameters,
-   drop locale prefixes, sort remaining query parameters, unify trailing
-   slashes. Two URLs that render the same page must produce the same key.
+   sort remaining query parameters, unify trailing slashes, and fold `www.` and
+   the scheme. Two URLs that render the same page must produce the same key.
+
+   Locale prefixes are **not** folded by default: `/de/pricing/` is a different
+   URL that Google indexes and ranks separately, and an audit that merges it
+   away cannot report on it. See `normalize_url`.
 2. **Classify instantly** where the URL alone is conclusive: the root path, a
    parameter matrix, a legal page.
 
@@ -486,7 +490,7 @@ def same_site(a: str, b: str) -> bool:
 
 
 def normalize_url(
-    url: str, *, strip_locale: bool = True, known_locales: frozenset[str] | None = None
+    url: str, *, strip_locale: bool = False, known_locales: frozenset[str] | None = None
 ) -> str:
     """Reduce a URL to its canonical dedup key.
 
@@ -494,10 +498,27 @@ def normalize_url(
     parameters, then sort what remains so parameter order cannot fork one page
     into several frontier entries.
 
+    Locale folding is **off by default**, reversing the original choice. That
+    choice was made to stop "a bilingual site's graph doubling", which is right
+    for a crawler that only wants unique content and wrong for an audit tool:
+    Google indexes `/de/pricing/` and `/pricing/` as separate URLs, ranks them
+    separately, and hreflang correctness is an entire audit category we cannot
+    report on for pages we have merged away.
+
+    Measured on highradius.com, folding put `/de/software/order-to-cash/` and
+    the English page on one key, so the surviving node's language depended on
+    which variant was crawled first — a German `Startseite` root in an English
+    tree. The damage was limited there only because their slugs are translated.
+    A site using identical slugs per locale — very common — would lose every
+    variant silently.
+
+    The cost is real and worth stating: a multilingual site now reports more
+    pages than it used to, and those pages consume the page budget.
+
     Args:
         url: Absolute or relative URL.
-        strip_locale: Whether to fold locale variants onto one key. Disable when
-            locales must be crawled as distinct pages.
+        strip_locale: Fold locale variants onto one key. Enable only when
+            duplicate *content* is the question and distinct URLs are not.
         known_locales: Locales observed on this site, passed through to
             `strip_locale_prefix`.
 

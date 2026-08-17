@@ -260,3 +260,119 @@ class TestBreadcrumbContainerDetection:
     )
     def test_a_real_menu_is_not_mistaken_for_one(self, attributes):
         assert is_breadcrumb_container(attributes) is False
+
+
+class TestSectionLabels:
+    """A leading site-root crumb is not a section.
+
+    Nearly every breadcrumb opens with a link to the homepage. Keeping it put
+    86% of highradius.com under one `Home` branch and hid the real sections a
+    level down — `Solutions` held 7 pages while 13 of its own children sat at
+    `Home > Solutions parent page > …`.
+    """
+
+    ROOT = "https://e.com/"
+
+    def test_a_leading_root_crumb_is_dropped(self):
+        trail = extract_breadcrumb(YOAST, BASE)
+        assert trail.labels[0] == "Home"
+        assert trail.section_labels(self.ROOT) == ("Services", "Cloud")
+
+    def test_a_trail_that_does_not_start_at_the_root_is_untouched(self):
+        """Infosys starts at `Services`; there is nothing to strip."""
+        trail = extract_breadcrumb(AEM, BASE)
+        assert trail.section_labels(self.ROOT) == ("Services", "Cobalt")
+
+    def test_matching_is_by_url_not_by_label(self):
+        """The label is translated — `Home`, `Accueil`, `Startseite`.
+
+        A word list would work in English and fail everywhere else, which is
+        exactly the bug that produced three roots for one concept.
+        """
+        html = """<script type="application/ld+json">
+        {"@type":"BreadcrumbList","itemListElement":[
+          {"@type":"ListItem","position":1,"name":"Accueil","item":"https://e.com/"},
+          {"@type":"ListItem","position":2,"name":"Logiciel","item":"https://e.com/fr/l"}]}
+        </script>"""
+        assert extract_breadcrumb(html, BASE).section_labels(self.ROOT) == ("Logiciel",)
+
+    def test_a_label_that_merely_says_home_is_kept(self):
+        """An unlinked first crumb is left alone.
+
+        Without a URL there is no evidence it is the site root, and a page
+        really can be called Home.
+        """
+        html = """<script type="application/ld+json">
+        {"@type":"BreadcrumbList","itemListElement":[
+          {"@type":"ListItem","position":1,"name":"Home"},
+          {"@type":"ListItem","position":2,"name":"Deep","item":"https://e.com/d"}]}
+        </script>"""
+        assert extract_breadcrumb(html, BASE).section_labels(self.ROOT) == ("Home", "Deep")
+
+    def test_a_root_only_trail_becomes_empty(self):
+        """`("Home",)` carries no placement, so the menu should take over."""
+        html = """<script type="application/ld+json">
+        {"@type":"BreadcrumbList","itemListElement":[
+          {"@type":"ListItem","position":1,"name":"Home","item":"https://e.com/"}]}
+        </script>"""
+        assert extract_breadcrumb(html, BASE).section_labels(self.ROOT) == ()
+
+    def test_a_trail_naming_only_the_page_itself_becomes_empty(self):
+        """The rankuno.com blog shape: `Home > <article title>`, nothing else.
+
+        Stripping the root leaves one crumb that *is* the page. Kept, it made
+        each of 38 pages a top-level section containing only itself.
+        """
+        html = """<script type="application/ld+json">
+        {"@type":"BreadcrumbList","itemListElement":[
+          {"@type":"ListItem","position":1,"name":"Home","item":"https://e.com/"},
+          {"@type":"ListItem","position":2,"name":"SEO Trends 2019"}]}
+        </script>"""
+        trail = extract_breadcrumb(html, BASE)
+        assert trail.labels == ("Home", "SEO Trends 2019")
+        assert trail.section_labels(self.ROOT, "https://e.com/blog/seo-trends-2019/") == ()
+
+    def test_a_lone_crumb_linking_to_this_page_becomes_empty(self):
+        """Same defect, published with a self-link instead of bare text."""
+        html = """<script type="application/ld+json">
+        {"@type":"BreadcrumbList","itemListElement":[
+          {"@type":"ListItem","position":1,"name":"Home","item":"https://e.com/"},
+          {"@type":"ListItem","position":2,"name":"Deep","item":"https://www.e.com/d"}]}
+        </script>"""
+        assert extract_breadcrumb(html, BASE).section_labels(self.ROOT, "https://e.com/d/") == ()
+
+    def test_a_lone_crumb_naming_a_real_parent_is_kept(self):
+        """`Home > Resources` on `/resources/foo/` is truncated, not self-referential.
+
+        The surviving crumb is the only placement the page has, and the whole
+        point of the URL check is that this case survives it.
+        """
+        html = """<script type="application/ld+json">
+        {"@type":"BreadcrumbList","itemListElement":[
+          {"@type":"ListItem","position":1,"name":"Home","item":"https://e.com/"},
+          {"@type":"ListItem","position":2,"name":"Resources","item":"https://e.com/resources/"}]}
+        </script>"""
+        labels = extract_breadcrumb(html, BASE).section_labels(
+            self.ROOT, "https://e.com/resources/foo/"
+        )
+        assert labels == ("Resources",)
+
+    def test_two_surviving_crumbs_are_untouched_even_when_the_last_is_the_page(self):
+        """`Home > Blog > Article` still places the article under Blog."""
+        html = """<script type="application/ld+json">
+        {"@type":"BreadcrumbList","itemListElement":[
+          {"@type":"ListItem","position":1,"name":"Home","item":"https://e.com/"},
+          {"@type":"ListItem","position":2,"name":"Blog","item":"https://e.com/blog/"},
+          {"@type":"ListItem","position":3,"name":"Article"}]}
+        </script>"""
+        labels = extract_breadcrumb(html, BASE).section_labels(self.ROOT, "https://e.com/blog/a/")
+        assert labels == ("Blog", "Article")
+
+    def test_www_and_scheme_differences_still_match(self):
+        """The crumb links to `https://www.e.com/`; the crawl root has neither."""
+        html = """<script type="application/ld+json">
+        {"@type":"BreadcrumbList","itemListElement":[
+          {"@type":"ListItem","position":1,"name":"Home","item":"https://www.e.com/"},
+          {"@type":"ListItem","position":2,"name":"Deep","item":"https://e.com/d"}]}
+        </script>"""
+        assert extract_breadcrumb(html, BASE).section_labels("http://e.com") == ("Deep",)

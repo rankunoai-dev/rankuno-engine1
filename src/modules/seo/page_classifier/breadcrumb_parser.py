@@ -51,7 +51,7 @@ from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
-from src.modules.seo.page_classifier.url_rules import safe_split
+from src.modules.seo.page_classifier.url_rules import normalize_url, safe_split
 
 __all__ = [
     "MAX_BREADCRUMB_STEPS",
@@ -130,6 +130,68 @@ class BreadcrumbTrail(StrictModel):
     def is_empty(self) -> bool:
         """Whether nothing usable was found."""
         return not self.steps
+
+    def section_labels(self, site_root: str, page_url: str | None = None) -> tuple[str, ...]:
+        """Labels with a leading site-root crumb removed, and self-only trails dropped.
+
+        Nearly every breadcrumb opens with a link to the homepage, and that
+        crumb is not a section — it is the root the whole tree already hangs
+        from. Keeping it collapsed 86% of highradius.com under a single `Home`
+        branch and hid the real sections one level down: `Solutions` held 7
+        pages while 13 of its own children sat under `Home > Solutions parent
+        page`.
+
+        Matched on the crumb's **URL**, never on its text. The label is
+        translated — `Home`, `Accueil`, `Startseite` — and a word list would
+        work in English and fail everywhere else, which is precisely the bug
+        that produced three roots for one concept.
+
+        An unlinked first crumb is left alone: without a URL there is no
+        evidence it is the root, and guessing from the label is the thing this
+        avoids.
+
+        A trail that reduces to **one step naming the page itself** is then
+        dropped as well. `rankuno.com` publishes `Home > <article title>` on
+        every blog post and nothing else — no `Blog` crumb, no section. Stripping
+        the root leaves a single crumb that is the page, which is not ancestry:
+        it made each of 38 pages its own top-level section containing only
+        itself, and counted all 38 as reached by navigation when nothing in the
+        menu points at them.
+
+        The last crumb of a `BreadcrumbList` is by definition the current page,
+        so a lone survivor is normally it. That is still checked rather than
+        assumed: a truncated trail such as `Home > Resources` on
+        `/resources/foo/` leaves one crumb that is a *real* parent, and throwing
+        that away would lose the only placement the page has. The crumb is
+        dropped only when it is unlinked — the conventional markup for "you are
+        here" — or when its URL is this page's.
+
+        Args:
+            site_root: The crawl root, for recognising the leading Home crumb.
+            page_url: The page this trail was extracted from. Optional only
+                because a caller may not have it; without it a linked lone crumb
+                is kept, since it cannot be shown to be self-referential.
+        """
+        if not self.steps:
+            return ()
+        first = self.steps[0]
+        steps = self.steps[1:] if self._is_root_crumb(first, site_root) else self.steps
+        if len(steps) == 1 and self._is_self_crumb(steps[0], page_url):
+            return ()
+        return tuple(step.label for step in steps)
+
+    @staticmethod
+    def _is_root_crumb(step: BreadcrumbStep, site_root: str) -> bool:
+        return step.url is not None and normalize_url(step.url) == normalize_url(site_root)
+
+    @staticmethod
+    def _is_self_crumb(step: BreadcrumbStep, page_url: str | None) -> bool:
+        """Whether a crumb names the page it was extracted from."""
+        if step.url is None:
+            return True
+        if page_url is None:
+            return False
+        return normalize_url(step.url) == normalize_url(page_url)
 
 
 def _as_list(value: object) -> list[object]:

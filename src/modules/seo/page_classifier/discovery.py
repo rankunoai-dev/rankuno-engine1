@@ -557,7 +557,9 @@ class SiteGraph:
                     inbound_internal_links=node.inbound_links,
                     outbound_internal_links=node.outbound_links,
                     total_pages_in_crawl=size,
-                    breadcrumb_path=trail.labels if trail else (),
+                    breadcrumb_path=(
+                        trail.section_labels(self.base_url, node.url) if trail else ()
+                    ),
                 )
             )
         return tuple(evidence)
