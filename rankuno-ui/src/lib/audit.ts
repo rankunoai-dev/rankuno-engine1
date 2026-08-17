@@ -147,8 +147,22 @@ function normalizeSegment(segment: string): string {
     .join("-");
 }
 
-/** Whether `shorter` appears inside `longer` in order, gaps allowed. */
-function isSubsequence(shorter: readonly string[], longer: readonly string[]): boolean {
+/**
+ * Whether two ancestor chains describe the same position.
+ *
+ * Equal chains qualify, and so does one chain being the other with segments
+ * inserted — but only when the shorter chain is **non-empty**. An empty chain is
+ * a subsequence of every chain, which made a root-level page match every deeper
+ * page sharing its leaf: `linear.app/agents`, `/developers/agents` and
+ * `/integrations/agents` are a marketing page, a docs page and a listing, and
+ * were reported as one page at three addresses.
+ *
+ * Two empty chains are still a match — that is `/job-application/` against its
+ * own query variants, which is the case this was built for.
+ */
+function sameAncestry(a: readonly string[], b: readonly string[]): boolean {
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  if (shorter.length === 0) return longer.length === 0;
   let index = 0;
   for (const item of longer) {
     if (index < shorter.length && shorter[index] === item) index += 1;
@@ -203,7 +217,7 @@ function duplicateFindings(pages: readonly FullPageIntelligenceProfile[]): Findi
     bucket.forEach((page, index) => {
       const chain = chains[index];
       if (!chain) return;
-      if (index === 0 || isSubsequence(chain, head) || isSubsequence(head, chain)) {
+      if (index === 0 || sameAncestry(chain, head)) {
         matched.push(page);
       }
     });
