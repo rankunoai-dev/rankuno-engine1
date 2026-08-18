@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LEVEL_BADGE, type DashModel, type DashNode } from "../../lib/dashboardModel";
+import {
+  LEVEL_BADGE,
+  TRAIL_SOURCE_BADGE,
+  type DashModel,
+  type DashNode,
+} from "../../lib/dashboardModel";
 import { useDashboardStore } from "../../store/useDashboardStore";
 
 /** Row height in pixels. Fixed, which is what makes the window arithmetic O(1). */
@@ -103,6 +108,16 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
         </span>
         <LevelChip node={node} />
         <span className="tlbl">{node.label}</span>
+        {/* Only on section headers. On a leaf the badge would repeat on every
+            row and stop carrying information; the drawer states it per page. */}
+        {hasChildren && (
+          <span
+            className={`srcdot src-${node.src}`}
+            title={`Section built from: ${TRAIL_SOURCE_BADGE[node.src]}`}
+          >
+            {TRAIL_SOURCE_BADGE[node.src]}
+          </span>
+        )}
         {hasChildren && <span className="tcnt">{node.cnt.toLocaleString()}</span>}
       </button>,
     );

@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import types
 import typing
@@ -196,6 +197,15 @@ def ts_type(annotation: object) -> str:
     if origin is dict:
         key, value = (ts_type(arg) for arg in args)
         return f"Record<{key}, {value}>"
+
+    # `Literal["menu", "breadcrumb", "none"]` renders as the string-literal union
+    # TypeScript already uses for the `StrEnum`s, so both kinds of closed set
+    # reach the UI in the same shape. Inlined rather than emitted as a named
+    # alias: the reference check walks identifiers in the rendered type and
+    # would treat a name with no declaration as dangling, which is the guard
+    # working correctly.
+    if origin is typing.Literal:
+        return " | ".join(dict.fromkeys(json.dumps(arg) for arg in args))
 
     msg = f"No TypeScript mapping for {annotation!r}"
     raise UnmappedTypeError(msg)

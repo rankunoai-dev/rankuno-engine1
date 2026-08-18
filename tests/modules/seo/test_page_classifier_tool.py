@@ -17,8 +17,11 @@ from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.logical_hierarchy import OTHERS_LABEL
 from src.modules.seo.page_classifier.schemas import (
+    ConsensusMethod,
+    FullPageIntelligenceProfile,
     HierarchyLevel,
     PrimaryPageType,
+    SearchIntent,
     SignalScore,
     SignalSource,
 )
@@ -28,6 +31,7 @@ from src.modules.seo.page_classifier.tool import (
     PageClassificationOutput,
     PageClassificationTool,
     _better_trail,
+    _tagged,
     register_tools,
 )
 
@@ -476,17 +480,15 @@ class TestTrailPrecedence:
         under Home.
         """
         assert _better_trail(("Home",), ("Resources", "Learn & Transform", "Templates")) == (
-            "Resources",
-            "Learn & Transform",
-            "Templates",
+            ("Resources", "Learn & Transform", "Templates"),
+            "menu",
         )
 
     def test_the_breadcrumb_wins_when_it_is_more_specific(self):
         """Gep `/newsroom/x`: no menu match, a three-crumb trail of its own."""
         assert _better_trail(("HOME", "NEWS AND UPDATES", "A Release"), ()) == (
-            "HOME",
-            "NEWS AND UPDATES",
-            "A Release",
+            ("HOME", "NEWS AND UPDATES", "A Release"),
+            "breadcrumb",
         )
 
     def test_a_tie_goes_to_the_menu(self):
@@ -496,8 +498,8 @@ class TestTrailPrecedence:
         homepage, so it does not depend on which pages a crawl reached.
         """
         assert _better_trail(("Home", "FINsider"), ("Resources", "FINsider")) == (
-            "Resources",
-            "FINsider",
+            ("Resources", "FINsider"),
+            "menu",
         )
 
     def test_an_unmatched_menu_assignment_never_wins(self):
@@ -508,13 +510,72 @@ class TestTrailPrecedence:
         beat one on a naive length comparison.
         """
         assert _better_trail(("Home", "News"), (OTHERS_LABEL, "BLOG_ARTICLE")) == (
-            "Home",
-            "News",
+            ("Home", "News"),
+            "breadcrumb",
         )
 
     def test_others_still_applies_when_there_is_no_breadcrumb(self):
         """It is a real bucket, not a null — a page with nothing else lands there."""
-        assert _better_trail((), (OTHERS_LABEL, "UNKNOWN")) == (OTHERS_LABEL, "UNKNOWN")
+        assert _better_trail((), (OTHERS_LABEL, "UNKNOWN")) == ((OTHERS_LABEL, "UNKNOWN"), "none")
+
+    def test_the_others_bucket_is_not_a_menu_placement(self):
+        """The badge must not claim the header menu reaches a page it does not.
+
+        `OTHERS` is returned as the *trail* because it is a real bucket, but it
+        is the absence of a menu match, and reporting it as `menu` would make
+        the drawer assert the opposite of what happened.
+        """
+        _, source = _better_trail((), (OTHERS_LABEL, "UNKNOWN"))
+        assert source == "none"
 
     def test_no_evidence_either_way_stays_empty(self):
-        assert _better_trail((), ()) == ()
+        assert _better_trail((), ()) == ((), "none")
+
+
+class TestTrailProvenance:
+    """`trail_source` records which evidence placed a page.
+
+    It is not recoverable afterwards: `_better_trail` overwrites
+    `breadcrumb_path` with the menu path when the menu wins, so a consumer
+    holding the result cannot tell the two apart. Every path that produces a
+    profile therefore has to set it, and the two that skip the menu entirely are
+    the ones that would silently report `none`.
+    """
+
+    def test_a_breadcrumb_only_page_is_not_reported_as_unplaced(self):
+        """A page the menu never mentions still has a placement."""
+        page = _profile("https://e.com/a/b", ("Docs",))
+        assert _tagged(page, page.breadcrumb_path).trail_source == "breadcrumb"
+
+    def test_a_page_with_no_trail_at_all_is_unplaced(self):
+        page = _profile("https://e.com/a/b", ())
+        assert _tagged(page, page.breadcrumb_path).trail_source == "none"
+
+
+def _profile(url: str, trail: tuple[str, ...]) -> FullPageIntelligenceProfile:
+    """A minimal valid profile carrying a trail.
+
+    Built in full rather than stubbed because the model validates its own
+    level/type coherence, and a duck-typed stand-in would pass against a shape
+    the pipeline cannot produce.
+    """
+    return FullPageIntelligenceProfile(
+        url=url,
+        canonical_url=url,
+        normalized_path=url,
+        hierarchy_level=HierarchyLevel.L3_LEAF_PAGE,
+        primary_page_type=PrimaryPageType.UNKNOWN,
+        depth_from_l0=1,
+        breadcrumb_path=trail,
+        search_intent=SearchIntent.INFORMATIONAL,
+        signals_evaluated=(
+            SignalScore(
+                source=SignalSource.SITEMAP_INDEX,
+                suggested_level=HierarchyLevel.L3_LEAF_PAGE,
+                suggested_page_type=PrimaryPageType.UNKNOWN,
+                confidence=0.5,
+            ),
+        ),
+        final_confidence_score=0.5,
+        consensus_method=ConsensusMethod.LAYER1_STRUCTURAL,
+    )

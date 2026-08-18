@@ -604,6 +604,45 @@
   font-weight: 500;
   font-size: 12px;
 }
+
+/* Provenance. Outlined rather than filled, so it reads as a note about the row
+   and never competes with the level chip, which is the row's primary identity.
+   `.srcdot` sits on section headers in the tree; `.srcchip` is the drawer's
+   larger form of the same thing. */
+.srcdot,
+.srcchip {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex: none;
+  border: 1px solid currentColor;
+  background: transparent;
+  white-space: nowrap;
+}
+.srcdot { margin-left: 6px; }
+.srcchip { font-size: 9.5px; display: inline-block; }
+/* Menu and breadcrumb are deliberately different hues rather than shades. The
+   whole point of the badge is that a glance separates them. */
+.src-menu { color: #7dd3fc; }
+.src-breadcrumb { color: #fbbf24; }
+.src-mixed { color: #c4b5fd; }
+.src-none { color: #64748b; }
+/* The plain-language reason. Held to a readable measure — it is prose, and the
+   drawer is otherwise a table of short values. */
+.inspect .reason {
+  margin-top: 5px;
+  max-width: 62ch;
+  line-height: 1.45;
+}
+.inspect .trail {
+  margin-top: 5px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #94a3b8;
+  overflow-wrap: anywhere;
+}
 .tcnt {
   margin-left: auto;
   font-family: var(--mono);

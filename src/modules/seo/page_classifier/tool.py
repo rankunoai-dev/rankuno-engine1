@@ -77,6 +77,7 @@ from src.modules.seo.page_classifier.schemas import (
     FullPageIntelligenceProfile,
     PrimaryPageType,
     SignalScore,
+    TrailSource,
 )
 from src.modules.seo.page_classifier.signal_parsers import PageEvidence
 from src.modules.seo.page_classifier.site_profile import probe_site
@@ -431,7 +432,15 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             # rather than an error: a sitemap-only crawl is legitimate and simply
             # has no navigation data.
             _logger.info("nav_skipped_no_homepage_html", extra={"base_url": base_url})
-            return NavigationTree(), NavCoverageReport(total_urls=len(pages)), pages
+            # These pages still carry their own breadcrumbs from the cascade, and
+            # returning them untouched would leave `trail_source` at its `none`
+            # default — a placed page reported as unplaced. A sitemap-only crawl
+            # is the normal way to reach this branch, so it is not a rare path.
+            return (
+                NavigationTree(),
+                NavCoverageReport(total_urls=len(pages)),
+                tuple(_tagged(page, page.breadcrumb_path) for page in pages),
+            )
 
         navigation = parse_navigation(homepage_html, base_url)
         assignments, coverage = assign_navigation(navigation, pages)
@@ -440,10 +449,17 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         for page in pages:
             assignment = assignments.get(page.url)
             if assignment is None:
-                placed.append(page)
+                # Unassigned, but not necessarily unplaced — the cascade may have
+                # given it a breadcrumb. Tagged rather than passed through, or
+                # its `trail_source` would stay at the `none` default and the
+                # drawer would deny a placement the tree is already showing.
+                placed.append(_tagged(page, page.breadcrumb_path))
                 continue
-            update: dict[str, object] = {"nav_parent_url": assignment.nav_parent_url}
-            trail = _better_trail(page.breadcrumb_path, assignment.nav_path)
+            trail, source = _better_trail(page.breadcrumb_path, assignment.nav_path)
+            update: dict[str, object] = {
+                "nav_parent_url": assignment.nav_parent_url,
+                "trail_source": source,
+            }
             if trail != page.breadcrumb_path:
                 update["breadcrumb_path"] = trail
             placed.append(page.model_copy(update=update))
@@ -654,8 +670,29 @@ def _menu_depth(nav_path: tuple[str, ...]) -> int:
     return len(nav_path)
 
 
-def _better_trail(breadcrumb: tuple[str, ...], nav_path: tuple[str, ...]) -> tuple[str, ...]:
+def _tagged(
+    page: FullPageIntelligenceProfile, trail: tuple[str, ...]
+) -> FullPageIntelligenceProfile:
+    """Record a breadcrumb-only placement on a page the menu never reached.
+
+    For the two paths that never consult the header menu: a crawl with no
+    homepage body to parse, and a page the menu does not mention. Both leave a
+    real breadcrumb in place, and both would otherwise report `none`.
+    """
+    return page.model_copy(update={"trail_source": "breadcrumb" if trail else "none"})
+
+
+def _better_trail(
+    breadcrumb: tuple[str, ...], nav_path: tuple[str, ...]
+) -> tuple[tuple[str, ...], TrailSource]:
     """Choose between a page's own breadcrumb and its header-menu position.
+
+    Returns the trail **and where it came from**. The provenance is returned
+    rather than re-derived downstream because it is not recoverable from the
+    result: this function overwrites `breadcrumb_path` with the menu path when
+    the menu wins, so by the time a consumer sees the profile the two sources
+    are indistinguishable. A report that cannot say which one placed a page
+    cannot be checked against the site.
 
     Whichever places the page **more specifically** wins, and a tie goes to the
     menu. Neither source is reliably better, which is why an unconditional rule
@@ -677,10 +714,15 @@ def _better_trail(breadcrumb: tuple[str, ...], nav_path: tuple[str, ...]) -> tup
     """
     menu = _menu_depth(nav_path)
     if menu and menu >= len(breadcrumb):
-        return nav_path
+        return nav_path, "menu"
     if breadcrumb:
-        return breadcrumb
+        return breadcrumb, "breadcrumb"
     # Neither source placed it. `OTHERS` is still a real bucket — sub-grouped by
     # page type — and returning nothing here would drop that sub-grouping and
     # leave `nav_coverage` disagreeing with the tree.
-    return nav_path
+    #
+    # The source is `none`, not `menu`. `_menu_depth` has already ruled this
+    # path out as a placement; calling the OTHERS bucket a menu placement would
+    # make the provenance badge claim the header menu reaches pages it does not,
+    # which is the exact confusion the field exists to remove.
+    return nav_path, "none"

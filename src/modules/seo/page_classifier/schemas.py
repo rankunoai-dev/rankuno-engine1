@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -40,8 +41,19 @@ __all__ = [
     "SearchIntent",
     "SignalScore",
     "SignalSource",
+    "TrailSource",
     "is_valid_taxonomy_pair",
 ]
+
+TrailSource = Literal["menu", "breadcrumb", "none"]
+"""Which source placed a page in the tree.
+
+A `Literal` rather than a `StrEnum` deliberately. Ruling 3 in `CLAUDE.md` splits
+enum casing by kind — governance lowercase, domain taxonomy UPPER — and this is
+neither. It is provenance metadata about the engine's own reasoning, it is only
+ever read as a string by the UI, and giving it an enum would force a casing
+choice that the ruling does not cover.
+"""
 
 LLM_FALLBACK_CONFIDENCE_THRESHOLD = 0.85
 """Below this combined confidence, Layer 3 escalates to the governed LLM.
@@ -254,7 +266,19 @@ class FullPageIntelligenceProfile(StrictModel):
             still an `L3_LEAF_PAGE`. This is the click-depth fallacy the engine
             exists to avoid.
         nav_parent_url: Parent in the navigation tree, if one was resolved.
-        breadcrumb_path: Breadcrumb trail, outermost first.
+        breadcrumb_path: The trail this page is placed under, outermost first.
+            Despite the name it is not always the page's own breadcrumb —
+            `_better_trail` overwrites it with the header-menu path when the
+            menu places the page more specifically. `trail_source` says which
+            one it is.
+        trail_source: Where `breadcrumb_path` came from. `menu` is the parsed
+            header navigation, `breadcrumb` is markup the page published about
+            itself, `none` means neither placed it and the page sits in OTHERS.
+            Recorded because the two are evidence of different strength and a
+            report that presents them identically cannot be checked: a menu path
+            is one global structure read once from the homepage, while a
+            breadcrumb is a per-page assertion that can contradict its
+            neighbours.
         topical_category: Top-level topical silo.
         sub_topic: Narrower topic within the silo.
         search_intent: What a searcher wants here.
@@ -278,6 +302,9 @@ class FullPageIntelligenceProfile(StrictModel):
 
     nav_parent_url: str | None = None
     breadcrumb_path: tuple[str, ...] = ()
+    # Defaults to `none` so a profile built outside the navigation pass — the
+    # cascade's own output, and every fixture — makes no claim it cannot support.
+    trail_source: TrailSource = "none"
 
     topical_category: str = Field(default="", max_length=200)
     sub_topic: str | None = Field(default=None, max_length=200)

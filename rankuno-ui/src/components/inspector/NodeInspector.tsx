@@ -5,6 +5,8 @@ import {
   LANE_LABELS,
   METHOD_LABELS,
   METHOD_ORDER,
+  TRAIL_SOURCE_BADGE,
+  TRAIL_SOURCE_REASON,
   UNAVAILABLE_METHODS,
   type DashModel,
 } from "../../lib/dashboardModel";
@@ -39,6 +41,10 @@ export function NodeInspector({ model }: Props): JSX.Element {
   }
 
   const profile = node.profile;
+  // The trail as the engine settled it. Named `breadcrumb_path` for history —
+  // it holds the menu path whenever the menu won, which is exactly why the
+  // badge above it has to say which one this is.
+  const trail = profile?.breadcrumb_path ?? [];
 
   return (
     <div className="inspect">
@@ -73,6 +79,23 @@ export function NodeInspector({ model }: Props): JSX.Element {
             </dd>
           </div>
         )}
+        {/* Deliberately above "Menu vs URL", and shown for grouping nodes too.
+            The question a reader has on opening this drawer is "why is it
+            here?", and until now the drawer answered "what is it?" and left the
+            first question to be inferred from a trail whose origin the result no
+            longer recorded. */}
+        <div>
+          <dt>Placed by</dt>
+          <dd>
+            <span className={`srcchip src-${node.src}`}>{TRAIL_SOURCE_BADGE[node.src]}</span>
+            <div className="dim reason">{TRAIL_SOURCE_REASON[node.src]}</div>
+            {trail.length > 0 && (
+              <div className="trail">
+                {trail.join("  ›  ")}
+              </div>
+            )}
+          </dd>
+        </div>
         {profile && (
           <div>
             <dt>Menu vs URL</dt>

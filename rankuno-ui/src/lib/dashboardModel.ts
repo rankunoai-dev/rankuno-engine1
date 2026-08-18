@@ -28,7 +28,20 @@ export interface DashNode {
   cnt: number;
   /** The classified page, absent on structural grouping nodes. */
   profile: FullPageIntelligenceProfile | null;
+  /**
+   * What placed this node, accumulated over its whole subtree.
+   *
+   * A page carries its own `trail_source`. A grouping node has no profile, so
+   * it inherits the consensus of the pages beneath it — and `mixed` when they
+   * disagree, which is itself worth seeing: a section built partly from the
+   * header menu and partly from breadcrumbs is a section whose shape depends on
+   * which pages a crawl happened to fetch.
+   */
+  src: TrailSourceTag;
 }
+
+/** `trail_source` plus the value only a grouping node can hold. */
+export type TrailSourceTag = "menu" | "breadcrumb" | "mixed" | "none";
 
 export interface DashModel {
   nodes: DashNode[];
@@ -40,6 +53,61 @@ export interface DashModel {
   /** Pages per confidence band, for the filter chips. */
   bandCounts: Record<ConfidenceBand, number>;
 }
+
+/**
+ * A page's placement provenance, read defensively.
+ *
+ * `trail_source` is required by the generated contract, but every crawl stored
+ * before it existed lacks the field entirely, and those results are still
+ * loadable from `.jobs/`. Reading it through the type alone would put
+ * `undefined` behind a non-optional string and render an empty badge on every
+ * historical crawl.
+ */
+export function trailSourceOf(profile: FullPageIntelligenceProfile): TrailSourceTag {
+  const raw = (profile as { trail_source?: string }).trail_source;
+  return raw === "menu" || raw === "breadcrumb" ? raw : "none";
+}
+
+/** Two sources agree, or they do not. `none` is absence, so it never conflicts. */
+function merge(a: TrailSourceTag, b: TrailSourceTag): TrailSourceTag {
+  if (a === b) return a;
+  if (a === "none") return b;
+  if (b === "none") return a;
+  return "mixed";
+}
+
+export const TRAIL_SOURCE_BADGE: Record<TrailSourceTag, string> = {
+  menu: "Header Menu",
+  breadcrumb: "Published Breadcrumbs",
+  mixed: "Menu + Breadcrumbs",
+  none: "Not placed",
+};
+
+/**
+ * Why a page sits where it does, in words a client can check against the site.
+ *
+ * Phrased as evidence and its limits rather than as a verdict. The two sources
+ * fail differently and an analyst has to know which one they are arguing with:
+ * a menu path is wrong for the whole site at once, a breadcrumb is wrong one
+ * page at a time.
+ */
+export const TRAIL_SOURCE_REASON: Record<TrailSourceTag, string> = {
+  menu:
+    "The site's header menu links to this page from this section. The menu is read " +
+    "once from the homepage, so this placement is the same on every crawl and is the " +
+    "route a visitor actually has.",
+  breadcrumb:
+    "This page publishes its own breadcrumb saying it sits here. It was read from this " +
+    "page alone, so pages in the same folder can and sometimes do disagree — the header " +
+    "menu does not reach this page.",
+  mixed:
+    "Some pages in this section were placed by the header menu and others by their own " +
+    "breadcrumbs. The section is real, but its exact shape depends on which pages the " +
+    "crawl reached.",
+  none:
+    "Neither the header menu nor a breadcrumb on the page places this URL. Nothing on " +
+    "the site says where it belongs, which is why it sits under OTHERS.",
+};
 
 export const OTHERS_LANE = 4;
 
@@ -221,6 +289,7 @@ export function buildDashModel(
       kids: [],
       cnt: 0,
       profile: node.profile,
+      src: node.profile ? trailSourceOf(node.profile) : "none",
     });
 
     if (parent === null) roots.push(index);
@@ -241,7 +310,15 @@ export function buildDashModel(
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const node = nodes[index]!;
     if (node.profile) node.cnt += 1;
-    if (node.p !== null) nodes[node.p]!.cnt += node.cnt;
+    if (node.p !== null) {
+      const parent = nodes[node.p]!;
+      parent.cnt += node.cnt;
+      // Same reverse pass as the counts, for the same reason: children always
+      // hold a higher index than their parent, so one pass settles the whole
+      // tree. A grouping node starts at `none` and takes the first real source
+      // it sees, then degrades to `mixed` on the first disagreement.
+      parent.src = merge(parent.src, node.src);
+    }
   }
 
   const laneCounts: [number, number, number, number, number] = [0, 0, 0, 0, 0];
