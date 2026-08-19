@@ -419,51 +419,10 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         Read from the homepage only. The header menu is global, so parsing it on
         every page would repeat identical work thousands of times for one answer.
 
-        This fills `nav_parent_url` and `breadcrumb_path`, which have been on the
-        profile contract since Phase 1 was specified and have never been
-        populated by anything.
-
         Returns:
             The menu, its coverage, and the profiles with navigation filled in.
         """
-        homepage_html = graph.html_for(base_url)
-        if not homepage_html:
-            # No homepage body means no menu to read. Reported as an empty tree
-            # rather than an error: a sitemap-only crawl is legitimate and simply
-            # has no navigation data.
-            _logger.info("nav_skipped_no_homepage_html", extra={"base_url": base_url})
-            # These pages still carry their own breadcrumbs from the cascade, and
-            # returning them untouched would leave `trail_source` at its `none`
-            # default — a placed page reported as unplaced. A sitemap-only crawl
-            # is the normal way to reach this branch, so it is not a rare path.
-            return (
-                NavigationTree(),
-                NavCoverageReport(total_urls=len(pages)),
-                tuple(_tagged(page, page.breadcrumb_path) for page in pages),
-            )
-
-        navigation = parse_navigation(homepage_html, base_url)
-        assignments, coverage = assign_navigation(navigation, pages)
-
-        placed: list[FullPageIntelligenceProfile] = []
-        for page in pages:
-            assignment = assignments.get(page.url)
-            if assignment is None:
-                # Unassigned, but not necessarily unplaced — the cascade may have
-                # given it a breadcrumb. Tagged rather than passed through, or
-                # its `trail_source` would stay at the `none` default and the
-                # drawer would deny a placement the tree is already showing.
-                placed.append(_tagged(page, page.breadcrumb_path))
-                continue
-            trail, source = _better_trail(page.breadcrumb_path, assignment.nav_path)
-            update: dict[str, object] = {
-                "nav_parent_url": assignment.nav_parent_url,
-                "trail_source": source,
-            }
-            if trail != page.breadcrumb_path:
-                update["breadcrumb_path"] = trail
-            placed.append(page.model_copy(update=update))
-        return navigation, coverage, tuple(placed)
+        return place_pages(graph.html_for(base_url), base_url, pages)
 
     # -- internals ---------------------------------------------------------
 
@@ -726,3 +685,173 @@ def _better_trail(
     # make the provenance badge claim the header menu reaches pages it does not,
     # which is the exact confusion the field exists to remove.
     return nav_path, "none"
+
+
+def place_pages(
+    homepage_html: str | None,
+    base_url: str,
+    pages: tuple[FullPageIntelligenceProfile, ...],
+) -> tuple[NavigationTree, NavCoverageReport, tuple[FullPageIntelligenceProfile, ...]]:
+    """Parse a header menu and place every page under a section.
+
+    Takes HTML rather than a `SiteGraph` so a crawl and a reparse run the same
+    code. A reparse that reimplemented placement would drift from the crawl the
+    first time either changed, and the whole point of re-running is that the two
+    agree.
+
+    This fills `nav_parent_url`, `breadcrumb_path` and `trail_source`, and reads
+    only `own_breadcrumb` as input — so it is safe to run repeatedly against its
+    own output.
+
+    Args:
+        homepage_html: The homepage body, or `None` when none was captured.
+        base_url: Crawl root, for resolving menu links.
+        pages: Classified pages to place.
+
+    Returns:
+        The menu, its coverage, and the profiles with navigation filled in.
+    """
+    if not homepage_html:
+        # No homepage body means no menu to read. Reported as an empty tree
+        # rather than an error: a sitemap-only crawl is legitimate and simply
+        # has no navigation data.
+        _logger.info("nav_skipped_no_homepage_html", extra={"base_url": base_url})
+        # These pages still carry their own breadcrumbs from the cascade, and
+        # returning them untouched would leave `trail_source` at its `none`
+        # default — a placed page reported as unplaced. A sitemap-only crawl
+        # is the normal way to reach this branch, so it is not a rare path.
+        return (
+            NavigationTree(),
+            NavCoverageReport(total_urls=len(pages)),
+            tuple(_tagged(page, page.breadcrumb_path) for page in pages),
+        )
+
+    navigation = parse_navigation(homepage_html, base_url)
+    assignments, coverage = assign_navigation(navigation, pages)
+
+    placed: list[FullPageIntelligenceProfile] = []
+    for page in pages:
+        assignment = assignments.get(page.url)
+        if assignment is None:
+            # Unassigned, but not necessarily unplaced — the cascade may have
+            # given it a breadcrumb. Tagged rather than passed through, or
+            # its `trail_source` would stay at the `none` default and the
+            # drawer would deny a placement the tree is already showing.
+            placed.append(_tagged(page, _own_breadcrumb(page)))
+            continue
+        # `own_breadcrumb`, never `breadcrumb_path`. On a fresh crawl they
+        # are equal, but this function also runs against a *stored* result
+        # during a reparse, where `breadcrumb_path` has already been
+        # overwritten by this very line. Feeding it back in is not a no-op:
+        # a page in OTHERS carries `(OTHERS, <type>)`, which `_menu_depth`
+        # rejects as a menu placement but `_better_trail` then accepts as a
+        # breadcrumb — flipping every OTHERS page from `none` to
+        # `breadcrumb` and claiming the site publishes a crumb saying
+        # "OTHERS". 30 pages on rankuno, 316 on linear.
+        trail, source = _better_trail(_own_breadcrumb(page), assignment.nav_path)
+        update: dict[str, object] = {
+            "nav_parent_url": assignment.nav_parent_url,
+            "trail_source": source,
+        }
+        if trail != page.breadcrumb_path:
+            update["breadcrumb_path"] = trail
+        placed.append(page.model_copy(update=update))
+    return navigation, coverage, tuple(placed)
+
+
+def _own_breadcrumb(page: FullPageIntelligenceProfile) -> tuple[str, ...]:
+    """What this page published about itself, reconstructed if it was not stored.
+
+    `own_breadcrumb` only exists on crawls run after it was added, and older
+    results are still on disk and still reparsed. Reading the field blindly
+    returns `()` for all of them, which discards every breadcrumb-placed page
+    into OTHERS — measured at 1 of 400 on a linear.app crawl and 6,003 of 7,287
+    on gep.com, silently.
+
+    `trail_source` makes the reconstruction exact in the two cases that matter:
+
+    * `breadcrumb` — the menu lost, so `breadcrumb_path` *is* the page's own
+      trail, unmodified.
+    * `none` — nothing placed the page, so it published no usable trail.
+
+    `menu` is the one case that cannot be recovered: the page's trail was
+    overwritten and was, by definition, no deeper than the menu path that beat
+    it. Returning `()` keeps the menu placement it already had, which is the
+    same answer for any trail it might have carried.
+    """
+    if page.own_breadcrumb:
+        return page.own_breadcrumb
+    if page.trail_source == "breadcrumb":
+        return page.breadcrumb_path
+    return ()
+
+
+def reparse_placement(
+    result: PageClassificationOutput, homepage_html: str | None = None
+) -> PageClassificationOutput:
+    """Re-run placement over a stored result, without touching the network.
+
+    Answers "what would this crawl look like under today's rules?" for the parts
+    of the engine that read the header menu: `nav_tree_parser`,
+    `assign_navigation`, `_better_trail` and `trail_source`. Classification is
+    untouched — every page keeps the level, type and confidence the cascade gave
+    it, because those came from page bodies that no longer exist.
+
+    What this cannot do, and why
+    ----------------------------
+    A finished crawl stores no HTML. `SiteGraph._html` is discarded when the job
+    ends, and neither the result nor the checkpoint carries a body — the
+    checkpoint holds URLs only. Two consequences follow, and both are limits of
+    the stored data rather than of this function:
+
+    * **Without `homepage_html` the menu cannot be re-parsed at all.** The stored
+      `navigation` tree is reused as-is, so a change to `nav_tree_parser` has no
+      effect. Pass the homepage body to get one.
+    * **Breadcrumbs can never be re-extracted.** `own_breadcrumb` is the trail as
+      the page published it, but the raw markup is gone, so a change to
+      `breadcrumb_parser` cannot be applied to a stored crawl at any price short
+      of re-crawling.
+
+    Idempotent, and deliberately so. Placement reads `own_breadcrumb`, which this
+    never writes, so running it twice gives the same answer as running it once.
+    Reading `breadcrumb_path` instead would not: it already holds whatever won
+    the last contest, and re-feeding it flips every OTHERS page from `none` to
+    `breadcrumb`.
+
+    Args:
+        result: A stored crawl result.
+        homepage_html: The homepage body, if it was kept. Without it the stored
+            menu is reused rather than re-parsed.
+
+    Returns:
+        A new result. The input is not modified.
+    """
+    if homepage_html:
+        navigation, coverage, pages = place_pages(homepage_html, result.base_url, result.pages)
+    else:
+        # No body to re-parse, so the menu stands and only placement re-runs.
+        # `assign_navigation` is still worth running: the rules that read the
+        # menu may have changed even when the menu itself cannot.
+        navigation = result.navigation
+        assignments, coverage = assign_navigation(navigation, result.pages)
+        placed: list[FullPageIntelligenceProfile] = []
+        for page in result.pages:
+            assignment = assignments.get(page.url)
+            if assignment is None:
+                placed.append(_tagged(page, _own_breadcrumb(page)))
+                continue
+            trail, source = _better_trail(_own_breadcrumb(page), assignment.nav_path)
+            placed.append(
+                page.model_copy(
+                    update={
+                        "nav_parent_url": assignment.nav_parent_url,
+                        "trail_source": source,
+                        "breadcrumb_path": trail,
+                    }
+                )
+            )
+        pages = tuple(placed)
+
+    return result.model_copy(
+        update={"navigation": navigation, "nav_coverage": coverage, "pages": pages}
+    )

@@ -316,6 +316,8 @@ def classify_page(
         primary_page_type=page_type,
         depth_from_l0=depth_of(evidence.normalized_path),
         breadcrumb_path=evidence.breadcrumb_path,
+        # The same value, kept where the navigation pass cannot overwrite it.
+        own_breadcrumb=evidence.breadcrumb_path,
         search_intent=infer_search_intent(level, page_type),
         conversion_role=infer_conversion_role(page_type),
         inbound_internal_links_count=evidence.inbound_internal_links,

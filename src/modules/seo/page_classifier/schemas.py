@@ -271,6 +271,12 @@ class FullPageIntelligenceProfile(StrictModel):
             `_better_trail` overwrites it with the header-menu path when the
             menu places the page more specifically. `trail_source` says which
             one it is.
+        own_breadcrumb: The trail **this page published about itself**, before
+            any contest with the header menu. Kept separately because
+            `breadcrumb_path` is overwritten when the menu wins, which destroys
+            the only record of what the page actually said — and with it any
+            chance of recomputing placement later without re-fetching the site.
+            Empty when the page published no breadcrumb.
         trail_source: Where `breadcrumb_path` came from. `menu` is the parsed
             header navigation, `breadcrumb` is markup the page published about
             itself, `none` means neither placed it and the page sits in OTHERS.
@@ -302,6 +308,7 @@ class FullPageIntelligenceProfile(StrictModel):
 
     nav_parent_url: str | None = None
     breadcrumb_path: tuple[str, ...] = ()
+    own_breadcrumb: tuple[str, ...] = ()
     # Defaults to `none` so a profile built outside the navigation pass — the
     # cascade's own output, and every fixture — makes no claim it cannot support.
     trail_source: TrailSource = "none"

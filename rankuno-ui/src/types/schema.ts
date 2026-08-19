@@ -100,6 +100,7 @@ export interface FullPageIntelligenceProfile {
   depth_from_l0: number;
   nav_parent_url: string | null;
   breadcrumb_path: string[];
+  own_breadcrumb: string[];
   trail_source: "menu" | "breadcrumb" | "none";
   topical_category: string;
   sub_topic: string | null;

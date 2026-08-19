@@ -15,7 +15,9 @@ from src.core.registry import registry
 from src.core.schemas import ExecutionStatus, RiskClass
 from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import HttpFetcher
+from src.modules.seo.page_classifier.discovery import DiscoveryReport
 from src.modules.seo.page_classifier.logical_hierarchy import OTHERS_LABEL
+from src.modules.seo.page_classifier.nav_tree_parser import NavigationTree
 from src.modules.seo.page_classifier.schemas import (
     ConsensusMethod,
     FullPageIntelligenceProfile,
@@ -27,13 +29,16 @@ from src.modules.seo.page_classifier.schemas import (
 )
 from src.modules.seo.page_classifier.signal_parsers import PageEvidence
 from src.modules.seo.page_classifier.tool import (
+    CrawlSummary,
     PageClassificationInput,
     PageClassificationOutput,
     PageClassificationTool,
     _better_trail,
     _tagged,
     register_tools,
+    reparse_placement,
 )
+from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
 
 PUBLIC_IP = "93.184.216.34"
 ROBOTS = "User-agent: *\nDisallow:\n"
@@ -579,3 +584,88 @@ def _profile(url: str, trail: tuple[str, ...]) -> FullPageIntelligenceProfile:
         final_confidence_score=0.5,
         consensus_method=ConsensusMethod.LAYER1_STRUCTURAL,
     )
+
+
+class TestReparse:
+    """Re-running placement over a stored result, without the network.
+
+    A finished crawl stores no HTML, so this can re-run the rules that read the
+    menu but can never re-extract a breadcrumb. Both limits are load-bearing and
+    both are asserted here.
+    """
+
+    def _result(
+        self,
+        pages: tuple[FullPageIntelligenceProfile, ...],
+        navigation: NavigationTree | None = None,
+    ) -> PageClassificationOutput:
+        return PageClassificationOutput(
+            base_url="https://e.com/",
+            site_profile=SiteProfile(),
+            weight_profile=WeightProfileReport.for_site(SiteProfile()),
+            discovery=DiscoveryReport(base_url="https://e.com/"),
+            summary=CrawlSummary(),
+            pages=pages,
+            navigation=navigation or NavigationTree(),
+        )
+
+    def test_reparsing_changes_nothing_when_the_rules_have_not(self):
+        """Idempotence is the whole contract. Anything else is corruption."""
+        page = _profile("https://e.com/a", ("Docs",))
+        first = reparse_placement(self._result((page,)))
+        second = reparse_placement(first)
+        assert first.pages == second.pages
+        assert first.navigation == second.navigation
+
+    def test_an_others_page_is_not_relabelled_as_a_breadcrumb(self):
+        """The defect that made a naive reparse silently wrong.
+
+        A page in OTHERS carries `(OTHERS, <type>)` in `breadcrumb_path`.
+        `_menu_depth` refuses it as a menu placement, but feeding it back in as
+        a *breadcrumb* is accepted — flipping the page to `breadcrumb` and
+        claiming the site publishes a crumb reading "OTHERS". Placement reads
+        `own_breadcrumb`, which is never written, so it cannot happen.
+        """
+        page = _profile("https://e.com/a", ()).model_copy(
+            update={"breadcrumb_path": (OTHERS_LABEL, "UNKNOWN"), "trail_source": "none"}
+        )
+        out = reparse_placement(self._result((page,)))
+        assert out.pages[0].trail_source == "none"
+
+    def test_a_legacy_breadcrumb_placement_is_not_discarded(self):
+        """Crawls predating `own_breadcrumb` are still on disk and still reparsed.
+
+        Reading the empty field blindly discards every breadcrumb-placed page
+        into OTHERS — 1 of 400 on a linear.app crawl, and 6,003 of 7,287 on
+        gep.com. `trail_source` makes the reconstruction exact: when it says
+        `breadcrumb`, `breadcrumb_path` *is* the page's own trail.
+        """
+        legacy = _profile("https://e.com/a", ()).model_copy(
+            update={"breadcrumb_path": ("Docs", "Guides"), "trail_source": "breadcrumb"}
+        )
+        assert legacy.own_breadcrumb == ()
+        out = reparse_placement(self._result((legacy,)))
+        assert out.pages[0].breadcrumb_path == ("Docs", "Guides")
+        assert out.pages[0].trail_source == "breadcrumb"
+
+    def test_homepage_html_re_parses_the_menu(self):
+        """With a body the menu is rebuilt; without one the stored tree stands."""
+        html = """<header><nav><ul>
+          <li><a href="/docs/">Docs</a></li>
+        </ul></nav></header>"""
+        page = _profile("https://e.com/docs/", ())
+        without = reparse_placement(self._result((page,)))
+        assert without.navigation.roots == ()
+
+        with_html = reparse_placement(self._result((page,)), html)
+        assert [r.label for r in with_html.navigation.roots] == ["Docs"]
+
+    def test_the_input_is_not_mutated(self):
+        """A reparse must leave the stored result exactly as it found it."""
+        page = _profile("https://e.com/a", ("Docs",))
+        stored = self._result((page,))
+        reparse_placement(
+            stored, "<header><nav><ul><li><a href='/a'>A</a></li></ul></nav></header>"
+        )
+        assert stored.pages[0].breadcrumb_path == ("Docs",)
+        assert stored.navigation.roots == ()
