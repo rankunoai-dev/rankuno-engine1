@@ -56,6 +56,7 @@ which, for an AI-assisted codebase, is every session.
 | [0024](0024-job-capacity-provenance-and-cancellation.md) | 2026-08-19 | Placement provenance, job capacity checks, and cancellation semantics | 1,212 tests, 95.39% |
 | [0025](0025-fragment-id-dropdown-panels.md) | 2026-08-19 | Fragment-ID mega-menu dropdown panel detection | 1,218 tests, 95.39% |
 | [0026](0026-homepage-sidecar-and-reparse-endpoint.md) | 2026-08-19 | Homepage HTML sidecar storage and zero-network re-parse endpoint | 1,231 tests, 95.19% |
+| [0027](0027-site-report-structural-depth-truncation.md) | 2026-08-19 | Site report structural container filtering & print spooler fix | 1,236 tests, 95.19% |
 
 
 ---
