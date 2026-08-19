@@ -2,7 +2,39 @@ import type { PageClassificationOutput } from "../../types/schema";
 import { OTHERS_LANE, LEVEL_BADGE, type DashModel } from "../../lib/dashboardModel";
 import "./report.css";
 
-/** Rows included in the printed tree. */
+/**
+ * Deepest tree level printed.
+ *
+ * A site architecture report is about *sections*, and this is where that
+ * becomes a rule rather than an aspiration. Printed rows are roots, their
+ * categories, and the sections inside those; individual leaf pages are left to
+ * the interactive tree, where they can be searched, and to CSV, where they can
+ * be sorted.
+ *
+ * Depth alone does not express this and measuring proved it. On kinsta.com the
+ * first three levels hold 6,026 nodes — 3,456 of them individual pages, because
+ * a page whose breadcrumb reads `Blog` lands at depth 1 with nothing beneath
+ * it. Cutting on depth alone would have printed **134 pages**, worse than the
+ * 70 it was meant to fix; the old row cap was all that hid this. A node earns a
+ * row by *holding* something, not by sitting high in the tree.
+ *
+ * The alternative it replaces was a flat count: the first 3,000 nodes in tree
+ * order. On a 29,248-node kinsta.com crawl that printed 70 A4 pages while
+ * omitting 90% of the site, and the 10% it kept was chosen by traversal order
+ * rather than by meaning — every section under `Contact` survived and nothing
+ * under `Resources` did. It also broke printing outright: Microsoft Print to
+ * PDF spools the whole document before writing it, and the Windows spooler
+ * aborts a job that size with "Printing failed. Please check your printer".
+ */
+export const REPORT_MAX_DEPTH = 2;
+
+/**
+ * Hard ceiling on printed rows, kept as a backstop rather than a policy.
+ *
+ * Depth is what decides what belongs in the report; this only stops a
+ * pathological site — one with tens of thousands of top-level sections — from
+ * producing an unprintable document anyway.
+ */
 export const REPORT_ROW_LIMIT = 3_000;
 
 /**
@@ -44,8 +76,14 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
   // 10,816 classified. A headline larger than the total it is a share of.
   const inOthers = model.nodes.filter((n) => n.profile && n.lv === OTHERS_LANE).length;
   const placed = model.nodes.filter((n) => n.profile).length - inOthers;
-  const rows = flatten(model, REPORT_ROW_LIMIT);
-  const omitted = model.nodes.length - rows.length;
+  const rows = flatten(model, REPORT_ROW_LIMIT, REPORT_MAX_DEPTH);
+  const sections = countSections(model, REPORT_MAX_DEPTH);
+  // Deliberately two numbers, not one. Leaves omitted *by design* and rows
+  // dropped because the report hit its ceiling are different facts, and
+  // collapsing them into "26,248 omitted" is what made the old notice read as
+  // an apology for a broken report rather than a statement of scope.
+  const deeper = model.nodes.length - sections;
+  const truncated = sections - rows.length;
 
   return (
     <div className="rk-report" aria-hidden="true">
@@ -104,12 +142,20 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
           </tr>
           <tr>
             {/* Counted from the tree this report is printing, not from
-                `nav_coverage`. That field is computed from the header menu
-                alone and knows nothing about breadcrumbs, so once pages began
-                being placed by their own trail the two diverged: it reported
-                5,834 in OTHERS on gep.com while the tree below held 1,210. A
-                headline number contradicting the table under it is worse than
-                no headline number. */}
+                `nav_coverage`.
+
+                This began as a workaround: `nav_coverage` counted the header
+                menu alone and knew nothing about breadcrumbs, so once pages
+                began being placed by their own trail the two diverged — 5,834
+                in OTHERS on gep.com against 1,210 in the tree below. Cycle 0022
+                fixed the metric at source, so the two now agree on a fresh
+                crawl.
+
+                Still counted from the tree, for two reasons that outlive the
+                bug: a result stored before 0022 carries the old menu-only
+                numbers and would print them, and this table is a description of
+                the tree beside it — deriving it from anything else reintroduces
+                the possibility of a headline contradicting the rows under it. */}
             <th>Placed in a section</th>
             <td>
               {placed.toLocaleString()}
@@ -158,11 +204,25 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
       </p>
 
       <h2>Structure</h2>
-      {omitted > 0 && (
+      {/* Scope, not an apology. This is the whole architecture down to section
+          level; what is missing is missing on purpose and recoverable. */}
+      <p className="rep-note">
+        Every section on the site, {REPORT_MAX_DEPTH + 1} levels deep —{" "}
+        {rows.length.toLocaleString()} of {model.nodes.length.toLocaleString()} nodes.
+        {deeper > 0 && (
+          <>
+            {" "}
+            The {deeper.toLocaleString()} pages and deeper sub-sections inside them are
+            omitted for print clarity; browse them in the interactive tree, or export
+            the full URL list to CSV.
+          </>
+        )}
+      </p>
+      {truncated > 0 && (
         <p className="rep-warn">
-          Showing the first {rows.length.toLocaleString()} of{" "}
-          {model.nodes.length.toLocaleString()} nodes; {omitted.toLocaleString()} omitted
-          to keep this report printable.
+          This site has more sections than one report can hold —{" "}
+          {truncated.toLocaleString()} were dropped at the {REPORT_ROW_LIMIT.toLocaleString()}
+          -row ceiling. The structure below is incomplete.
         </p>
       )}
 
@@ -219,7 +279,11 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
 }
 
 /** Depth-first order, capped. Iterative for the same reason the tree build is. */
-function flatten(model: DashModel, limit: number): Array<{ index: number; depth: number }> {
+function flatten(
+  model: DashModel,
+  limit: number,
+  maxDepth: number,
+): Array<{ index: number; depth: number }> {
   const rows: Array<{ index: number; depth: number }> = [];
   const stack: Array<{ index: number; depth: number }> = [];
   for (let k = model.roots.length - 1; k >= 0; k -= 1) {
@@ -230,10 +294,37 @@ function flatten(model: DashModel, limit: number): Array<{ index: number; depth:
     const row = stack.pop()!;
     rows.push(row);
     const node = model.nodes[row.index];
-    if (!node) continue;
+    // Children are not pushed past the cut, so the walk stops descending rather
+    // than walking the whole tree and discarding most of it. On kinsta.com that
+    // is 29,248 nodes visited against roughly 300 kept.
+    if (!node || row.depth >= maxDepth) continue;
     for (let k = node.kids.length - 1; k >= 0; k -= 1) {
+      const kid = model.nodes[node.kids[k]!];
+      // A childless node below the top level is an individual page, and this
+      // report is about sections. Roots are kept whatever they hold: a
+      // top-level tab pointing at one page is still part of the architecture.
+      if (kid && kid.kids.length === 0) continue;
       stack.push({ index: node.kids[k]!, depth: row.depth + 1 });
     }
   }
   return rows;
+}
+
+/** Sections the report would print with no row ceiling, for the omission notice. */
+function countSections(model: DashModel, maxDepth: number): number {
+  let total = 0;
+  const stack: Array<{ index: number; depth: number }> = model.roots.map((index) => ({
+    index,
+    depth: 0,
+  }));
+  while (stack.length > 0) {
+    const row = stack.pop()!;
+    total += 1;
+    const node = model.nodes[row.index];
+    if (!node || row.depth >= maxDepth) continue;
+    for (const kid of node.kids) {
+      if (model.nodes[kid]?.kids.length) stack.push({ index: kid, depth: row.depth + 1 });
+    }
+  }
+  return total;
 }
