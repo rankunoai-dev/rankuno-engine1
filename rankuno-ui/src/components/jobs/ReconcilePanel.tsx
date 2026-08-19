@@ -6,8 +6,14 @@ import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
 import "./jobs.css";
 
-/** Bytes accepted from one export. */
-const MAX_CSV_BYTES = 80 * 1024 * 1024;
+/**
+ * Bytes accepted from one export.
+ *
+ * Decimal megabytes, not binary. The refusal message divides by 1e6 to name the
+ * file's size, so a 1024-based limit told the operator their 84 MB file was
+ * rejected by an "80 MB" cap and left them 4 MB to explain. The two now agree.
+ */
+const MAX_CSV_BYTES = 80 * 1_000_000;
 
 /**
  * Plain-English meaning for each frog-side reason.
