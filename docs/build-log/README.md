@@ -51,8 +51,8 @@ which, for an AI-assisted codebase, is every session.
 | [0019](0019-checkpoints-and-partial-recovery.md) | 2026-08-11 | Crawl checkpoints, IPv6 parse fix, partial-tree recovery | 1,010 tests, 95.69% |
 | [0020](0020-non-page-url-filtering.md) | 2026-08-12 | Media URLs stop entering the graph as pages; PDF export | 1,050 tests, 95.62% |
 | [0021](0021-crawl-traps-and-background-jobs.md) | 2026-08-12 | Spider-trap refusal, www site identity, background jobs | 1,096 tests, 95.67% |
-| [0022](0022-navigation-coverage-counts-breadcrumbs.md) | 2026-08-12 | Nav coverage counts breadcrumbs; KPI cards match the tree | 1,238 tests, 95.17% |
-| [0022](0022-webflow-dropdown-tabs-and-blank-ua-fix.md) | 2026-08-12 | Webflow DOM dropdown tabs, leaf pruning, menu duplicate fix | 1,113 tests, 95.70% |
+| [0022a](0022-webflow-dropdown-tabs-and-blank-ua-fix.md) | 2026-08-12 | Webflow DOM dropdown tabs, leaf pruning, menu duplicate fix | 1,113 tests, 95.70% |
+| [0022b](0022b-navigation-coverage-counts-breadcrumbs.md) | 2026-08-19 | Nav coverage counts breadcrumbs; KPI cards match the tree | 1,238 tests, 95.17% |
 | [0023](0023-placement-fidelity.md) | 2026-08-17 | Self-referential breadcrumbs, mega-menu nesting, duplicate URLs | 1,202 tests, 95.43% |
 | [0024](0024-job-capacity-provenance-and-cancellation.md) | 2026-08-19 | Placement provenance, job capacity checks, and cancellation semantics | 1,212 tests, 95.39% |
 | [0025](0025-fragment-id-dropdown-panels.md) | 2026-08-19 | Fragment-ID mega-menu dropdown panel detection | 1,218 tests, 95.39% |
