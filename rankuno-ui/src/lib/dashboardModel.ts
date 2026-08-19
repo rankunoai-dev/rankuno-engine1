@@ -52,6 +52,17 @@ export interface DashModel {
   laneCounts: [number, number, number, number, number];
   /** Pages per confidence band, for the filter chips. */
   bandCounts: Record<ConfidenceBand, number>;
+  /**
+   * Whether this crawl recorded placement provenance at all.
+   *
+   * False for every result written before `trail_source` existed, and those are
+   * still loadable from `.jobs/`. The distinction is not cosmetic: without it
+   * each of highradius' 114 sections renders as "Not placed", which reads as a
+   * finding about the site when it is a fact about the file. Badges are hidden
+   * and the provenance ordering is skipped rather than asserting an absence the
+   * crawl never measured.
+   */
+  hasProvenance: boolean;
 }
 
 /**
@@ -66,6 +77,25 @@ export interface DashModel {
 export function trailSourceOf(profile: FullPageIntelligenceProfile): TrailSourceTag {
   const raw = (profile as { trail_source?: string }).trail_source;
   return raw === "menu" || raw === "breadcrumb" ? raw : "none";
+}
+
+const SRC_RANK: Record<TrailSourceTag, number> = {
+  menu: 0,
+  mixed: 1,
+  breadcrumb: 2,
+  none: 3,
+};
+
+/**
+ * Sort key for a top-level section.
+ *
+ * `OTHERS` is pinned below even the other unplaced sections. Its own `src` is
+ * `none`, so ranking on that alone would sort it alphabetically among them and
+ * it would stop being last — and it is the residue, not a section. `navTree`
+ * makes the same exception for the same reason.
+ */
+function rootRank(node: DashNode): number {
+  return node.label === OTHERS_LABEL ? 4 : SRC_RANK[node.src];
 }
 
 /** Two sources agree, or they do not. `none` is absence, so it never conflicts. */
@@ -321,6 +351,24 @@ export function buildDashModel(
     }
   }
 
+  // Top-level sections ordered by the strength of the evidence that built them:
+  // header menu, then menu-and-breadcrumb, then breadcrumb alone, then whatever
+  // nothing placed. A reader works down the tree in one direction and the
+  // confidence only ever decreases, instead of a menu-backed section and a
+  // single self-published page sitting side by side as apparent equals.
+  //
+  // Sorted here rather than in `navTree`, which orders every level: `src` is not
+  // known until the pass above has walked the whole subtree. Only the roots are
+  // reordered — inside a section, alphabetical order is what makes a named
+  // section scannable, and regrouping it by provenance would scatter it.
+  //
+  // The sort is stable, so sections sharing a source keep the alphabetical order
+  // `navTree` gave them.
+  const hasProvenance = result.pages.some((page) => "trail_source" in page);
+  if (hasProvenance) {
+    roots.sort((a, b) => rootRank(nodes[a]!) - rootRank(nodes[b]!));
+  }
+
   const laneCounts: [number, number, number, number, number] = [0, 0, 0, 0, 0];
   const bandCounts: Record<ConfidenceBand, number> = { high: 0, review: 0 };
   for (const node of nodes) {
@@ -336,6 +384,7 @@ export function buildDashModel(
     index: nodes.map((node) => `${node.label} ${node.url}`.toLowerCase()),
     laneCounts,
     bandCounts,
+    hasProvenance,
   };
 }
 
@@ -343,6 +392,9 @@ export const EMPTY_MODEL: DashModel = {
   nodes: [],
   roots: [],
   index: [],
+  // No crawl loaded, so nothing to claim either way. Nothing renders from this
+  // model anyway; `false` is the value that asserts least.
+  hasProvenance: false,
   laneCounts: [0, 0, 0, 0, 0],
   bandCounts: { high: 0, review: 0 },
 };

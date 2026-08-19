@@ -110,7 +110,7 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
         <span className="tlbl">{node.label}</span>
         {/* Only on section headers. On a leaf the badge would repeat on every
             row and stop carrying information; the drawer states it per page. */}
-        {hasChildren && (
+        {hasChildren && model.hasProvenance && (
           <span
             className={`srcdot src-${node.src}`}
             title={`Section built from: ${TRAIL_SOURCE_BADGE[node.src]}`}

@@ -87,8 +87,19 @@ export function NodeInspector({ model }: Props): JSX.Element {
         <div>
           <dt>Placed by</dt>
           <dd>
-            <span className={`srcchip src-${node.src}`}>{TRAIL_SOURCE_BADGE[node.src]}</span>
-            <div className="dim reason">{TRAIL_SOURCE_REASON[node.src]}</div>
+            {model.hasProvenance ? (
+              <>
+                <span className={`srcchip src-${node.src}`}>{TRAIL_SOURCE_BADGE[node.src]}</span>
+                <div className="dim reason">{TRAIL_SOURCE_REASON[node.src]}</div>
+              </>
+            ) : (
+              /* Not the same as "nothing placed it". This crawl predates the
+                 field, so the engine never recorded an answer either way. */
+              <div className="dim reason">
+                This crawl was run before the engine recorded what placed each page. Re-crawl
+                to see whether the header menu or a published breadcrumb put it here.
+              </div>
+            )}
             {trail.length > 0 && (
               <div className="trail">
                 {trail.join("  ›  ")}
