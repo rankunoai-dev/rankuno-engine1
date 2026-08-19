@@ -198,11 +198,12 @@ export interface NavigationTree {
   source: NavSource;
 }
 
-/** How much of the site the navigation menu actually accounts for. */
+/** How much of the site has a published navigational position, and from where. */
 export interface NavCoverageReport {
   total_urls: number;
   exact_matches: number;
   inherited_matches: number;
+  breadcrumb_matches: number;
   unmatched: number;
   nav_entries: number;
   groups: string[];

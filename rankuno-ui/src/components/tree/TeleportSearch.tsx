@@ -90,8 +90,14 @@ export function TeleportSearch({ model }: Props): JSX.Element {
     <div className="search" ref={container}>
       <input
         value={query}
-        placeholder={`Teleport-search ${model.nodes.length.toLocaleString()} URLs…`}
-        aria-label="Search all URLs"
+        // "nodes", not "URLs". The index covers grouping nodes too — menu
+        // sections that are not themselves pages — and those have no URL of
+        // their own; `dashboardModel` falls back to the section path. On
+        // kinsta.com 1,592 of the 29,248 were structural, so the old wording
+        // overstated the crawl by that much against a KPI card reading 27,656
+        // on the same screen.
+        placeholder={`Teleport-search ${model.nodes.length.toLocaleString()} nodes…`}
+        aria-label="Search all nodes"
         autoComplete="off"
         onChange={(event) => {
           setQuery(event.target.value);
@@ -121,7 +127,7 @@ export function TeleportSearch({ model }: Props): JSX.Element {
           <div className="more">
             {total === 0
               ? "No matches"
-              : `${total.toLocaleString()} matches across ${model.nodes.length.toLocaleString()} URLs — showing first ${hits.length}`}
+              : `${total.toLocaleString()} matches across ${model.nodes.length.toLocaleString()} nodes — showing first ${hits.length}`}
           </div>
         </div>
       )}

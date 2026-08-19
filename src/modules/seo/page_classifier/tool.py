@@ -68,6 +68,7 @@ from src.modules.seo.page_classifier.logical_hierarchy import (
     OTHERS_LABEL,
     NavCoverageReport,
     assign_navigation,
+    recount_placements,
 )
 from src.modules.seo.page_classifier.nav_tree_parser import (
     NavigationTree,
@@ -733,10 +734,15 @@ def place_pages(
         # returning them untouched would leave `trail_source` at its `none`
         # default — a placed page reported as unplaced. A sitemap-only crawl
         # is the normal way to reach this branch, so it is not a rare path.
+        tagged = tuple(_tagged(page, page.breadcrumb_path) for page in pages)
+        # Recounted even with no menu at all. This is the sitemap-only branch,
+        # where every placement that exists came from a page's own breadcrumb —
+        # so it is the branch where a menu-only count is most wrong, reporting a
+        # fully breadcrumbed site as 100% unplaced.
         return (
             NavigationTree(),
-            NavCoverageReport(total_urls=len(pages)),
-            tuple(_tagged(page, page.breadcrumb_path) for page in pages),
+            recount_placements(NavCoverageReport(total_urls=len(pages)), tagged),
+            tagged,
         )
 
     navigation = parse_navigation(homepage_html, base_url)
@@ -769,7 +775,12 @@ def place_pages(
         if trail != page.breadcrumb_path:
             update["breadcrumb_path"] = trail
         placed.append(page.model_copy(update=update))
-    return navigation, coverage, tuple(placed)
+
+    # `assign_navigation` ran before `_better_trail` chose between the menu and
+    # each page's own breadcrumb, so its report knows only about the menu. Only
+    # now is `trail_source` final.
+    result = tuple(placed)
+    return navigation, recount_placements(coverage, result), result
 
 
 def _own_breadcrumb(page: FullPageIntelligenceProfile) -> tuple[str, ...]:
@@ -864,6 +875,7 @@ def reparse_placement(
                 )
             )
         pages = tuple(placed)
+        coverage = recount_placements(coverage, pages)
 
     return result.model_copy(
         update={"navigation": navigation, "nav_coverage": coverage, "pages": pages}

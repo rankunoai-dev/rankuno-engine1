@@ -11,7 +11,9 @@ from __future__ import annotations
 import pytest
 from src.modules.seo.page_classifier.logical_hierarchy import (
     OTHERS_LABEL,
+    NavCoverageReport,
     assign_navigation,
+    recount_placements,
 )
 from src.modules.seo.page_classifier.nav_tree_parser import parse_navigation
 from src.modules.seo.page_classifier.schemas import (
@@ -254,3 +256,89 @@ class TestRootLinkIsNotACatchAll:
         )
         assigned, _ = assign_navigation(menu, [profile("https://e.com/")])
         assert assigned["https://e.com/"].group == OTHERS_LABEL
+
+
+def placed(url: str, source: str):
+    """A profile whose placement contest has already been decided."""
+    return profile(url).model_copy(update={"trail_source": source})
+
+
+class TestRecountPlacements:
+    """Coverage restated against what actually placed each page.
+
+    `assign_navigation` runs before `_better_trail` chooses between the menu and
+    a page's own breadcrumb, so its report can only see the menu. Every
+    breadcrumb-placed page therefore landed in `unmatched` — 22,869 of
+    kinsta.com's 27,656, reported as "no navigation path reaches these" while
+    the tree on the same screen placed all of them.
+    """
+
+    def test_breadcrumb_pages_leave_unmatched(self):
+        base = NavCoverageReport(total_urls=3, exact_matches=1, unmatched=2)
+        report = recount_placements(
+            base,
+            [
+                placed("https://e.com/a/", "menu"),
+                placed("https://e.com/b/", "breadcrumb"),
+                placed("https://e.com/c/", "none"),
+            ],
+        )
+        assert report.exact_matches == 1
+        assert report.breadcrumb_matches == 1
+        assert report.unmatched == 1
+        assert report.placed == 2
+
+    def test_only_none_is_unmatched(self):
+        pages = [placed(f"https://e.com/{i}/", "breadcrumb") for i in range(10)]
+        report = recount_placements(NavCoverageReport(total_urls=10, unmatched=10), pages)
+        assert report.unmatched == 0
+        assert report.coverage == 1.0
+        # The menu reached none of them, and that stays visible.
+        assert report.menu_coverage == 0.0
+
+    def test_the_menu_split_is_carried_through_not_reinvented(self):
+        base = NavCoverageReport(total_urls=2, exact_matches=1, inherited_matches=1)
+        report = recount_placements(
+            base, [placed("https://e.com/a/", "menu"), placed("https://e.com/b/", "menu")]
+        )
+        assert (report.exact_matches, report.inherited_matches) == (1, 1)
+
+    def test_a_demoted_menu_page_cannot_drive_unmatched_negative(self):
+        """`_better_trail` can prefer a deeper breadcrumb over the menu.
+
+        The stored exact/inherited pair then over-counts the pages still
+        menu-placed. Left unclamped this subtracts more than `total_urls` and
+        `unmatched` fails its own `ge=0` constraint.
+        """
+        base = NavCoverageReport(total_urls=2, exact_matches=2)
+        report = recount_placements(
+            base,
+            [placed("https://e.com/a/", "breadcrumb"), placed("https://e.com/b/", "breadcrumb")],
+        )
+        assert report.exact_matches == 0
+        assert report.breadcrumb_matches == 2
+        assert report.unmatched == 0
+
+    def test_an_others_page_is_not_counted_as_placed(self):
+        """`OTHERS` pages carry a non-empty trail — `(OTHERS, <type>)`.
+
+        Counting non-empty `breadcrumb_path` instead of `trail_source` would
+        report every unplaced page as placed, inverting the bug being fixed.
+        """
+        page = placed("https://e.com/x/", "none").model_copy(
+            update={"breadcrumb_path": (OTHERS_LABEL, "UNKNOWN")}
+        )
+        report = recount_placements(NavCoverageReport(total_urls=1), [page])
+        assert report.breadcrumb_matches == 0
+        assert report.unmatched == 1
+
+    def test_the_total_comes_from_the_pages(self):
+        report = recount_placements(
+            NavCoverageReport(total_urls=99), [placed("https://e.com/a/", "menu")]
+        )
+        assert report.total_urls == 1
+
+    def test_an_empty_crawl_reports_zero_rather_than_dividing(self):
+        report = recount_placements(NavCoverageReport(), [])
+        assert report.coverage == 0.0
+        assert report.unmatched == 0

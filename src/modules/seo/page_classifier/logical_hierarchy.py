@@ -47,6 +47,7 @@ __all__ = [
     "NavAssignment",
     "NavCoverageReport",
     "assign_navigation",
+    "recount_placements",
 ]
 
 _logger = get_logger("modules.seo.logical_hierarchy")
@@ -83,17 +84,34 @@ class NavAssignment(StrictModel):
 
 
 class NavCoverageReport(StrictModel):
-    """How much of the site the navigation menu actually accounts for.
+    """How much of the site has a published navigational position, and from where.
 
-    Reported rather than assumed. Menu coverage varies enormously between sites,
-    and a caller presenting a nav tree needs to know whether it describes the
-    site or a corner of it.
+    Reported rather than assumed. Coverage varies enormously between sites, and a
+    caller presenting a nav tree needs to know whether it describes the site or a
+    corner of it.
+
+    Two sources, counted apart
+    --------------------------
+    A page can be placed by the **header menu** or by its **own published
+    breadcrumb**, and the two fail differently: a menu path is wrong for the
+    whole site at once, a breadcrumb is wrong one page at a time. They are
+    therefore counted separately and summed only by `placed`.
+
+    Until cycle 0022 this model counted the menu alone, so every
+    breadcrumb-placed page landed in `unmatched` — 22,869 of kinsta.com's 27,656
+    pages, reported under the words "no navigation path reaches these" while the
+    tree on the same screen placed all of them correctly. `unmatched` now means
+    what it says: nothing on the site places this URL.
 
     Attributes:
         total_urls: URLs considered.
         exact_matches: URLs that are themselves menu entries.
         inherited_matches: URLs placed under an ancestor menu entry.
-        unmatched: URLs in `OTHERS`.
+        breadcrumb_matches: URLs placed by their own published breadcrumb, the
+            menu having not reached them. Defaults to 0, which is also what every
+            result stored before this field existed will deserialize to — those
+            keep the old menu-only reading until they are reparsed.
+        unmatched: URLs no source places, i.e. `OTHERS`.
         nav_entries: Linked entries in the menu.
         groups: Top-level group names, in menu order, `OTHERS` last if present.
     """
@@ -101,16 +119,89 @@ class NavCoverageReport(StrictModel):
     total_urls: int = Field(default=0, ge=0)
     exact_matches: int = Field(default=0, ge=0)
     inherited_matches: int = Field(default=0, ge=0)
+    breadcrumb_matches: int = Field(default=0, ge=0)
     unmatched: int = Field(default=0, ge=0)
     nav_entries: int = Field(default=0, ge=0)
     groups: tuple[str, ...] = ()
 
     @property
+    def menu_matches(self) -> int:
+        """URLs the header menu reaches, exactly or by inheritance."""
+        return self.exact_matches + self.inherited_matches
+
+    @property
+    def placed(self) -> int:
+        """URLs with a published position, from either source."""
+        return self.menu_matches + self.breadcrumb_matches
+
+    @property
     def coverage(self) -> float:
-        """Fraction of URLs the menu accounts for, 0.0–1.0."""
+        """Fraction of URLs with any published position, 0.0–1.0.
+
+        Widened from menu-only in cycle 0022. `menu_coverage` is the previous
+        meaning, kept because the two are genuinely different questions and the
+        gap between them is itself a finding about the site.
+        """
         if not self.total_urls:
             return 0.0
-        return (self.exact_matches + self.inherited_matches) / self.total_urls
+        return self.placed / self.total_urls
+
+    @property
+    def menu_coverage(self) -> float:
+        """Fraction of URLs the header menu alone accounts for, 0.0–1.0."""
+        if not self.total_urls:
+            return 0.0
+        return self.menu_matches / self.total_urls
+
+
+def recount_placements(
+    report: NavCoverageReport,
+    pages: Sequence[FullPageIntelligenceProfile],
+) -> NavCoverageReport:
+    """Restate a menu-only coverage report against what finally placed each page.
+
+    `assign_navigation` runs *before* `_better_trail` decides between the menu
+    and a page's own breadcrumb, so the report it returns can only know about the
+    menu. This closes that gap by re-reading `trail_source`, which is the record
+    of which source actually won.
+
+    Counted from `trail_source` rather than from a non-empty `breadcrumb_path`,
+    because a page in `OTHERS` carries the trail `(OTHERS, <page type>)` — a
+    non-empty path that places nothing. Counting paths would report every
+    unplaced page as placed, which is the inverse of the bug this fixes.
+
+    The menu counts are carried through untouched: they came from prefix matching
+    against the parsed tree and re-deriving them here would give a second
+    definition of "exact match" to disagree with the first.
+
+    Args:
+        report: The menu-derived report from `assign_navigation`.
+        pages: The profiles *after* placement, carrying final `trail_source`.
+
+    Returns:
+        A new report. `total_urls` is taken from `pages`, so a caller that
+        filtered between the two calls gets a coherent total rather than a
+        stale one.
+    """
+    breadcrumb = sum(1 for page in pages if page.trail_source == "breadcrumb")
+    menu = sum(1 for page in pages if page.trail_source == "menu")
+
+    # `menu` recomputed only to bound the carried-through split. When placement
+    # demotes a menu page — `_better_trail` prefers a deeper breadcrumb — the
+    # stored exact/inherited pair would otherwise exceed the pages that are still
+    # menu-placed, and `unmatched` would go negative on a `ge=0` field.
+    exact = min(report.exact_matches, menu)
+    inherited = min(report.inherited_matches, menu - exact)
+
+    return report.model_copy(
+        update={
+            "total_urls": len(pages),
+            "exact_matches": exact,
+            "inherited_matches": inherited,
+            "breadcrumb_matches": breadcrumb,
+            "unmatched": len(pages) - exact - inherited - breadcrumb,
+        }
+    )
 
 
 def _match_key(url: str) -> str:
