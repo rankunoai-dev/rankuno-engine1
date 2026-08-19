@@ -93,6 +93,41 @@ pruned, so the CTA and placeholder text that this inevitably also catches does
 not survive as a section."""
 _SKIP_HREF_PREFIXES = ("#", "javascript:", "mailto:", "tel:", "data:", "sms:")
 
+_FRAGMENT_HREF = re.compile(r"^#([A-Za-z][\w:.-]*)$")
+"""A pure-fragment href, which on a mega-menu names the panel the tab opens.
+
+Anchored at both ends deliberately. `#` alone is a placeholder used by menus
+that wire themselves up in JavaScript and addresses nothing; `/a#b` is a link to
+another page that happens to carry a fragment. Only `#id` is the disclosure
+pattern this reads."""
+
+_PANEL_TAGS = frozenset({"div", "section", "aside", "ul", "ol", "nav", "details"})
+"""Elements that may be a dropdown panel.
+
+Containers only. A fragment can legitimately point at a heading or an icon —
+`<a href="#icon-1">` against `<span id="icon-1">` — and treating an inline
+element as a panel would push a whole menu down a level for nothing."""
+
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+"""HTML elements with no closing tag. Counting them would desync the stack."""
+
 _WHITESPACE = re.compile(r"\s+")
 
 _HAS_WORD = re.compile(r"\w", re.UNICODE)
@@ -215,6 +250,29 @@ class _NavCollector(HTMLParser):
         `role="navigation"` still gates parsing as before, but is not counted
         here: matching its close would need a full element stack, and getting
         that wrong would mis-depth an entire menu."""
+        self._panel_ids: set[str] = set()
+        """Fragment targets named by tab anchors seen so far.
+
+        Kinsta states the tab-to-panel relationship outright — the tab is
+        `<a href="#megamenu-item-0__child">` and the panel is
+        `<div id="megamenu-item-0__child">`. That is the ARIA disclosure
+        pattern, and it is authored intent rather than a class-name guess, which
+        is what makes acting on it safe.
+
+        Without it the panel is invisible to the depth model: `_dropdown_depth`
+        counts only `<nav>`/`<header>`, so a `<div>` panel left the column
+        headings inside it at the same depth as the tabs. `Platform` was then
+        closed with no children by the first `<h6>` and pruned as an unlinked
+        leaf, and its column titles — `Product`, `Features`, `Extensions` — were
+        promoted to top-level tabs in its place."""
+        self._elements: list[str] = []
+        """Open non-void elements inside the header, for closing panels.
+
+        Needed because a panel is a `<div>` among many nested `<div>`s, so
+        matching on tag name alone would close it at the first inner `</div>`.
+        Depth in this stack is the only reliable marker of where it ends."""
+        self._panel_levels: list[int] = []
+        """Stack depth at which each open panel began."""
         self._current: list[str] | None = None
         self._current_href: str | None = None
         self._current_depth = 0
@@ -258,11 +316,25 @@ class _NavCollector(HTMLParser):
         if not self._inside_header_nav:
             return
 
+        # Element stack first, so a panel's own opening tag is on it before its
+        # level is recorded.
+        if tag not in _VOID_TAGS:
+            self._elements.append(tag)
+            element_id = mapping.get("id", "").strip()
+            if tag in _PANEL_TAGS and element_id and element_id in self._panel_ids:
+                self._panel_levels.append(len(self._elements))
+                self._dropdown_depth += 1
+
         if tag in _LIST_TAGS:
             self._list_depth += 1
         elif tag == "a":
             self._finish_anchor()
-            self._open(mapping.get("href") or None)
+            href = mapping.get("href") or None
+            if href and (match := _FRAGMENT_HREF.match(href.strip())):
+                # Recorded before the panel is reached: the tab always precedes
+                # the panel it opens.
+                self._panel_ids.add(match.group(1))
+            self._open(href)
             self._anchor_open = True
         elif tag in _HEADING_TAGS and not self._anchor_open and self._list_depth > 0:
             # Replaces any open *unlinked* candidate rather than being ignored.
@@ -290,6 +362,19 @@ class _NavCollector(HTMLParser):
             return
         if not self._inside_header_nav:
             return
+
+        if tag not in _VOID_TAGS and tag in self._elements:
+            # Pop to the match rather than popping once. Menus routinely omit
+            # `</li>`, and a stack that only ever popped its top would drift by
+            # one per item until the panel boundary was meaningless.
+            while self._elements:
+                popped = self._elements.pop()
+                while self._panel_levels and self._panel_levels[-1] > len(self._elements):
+                    self._panel_levels.pop()
+                    self._dropdown_depth = max(0, self._dropdown_depth - 1)
+                if popped == tag:
+                    break
+
         if tag in _LIST_TAGS:
             self._list_depth = max(0, self._list_depth - 1)
         elif tag == "a":

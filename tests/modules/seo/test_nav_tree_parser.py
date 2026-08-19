@@ -540,3 +540,98 @@ class TestBreadcrumbIsNotTheMenu:
         <div class="breadcrumbs"><a href="/">Home</a><a href="/mens">Mens</a></div>
         """
         assert [root.label for root in parse_navigation(html, BASE).roots] == ["Shop"]
+
+
+class TestFragmentPanels:
+    """A tab whose href names the panel it opens.
+
+    The kinsta.com shape. Its dropdown is a `<div>`, not a `<nav>`, so
+    `_dropdown_depth` never fired and the `<h6>` column titles inside the panel
+    computed the same depth as the tabs themselves. `_build_tree` then closed
+    `Platform` with no children at the first `<h6>`, `_prune_unlinked_leaves`
+    deleted it as an unlinked leaf, and its column titles were promoted to
+    top-level tabs in its place. Live, that turned 5 real tabs into 15 fake
+    ones.
+    """
+
+    HREF = "https://e.com/"
+
+    def test_a_fragment_panel_nests_its_columns(self):
+        html = """<header><nav><ul>
+          <li><a href="#panel-0">Platform</a>
+            <div id="panel-0">
+              <h6>Product</h6>
+              <ul><li><a href="/hosting/">Hosting</a></li></ul>
+            </div>
+          </li>
+          <li><a href="/pricing/">Pricing</a></li>
+        </ul></nav></header>"""
+        roots = parse_navigation(html, self.HREF).roots
+        assert [r.label for r in roots] == ["Platform", "Pricing"]
+        platform = roots[0]
+        assert [c.label for c in platform.children] == ["Product"]
+        assert [g.label for g in platform.children[0].children] == ["Hosting"]
+
+    def test_a_plain_page_link_is_not_a_panel(self):
+        """`/a#b` addresses another page, not a panel on this one."""
+        html = """<header><nav><ul>
+          <li><a href="/other#panel-0">Elsewhere</a>
+            <div id="panel-0"><h6>Column</h6>
+              <ul><li><a href="/deep/">Deep</a></li></ul></div>
+          </li>
+        </ul></nav></header>"""
+        roots = parse_navigation(html, self.HREF).roots
+        # No panel recognised, so the heading stays a sibling and takes the
+        # links — the pre-fix behaviour, preserved where the signal is absent.
+        assert [r.label for r in roots] == ["Elsewhere", "Column"]
+
+    def test_a_bare_hash_is_not_a_panel_id(self):
+        """`href="#"` is a placeholder addressing nothing."""
+        html = """<header><nav><ul>
+          <li><a href="#">Toggle</a><div id=""><h6>C</h6>
+            <ul><li><a href="/x/">X</a></li></ul></div></li>
+        </ul></nav></header>"""
+        assert [r.label for r in parse_navigation(html, self.HREF).roots] == ["C"]
+
+    def test_a_fragment_pointing_at_an_inline_element_is_ignored(self):
+        """`<span id="icon">` is not a dropdown, and must not shift depth."""
+        html = """<header><nav><ul>
+          <li><a href="#icon">Tab</a><span id="icon">*</span>
+            <h6>Column</h6>
+            <ul><li><a href="/y/">Y</a></li></ul></li>
+        </ul></nav></header>"""
+        assert [r.label for r in parse_navigation(html, self.HREF).roots] == ["Column"]
+
+    def test_the_panel_closes_at_the_right_div(self):
+        """Nested `<div>`s must not close the panel early.
+
+        Matching a panel by tag name would end it at the first inner `</div>`,
+        putting everything after that back at tab depth — the same failure with
+        a smaller blast radius.
+        """
+        html = """<header><nav><ul>
+          <li><a href="#p">Tab</a>
+            <div id="p">
+              <div><div><h6>First</h6>
+                <ul><li><a href="/1/">One</a></li></ul></div></div>
+              <h6>Second</h6>
+              <ul><li><a href="/2/">Two</a></li></ul>
+            </div>
+          </li>
+          <li><a href="/after/">After</a></li>
+        </ul></nav></header>"""
+        roots = parse_navigation(html, self.HREF).roots
+        assert [r.label for r in roots] == ["Tab", "After"]
+        assert [c.label for c in roots[0].children] == ["First", "Second"]
+
+    def test_unclosed_list_items_do_not_desync_the_panel(self):
+        """Menus routinely omit `</li>`; popping only the top would drift."""
+        html = """<header><nav><ul>
+          <li><a href="#p">Tab</a>
+            <div id="p"><h6>Col</h6>
+              <ul><li><a href="/1/">One</a><li><a href="/2/">Two</a></ul>
+            </div>
+          <li><a href="/after/">After</a>
+        </ul></nav></header>"""
+        roots = parse_navigation(html, self.HREF).roots
+        assert [r.label for r in roots] == ["Tab", "After"]
