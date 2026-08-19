@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import Field, ValidationError
 
@@ -68,6 +68,9 @@ from src.modules.seo.page_classifier.schemas import (
     SearchIntent,
     SignalScore,
     SignalSource,
+)
+from src.modules.seo.page_classifier.screaming_frog_merge import (
+    merge_reconciled_urls,
 )
 from src.modules.seo.page_classifier.tool import (
     CrawlSummary,
@@ -297,6 +300,45 @@ class HealthView(StrictModel):
     status: str = "ok"
     active_jobs: int = 0
     max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS
+
+
+class ReconciliationSummary(StrictModel):
+    """What a Screaming Frog reconciliation found, and what it did about it.
+
+    Returned instead of a bare `JobRecord` because the counts are the point: an
+    operator uploads an export to learn the size of the gap, and half of them
+    will not want the merged job at all. The new job's id is included so the UI
+    can open it when they do.
+    """
+
+    job_id: str
+    """The merged result, saved as a new job. Equal to `source_job_id` when
+    nothing was merged — there is no new job in that case."""
+
+    source_job_id: str
+    base_url: str
+
+    frog_rows: int = 0
+    """Rows read from the export."""
+
+    in_both: int = 0
+    """URLs both crawlers found."""
+
+    missed_pages: int = 0
+    """Live, indexable, in-scope pages the engine never reached. Merged."""
+
+    orphans: int = 0
+    """Published pages no internal link reaches. Found only by the engine, and
+    left where they are — their absence from the export *is* the finding."""
+
+    merged: int = 0
+    """Pages added to the tree. Zero is a normal outcome."""
+
+    frog_reasons: Mapping[str, int] = Field(default_factory=dict)
+    """Why each frog-only URL was not merged, by reason."""
+
+    engine_reasons: Mapping[str, int] = Field(default_factory=dict)
+    """Why each engine-only URL is absent from the export, by reason."""
 
 
 class JobAccepted(StrictModel):
@@ -746,6 +788,105 @@ def create_app(
             extra={"source": job_id, "job_id": record.id, "menu_reparsed": bool(homepage)},
         )
         return state.store.get(record.id)
+
+    @app.post(
+        f"{API_PREFIX}/jobs/{{job_id}}/reconcile/screaming-frog",
+        response_model=ReconciliationSummary,
+    )
+    async def reconcile_screaming_frog(job_id: str, request: Request) -> ReconciliationSummary:
+        """Compare a Screaming Frog export against a finished job, and merge the gap.
+
+        **Entirely optional.** Nothing else in the engine calls this, and a crawl
+        that never sees an export behaves exactly as it always has. This is an
+        extra pass an operator may run when they happen to have a Screaming Frog
+        licence and a reason to cross-check.
+
+        The body is the raw CSV, sent as `text/csv` — not `multipart/form-data`.
+        FastAPI's file upload needs `python-multipart`, which is not a
+        dependency of this project, and adding a package to accept one file when
+        Starlette already hands over the request body would be a poor trade. The
+        browser reads the file and POSTs its text.
+
+        Synchronous and offline, like reparse: no worker thread, no concurrency
+        slot, no network. Merging 250 pages into a 27,656-page crawl takes about
+        1.2 seconds, nearly all of it re-running placement over the combined set.
+
+        A **new** job when anything merges, never a mutation of the old one. The
+        original is the evidence of what the crawl alone found, and the whole
+        value of a reconciliation is the comparison. When nothing merges, no job
+        is created and `job_id` echoes the source.
+
+        Raises:
+            HTTPException: `404` if there is no such job, `409` if its result
+                predates the current output contract, `400` if the body is
+                empty or is not a readable export.
+        """
+        body = await request.body()
+        if not body.strip():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="empty body: POST the Screaming Frog CSV as text/csv",
+            )
+
+        try:
+            stored = state.store.read_result(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"no job {job_id} with a result"
+            ) from exc
+
+        try:
+            before = PageClassificationOutput.model_validate(stored)
+        except ValidationError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="this job's result predates the current output contract",
+            ) from exc
+
+        # `utf-8-sig`: Screaming Frog writes a byte-order mark, and without this
+        # the first header keeps an invisible prefix, never matches "Address",
+        # and the whole export silently reconciles to nothing.
+        try:
+            outcome = merge_reconciled_urls(before, body.decode("utf-8-sig", errors="replace"))
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        report = outcome.report
+        target = job_id
+        if outcome.merged:
+            record = state.store.create(
+                TOOL_NAME,
+                {"base_url": before.base_url},
+                label=f"{before.base_url} (+{outcome.merged} from Screaming Frog)",
+            )
+            state.store.finish(record.id, outcome.output.model_dump(mode="json"))
+            homepage = state.store.read_homepage(job_id)
+            # Carried over so the merged job can itself be reparsed later.
+            if homepage:
+                state.store.write_homepage(record.id, homepage)
+            target = record.id
+
+        _logger.info(
+            "job_reconciled",
+            extra={
+                "source": job_id,
+                "job_id": target,
+                "merged": outcome.merged,
+                "missed": len(report.missed_pages),
+            },
+        )
+        return ReconciliationSummary(
+            job_id=target,
+            source_job_id=job_id,
+            base_url=before.base_url,
+            frog_rows=report.frog_rows,
+            in_both=report.in_both,
+            missed_pages=len(report.missed_pages),
+            orphans=len(report.orphans),
+            merged=outcome.merged,
+            frog_reasons=dict(report.frog_reasons),
+            engine_reasons=dict(report.engine_reasons),
+        )
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
     async def cancel_job(job_id: str) -> JobRecord:

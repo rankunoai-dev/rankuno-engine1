@@ -134,6 +134,42 @@ somebody else's server. Writes a self-contained interactive HTML report.
 ceiling does not reduce how many pages are fetched — the page budget is spent
 either way — it only decides whether a deep site's lower levels are reachable.
 
+### Cross-checking against Screaming Frog (optional)
+
+**Entirely optional.** A crawl is complete on its own terms; this is an extra
+pass for operators who happen to have a Screaming Frog licence. Nothing in the
+crawl path imports it, and no workflow requires an export.
+
+```powershell
+# Report the gap, change nothing (the default)
+.\.venv\Scripts\python.exe scriptseconcile_screaming_frog.py <job-id> internal_html.csv
+
+# Fold the pages Screaming Frog found and the engine missed into the tree
+.\.venv\Scripts\python.exe scriptseconcile_screaming_frog.py <job-id> internal_html.csv --merge --out merged.json
+```
+
+The same thing over HTTP, posting the CSV as the raw body — not
+`multipart/form-data`, which would need a dependency this project does not have:
+
+```
+POST /api/v1/jobs/{id}/reconcile/screaming-frog     Content-Type: text/csv
+```
+
+Both directions of the disagreement are reported, and they call for opposite
+fixes:
+
+| Direction | What it means | The fix |
+| :--- | :--- | :--- |
+| Screaming Frog found it, the engine did not | Linked but in no sitemap, usually deep | Add it to a sitemap |
+| The engine found it, Screaming Frog did not | Published with no internal link — a sitemap orphan | Add internal links |
+
+Only the first direction is merged, and only its `MISSED_PAGE` rows: redirect
+sources, off-site URLs, media and 4xx are differences the engine holds on
+purpose, not gaps. Merged pages are classified from the URL alone — an export
+carries no HTML — so they keep a low confidence score, which is how you tell
+them from crawled pages. A merge always writes a **new** job; the original is
+never modified. CSV only; `.xlsx` is not supported ([build-log 0028](docs/build-log/0028-screaming-frog-merge-and-optional-reconcile.md)).
+
 ### The local API and the React UI
 
 ```powershell

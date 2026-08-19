@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from src.api import server as server_module
@@ -21,6 +22,15 @@ from src.api.server import API_PREFIX, create_app
 from src.core.state_store import MAX_HOMEPAGE_BYTES, DiskJobStore, JobRecord, JobStatus
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
+from src.modules.seo.page_classifier.schemas import (
+    ConsensusMethod,
+    FullPageIntelligenceProfile,
+    HierarchyLevel,
+    PrimaryPageType,
+    SearchIntent,
+    SignalScore,
+    SignalSource,
+)
 from src.modules.seo.page_classifier.tool import (
     CrawlSummary,
     PageClassificationOutput,
@@ -945,3 +955,145 @@ class TestReparseEndpoint:
         with TestClient(app) as client:
             record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
             assert client.post(f"{API_PREFIX}/jobs/{record.id}/reparse").status_code == 404
+
+
+class TestScreamingFrogEndpoint:
+    """The optional reconciliation pass.
+
+    Optional is the load-bearing word: no other endpoint calls this, and a crawl
+    that never sees an export must behave exactly as it always has. The tests
+    that matter most here are the ones asserting what it does *not* do.
+    """
+
+    HEADER = (
+        "Address,Status Code,Content Type,Indexability,Indexability Status,"
+        "Redirect URL,Crawl Depth,Unique Inlinks"
+    )
+    PATH = "reconcile/screaming-frog"
+
+    def _finished(self, store: DiskJobStore) -> JobRecord:
+        """A one-page crawl to reconcile against."""
+        page = FullPageIntelligenceProfile(
+            url="https://e.com/a/",
+            canonical_url="https://e.com/a/",
+            normalized_path="https://e.com/a/",
+            hierarchy_level=HierarchyLevel.L3_LEAF_PAGE,
+            primary_page_type=PrimaryPageType.BLOG_ARTICLE,
+            depth_from_l0=1,
+            search_intent=SearchIntent.INFORMATIONAL,
+            signals_evaluated=(
+                SignalScore(
+                    source=SignalSource.SITEMAP_INDEX,
+                    suggested_level=HierarchyLevel.L3_LEAF_PAGE,
+                    suggested_page_type=PrimaryPageType.BLOG_ARTICLE,
+                    confidence=0.9,
+                ),
+            ),
+            final_confidence_score=0.9,
+            consensus_method=ConsensusMethod.LAYER1_STRUCTURAL,
+        )
+        record = store.create(
+            server_module.TOOL_NAME, {"base_url": "https://e.com/"}, label="e.com"
+        )
+        store.finish(
+            record.id,
+            PageClassificationOutput(
+                base_url="https://e.com/",
+                site_profile=SiteProfile(),
+                weight_profile=WeightProfileReport.for_site(SiteProfile()),
+                discovery=DiscoveryReport(base_url="https://e.com/"),
+                summary=CrawlSummary(pages_classified=1),
+                pages=(page,),
+            ).model_dump(mode="json"),
+        )
+        return record
+
+    def _post(self, client: TestClient, job_id: str, *lines: str) -> httpx.Response:
+        return client.post(
+            f"{API_PREFIX}/jobs/{job_id}/{self.PATH}",
+            content="\n".join((self.HEADER, *lines)).encode("utf-8"),
+            headers={"Content-Type": "text/csv"},
+        )
+
+    def test_a_missed_page_is_merged_into_a_new_job(self, store):
+        """The original stays put: the comparison is the point of running this."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            source = self._finished(store)
+            response = self._post(
+                client, source.id, '"https://e.com/b/",200,text/html,Indexable,,,3,5'
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["merged"] == 1
+        assert body["missed_pages"] == 1
+        assert body["job_id"] != source.id
+        assert body["source_job_id"] == source.id
+        # The source result is untouched.
+        assert len(store.read_result(source.id)["pages"]) == 1
+        assert len(store.read_result(body["job_id"])["pages"]) == 2
+
+    def test_nothing_to_merge_creates_no_job(self, store):
+        """A report-only run must not litter `.jobs/` with duplicates."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            source = self._finished(store)
+            before = len(store.list_jobs())
+            response = self._post(
+                client, source.id, '"https://e.com/a/",200,text/html,Indexable,,,3,5'
+            )
+            after = len(store.list_jobs())
+
+        body = response.json()
+        assert body["merged"] == 0
+        assert body["job_id"] == source.id
+        assert after == before
+
+    def test_noise_is_reported_but_never_merged(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            source = self._finished(store)
+            response = self._post(
+                client,
+                source.id,
+                '"https://e.com/gone/",404,text/html,Non-Indexable,,,4,0',
+                '"https://e.com/hero.jpg",200,image/jpeg,Indexable,,,2,9',
+            )
+
+        body = response.json()
+        assert body["merged"] == 0
+        assert body["frog_reasons"]["CLIENT_ERROR"] == 1
+        assert body["frog_reasons"]["MEDIA_URL"] == 1
+
+    def test_an_empty_body_is_rejected(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            source = self._finished(store)
+            response = client.post(
+                f"{API_PREFIX}/jobs/{source.id}/{self.PATH}",
+                content=b"",
+                headers={"Content-Type": "text/csv"},
+            )
+        assert response.status_code == 400
+
+    def test_an_unknown_job_is_404(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            response = self._post(
+                client, "nope", '"https://e.com/b/",200,text/html,Indexable,,,3,5'
+            )
+        assert response.status_code == 404
+
+    def test_a_byte_order_mark_does_not_blind_the_parser(self, store):
+        """Screaming Frog writes a BOM; without `utf-8-sig` the export reads as empty."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            source = self._finished(store)
+            payload = "\n".join((self.HEADER, '"https://e.com/b/",200,text/html,Indexable,,,3,5'))
+            response = client.post(
+                f"{API_PREFIX}/jobs/{source.id}/{self.PATH}",
+                content=b"\xef\xbb\xbf" + payload.encode("utf-8"),
+                headers={"Content-Type": "text/csv"},
+            )
+        assert response.json()["merged"] == 1
