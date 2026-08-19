@@ -14,10 +14,13 @@ from src.modules.seo.page_classifier.screaming_frog_reconciler import (
     MIN_TAIL_REPEATS,
     EngineGapReason,
     FrogGapReason,
+    MissedPageStatus,
+    ReconciliationReport,
     ScreamingFrogRow,
     load_screaming_frog_csv,
     normalise,
     reconcile,
+    verify_missed_pages,
 )
 
 BASE = "https://www.e.com/"
@@ -177,3 +180,48 @@ class TestOverlap:
         assert report.frog_rows == 2
         assert report.frog_live == 1
         assert report.engine_urls == 1
+
+
+class TestVerifyMissedPages:
+    """The bucket that accuses the engine is the one worth checking twice.
+
+    On highradius.com a 60-URL sample of 892 came back 50 redirects and 10 live
+    pages, because the site moved `/value-creation/` under
+    `/resources/value-creation/` after the export was captured. Unverified, that
+    number would have justified building crawler reach for pages that no longer
+    exist.
+    """
+
+    def _report(self, url: str = "https://www.e.com/moved") -> ReconciliationReport:
+        return reconcile(BASE, (), (row(url),))
+
+    def test_a_redirect_is_not_a_missed_page(self):
+        report = self._report()
+        (check,) = verify_missed_pages(report, (), lambda _u: (301, "https://www.e.com/new-home"))
+        assert check.status == MissedPageStatus.REDIRECTED
+
+    def test_a_redirect_to_a_held_url_is_named_as_such(self):
+        """The common case: the same page under its old address."""
+        report = self._report()
+        (check,) = verify_missed_pages(
+            report,
+            ("https://www.e.com/new-home",),
+            lambda _u: (301, "https://www.e.com/new-home/"),
+        )
+        assert check.destination_held is True
+
+    def test_a_live_page_survives_verification(self):
+        report = self._report()
+        (check,) = verify_missed_pages(report, (), lambda _u: (200, ""))
+        assert check.status == MissedPageStatus.LIVE
+
+    def test_a_dead_page_is_not_a_miss(self):
+        report = self._report()
+        (check,) = verify_missed_pages(report, (), lambda _u: (404, ""))
+        assert check.status == MissedPageStatus.GONE
+
+    def test_a_failed_check_is_unknown_not_absent(self):
+        """A network failure must not quietly clear the engine of a miss."""
+        report = self._report()
+        (check,) = verify_missed_pages(report, (), lambda _u: (0, ""))
+        assert check.status == MissedPageStatus.UNREACHABLE

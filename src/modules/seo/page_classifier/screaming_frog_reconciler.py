@@ -45,6 +45,7 @@ from __future__ import annotations
 import csv
 import io
 from collections import Counter
+from collections.abc import Callable
 from enum import StrEnum
 from urllib.parse import urlsplit, urlunsplit
 
@@ -65,9 +66,12 @@ __all__ = [
     "ReconciliationReport",
     "ScreamingFrogRow",
     "UrlGap",
+    "MissedPageCheck",
+    "MissedPageStatus",
     "load_screaming_frog_csv",
     "normalise",
     "reconcile",
+    "verify_missed_pages",
 ]
 
 _logger = get_logger("modules.seo.screaming_frog_reconciler")
@@ -395,3 +399,109 @@ def reconcile(
         },
     )
     return report
+
+
+class MissedPageStatus(StrEnum):
+    """What a live check found at a URL the export called a missed page."""
+
+    LIVE = "LIVE"
+    """Still a page, and still absent from the crawl. A genuine miss."""
+
+    REDIRECTED = "REDIRECTED"
+    """Moved since the export was taken. Not a page."""
+
+    GONE = "GONE"
+    """4xx or 5xx now. Not a page."""
+
+    UNREACHABLE = "UNREACHABLE"
+    """The check itself failed. Unknown, and must not be counted either way."""
+
+
+class MissedPageCheck(StrictModel):
+    """One verified URL from the `MISSED_PAGE` bucket.
+
+    Attributes:
+        url: The address as Screaming Frog reported it.
+        status: What the live check found.
+        http_status: The code returned, or 0 if the check failed.
+        destination: Where a redirect points, empty otherwise.
+        destination_held: Whether the crawl already holds that destination. When
+            true the "miss" is the same page under its old address.
+    """
+
+    url: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    http_status: int = Field(default=0, ge=0)
+    destination: str = ""
+    destination_held: bool = False
+
+
+def verify_missed_pages(
+    report: ReconciliationReport,
+    engine_urls: tuple[str, ...],
+    probe: Callable[[str], tuple[int, str]],
+) -> tuple[MissedPageCheck, ...]:
+    """Check the `MISSED_PAGE` bucket against the live site.
+
+    Why this is not optional in practice
+    ------------------------------------
+    The bucket is the only reason in the report that accuses this engine of a
+    defect, and it is derived from two snapshots taken at different times. A site
+    that reorganises between them manufactures misses out of nothing.
+
+    Measured on highradius.com, that is most of the bucket. A 60-URL random
+    sample of its 892 came back **50 redirects and 10 live pages**, and 38 of the
+    redirects pointed at URLs the crawl already held: the site had moved
+    `/value-creation/` under `/resources/value-creation/` after the export was
+    captured. Acting on the unverified number would have meant building crawler
+    reach for roughly 750 pages that no longer exist.
+
+    Screaming Frog is not at fault and neither is the reconciliation. Both are
+    correct about the moment they describe; only the live site knows which
+    moment is now.
+
+    The probe is injected rather than made here, because this module must not
+    open sockets — outbound HTTP belongs behind `BaseAPIClient`. The caller
+    supplies something that performs one request **without following
+    redirects**: following them would report the destination's 200 and reproduce
+    the exact confusion this exists to resolve.
+
+    Args:
+        report: A reconciliation whose `missed_pages` should be checked.
+        engine_urls: Every URL in the crawl, to recognise a redirect that lands
+            somewhere already held.
+        probe: Given a URL, returns `(status_code, location_header)`. Should
+            return `(0, "")` when the request fails rather than raising.
+
+    Returns:
+        One check per URL in the bucket, in the same order.
+    """
+    held = {normalise(url) for url in engine_urls}
+    checks: list[MissedPageCheck] = []
+
+    for url in report.missed_pages:
+        code, location = probe(url)
+        if code == 0:
+            status = MissedPageStatus.UNREACHABLE
+        elif 300 <= code < 400:
+            status = MissedPageStatus.REDIRECTED
+        elif code >= 400:
+            status = MissedPageStatus.GONE
+        else:
+            status = MissedPageStatus.LIVE
+        checks.append(
+            MissedPageCheck(
+                url=url,
+                status=status.value,
+                http_status=code,
+                destination=location,
+                destination_held=bool(location) and normalise(location) in held,
+            )
+        )
+
+    surviving = sum(1 for check in checks if check.status == MissedPageStatus.LIVE)
+    _logger.info(
+        "missed_pages_verified",
+        extra={"checked": len(checks), "still_live": surviving},
+    )
+    return tuple(checks)
