@@ -101,6 +101,8 @@ interface CrawlState {
    * the header pill and the jobs table need no special case for them.
    */
   relaunch: (jobId: string, mode: "retry" | "resume", label: string) => Promise<string | null>;
+  /** Abandon a running job and reclaim its concurrency slot. */
+  cancel: (jobId: string) => Promise<void>;
 }
 
 /*
@@ -273,6 +275,21 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     await get().refreshJobs();
     void watchJob(get, adapter, newId);
     return newId;
+  },
+
+  async cancel(jobId) {
+    const adapter = get().adapter;
+    if (!(adapter instanceof HttpAdapter)) return;
+    try {
+      await adapter.cancelJob(jobId);
+    } catch (cause) {
+      set({ error: describe(cause) });
+      return;
+    }
+    // Refreshed rather than patched optimistically: the server decides whether
+    // the job was still cancellable, and a row that flips to cancelled locally
+    // and back on the next poll is worse than one that waits a beat.
+    await get().refreshJobs();
   },
 
   setGrouping(grouping) {

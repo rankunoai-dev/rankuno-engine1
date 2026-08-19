@@ -180,8 +180,20 @@ class TestConcurrencyCap:
             response = post_job(client)
         assert response.status_code == 429
 
-    def test_a_refused_job_is_not_left_pending(self, store):
-        """A 429'd job must reach a terminal state, or a poller waits forever."""
+    def test_a_refused_job_leaves_no_record(self, store):
+        """A refusal is not a job, and must not look like one afterwards.
+
+        This asserted the opposite until the ordering was fixed: capacity was
+        checked *after* the store minted a record, so every refusal persisted a
+        job and immediately marked it failed. Retrying against a full server
+        manufactured one permanent FAILED row per click — 16 of 99 records on
+        one workstation were nothing but refusals, and in the jobs list they
+        were indistinguishable from crawls that had really run and really
+        failed.
+
+        Nothing waits forever as a result: the 429 is synchronous, so the caller
+        is told at the point of asking and never receives an id to poll.
+        """
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
@@ -189,12 +201,31 @@ class TestConcurrencyCap:
         )
         app.state.api.try_reserve("occupier")
         with TestClient(app) as client:
-            post_job(client)
+            assert post_job(client).status_code == 429
 
-        records = store.list_jobs()
-        assert len(records) == 1
-        assert records[0].status is JobStatus.FAILED
-        assert records[0].is_terminal
+        assert store.list_jobs() == []
+
+    def test_a_refusal_does_not_consume_a_slot(self, store):
+        """The provisional reservation must be given back, not leaked.
+
+        Capacity is now claimed before the record exists, so a refused request
+        holds a slot for the duration of the check. Leaking one would cost a
+        permanent slot per refused click — the exact failure this whole change
+        is about.
+        """
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            max_concurrent_jobs=1,
+        )
+        state = app.state.api
+        state.try_reserve("occupier")
+        with TestClient(app) as client:
+            for _ in range(5):
+                assert post_job(client).status_code == 429
+
+        state.release("occupier")
+        assert state.active_count == 0
 
     def test_reserving_is_atomic(self, store):
         """Check-then-reserve in two steps would let both callers through."""
@@ -757,3 +788,68 @@ class TestResume:
         # all, and asserting on a single attribute would miss a status or
         # telemetry rewrite.
         assert after == before
+
+
+class TestCancel:
+    """Abandoning a job and reclaiming its slot.
+
+    The failure this exists for: two crawls wedged in network I/O held two of
+    three slots for sixteen hours, so every new crawl was refused by a server
+    that was doing nothing useful.
+    """
+
+    def test_cancelling_frees_the_slot(self, store):
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            max_concurrent_jobs=1,
+        )
+        state = app.state.api
+        record = store.create("tool", {"base_url": "https://e.com/"}, label="stuck")
+
+        # Marked running *inside* the client context. Startup recovers orphaned
+        # jobs — anything left RUNNING by a dead process is failed on boot — so
+        # a job put in that state beforehand is already terminal by the time the
+        # request arrives, and the cancel would 409 for the wrong reason.
+        with TestClient(app) as client:
+            store.mark_running(record.id)
+            state.try_reserve(record.id)
+            response = client.post(f"{API_PREFIX}/jobs/{record.id}/cancel")
+
+        assert response.status_code == 200
+        assert state.active_count == 0
+        assert store.get(record.id).status is JobStatus.FAILED
+
+    def test_the_reason_says_the_thread_may_survive(self, store):
+        """The button cannot kill a worker thread, and must not imply it can.
+
+        `asyncio.to_thread` cannot be interrupted from outside, so the crawl
+        keeps fetching until it finishes or the process exits. A cancelled job
+        that read like a clean stop would be a lie told in the one place an
+        operator goes when they already distrust the system.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = store.create("tool", {"base_url": "https://e.com/"}, label="stuck")
+
+        with TestClient(app) as client:
+            store.mark_running(record.id)
+            client.post(f"{API_PREFIX}/jobs/{record.id}/cancel")
+
+        assert "may still be running" in (store.get(record.id).error or "")
+
+    def test_a_finished_job_cannot_be_cancelled(self, store):
+        """409 rather than rewriting history. A finished crawl is the evidence."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = store.create("tool", {"base_url": "https://e.com/"}, label="done")
+        store.finish(record.id, {"pages": []})
+
+        with TestClient(app) as client:
+            response = client.post(f"{API_PREFIX}/jobs/{record.id}/cancel")
+
+        assert response.status_code == 409
+        assert store.get(record.id).status is JobStatus.SUCCEEDED
+
+    def test_cancelling_an_unknown_job_is_404(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            assert client.post(f"{API_PREFIX}/jobs/nope/cancel").status_code == 404

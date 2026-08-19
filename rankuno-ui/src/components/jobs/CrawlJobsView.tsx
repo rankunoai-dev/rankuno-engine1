@@ -1,4 +1,4 @@
-import { Button, Empty, Progress, Table, Tag, Tooltip } from "antd";
+import { Button, Empty, Popconfirm, Progress, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useState } from "react";
 import type { CrawlJobSummary, JobStatus } from "../../adapters/adapterInterface";
@@ -57,6 +57,7 @@ export function CrawlJobsView(): JSX.Element {
   const loadCheckpoint = useCrawlStore((state) => state.loadCheckpoint);
   const refreshJobs = useCrawlStore((state) => state.refreshJobs);
   const relaunch = useCrawlStore((state) => state.relaunch);
+  const cancel = useCrawlStore((state) => state.cancel);
   // Fixtures cannot crawl, so the buttons are hidden rather than offered and
   // then failing on click.
   const canRelaunch = useCrawlStore((state) => state.adapter?.startJob !== undefined);
@@ -124,6 +125,7 @@ export function CrawlJobsView(): JSX.Element {
           row={row}
           onOpen={() => openTree(row)}
           onRelaunch={(mode) => void relaunch(row.id, mode, `${row.label} (${mode})`)}
+          onCancel={() => void cancel(row.id)}
           canRelaunch={canRelaunch}
         />
       ),
@@ -211,16 +213,18 @@ function describeEta(live: LiveJob): string {
   return "discovering URLs…";
 }
 
-/** View, recover, retry and resume buttons for one row. */
+/** View, recover, retry, resume and cancel buttons for one row. */
 function ActionCell({
   row,
   onOpen,
   onRelaunch,
+  onCancel,
   canRelaunch,
 }: {
   row: JobRow;
   onOpen: () => void;
   onRelaunch: (mode: "retry" | "resume") => void;
+  onCancel: () => void;
   canRelaunch: boolean;
 }): JSX.Element {
   const ready = row.status === "succeeded" || row.status === "partial";
@@ -260,6 +264,26 @@ function ActionCell({
           <Button size="small" type="text" onClick={() => onRelaunch("retry")}>
             Retry
           </Button>
+        </Tooltip>
+      )}
+
+      {/* Only while the job still holds a slot. The tooltip states the limit
+          plainly: a worker thread cannot be interrupted from outside, so this
+          reclaims capacity rather than stopping traffic, and a button that
+          implied otherwise would mislead exactly when trust is lowest. */}
+      {canRelaunch && (row.status === "running" || row.status === "queued") && (
+        <Tooltip title="Give this crawl's slot back so other crawls can start. The crawl itself keeps running on the server until it finishes or the server restarts — its result is discarded.">
+          <Popconfirm
+            title="Abandon this crawl?"
+            description="Its slot is freed immediately. The crawl keeps running server-side and its result is thrown away."
+            okText="Abandon"
+            cancelText="Keep"
+            onConfirm={onCancel}
+          >
+            <Button size="small" type="text" danger>
+              Kill
+            </Button>
+          </Popconfirm>
         </Tooltip>
       )}
     </div>

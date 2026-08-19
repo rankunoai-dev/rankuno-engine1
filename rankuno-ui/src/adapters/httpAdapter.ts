@@ -178,6 +178,22 @@ export class HttpAdapter implements CrawlDataAdapter {
   }
 
   /**
+   * Abandon a running job and give its concurrency slot back.
+   *
+   * **Releases the slot; does not stop the crawl.** The work runs on a server
+   * worker thread that cannot be interrupted from outside, so it keeps fetching
+   * until it finishes or the server restarts, and its result is discarded.
+   *
+   * Worth having anyway: a crawl wedged in network I/O holds a slot
+   * indefinitely, and with three slots that is a server which refuses new work
+   * while doing none. This restores the ability to crawl; it does not free the
+   * bandwidth.
+   */
+  async cancelJob(jobId: string): Promise<void> {
+    await this.request(`/jobs/${jobId}/cancel`, { method: "POST" });
+  }
+
+  /**
    * Run a finished job's crawl again with the settings it originally used.
    *
    * Returns the *new* job's id. The engine never mutates the original: its

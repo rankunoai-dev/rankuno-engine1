@@ -40,6 +40,7 @@ from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,6 +54,7 @@ from src.core.state_store import (
     DiskJobStore,
     JobNotFoundError,
     JobRecord,
+    JobStatus,
     JobStore,
     JobTelemetry,
 )
@@ -357,6 +359,22 @@ class ApiState:
         with self._lock:
             self._active.discard(job_id)
 
+    def rekey(self, provisional: str, job_id: str) -> None:
+        """Move a reservation from a provisional id onto the real one.
+
+        Capacity has to be claimed before the store mints an id, or a refusal
+        leaves a persisted job behind. This transfers the claim without ever
+        dropping it, so the slot cannot be taken in between.
+        """
+        with self._lock:
+            self._active.discard(provisional)
+            self._active.add(job_id)
+
+    def is_active(self, job_id: str) -> bool:
+        """Whether this job currently holds a concurrency slot."""
+        with self._lock:
+            return job_id in self._active
+
     def track(self, task: asyncio.Task[None]) -> None:
         """Hold a strong reference to an in-flight task until it completes.
 
@@ -587,13 +605,29 @@ def create_app(
             _logger.warning("job_rejected_unsafe_url", extra={"url": payload.base_url})
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-        record = state.store.create(TOOL_NAME, payload.model_dump(mode="json"), label=label)
-        if not state.try_reserve(record.id):
-            state.store.mark_failed(record.id, "server is at its concurrent crawl limit")
+        # Capacity is claimed *before* the record exists. The other order
+        # persisted a job for every refusal and immediately marked it failed, so
+        # a user retrying against a full server manufactured a permanent FAILED
+        # row per click — 16 of 99 records on one workstation were nothing but
+        # refusals, indistinguishable in the list from crawls that really ran.
+        #
+        # The slot is reserved against a provisional id and re-keyed once the
+        # record exists, because `try_reserve` needs something to hold and the
+        # id is the store's to mint.
+        pending = f"pending:{uuid4().hex}"
+        if not state.try_reserve(pending):
             raise HTTPException(
                 status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"at most {state.max_concurrent_jobs} crawls may run at once",
             )
+        try:
+            record = state.store.create(TOOL_NAME, payload.model_dump(mode="json"), label=label)
+        except Exception:
+            # The store failed, so there is no job and nothing will ever release
+            # this slot. Leaking it would cost a permanent slot per failure.
+            state.release(pending)
+            raise
+        state.rekey(pending, record.id)
         state.track(asyncio.create_task(_dispatch(state, record.id, payload)))
         return JobAccepted(id=record.id, status=record.status.value, label=record.label)
 
@@ -650,6 +684,49 @@ def create_app(
         """
         payload = _stored_payload(job_id)
         return _start(payload, f"{payload.base_url} (retry)")
+
+    @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
+    async def cancel_job(job_id: str) -> JobRecord:
+        """Abandon a job and give its concurrency slot back.
+
+        **This releases the slot; it does not stop the crawl.** The work runs on
+        a worker thread via `asyncio.to_thread`, and a Python thread cannot be
+        killed from outside — cancelling the awaiting task does not reach into
+        it either. The thread keeps fetching until it finishes or the process
+        exits, and its result is discarded when it does.
+
+        That is a weaker guarantee than the button implies, and it is still
+        worth having. The failure this exists for is a crawl wedged in network
+        I/O for hours: two stripe.com jobs held two of three slots for sixteen
+        hours on one workstation, so every new crawl was refused by a server
+        that was, for practical purposes, doing nothing. Releasing the slot
+        restores the ability to work; waiting for the thread does not.
+
+        A real stop needs a cancellation flag the crawl checks between fetches.
+        That does not exist yet — see the build log for this cycle.
+
+        Raises:
+            HTTPException: `404` if there is no such job, `409` if it has
+                already reached a terminal state.
+        """
+        try:
+            record = state.store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+        if record.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"job is {record.status.value} and has already finished",
+            )
+
+        state.release(job_id)
+        updated = state.store.mark_failed(
+            job_id,
+            "cancelled by operator — the crawl thread may still be running until it "
+            "finishes or the server restarts",
+        )
+        _logger.warning("job_cancelled", extra={"job_id": job_id})
+        return updated
 
     @app.post(
         f"{API_PREFIX}/jobs/{{job_id}}/resume",
