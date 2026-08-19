@@ -18,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from src.api import server as server_module
 from src.api.server import API_PREFIX, create_app
-from src.core.state_store import DiskJobStore, JobStatus
+from src.core.state_store import MAX_HOMEPAGE_BYTES, DiskJobStore, JobRecord, JobStatus
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.tool import (
@@ -853,3 +853,95 @@ class TestCancel:
         app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
         with TestClient(app) as client:
             assert client.post(f"{API_PREFIX}/jobs/nope/cancel").status_code == 404
+
+
+class TestHomepageSidecar:
+    """The one page kept so a menu can be re-parsed later."""
+
+    def test_a_homepage_round_trips(self, store):
+        record = store.create("tool", {"base_url": "https://e.com/"})
+        store.write_homepage(record.id, "<header><nav>menu</nav></header>")
+        assert store.read_homepage(record.id) == "<header><nav>menu</nav></header>"
+
+    def test_an_absent_homepage_is_none_not_an_error(self, store):
+        """Every crawl older than the sidecar answers this way, and must."""
+        record = store.create("tool", {"base_url": "https://e.com/"})
+        assert store.read_homepage(record.id) is None
+
+    def test_an_oversized_homepage_is_dropped_not_truncated(self, store):
+        """Half a document parses into a menu that is quietly missing its tail.
+
+        A wrong tree is worse than no tree, so the body is refused outright and
+        the reparse falls back to the stored menu.
+        """
+        record = store.create("tool", {"base_url": "https://e.com/"})
+        store.write_homepage(record.id, "x" * (MAX_HOMEPAGE_BYTES + 1))
+        assert store.read_homepage(record.id) is None
+
+    def test_writing_for_an_unknown_job_does_not_raise(self, store):
+        """Losing a re-parsing aid must never fail the crawl that produced it."""
+        store.write_homepage("nope", "<html></html>")
+
+
+class TestReparseEndpoint:
+    def _finished(self, store: DiskJobStore, client: TestClient) -> JobRecord:
+        """A job carrying a real, contract-valid result."""
+        record = store.create(
+            server_module.TOOL_NAME, {"base_url": "https://e.com/"}, label="e.com"
+        )
+        store.finish(
+            record.id,
+            PageClassificationOutput(
+                base_url="https://e.com/",
+                site_profile=SiteProfile(),
+                weight_profile=WeightProfileReport.for_site(SiteProfile()),
+                discovery=DiscoveryReport(base_url="https://e.com/"),
+                summary=CrawlSummary(),
+                pages=(),
+            ).model_dump(mode="json"),
+        )
+        return record
+
+    def test_reparsing_creates_a_new_job_and_keeps_the_original(self, store):
+        """The original is the evidence of what the site was when crawled."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            source = self._finished(store, client)
+            response = client.post(f"{API_PREFIX}/jobs/{source.id}/reparse")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] != source.id
+        assert body["status"] == JobStatus.SUCCEEDED.value
+        assert "(reparsed)" in body["label"]
+        assert store.get(source.id).status is JobStatus.SUCCEEDED
+
+    def test_the_menu_is_re_parsed_when_a_homepage_was_kept(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            source = self._finished(store, client)
+            store.write_homepage(
+                source.id,
+                "<header><nav><ul><li><a href='https://e.com/docs/'>Docs</a></li></ul></nav></header>",
+            )
+            body = client.post(f"{API_PREFIX}/jobs/{source.id}/reparse").json()
+
+        result = store.read_result(body["id"])
+        assert [r["label"] for r in result["navigation"]["roots"]] == ["Docs"]
+        # Carried forward, or the chain breaks after one hop.
+        assert store.read_homepage(body["id"]) is not None
+
+    def test_reparsing_without_a_homepage_keeps_the_stored_menu(self, store):
+        """The normal case for every crawl older than the sidecar."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            source = self._finished(store, client)
+            body = client.post(f"{API_PREFIX}/jobs/{source.id}/reparse").json()
+
+        assert store.read_result(body["id"])["navigation"]["roots"] == []
+
+    def test_reparsing_a_job_with_no_result_is_404(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+            assert client.post(f"{API_PREFIX}/jobs/{record.id}/reparse").status_code == 404

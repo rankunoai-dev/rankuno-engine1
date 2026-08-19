@@ -52,6 +52,7 @@ from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 
 __all__ = [
+    "MAX_HOMEPAGE_BYTES",
     "MAX_RECENT_ITEMS",
     "DiskJobStore",
     "JobNotFoundError",
@@ -95,6 +96,13 @@ class JobStatus(StrEnum):
 TERMINAL_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus.FAILED})
 """Statuses from which a job never moves again, so a poller can stop."""
 
+
+MAX_HOMEPAGE_BYTES = 8 * 1024 * 1024
+"""Ceiling on a stored homepage body.
+
+Generous against real pages — kinsta.com is 300KB and postman.com 288KB — and
+still bounded. The sidecar exists so a menu can be re-parsed later; it is not an
+archive, and one pathological page per job must not be able to fill the disk."""
 
 MAX_RECENT_ITEMS = 20
 """Recent work items retained for display.
@@ -247,6 +255,14 @@ class JobStore(Protocol):
         """Read saved partial work, or `None` if there is none."""
         ...
 
+    def write_homepage(self, job_id: str, html: str) -> None:
+        """Save the homepage body so the menu can be re-parsed later."""
+        ...
+
+    def read_homepage(self, job_id: str) -> str | None:
+        """Read the saved homepage body, or `None` if none was kept."""
+        ...
+
     def recover_orphans(self) -> list[str]:
         """Fail every job left non-terminal by a previous process."""
         ...
@@ -309,6 +325,9 @@ class DiskJobStore:
 
     def _checkpoint_path(self, job_id: str) -> Path:
         return self._root / f"{job_id}.checkpoint.json"
+
+    def _homepage_path(self, job_id: str) -> Path:
+        return self._root / f"{job_id}.homepage.html"
 
     def _read(self, job_id: str) -> JobRecord:
         path = self._record_path(job_id)
@@ -488,6 +507,46 @@ class DiskJobStore:
             self._read(job_id)  # Fail before writing for a job that is gone.
             _atomic_write(self._checkpoint_path(job_id), json.dumps(dict(payload)))
         self._transition(job_id, has_checkpoint=True)
+
+    def write_homepage(self, job_id: str, html: str) -> None:
+        """Save the homepage body so the menu can be re-parsed without the network.
+
+        A finished crawl otherwise keeps no HTML at all — `SiteGraph._html` is
+        discarded with the graph — so a fix to the header-menu parser could
+        never be applied to a result that already existed. One page is enough,
+        because the menu is global and is read from the homepage only.
+
+        Held to `MAX_HOMEPAGE_BYTES`. This is a convenience for re-parsing, not
+        an archive, and a pathological page must not be able to fill the disk
+        one job at a time. An oversized body is dropped rather than truncated:
+        half a document produces a plausible-looking menu that is missing
+        whatever came after the cut, and a wrong tree is worse than no tree.
+
+        Never raises. Failing to keep a re-parsing aid must not fail the crawl
+        that produced it.
+        """
+        if len(html.encode("utf-8", "ignore")) > MAX_HOMEPAGE_BYTES:
+            _logger.info("homepage_too_large", extra={"job_id": job_id})
+            return
+        try:
+            with self._lock:
+                self._read(job_id)
+                _atomic_write(self._homepage_path(job_id), html)
+        except (JobNotFoundError, OSError) as exc:
+            _logger.warning("homepage_write_failed", extra={"job_id": job_id, "error": str(exc)})
+
+    def read_homepage(self, job_id: str) -> str | None:
+        """Read the saved homepage body, or `None` if none was kept.
+
+        `None` is the normal answer for every crawl run before this existed, and
+        for any crawl that never fetched its homepage.
+        """
+        path = self._homepage_path(job_id)
+        try:
+            return path.read_text(encoding="utf-8") if path.exists() else None
+        except OSError as exc:
+            _logger.warning("homepage_read_failed", extra={"job_id": job_id, "error": str(exc)})
+            return None
 
     def read_checkpoint(self, job_id: str) -> Mapping[str, object] | None:
         """Read a job's saved partial work.

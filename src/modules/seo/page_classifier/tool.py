@@ -32,7 +32,7 @@ degrades, it does not fail.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Annotated, ClassVar, Protocol, runtime_checkable
 
 from pydantic import Field
@@ -299,6 +299,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         cost_ledger: CostLedger | None = None,
         progress_sink: ProgressSink | None = None,
         checkpoint_sink: CheckpointSink | None = None,
+        homepage_sink: Callable[[str], None] | None = None,
         **kwargs: object,
     ) -> None:
         """Build the tool.
@@ -309,6 +310,11 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             url_policy: SSRF policy for a fetcher built here.
             checkpoint_sink: Optional durability hook, offered the graph so
                 partial work survives an interruption.
+            homepage_sink: Optional hook handed the homepage body once the menu
+                has been read from it. The crawl discards all HTML when it ends,
+                so without this a later fix to the header-menu parser can never
+                be applied to this result. Offered rather than written here
+                because where a body belongs is the caller's decision.
             progress_sink: Optional observability hook, called as pages are
                 fetched. Constructor-injected rather than a field on the input
                 model: it is a callable the *caller* owns, not a crawl parameter,
@@ -328,6 +334,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         self._cost_ledger = cost_ledger
         self._progress_sink = progress_sink
         self._checkpoint_sink = checkpoint_sink
+        self._homepage_sink = homepage_sink
 
     def describe_invocation(self, payload: PageClassificationInput) -> str:
         """Operator-facing summary. Names the site, not the object graph."""
@@ -422,7 +429,13 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         Returns:
             The menu, its coverage, and the profiles with navigation filled in.
         """
-        return place_pages(graph.html_for(base_url), base_url, pages)
+        homepage_html = graph.html_for(base_url)
+        if homepage_html and self._homepage_sink is not None:
+            try:
+                self._homepage_sink(homepage_html)
+            except Exception:  # noqa: BLE001 - a re-parsing aid must not fail a crawl
+                _logger.warning("homepage_sink_failed", extra={"base_url": base_url})
+        return place_pages(homepage_html, base_url, pages)
 
     # -- internals ---------------------------------------------------------
 

@@ -74,6 +74,7 @@ from src.modules.seo.page_classifier.tool import (
     PageClassificationInput,
     PageClassificationOutput,
     PageClassificationTool,
+    reparse_placement,
 )
 from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
 
@@ -400,6 +401,9 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
             url_policy=state.url_policy,
             progress_sink=TelemetryRecorder(store, job_id, payload.resolved_max_pages),
             checkpoint_sink=CrawlCheckpointer(store, job_id, payload.base_url),
+            # Kept so a later fix to the header-menu parser can be applied to
+            # this result without re-crawling. One page; the menu is global.
+            homepage_sink=lambda html: store.write_homepage(job_id, html),
         ).run(payload)
 
         if not result.ok or result.data is None:
@@ -684,6 +688,64 @@ def create_app(
         """
         payload = _stored_payload(job_id)
         return _start(payload, f"{payload.base_url} (retry)")
+
+    @app.post(f"{API_PREFIX}/jobs/{{job_id}}/reparse", response_model=JobRecord)
+    async def reparse_job(job_id: str) -> JobRecord:
+        """Re-run placement over a finished job under today's rules.
+
+        Synchronous and offline. No worker thread, no concurrency slot, no
+        network: the homepage body is read from this job's sidecar and the
+        classified pages come from its stored result. A 27,562-page crawl
+        reparses in well under a second.
+
+        A **new** job, never a mutation of the old one, for the same reason
+        retry is. The original is the evidence of what the site looked like when
+        it was crawled; overwriting it would destroy the comparison that makes a
+        reparse worth running.
+
+        What this can and cannot pick up follows from what was stored. With a
+        homepage sidecar the menu is re-parsed, so a `nav_tree_parser` fix
+        applies. Without one — every crawl run before the sidecar existed — the
+        stored menu stands and only the placement rules re-run. Breadcrumbs are
+        never re-extracted: the page bodies are gone.
+
+        Raises:
+            HTTPException: `404` if there is no such job, `409` if it has no
+                stored result to reparse.
+        """
+        try:
+            stored = state.store.read_result(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"no job {job_id} with a result"
+            ) from exc
+
+        try:
+            before = PageClassificationOutput.model_validate(stored)
+        except ValidationError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="this job's result predates the current output contract",
+            ) from exc
+
+        homepage = state.store.read_homepage(job_id)
+        after = reparse_placement(before, homepage)
+
+        record = state.store.create(
+            TOOL_NAME,
+            {"base_url": before.base_url},
+            label=f"{before.base_url} (reparsed)",
+        )
+        state.store.finish(record.id, after.model_dump(mode="json"))
+        # Carried over so the new job can itself be reparsed. Without this the
+        # chain breaks after one hop, which is exactly when it matters.
+        if homepage:
+            state.store.write_homepage(record.id, homepage)
+        _logger.info(
+            "job_reparsed",
+            extra={"source": job_id, "job_id": record.id, "menu_reparsed": bool(homepage)},
+        )
+        return state.store.get(record.id)
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
     async def cancel_job(job_id: str) -> JobRecord:
