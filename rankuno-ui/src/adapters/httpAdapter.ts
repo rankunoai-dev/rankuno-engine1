@@ -6,6 +6,7 @@ import type {
 import type {
   CrawlDataAdapter,
   CrawlJobSummary,
+  ReconciliationSummary,
   JobProgress,
   JobStatus,
 } from "./adapterInterface";
@@ -166,6 +167,23 @@ export class HttpAdapter implements CrawlDataAdapter {
       message: describeStatus(record),
       telemetry,
     };
+  }
+
+  /**
+   * POST an export as `text/csv` and get the gap back.
+   *
+   * The body is the raw CSV, not `multipart/form-data`: the server accepts it
+   * that way because `python-multipart` is not one of its dependencies, and
+   * sending the text the browser already read costs nothing.
+   */
+  async reconcileScreamingFrog(
+    jobId: string,
+    csvText: string,
+  ): Promise<ReconciliationSummary> {
+    return this.request<ReconciliationSummary>(
+      `/jobs/${encodeURIComponent(jobId)}/reconcile/screaming-frog`,
+      { method: "POST", headers: { "Content-Type": "text/csv" }, body: csvText },
+    );
   }
 
   async startJob(request: PageClassificationInput): Promise<string> {

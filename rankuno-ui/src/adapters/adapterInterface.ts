@@ -65,6 +65,29 @@ export interface JobProgress {
 }
 
 /**
+ * What a Screaming Frog reconciliation found, and what it did about it.
+ *
+ * Mirrors `ReconciliationSummary` in `src/api/server.py`. Hand-written rather
+ * than generated: `schema.ts` covers the crawl contract, and this belongs to
+ * the API layer, which the exporter does not read.
+ */
+export interface ReconciliationSummary {
+  /** The merged result. Equals `source_job_id` when nothing was merged. */
+  job_id: string;
+  source_job_id: string;
+  base_url: string;
+  frog_rows: number;
+  in_both: number;
+  /** Live, in-scope pages the engine never reached. These were merged. */
+  missed_pages: number;
+  /** Published pages no internal link reaches. Left where they are. */
+  orphans: number;
+  merged: number;
+  frog_reasons: Record<string, number>;
+  engine_reasons: Record<string, number>;
+}
+
+/**
  * How the UI reaches crawl data.
  *
  * One interface, two implementations: `MockAdapter` today, an HTTP adapter when
@@ -91,6 +114,15 @@ export interface CrawlDataAdapter {
    * components are written against polling from the start.
    */
   getProgress(jobId: string): Promise<JobProgress>;
+
+  /**
+   * Cross-check a finished job against a Screaming Frog export.
+   *
+   * Optional on the interface, like `startJob`: fixtures cannot reconcile, and
+   * a UI that offers the control then fails on click is worse than one that
+   * hides it.
+   */
+  reconcileScreamingFrog?(jobId: string, csvText: string): Promise<ReconciliationSummary>;
 
   /**
    * Start a new crawl, returning its job id.

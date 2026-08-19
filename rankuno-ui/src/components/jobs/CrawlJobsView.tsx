@@ -12,6 +12,7 @@ import { formatCrawlTime } from "../../lib/time";
 import type { LiveJob } from "../../store/useCrawlStore";
 import { isLive, useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
+import { ReconcilePanel } from "./ReconcilePanel";
 import { UrlTicker } from "../telemetry/UrlTicker";
 import "./jobs.css";
 
@@ -62,6 +63,12 @@ export function CrawlJobsView(): JSX.Element {
   // then failing on click.
   const canRelaunch = useCrawlStore((state) => state.adapter?.startJob !== undefined);
   const setView = useUiStore((state) => state.setView);
+  // Hidden entirely when the adapter cannot reconcile — fixtures cannot — so
+  // the control is absent rather than present and failing on click.
+  const canReconcile = useCrawlStore(
+    (state) => state.adapter?.reconcileScreamingFrog !== undefined,
+  );
+  const [reconciling, setReconciling] = useState<JobRow | null>(null);
 
   // Drives the elapsed clocks only. The crawl's own numbers arrive on the
   // adapter's poll; this is a second-hand, and it stops when nothing is running
@@ -126,7 +133,9 @@ export function CrawlJobsView(): JSX.Element {
           onOpen={() => openTree(row)}
           onRelaunch={(mode) => void relaunch(row.id, mode, `${row.label} (${mode})`)}
           onCancel={() => void cancel(row.id)}
+          onReconcile={() => setReconciling(row)}
           canRelaunch={canRelaunch}
+          canReconcile={canReconcile}
         />
       ),
     },
@@ -160,6 +169,15 @@ export function CrawlJobsView(): JSX.Element {
           expandedRowRender: (row) => <StreamPanel row={row} />,
         }}
       />
+
+      {reconciling && (
+        <ReconcilePanel
+          jobId={reconciling.id}
+          label={reconciling.label}
+          open
+          onClose={() => setReconciling(null)}
+        />
+      )}
     </div>
   );
 }
@@ -219,13 +237,17 @@ function ActionCell({
   onOpen,
   onRelaunch,
   onCancel,
+  onReconcile,
   canRelaunch,
+  canReconcile,
 }: {
   row: JobRow;
   onOpen: () => void;
   onRelaunch: (mode: "retry" | "resume") => void;
   onCancel: () => void;
+  onReconcile: () => void;
   canRelaunch: boolean;
+  canReconcile: boolean;
 }): JSX.Element {
   const ready = row.status === "succeeded" || row.status === "partial";
   const finished = ready || row.status === "failed";
@@ -249,6 +271,14 @@ function ActionCell({
         <Button size="small" type={ready ? "primary" : "default"} disabled={!ready} onClick={onOpen}>
           View tree
         </Button>
+      )}
+
+      {canReconcile && ready && (
+        <Tooltip title="Optional. Upload a Screaming Frog export to see what each crawler found and the other did not, and fold in any live pages this crawl missed.">
+          <Button size="small" onClick={onReconcile}>
+            Cross-check
+          </Button>
+        </Tooltip>
       )}
 
       {canRelaunch && stoppedEarly && (

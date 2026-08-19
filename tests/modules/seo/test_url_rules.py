@@ -12,6 +12,7 @@ from src.modules.seo.page_classifier.url_rules import (
     depth_of,
     is_crawlable_url,
     is_faceted_filter,
+    is_malformed_url,
     is_spider_trap,
     is_tracking_param,
     normalize_path,
@@ -471,3 +472,71 @@ class TestSpiderTrap:
     def test_an_unparseable_url_is_not_blamed_on_a_trap(self):
         """`safe_split` already reports it; this must not misattribute it."""
         assert is_spider_trap("http://[abc") is False
+
+
+class TestIsMalformedUrl:
+    """URLs fabricated by broken markup, refused before they become nodes.
+
+    The hard part is not catching them, it is *not* catching legitimate URLs
+    that happen to contain whitespace. Measured across 65 stored crawls and
+    392,835 URLs: 387 carry whitespace inside a real filename, and every one of
+    them must survive.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # `href=" blog/post/"` — the space survived into a sitemap <loc>.
+            "https://kinsta.com/ blog/disk-usage-wordpress/",
+            "https://kinsta.com/%20blog/how-to-install-a-wordpress-theme/",
+            # A protocol-relative href with a leading space, folded into a path.
+            "https://kinsta.com/%20/abookin.com/plugins/booking-calendar/",
+            # Unclosed anchor.
+            "https://www.highradius.com/about/news/livecube/<a href=",
+            # Documentation placeholders published as links.
+            "https://www.gep.com/<nolink>",
+            "https://linear.app/team/%3Cteam%20ID%3E/new",
+            # A curly quote for `"` swallowed a paragraph of body copy.
+            "https://kinsta.com/blog/x/%E2%80%9C>MailChimp</a>%20per%20potenziare",
+            "https://kinsta.com/blog/shopify-alternatives/%E2%80%9D",
+        ],
+    )
+    def test_markup_artefacts_are_refused(self, url):
+        assert is_malformed_url(url) is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # Real published reports. Spaces are part of the filename, and
+            # refusing these deletes indexable assets from the audit.
+            "https://www.infosys.com/dam/pdf/Infosys ESG - climate change.pdf",
+            "https://www.infosys.com/x/digital%20bank%20in%20a%20bank_icici%20bank.pdf",
+            "https://www.gep.com/blog/tech/why-data-fragmentation-limits%20-agentic",
+            # Ordinary pages.
+            "https://e.com/",
+            "https://e.com/blog/normal-page/",
+            "https://e.com/v1.0/details",
+        ],
+    )
+    def test_legitimate_urls_survive(self, url):
+        assert is_malformed_url(url) is False
+
+    def test_only_a_leading_space_is_refused_not_an_interior_one(self):
+        """The whole discriminator, stated as one pair.
+
+        A path cannot begin with a space; a filename routinely contains one.
+        """
+        assert is_malformed_url("https://e.com/ a/b.pdf") is True
+        assert is_malformed_url("https://e.com/a/my file.pdf") is False
+
+    def test_the_query_string_is_not_examined(self):
+        """A comparison operator in a query is not broken markup."""
+        assert is_malformed_url("https://e.com/search?q=a<b") is False
+
+    def test_encoded_and_raw_markers_are_the_same_thing(self):
+        assert is_malformed_url("https://e.com/%3Cnolink%3E") is True
+        assert is_malformed_url("https://e.com/<nolink>") is True
+
+    def test_an_unparseable_url_is_not_claimed_here(self):
+        """`safe_split` refuses it earlier; claiming it would misattribute it."""
+        assert is_malformed_url("http://[abc") is False

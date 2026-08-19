@@ -1,0 +1,267 @@
+import { Alert, Button, Modal, Table, Tag, Upload } from "antd";
+import type { UploadFile } from "antd/es/upload/interface";
+import { useState } from "react";
+import type { ReconciliationSummary } from "../../adapters/adapterInterface";
+import { useCrawlStore } from "../../store/useCrawlStore";
+import { useUiStore } from "../../store/useUiStore";
+import "./jobs.css";
+
+/** Bytes accepted from one export. */
+const MAX_CSV_BYTES = 80 * 1024 * 1024;
+
+/**
+ * Plain-English meaning for each frog-side reason.
+ *
+ * The enum values are the engine's vocabulary; an analyst should not have to
+ * learn it to read a gap. Only `MISSED_PAGE` is a defect and the wording says
+ * so, because the whole table otherwise reads as a list of failures when four
+ * of its five rows are the engine working correctly.
+ */
+const FROG_REASONS: Record<string, string> = {
+  MISSED_PAGE: "Live pages the crawl never reached — merged into the tree",
+  REDIRECT: "Redirect sources — not pages; their destinations are already held",
+  CLIENT_ERROR: "4xx / 5xx — not pages",
+  OFF_SITE: "A different host — out of scope by design",
+  MEDIA_URL: "Images, scripts, stylesheets — refused by design",
+  SPIDER_TRAP: "Relative-href crawl loops — refused by design",
+  NON_INDEXABLE: "Live but canonicalised elsewhere or noindex",
+};
+
+const ENGINE_REASONS: Record<string, string> = {
+  SITEMAP_ORPHAN: "Published, and no internal link reaches them — the finding",
+  QUERY_VARIANT: "Same path with a query string Screaming Frog collapsed",
+  REPEATED_SUFFIX_TRAP: "Fabricated by a relative-href loop — our defect",
+  MALFORMED_MARKUP: "Built from broken HTML on the site — not URLs at all",
+};
+
+interface Props {
+  jobId: string;
+  label: string;
+  open: boolean;
+  onClose: () => void;
+}
+
+/**
+ * Upload a Screaming Frog export and show the two-way gap.
+ *
+ * Deliberately a modal launched per job rather than a page: a reconciliation is
+ * *about* one crawl, and a standalone screen would need its own job picker that
+ * could disagree with the row the operator clicked.
+ *
+ * The whole feature is optional. This dialog is the only way to reach it, the
+ * button that opens it is hidden when the adapter cannot reconcile, and a crawl
+ * that never sees an export is unaffected.
+ */
+export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Element {
+  const reconcile = useCrawlStore((state) => state.reconcileScreamingFrog);
+  const selectJob = useCrawlStore((state) => state.selectJob);
+  const setView = useUiStore((state) => state.setView);
+
+  const [busy, setBusy] = useState(false);
+  const [summary, setSummary] = useState<ReconciliationSummary | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  function reset(): void {
+    setSummary(null);
+    setProblem(null);
+    setBusy(false);
+  }
+
+  async function accept(file: File): Promise<void> {
+    setProblem(null);
+    if (file.size > MAX_CSV_BYTES) {
+      // Checked here as well as on the server. A 200 MB file read into a string
+      // in the browser is a tab crash, which gives the operator no message at
+      // all — the server's own refusal would never be reached.
+      setProblem(
+        `That file is ${(file.size / 1e6).toFixed(0)} MB. Export "Internal → HTML" ` +
+          `rather than the full crawl, or trim it first.`,
+      );
+      return;
+    }
+    setBusy(true);
+    try {
+      // `file.text()` decodes as UTF-8 and strips nothing. The byte-order mark
+      // Screaming Frog writes is handled server-side with `utf-8-sig`, so it
+      // does not matter that it survives the trip.
+      const text = await file.text();
+      const result = await reconcile(jobId, text);
+      if (result === null) {
+        setProblem("The reconciliation failed. See the error banner on the dashboard.");
+      } else {
+        setSummary(result);
+      }
+    } catch (cause) {
+      setProblem(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openMerged(): void {
+    if (!summary) return;
+    void (async () => {
+      await selectJob(summary.job_id);
+      setView("visualizer");
+      onClose();
+      reset();
+    })();
+  }
+
+  return (
+    <Modal
+      open={open}
+      title={`Cross-check against Screaming Frog — ${label}`}
+      width={720}
+      onCancel={() => {
+        onClose();
+        reset();
+      }}
+      footer={
+        summary && summary.merged > 0 ? (
+          <Button type="primary" onClick={openMerged}>
+            Open merged tree ({summary.merged.toLocaleString()} added)
+          </Button>
+        ) : null
+      }
+      destroyOnClose
+    >
+      {summary === null ? (
+        <>
+          <p className="jb-dim">
+            Export <b>Internal → HTML</b> from Screaming Frog as CSV and drop it
+            here. Nothing is uploaded anywhere: the file is read in your browser
+            and posted to the local engine on this machine.
+          </p>
+          <Upload.Dragger
+            accept=".csv,text/csv"
+            maxCount={1}
+            disabled={busy}
+            showUploadList={false}
+            // `beforeUpload` returning false stops antd from POSTing the file
+            // itself. It has no endpoint to POST to — the store owns the
+            // request — and letting it try produces a silent network error
+            // beside a spinner that never stops.
+            beforeUpload={(file: UploadFile & File) => {
+              void accept(file);
+              return false;
+            }}
+          >
+            <p className="jb-drop-title">{busy ? "Reconciling…" : "Drop internal_html.csv"}</p>
+            <p className="jb-dim">or click to choose a file</p>
+          </Upload.Dragger>
+          {problem && (
+            <Alert type="error" showIcon message={problem} style={{ marginTop: 12 }} />
+          )}
+        </>
+      ) : (
+        <GapReport summary={summary} />
+      )}
+    </Modal>
+  );
+}
+
+/** The two-way gap, once an export has been read. */
+function GapReport({ summary }: { summary: ReconciliationSummary }): JSX.Element {
+  const rows = (
+    map: Record<string, number>,
+    labels: Record<string, string>,
+  ): Array<{ key: string; reason: string; meaning: string; count: number }> =>
+    Object.entries(map)
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, count]) => ({
+        key: reason,
+        reason,
+        meaning: labels[reason] ?? "—",
+        count,
+      }));
+
+  return (
+    <div className="jb-gap">
+      <div className="jb-gap-heads">
+        <Stat label="Found by both" value={summary.in_both} />
+        <Stat label="Rows in export" value={summary.frog_rows} />
+        <Stat label="Pages we missed" value={summary.missed_pages} tone="bad" />
+        <Stat label="Sitemap orphans" value={summary.orphans} tone="warn" />
+      </div>
+
+      {summary.merged > 0 ? (
+        <Alert
+          type="success"
+          showIcon
+          message={`${summary.merged.toLocaleString()} pages merged into a new crawl.`}
+          description="The original crawl is unchanged. Merged pages carry a low confidence score because an export has no HTML to classify from."
+        />
+      ) : (
+        <Alert
+          type="info"
+          showIcon
+          message="Nothing to merge — no new job was created."
+          description="Every live, in-scope page in the export was already in the crawl."
+        />
+      )}
+
+      <h4 className="jb-gap-h">Screaming Frog found, we did not</h4>
+      <Table
+        size="small"
+        pagination={false}
+        dataSource={rows(summary.frog_reasons, FROG_REASONS)}
+        columns={[
+          {
+            title: "Reason",
+            dataIndex: "reason",
+            render: (value: string) => (
+              <Tag color={value === "MISSED_PAGE" ? "error" : "default"}>{value}</Tag>
+            ),
+          },
+          { title: "What it means", dataIndex: "meaning" },
+          { title: "URLs", dataIndex: "count", align: "right" as const, width: 80 },
+        ]}
+      />
+
+      <h4 className="jb-gap-h">We found, Screaming Frog did not</h4>
+      <Table
+        size="small"
+        pagination={false}
+        dataSource={rows(summary.engine_reasons, ENGINE_REASONS)}
+        columns={[
+          {
+            title: "Reason",
+            dataIndex: "reason",
+            render: (value: string) => (
+              <Tag color={value === "SITEMAP_ORPHAN" ? "warning" : "default"}>{value}</Tag>
+            ),
+          },
+          { title: "What it means", dataIndex: "meaning" },
+          { title: "URLs", dataIndex: "count", align: "right" as const, width: 80 },
+        ]}
+      />
+
+      {/* The two directions need opposite fixes, and that is the whole point of
+          reading them side by side. Said in words because a table of enum names
+          does not say it. */}
+      <p className="jb-dim jb-gap-note">
+        The two gaps call for opposite fixes: a page Screaming Frog reached and we
+        did not is missing from your sitemaps; a page only we found has no
+        internal link pointing at it.
+      </p>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone?: "bad" | "warn";
+}): JSX.Element {
+  return (
+    <div className={`jb-stat${tone ? ` jb-stat-${tone}` : ""}`}>
+      <span className="jb-stat-v">{value.toLocaleString()}</span>
+      <span className="jb-stat-l">{label}</span>
+    </div>
+  );
+}

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   CrawlDataAdapter,
   CrawlJobSummary,
+  ReconciliationSummary,
   JobStatus,
 } from "../adapters/adapterInterface";
 import { HttpAdapter } from "../adapters/httpAdapter";
@@ -92,6 +93,21 @@ interface CrawlState {
   selectJob: (jobId: string) => Promise<void>;
   /** Submit a crawl and return its id. Resolves at submission, not completion. */
   startCrawl: (request: PageClassificationInput) => Promise<string | null>;
+  /**
+   * Cross-check a finished job against a Screaming Frog export.
+   *
+   * Returns the summary rather than storing it as "the" reconciliation: two
+   * jobs can be reconciled in one session and a single slot would show the
+   * wrong site's gap. The caller holds the result for as long as its panel is
+   * open.
+   *
+   * Resolves to `null` when the adapter cannot reconcile — fixtures — or when
+   * the request failed, with the reason left in `error`.
+   */
+  reconcileScreamingFrog: (
+    jobId: string,
+    csvText: string,
+  ) => Promise<ReconciliationSummary | null>;
   refreshJobs: () => Promise<void>;
   loadCheckpoint: (jobId: string) => Promise<void>;
   /**
@@ -179,6 +195,25 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       });
     } catch (cause) {
       set({ status: "failed", error: describe(cause) });
+    }
+  },
+
+  async reconcileScreamingFrog(jobId, csvText) {
+    const adapter = get().adapter;
+    if (!adapter?.reconcileScreamingFrog) {
+      set({ error: "This data source cannot reconcile against Screaming Frog." });
+      return null;
+    }
+    try {
+      const summary = await adapter.reconcileScreamingFrog(jobId, csvText);
+      // A merge creates a new job, so the list is stale the moment this
+      // returns. Refreshed here rather than by the caller, or a panel that
+      // forgot would leave the merged crawl unselectable.
+      await get().refreshJobs();
+      return summary;
+    } catch (cause) {
+      set({ error: describe(cause) });
+      return null;
     }
   },
 

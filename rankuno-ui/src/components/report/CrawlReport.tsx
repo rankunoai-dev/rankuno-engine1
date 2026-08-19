@@ -141,6 +141,15 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
             <td>{count(discovery.traps_skipped)}</td>
           </tr>
           <tr>
+            {/* Also a finding about the client's HTML rather than the crawl:
+                an unclosed anchor or a smart-quoted attribute makes the parser
+                read prose as a link. These were never pages. */}
+            <th>Malformed links skipped</th>
+            <td>{count(discovery.malformed_skipped)}</td>
+            <th />
+            <td />
+          </tr>
+          <tr>
             {/* Counted from the tree this report is printing, not from
                 `nav_coverage`.
 

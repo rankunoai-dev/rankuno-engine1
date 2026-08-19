@@ -722,3 +722,49 @@ class TestResumeSeeding:
             site_fetcher(self.SEED_SITE, settings), "https://e.com", seed_urls=()
         )
         assert {n.url for n in plain.nodes} == {n.url for n in seeded.nodes}
+
+
+class TestMalformedRefusal:
+    """Markup artefacts must not become graph nodes.
+
+    Enforced at `SiteGraph.add` for the same reason media and traps are: it is
+    the one function every discovery path goes through, and the sitemap path is
+    where these actually arrive — `urljoin` already strips a leading space, so
+    the DOM path was never the source.
+    """
+
+    def test_the_graph_refuses_them_from_any_path(self):
+        graph = SiteGraph("https://e.com")
+        assert graph.add("https://e.com/ blog/x/", sitemap=True) is None
+        assert graph.add("https://e.com/%20blog/y/", cms_api=True) is None
+        assert graph.add("https://e.com/<nolink>", dom_link=True) is None
+        assert len(graph) == 0
+        assert graph.malformed_skipped == 3
+
+    def test_a_filename_with_spaces_still_enters(self):
+        """The false positive that would delete real published documents."""
+        graph = SiteGraph("https://e.com")
+        assert graph.add("https://e.com/dam/Infosys ESG - climate.pdf", sitemap=True) is not None
+        assert graph.malformed_skipped == 0
+
+    def test_it_is_counted_apart_from_traps_and_media(self):
+        """Three causes, three fixes. One number would name none of them."""
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/<nolink>", sitemap=True)
+        graph.add("https://e.com/hero.jpg", sitemap=True)
+        assert (graph.malformed_skipped, graph.media_skipped) == (1, 1)
+
+    def test_the_crawl_root_is_exempt(self):
+        """An operator who types a malformed URL gets a report, not a blank."""
+        graph = SiteGraph("https://e.com/<nolink>")
+        assert graph.add("https://e.com/<nolink>", dom_link=True) is not None
+
+    def test_refusing_is_not_truncation(self):
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/ blog/x/", sitemap=True)
+        assert graph.truncated is False
+
+    def test_the_count_reaches_the_report(self):
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/ blog/x/", sitemap=True)
+        assert graph.report().malformed_skipped == 1

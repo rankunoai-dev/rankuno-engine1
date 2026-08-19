@@ -25,7 +25,7 @@ page it resolves is a page that never reaches the paid Layer 3, which per
 from __future__ import annotations
 
 import re
-from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import SplitResult, parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from src.core.logger import get_logger
 from src.modules.seo.page_classifier.schemas import (
@@ -44,8 +44,10 @@ __all__ = [
     "TRAP_SEGMENT_MIN_LENGTH",
     "is_crawlable_url",
     "is_faceted_filter",
+    "is_malformed_url",
     "is_spider_trap",
     "is_locale_segment",
+    "MARKUP_MARKERS",
     "is_tracking_param",
     "normalize_path",
     "normalize_url",
@@ -384,6 +386,82 @@ TRAP_SEGMENT_MIN_LENGTH = 3
 Locale and shorthand segments — `en`, `de`, `fr`, `iki`, `lp` — legitimately
 recur in a path, so only longer segments count. Measured against 55,645 real
 URLs from six sites, this threshold produced no false positive."""
+
+
+MARKUP_MARKERS: tuple[str, ...] = ("<", ">", "href=", "“", "”")
+"""Substrings that mean a URL was built out of broken markup, not a link.
+
+Every one of these is illegal in a URL path unencoded, and meaningless in it
+encoded. They appear because an unclosed tag or a smart-quoted attribute made
+the HTML parser treat prose as an `href`:
+
+* `highradius.com/about/news/highradius-launches-livecube/<a href=` — an anchor
+  that was never closed.
+* `kinsta.com/blog/how-to-use-mailchimp/%E2%80%9C>MailChimp</a>%20per%20...` — a
+  curly quote instead of `"` around the attribute, which swallowed an entire
+  paragraph of Italian body copy into the address.
+* `gep.com/<nolink>` and `linear.app/team/%3Cteam%20ID%3E/new` — documentation
+  placeholders published as real links.
+
+Measured across 65 stored crawls and 392,835 URLs: 100 distinct matches, and
+every one inspected was fabricated. No legitimate page URL was caught.
+"""
+
+_LEADING_SPACE_PATH = re.compile(r"^/(?:%20|%09|%0[ad]|\s)", re.I)
+"""A path that begins with whitespace, raw or percent-encoded.
+
+The signature of `href=" blog/post/"`. `urljoin` strips a leading space before
+resolving, so the DOM path is safe; a sitemap `<loc>` carrying the same defect
+is not, and neither is an href whose space survived as `%20`.
+
+Why *leading* only, and this is the whole subtlety
+--------------------------------------------------
+Whitespace elsewhere in a path is usually **legitimate**. Rejecting it outright
+would have deleted real, indexable assets — measured on the stored crawls:
+
+* `infosys.com/.../pdf/Infosys ESG - climate change.pdf` — a published report
+  whose filename genuinely contains spaces.
+* `infosys.com/confluence/images/.../digital%20bank%20in%20a%20bank_icici%20bank.pdf`
+  — the same thing, percent-encoded.
+
+387 URLs across the corpus carry whitespace that is part of a real filename. A
+path *beginning* with a space is different in kind: no page is served at a path
+whose first character is a space, so the 20 distinct URLs this matches are
+artefacts rather than pages.
+"""
+
+
+def is_malformed_url(url: str) -> bool:
+    """Report whether a URL was fabricated by broken markup rather than linked.
+
+    Two independent signatures, both measured against the stored corpus before
+    being adopted (see the constants above). Kept apart from `is_spider_trap`
+    for the same reason that rule is kept apart from `is_crawlable_url`: a loop
+    is a real URL generated too many times, whereas this is not a URL at all,
+    and a report that merges the two can name neither cause.
+
+    Checked on the **path** only. Restricting it there loses nothing — verified
+    at 100 matches either way across the corpus — and avoids refusing a query
+    string that legitimately carries a comparison operator.
+
+    Percent-decoded before matching, because `%3C` and `<` are the same
+    character and a fabricated URL is as likely to arrive encoded as raw.
+
+    Args:
+        url: Absolute or relative URL.
+
+    Returns:
+        True when the URL should never enter the graph. Unparseable URLs return
+        False: they are refused earlier, by `safe_split`, and claiming them here
+        would attribute them to the wrong cause in the report.
+    """
+    parts = safe_split(url)
+    if parts is None:
+        return False
+    if _LEADING_SPACE_PATH.match(parts.path):
+        return True
+    decoded = unquote(parts.path)
+    return any(marker in decoded for marker in MARKUP_MARKERS)
 
 
 def is_spider_trap(url: str) -> bool:

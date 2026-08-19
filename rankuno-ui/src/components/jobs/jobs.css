@@ -138,3 +138,67 @@
   gap: 4px;
   flex-wrap: wrap;
 }
+
+/* ---- Screaming Frog cross-check panel ----
+   Rendered inside an antd Modal, which mounts outside `.jb-wrap`, so the two
+   dark-ground tokens defined there are not in scope. The modal is already on
+   antd's dark algorithm, so these inherit correctly and only layout is set. */
+
+.jb-drop-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin: 0 0 2px;
+}
+
+.jb-gap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.jb-gap-heads {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.jb-stat {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.jb-stat-v {
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.jb-stat-l {
+  font-size: 10.5px;
+  opacity: 0.7;
+}
+
+/* The two numbers an analyst is actually looking for. Coloured because the
+   other two are context and these are the finding. */
+.jb-stat-bad .jb-stat-v {
+  color: #ff7875;
+}
+.jb-stat-warn .jb-stat-v {
+  color: #ffc53d;
+}
+
+.jb-gap-h {
+  font-size: 12px;
+  font-weight: 700;
+  margin: 4px 0 0;
+}
+
+.jb-gap-note {
+  margin: 0;
+  line-height: 1.5;
+}

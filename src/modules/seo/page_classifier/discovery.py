@@ -56,6 +56,7 @@ from src.modules.seo.page_classifier.signal_parsers import CmsRecord, PageEviden
 from src.modules.seo.page_classifier.url_rules import (
     is_crawlable_url,
     is_faceted_filter,
+    is_malformed_url,
     is_spider_trap,
     normalize_url,
 )
@@ -273,6 +274,13 @@ class DiscoveryReport(StrictModel):
 
     Almost always a WordPress `attachment-sitemap.xml`, which lists every
     uploaded image as though it were a page."""
+    malformed_skipped: int = Field(default=0, ge=0)
+    """URLs refused because broken markup fabricated them.
+
+    An unclosed anchor or a smart-quoted attribute makes the parser read prose
+    as an `href`. Counted apart from traps and media because the fix is
+    different again: this one is a defect in the client's HTML, and the URLs it
+    produces were never pages at all."""
     traps_skipped: int = Field(default=0, ge=0)
     """URLs refused as self-referential crawl loops.
 
@@ -364,6 +372,12 @@ class SiteGraph:
         this is the difference between "the sitemap listed 400 pages" and "the
         sitemap listed 400 entries, 300 of which were uploads", and a reader
         who cannot see the number has no way to tell those apart."""
+        self.malformed_skipped = 0
+        """URLs refused as artefacts of broken markup on the site.
+
+        Reported rather than dropped for the same reason as the others: a
+        non-zero count is a defect in the client's HTML worth telling them
+        about, and an invisible one gets fixed by nobody."""
         self.traps_skipped = 0
         """URLs refused as self-referential crawl loops.
 
@@ -420,6 +434,14 @@ class SiteGraph:
         # One number covering both would name neither.
         if url != self.base_url and is_spider_trap(url):
             self.traps_skipped += 1
+            return None
+
+        # Last of the three refusals, and the cheapest to get wrong. Whitespace
+        # inside a path is usually legitimate — `Infosys ESG - climate
+        # change.pdf` is a real published report — so only a path that *begins*
+        # with whitespace, or one carrying markup remnants, is refused here.
+        if url != self.base_url and is_malformed_url(url):
+            self.malformed_skipped += 1
             return None
 
         key = normalize_url(url)
@@ -583,6 +605,7 @@ class SiteGraph:
             fetch_failures=self.fetch_failures,
             media_skipped=self.media_skipped,
             traps_skipped=self.traps_skipped,
+            malformed_skipped=self.malformed_skipped,
             truncated=self.truncated,
             stopped_reason=self.stopped_reason,
         )

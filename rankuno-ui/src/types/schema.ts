@@ -155,6 +155,7 @@ export interface DiscoveryReport {
   pages_fetched: number;
   fetch_failures: number;
   media_skipped: number;
+  malformed_skipped: number;
   traps_skipped: number;
   truncated: boolean;
   stopped_reason: string | null;
