@@ -136,9 +136,18 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
                 what is misleading is a report that counts them as pages. */}
             <th>Media skipped</th>
             <td>{count(discovery.media_skipped)}</td>
-            {/* A finding about the client's site, not about the crawl. */}
-            <th>Loop URLs skipped</th>
+            {/* A finding about the client's site, not about the crawl: a
+                segment repeating inside one path. */}
+            <th>Repeating-path URLs skipped</th>
             <td>{count(discovery.traps_skipped)}</td>
+          </tr>
+          <tr>
+            {/* Counted apart because the client's fix is different and much
+                smaller: one template emitting an href with no leading slash
+                gives a single page an address under every parent on the site.
+                On one crawl this was 36% of everything discovered. */}
+            <th>Template-loop URLs skipped</th>
+            <td>{count(discovery.loop_urls_skipped)}</td>
           </tr>
           <tr>
             {/* Also a finding about the client's HTML rather than the crawl:

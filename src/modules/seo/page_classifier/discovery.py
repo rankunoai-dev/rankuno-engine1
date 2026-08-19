@@ -52,6 +52,7 @@ from src.modules.seo.page_classifier.discovery_parsers import (
     with_page_param,
     wordpress_total_pages,
 )
+from src.modules.seo.page_classifier.relative_loops import LoopWatcher
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord, PageEvidence
 from src.modules.seo.page_classifier.url_rules import (
     is_crawlable_url,
@@ -281,6 +282,15 @@ class DiscoveryReport(StrictModel):
     as an `href`. Counted apart from traps and media because the fix is
     different again: this one is a defect in the client's HTML, and the URLs it
     produces were never pages at all."""
+    loop_urls_skipped: int = Field(default=0, ge=0)
+    """URLs refused as copies of one page made by a broken relative link.
+
+    Distinct from `traps_skipped`, which counts a segment repeating *inside* one
+    path. This counts a whole-site pattern: a template emitting an `href` with
+    no leading slash, so one page acquires an address under every parent. On
+    highradius.com that was 35.9% of everything discovered, and the client's fix
+    is one character in a template."""
+
     traps_skipped: int = Field(default=0, ge=0)
     """URLs refused as self-referential crawl loops.
 
@@ -378,6 +388,10 @@ class SiteGraph:
         Reported rather than dropped for the same reason as the others: a
         non-zero count is a defect in the client's HTML worth telling them
         about, and an invisible one gets fixed by nobody."""
+        self._loops = LoopWatcher()
+        """Confirms relative-href loops as the crawl runs."""
+        self.loop_urls_skipped = 0
+        """URLs refused as members of a confirmed relative-href loop."""
         self.traps_skipped = 0
         """URLs refused as self-referential crawl loops.
 
@@ -445,6 +459,27 @@ class SiteGraph:
             return None
 
         key = normalize_url(url)
+
+        # Unlike the three refusals above, this one cannot be decided from the
+        # URL alone: every address a relative-href loop fabricates is perfectly
+        # well-formed. It is only visible as one path tail appearing under many
+        # parents at many depths, so the watcher accumulates that evidence and
+        # answers here.
+        #
+        # Confirming a tail also returns the URLs admitted before there was any
+        # reason to refuse them — the evidence *is* the repetition, so the early
+        # members necessarily got in. Evicting them is what makes the count the
+        # real one rather than the real one minus a couple of dozen.
+        if url != self.base_url:
+            refuse, evicted = self._loops.observe(url, key)
+            for stale in evicted:
+                if self._nodes.pop(stale, None) is not None:
+                    self.loop_urls_skipped += 1
+                self._html.pop(stale, None)
+            if refuse:
+                self.loop_urls_skipped += 1
+                return None
+
         existing = self._nodes.get(key)
 
         if existing is None:
@@ -605,6 +640,7 @@ class SiteGraph:
             fetch_failures=self.fetch_failures,
             media_skipped=self.media_skipped,
             traps_skipped=self.traps_skipped,
+            loop_urls_skipped=self.loop_urls_skipped,
             malformed_skipped=self.malformed_skipped,
             truncated=self.truncated,
             stopped_reason=self.stopped_reason,

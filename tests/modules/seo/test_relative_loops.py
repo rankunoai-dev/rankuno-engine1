@@ -8,9 +8,11 @@ the whole design is the depth check that separates those from a genuine loop.
 
 from __future__ import annotations
 
+from src.modules.seo.page_classifier.discovery import SiteGraph
 from src.modules.seo.page_classifier.relative_loops import (
     MIN_DEPTH_SPREAD,
     MIN_LOOP_URLS,
+    LoopWatcher,
     find_relative_loops,
 )
 
@@ -24,7 +26,9 @@ def loop_urls(count: int) -> tuple[str, ...]:
     generation is one segment deeper than the last.
     """
     return tuple(
-        "https://e.com/" + "/".join(f"s{level}" for level in range(index % 8 + 1)) + f"/{TAIL}"
+        "https://e.com/"
+        + "/".join(f"p{index}s{level}" for level in range(index % 8 + 1))
+        + f"/{TAIL}"
         for index in range(count)
     )
 
@@ -114,3 +118,57 @@ class TestEdges:
 
     def test_a_malformed_url_does_not_raise(self):
         assert find_relative_loops(("http://[", "not a url")).url_count == 0
+
+
+class TestLoopWatcher:
+    """Streaming confirmation, including the URLs admitted before proof existed."""
+
+    def test_a_confirmed_tail_is_refused_from_then_on(self):
+        watcher = LoopWatcher()
+        urls = loop_urls(MIN_LOOP_URLS * 2)
+        refusals = sum(1 for url in urls if watcher.observe(url, url)[0])
+        assert refusals > 0
+
+    def test_confirmation_names_the_urls_already_let_through(self):
+        """The evidence is the repetition, so the early members necessarily got in.
+
+        Without eviction the count is short by however many it took to prove the
+        loop, and the graph keeps them.
+        """
+        watcher = LoopWatcher()
+        evicted: tuple[str, ...] = ()
+        for url in loop_urls(MIN_LOOP_URLS * 2):
+            refuse, batch = watcher.observe(url, url)
+            if batch:
+                evicted = batch
+                assert refuse is True
+        assert len(evicted) == MIN_LOOP_URLS
+
+    def test_eviction_happens_once(self):
+        watcher = LoopWatcher()
+        batches = [
+            batch for url in loop_urls(MIN_LOOP_URLS * 3) if (batch := watcher.observe(url, url)[1])
+        ]
+        assert len(batches) == 1
+
+    def test_legitimate_repetition_is_never_confirmed(self):
+        """The stripe locale case, streamed rather than batched."""
+        watcher = LoopWatcher()
+        for index in range(MIN_LOOP_URLS * 3):
+            url = f"https://e.com/l{index}/newsroom/news/stripe-and-uber"
+            assert watcher.observe(url, url) == (False, ())
+
+    def test_the_graph_is_left_clean(self):
+        """End to end: a loop must not survive in `SiteGraph`."""
+        graph = SiteGraph(base_url="https://e.com/", max_pages=10_000)
+        for url in loop_urls(MIN_LOOP_URLS * 4):
+            graph.add(url, dom_link=True)
+        for url in (f"https://e.com/real/page/{index}" for index in range(5)):
+            graph.add(url, dom_link=True)
+
+        held = {node.url for node in graph._nodes.values()}
+        assert not any(TAIL in url for url in held)
+        assert len(held) == 5
+        # Every fabricated address is distinct, which is what the real defect
+        # produces: 23,641 different URLs for one page on highradius.com.
+        assert graph.report().loop_urls_skipped == MIN_LOOP_URLS * 4

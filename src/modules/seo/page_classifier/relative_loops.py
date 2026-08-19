@@ -64,6 +64,7 @@ __all__ = [
     "TAIL_SEGMENTS",
     "LoopReport",
     "LoopSignature",
+    "LoopWatcher",
     "find_relative_loops",
 ]
 
@@ -201,3 +202,71 @@ def find_relative_loops(urls: tuple[str, ...]) -> LoopReport:
             extra={"loops": len(signatures), "urls": len(caught)},
         )
     return LoopReport(signatures=tuple(signatures), urls=tuple(sorted(caught)))
+
+
+class LoopWatcher:
+    """Confirms loops as a crawl runs, so they stop costing fetches.
+
+    `find_relative_loops` needs the finished corpus. A crawl cannot wait for
+    that: on highradius.com the loop is 35.9% of every URL discovered, and
+    fetching them is most of the crawl's wasted time. This decides as it goes.
+
+    The awkward part, stated plainly
+    --------------------------------
+    A loop is not provable until enough of it exists. The evidence *is* the
+    repetition, so the first members are admitted before there is any reason to
+    refuse them. Rather than leave them in the graph, confirming a tail also
+    names every URL already let through under it, and the caller evicts them.
+    The tail is refused for the rest of the crawl.
+
+    That makes the count exact — all 46,103 rather than the ~46,080 a
+    forward-only rule would catch — at the cost of an eviction step the caller
+    has to honour. `SiteGraph.add` is the only caller and it does.
+
+    Memory is one entry per URL with a long enough path, holding the normalised
+    key that the graph already stores. On a 500,000-URL crawl that is the
+    largest single structure this class owns, and it is bounded by the crawl.
+    """
+
+    __slots__ = ("_confirmed", "_depths", "_keys")
+
+    def __init__(self) -> None:
+        """Start with nothing confirmed and no tails seen."""
+        self._keys: defaultdict[str, list[str]] = defaultdict(list)
+        """Normalised keys admitted under each tail, until it is confirmed."""
+        self._depths: defaultdict[str, set[int]] = defaultdict(set)
+        self._confirmed: set[str] = set()
+
+    def observe(self, url: str, key: str) -> tuple[bool, tuple[str, ...]]:
+        """Judge one URL as it is discovered.
+
+        Args:
+            url: The absolute URL.
+            key: Its normalised graph key, used for eviction.
+
+        Returns:
+            `(refuse, evict)`. `refuse` means do not admit this URL. `evict`
+            names keys admitted earlier under a tail that has just been
+            confirmed, and is empty except on the single call that confirms it.
+        """
+        found = _tail_of(url)
+        if found is None:
+            return False, ()
+        tail, depth = found
+
+        if tail in self._confirmed:
+            return True, ()
+
+        self._keys[tail].append(key)
+        self._depths[tail].add(depth)
+        if len(self._keys[tail]) < MIN_LOOP_URLS or len(self._depths[tail]) < MIN_DEPTH_SPREAD:
+            return False, ()
+
+        self._confirmed.add(tail)
+        evict = tuple(self._keys.pop(tail))
+        self._depths.pop(tail, None)
+        _logger.warning(
+            "relative_loop_confirmed",
+            extra={"tail": tail, "evicted": len(evict)},
+        )
+        return True, evict
