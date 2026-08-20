@@ -53,12 +53,9 @@ api = [
 seo = [
     # httpx moved to core dependencies above; listing it here too would let the
     # two bounds drift apart.
+    # openpyxl moved to core dependencies above; listing it here too would let the
+    # two bounds drift apart.
     "advertools>=0.14",
-    # Reads Screaming Frog's .xlsx export. A domain format, so an extra rather
-    # than a core dependency — `src/core` must stay importable with none of
-    # this installed. The reconciler imports it lazily and says what is missing
-    # if it is absent, so a checkout without `seo` still parses CSV exports.
-    "openpyxl>=3.1,<4.0",
     "trafilatura>=1.9",
     "selectolax>=0.3.21",
     "sentence-transformers>=3.0",
