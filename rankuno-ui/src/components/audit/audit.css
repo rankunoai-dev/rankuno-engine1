@@ -117,19 +117,51 @@
 
 /* Drill-down: the finding's full worklist, opened on demand. */
 
-.au-toggle {
+/* Filled, not outlined. The previous version was a 1px #1e293b border on a
+   #0f1420 card — two shades of the same near-black — with no background at all,
+   so the only thing marking it as a control was the cursor. An analyst looking
+   for the export could not find it, twice. */
+.au-actions {
   margin-left: auto;
-  background: none;
-  border: 1px solid #1e293b;
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+
+.au-toggle {
+  background: #16324a;
+  border: 1px solid #38bdf8;
   border-radius: 4px;
-  color: #7dd3fc;
-  font-size: 11px;
-  padding: 2px 8px;
+  color: #bae6fd;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 12px;
   cursor: pointer;
+  white-space: nowrap;
+}
+
+/* The export is the thing most of these cards exist to produce, so it reads as
+   the primary action and the drill-in reads as secondary. */
+.au-export {
+  background: #0e3a2f;
+  border: 1px solid #34d399;
+  border-radius: 4px;
+  color: #a7f3d0;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.au-export:hover {
+  background: #14523f;
+  border-color: #6ee7b7;
 }
 
 .au-toggle:hover {
-  border-color: #38bdf8;
+  background: #1d4266;
+  border-color: #7dd3fc;
 }
 
 .au-drill {

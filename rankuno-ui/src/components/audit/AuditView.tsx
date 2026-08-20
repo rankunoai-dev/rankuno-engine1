@@ -1,6 +1,7 @@
 import { Empty, Tag } from "antd";
 import { useMemo, useState } from "react";
 import { buildFindings, type Finding } from "../../lib/audit";
+import { downloadCsv, hostSlug, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { DuplicateTable } from "./DuplicateTable";
 import { OrphanTable } from "./OrphanTable";
@@ -68,20 +69,33 @@ export function AuditView(): JSX.Element {
                 {/* Only findings that carry a worklist get a control. A button
                     that expands to nothing is worse than no button. */}
                 {(finding.pages || finding.groups) && (
-                  <button
-                    type="button"
-                    className="au-toggle"
-                    aria-expanded={openId === finding.id}
-                    onClick={() => setOpenId(openId === finding.id ? null : finding.id)}
-                  >
-                    {openId === finding.id
-                      ? "Hide list"
-                      : // "sets" for a grouped finding: its count is clusters,
-                        // not URLs, and "See all 262" beside a title reading
-                        // "1,920 URLs" invites the reader to pair the wrong two
-                        // numbers.
-                        `See all ${finding.count.toLocaleString()}${finding.groups ? " sets" : ""}`}
-                  </button>
+                  <div className="au-actions">
+                    {/* On the card, not only inside the drill-in. The export was
+                        reachable solely by opening the table first, which meant
+                        the artefact most of these cards exist to produce was two
+                        clicks behind a control nobody could see. */}
+                    <button
+                      type="button"
+                      className="au-export"
+                      onClick={() => exportFinding(finding, result.base_url)}
+                    >
+                      Download CSV
+                    </button>
+                    <button
+                      type="button"
+                      className="au-toggle"
+                      aria-expanded={openId === finding.id}
+                      onClick={() => setOpenId(openId === finding.id ? null : finding.id)}
+                    >
+                      {openId === finding.id
+                        ? "Hide list"
+                        : // "sets" for a grouped finding: its count is clusters,
+                          // not URLs, and "See all 262" beside a title reading
+                          // "1,920 URLs" invites the reader to pair the wrong two
+                          // numbers.
+                          `See all ${finding.count.toLocaleString()}${finding.groups ? " sets" : ""}`}
+                    </button>
+                  </div>
                 )}
               </header>
               <p className="au-detail">{finding.detail}</p>
@@ -112,4 +126,32 @@ export function AuditView(): JSX.Element {
       )}
     </div>
   );
+}
+
+/**
+ * Write one finding's worklist to a CSV.
+ *
+ * Deliberately generic rather than per-finding. `OrphanTable` and
+ * `DuplicateTable` each carry an export tuned to their columns, and those stay —
+ * they know about orphan kinds and cluster survivors. This one answers the
+ * blunter question an analyst asks first: *give me the URLs behind this number*,
+ * without opening anything.
+ *
+ * A grouped finding keeps its clusters adjacent and numbered, because the set a
+ * URL belongs to is the whole point of that finding and a flat list destroys it.
+ */
+function exportFinding(finding: Finding, baseUrl: string): void {
+  const rows: (string | number | null)[][] = finding.groups
+    ? finding.groups.flatMap((group, index) =>
+        group.map((page) => [index + 1, page.url, page.primary_page_type, page.hierarchy_level]),
+      )
+    : (finding.pages ?? []).map((page) => [
+        null,
+        page.url,
+        page.primary_page_type,
+        page.hierarchy_level,
+      ]);
+
+  const csv = toCsv(["set", "url", "page_type", "hierarchy_level"], rows);
+  downloadCsv(`${hostSlug(baseUrl)}-${finding.id.replace(/[^a-z0-9]+/gi, "-")}.csv`, csv);
 }
