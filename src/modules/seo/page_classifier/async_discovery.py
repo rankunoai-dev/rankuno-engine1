@@ -239,6 +239,7 @@ async def adiscover_site(
     on_progress: ProgressSink | None = None,
     on_checkpoint: CheckpointSink | None = None,
     seed_urls: tuple[str, ...] = (),
+    exclude_urls: tuple[str, ...] = (),
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths concurrently and merge them.
 
@@ -263,6 +264,9 @@ async def adiscover_site(
         on_progress: Optional observability hook, called as pages are fetched.
         on_checkpoint: Optional durability hook, offered the graph so partial
             work survives an interruption. Implementations must throttle.
+        exclude_urls: URLs a previous run already fetched. Kept in the graph as
+            link targets, never requested. The half of a resume that stops the
+            crawl restarting from the homepage.
         seed_urls: Extra URLs to start the link crawl from, alongside the site
             root. Set when resuming an interrupted crawl. Seeds the graph
             refuses — media, loop artefacts, URLs past the ceiling — are dropped
@@ -296,6 +300,7 @@ async def adiscover_site(
                 on_progress,
                 on_checkpoint,
                 seed_urls,
+                exclude_urls,
             )
         except Exception as exc:  # noqa: BLE001 - a partial graph beats no graph
             # Everything discovered before the failure is real data an operator
@@ -450,6 +455,7 @@ async def _acrawl(
     on_progress: ProgressSink | None = None,
     on_checkpoint: CheckpointSink | None = None,
     seed_urls: tuple[str, ...] = (),
+    exclude_urls: tuple[str, ...] = (),
 ) -> int:
     """Path B — breadth-first traversal, one level at a time, fetched in parallel.
 
@@ -461,6 +467,11 @@ async def _acrawl(
     graph.add(base_url, dom_link=True, depth=0)
     seen: set[str] = {normalize_url(base_url)}
     level = [base_url]
+
+    # Mirrors the serial path exactly. The two are documented as behaviourally
+    # indistinguishable, and an exclusion honoured by only one of them would
+    # make a resume depend on `use_async_crawl`.
+    excluded: set[str] = {normalize_url(url) for url in exclude_urls}
 
     # A resumed crawl starts from the URLs the interrupted one never reached,
     # not from the homepage alone. Without this the resumed run would rediscover
@@ -487,7 +498,11 @@ async def _acrawl(
     # filled the budget, the DOM crawl fetched nothing at all — no HTML, no
     # link graph, no in-degree, and Signals 1, 4 and 5 silently starved.
     while level and (max_depth is None or depth <= max_depth):
-        crawlable = [url for url in level if not is_faceted_filter(url)]
+        crawlable = [
+            url
+            for url in level
+            if not is_faceted_filter(url) and normalize_url(url) not in excluded
+        ]
 
         def note(url: str) -> None:
             """Report one completed page, from inside the level.

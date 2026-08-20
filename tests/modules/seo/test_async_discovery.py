@@ -523,3 +523,44 @@ class TestCheckpointHookReachesTheCrawl:
     def test_no_sink_is_the_default(self, settings):
         _, report = run_async(settings)
         assert report.total_urls > 0
+
+
+# Same shape as `RESUME_SITE` in the serial suite: a root linking to both
+# leaves, so a crawl that starts at the root necessarily reaches everything.
+RESUME_SITE_ASYNC = {
+    "/robots.txt": httpx.Response(200, text=ROBOTS),
+    "/": html('<html><body><a href="/a/">A</a><a href="/b/">B</a></body></html>'),
+    "/a/": html("<html><body>leaf</body></html>"),
+    "/b/": html("<html><body>leaf</body></html>"),
+}
+
+
+class TestExcludeUrlsMatchesTheSerialPath:
+    """A resume must not depend on `use_async_crawl`.
+
+    The two paths are documented as behaviourally indistinguishable. An
+    exclusion honoured by only one of them would make a resumed crawl restart
+    from the homepage on whichever path the operator happened to be using — and
+    the async path is the default.
+    """
+
+    def test_a_plain_crawl_fetches_everything(self, settings):
+        _, report = run_async(settings, RESUME_SITE_ASYNC)
+        assert report.pages_fetched == 3
+
+    def test_an_excluded_url_is_never_fetched(self, settings):
+        _, report = run_async(settings, RESUME_SITE_ASYNC, exclude_urls=("https://e.com/a/",))
+        assert report.pages_fetched == 2
+
+    def test_excluding_the_root_stops_the_crawl_restarting_there(self, settings):
+        _, report = run_async(
+            settings,
+            RESUME_SITE_ASYNC,
+            seed_urls=("https://e.com/b/",),
+            exclude_urls=("https://e.com/", "https://e.com/a/"),
+        )
+        assert report.pages_fetched == 1
+
+    def test_the_match_is_normalised_not_literal(self, settings):
+        _, report = run_async(settings, RESUME_SITE_ASYNC, exclude_urls=("https://e.com/a",))
+        assert report.pages_fetched == 2

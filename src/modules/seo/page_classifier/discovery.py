@@ -659,6 +659,7 @@ def discover_site(
     on_progress: ProgressSink | None = None,
     on_checkpoint: CheckpointSink | None = None,
     seed_urls: tuple[str, ...] = (),
+    exclude_urls: tuple[str, ...] = (),
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths and merge them into one graph.
 
@@ -682,6 +683,10 @@ def discover_site(
             root. Set when resuming an interrupted crawl. Seeds the graph
             refuses — media, loop artefacts, URLs past the ceiling — are dropped
             like any other.
+        exclude_urls: URLs a previous run already fetched. They stay in the
+            graph as link targets but are never requested. Without this a
+            resumed crawl starts at the site root and walks the whole site
+            again, with the seeds merely appended to it.
 
     Returns:
         The merged graph and its report.
@@ -702,7 +707,14 @@ def discover_site(
     if crawl_dom:
         try:
             pages_fetched = _crawl_dom(
-                fetcher, base_url, graph, max_depth, on_progress, on_checkpoint, seed_urls
+                fetcher,
+                base_url,
+                graph,
+                max_depth,
+                on_progress,
+                on_checkpoint,
+                seed_urls,
+                exclude_urls,
             )
         except Exception as exc:  # noqa: BLE001 - a partial graph beats no graph
             _logger.exception("dom_crawl_aborted", extra={"url": base_url})
@@ -850,6 +862,7 @@ def _crawl_dom(
     on_progress: ProgressSink | None = None,
     on_checkpoint: CheckpointSink | None = None,
     seed_urls: tuple[str, ...] = (),
+    exclude_urls: tuple[str, ...] = (),
 ) -> int:
     """Path B — breadth-first link traversal from the root.
 
@@ -866,6 +879,10 @@ def _crawl_dom(
     graph.add(base_url, dom_link=True, depth=0)
     frontier: deque[tuple[str, int]] = deque([(base_url, 0)])
     seen: set[str] = {normalize_url(base_url)}
+
+    # Normalised once, for the same reason `seen` is: a raw comparison misses on
+    # a trailing slash and re-fetches the page the exclusion exists to skip.
+    excluded: set[str] = {normalize_url(url) for url in exclude_urls}
 
     # A resumed crawl begins from what the interrupted one never reached. Kept
     # identical to the async path deliberately: the two are documented as
@@ -899,6 +916,14 @@ def _crawl_dom(
         # Filter permutations are classified from the URL alone; fetching them
         # is the combinatorial trap the Amazon-scale rules exist to avoid.
         if is_faceted_filter(url):
+            continue
+
+        # Already fetched by the run this one resumes. Skipped at the fetch and
+        # nowhere earlier: the node stays in the graph, so it is still a valid
+        # link target and still counts toward in-degree. Note this also covers
+        # `base_url` on a resume, which is what stops the traversal restarting
+        # from the homepage.
+        if normalize_url(url) in excluded:
             continue
 
         result = _safe_fetch_html(fetcher, url, graph)

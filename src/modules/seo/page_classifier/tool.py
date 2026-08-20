@@ -184,7 +184,29 @@ class PageClassificationInput(StrictModel):
     Not a way to crawl a list of URLs in isolation. The site root is always
     crawled too, sitemap and CMS discovery still run, and a seed the graph
     refuses — a media file, a loop artefact, a URL past the page ceiling — is
-    dropped like any other."""
+    dropped like any other.
+
+    Seeding alone does **not** make a crawl a resume. It adds to the frontier;
+    it removes nothing from it. Pair it with `exclude_urls` or the run starts at
+    the homepage and walks the whole site again."""
+    exclude_urls: tuple[str, ...] = ()
+    """URLs a previous run already fetched. Never requested again.
+
+    The other half of a resume, and the half that makes it one. `seed_urls`
+    alone left the frontier starting at the site root, so a resumed crawl
+    re-fetched the homepage, followed every link out of it, and crawled the
+    whole site from the beginning — the seeds were simply appended to a full
+    re-crawl. Observed on gep.com: a resume advertising "+2,940" unfetched URLs
+    rediscovered 5,311 and began fetching from zero.
+
+    Applied at the *fetch*, not at the graph. An excluded URL is still a node
+    and still a valid link target, so in-degrees stay meaningful; it is only
+    never requested. Excluding the site root is what stops the traversal
+    restarting there, so no special case for the homepage is needed.
+
+    Matched on `normalize_url`, the same key discovery deduplicates on. Raw
+    string comparison would miss on a trailing slash and re-fetch the page
+    anyway."""
     concurrency: int = Field(default=DEFAULT_CONCURRENCY, ge=1, le=MAX_CONCURRENCY)
     """Simultaneous in-flight requests. Bounds local resources only — per-host
     politeness is enforced by the fetcher's token bucket regardless, so raising
@@ -467,6 +489,9 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             # resumed crawl that silently restarted from the homepage there
             # would look like the resume feature simply not working.
             "seed_urls": payload.seed_urls,
+            # Both halves of a resume travel together. Passing seeds without the
+            # exclusion is what made a resume a full re-crawl with extra steps.
+            "exclude_urls": payload.exclude_urls,
         }
 
         if payload.use_async_crawl and not _event_loop_running():

@@ -1035,7 +1035,34 @@ def create_app(
                 detail=f"job {job_id} fetched every URL it discovered",
             )
 
-        resumed = payload.model_copy(update={"seed_urls": remaining})
+        # The other half, and the half that was missing. `seed_urls` only adds
+        # to the frontier; without an exclusion the crawl still begins at the
+        # site root, follows every link out of it and re-fetches the whole site,
+        # with the seeds appended to a run that was never a resume. Observed on
+        # gep.com: a resume advertising "+2,940" rediscovered 5,311 URLs and
+        # started fetching from zero.
+        #
+        # Derived rather than stored: a checkpoint records everything it
+        # discovered and what it had not yet fetched, so the difference is
+        # exactly what the interrupted run completed.
+        discovered = checkpoint.get("urls")
+        if isinstance(discovered, list):
+            outstanding = set(remaining)
+            already = tuple(
+                url for url in discovered if isinstance(url, str) and url not in outstanding
+            )
+        else:
+            # A checkpoint old enough to lack the discovered set. Resuming still
+            # beats refusing — the seeds are real work — but it degrades to the
+            # old behaviour, so it is logged rather than passed over in silence.
+            already = ()
+            _logger.warning("resume_without_exclusion", extra={"job_id": job_id})
+
+        resumed = payload.model_copy(update={"seed_urls": remaining, "exclude_urls": already})
+        _logger.info(
+            "job_resumed",
+            extra={"source": job_id, "seeds": len(remaining), "excluded": len(already)},
+        )
         return _start(resumed, f"{payload.base_url} (resumed +{len(remaining):,})")
 
     return app

@@ -768,3 +768,88 @@ class TestMalformedRefusal:
         graph = SiteGraph("https://e.com")
         graph.add("https://e.com/ blog/x/", sitemap=True)
         assert graph.report().malformed_skipped == 1
+
+
+# A three-page site whose homepage links to both leaves, so a crawl that starts
+# at the root necessarily reaches everything.
+RESUME_SITE = {
+    "/robots.txt": httpx.Response(200, text=ROBOTS),
+    "/sitemap.xml": httpx.Response(404),
+    "/": html("<html><body><a href='/a/'>A</a><a href='/b/'>B</a></body></html>"),
+    "/a/": html(LEAF_HTML),
+    "/b/": html(LEAF_HTML),
+}
+
+
+class TestExcludeUrls:
+    """The half of a resume that makes it one.
+
+    `seed_urls` adds to the frontier; it removes nothing from it. Without an
+    exclusion the traversal still began at the site root, followed every link
+    out of it and re-crawled the whole site, with the seeds merely appended.
+    Observed live on gep.com: a resume advertising "+2,940" unfetched URLs
+    rediscovered 5,311 and started fetching from zero.
+    """
+
+    def test_a_plain_crawl_fetches_everything(self, settings):
+        """The baseline the exclusion is measured against."""
+        _, report = discover_site(site_fetcher(RESUME_SITE, settings), "https://e.com")
+        assert report.pages_fetched == 3
+
+    def test_an_excluded_url_is_never_fetched(self, settings):
+        _, report = discover_site(
+            site_fetcher(RESUME_SITE, settings),
+            "https://e.com",
+            exclude_urls=("https://e.com/a/",),
+        )
+        assert report.pages_fetched == 2
+
+    def test_excluding_the_root_stops_the_crawl_restarting_there(self, settings):
+        """The whole bug, in one assertion.
+
+        A resume excludes every page the interrupted run fetched, and the
+        homepage is nearly always among them. Skipping it means no links are
+        extracted from it, so the traversal cannot walk the site again — only
+        the seeds are fetched.
+        """
+        _, report = discover_site(
+            site_fetcher(RESUME_SITE, settings),
+            "https://e.com",
+            seed_urls=("https://e.com/b/",),
+            exclude_urls=("https://e.com/", "https://e.com/a/"),
+        )
+        assert report.pages_fetched == 1
+
+    def test_an_excluded_url_is_still_a_graph_node(self, settings):
+        """Skipped at the fetch, not at the graph.
+
+        In-degree and orphan flags are properties of the whole graph, so a
+        target that vanished would make the pages that link to it look like they
+        link nowhere.
+        """
+        graph, _ = discover_site(
+            site_fetcher(RESUME_SITE, settings),
+            "https://e.com",
+            exclude_urls=("https://e.com/a/",),
+        )
+        assert "https://e.com/a/" in {node.url for node in graph.nodes}
+
+    def test_the_match_is_normalised_not_literal(self, settings):
+        """A trailing slash must not defeat the exclusion.
+
+        Raw string comparison would miss and re-fetch the page the exclusion
+        exists to skip — silently, and once per resumed crawl.
+        """
+        _, report = discover_site(
+            site_fetcher(RESUME_SITE, settings),
+            "https://e.com",
+            exclude_urls=("https://e.com/a",),
+        )
+        assert report.pages_fetched == 2
+
+    def test_no_exclusion_changes_nothing(self, settings):
+        """Every crawl that is not a resume passes an empty tuple."""
+        _, report = discover_site(
+            site_fetcher(RESUME_SITE, settings), "https://e.com", exclude_urls=()
+        )
+        assert report.pages_fetched == 3

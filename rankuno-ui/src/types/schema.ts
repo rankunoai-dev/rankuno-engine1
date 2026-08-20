@@ -244,6 +244,7 @@ export interface PageClassificationInput {
   user_agent: string;
   browser_headers: boolean;
   seed_urls: string[];
+  exclude_urls: string[];
   concurrency: number;
   use_async_crawl: boolean;
   dom_reserve_fraction: number;

@@ -62,6 +62,7 @@ which, for an AI-assisted codebase, is every session.
 | [0029](0029-malformed-url-refusal-and-reconcile-ui.md) | 2026-08-19 | Markup-artefact URL refusal; Screaming Frog upload & gap panel | 1,315 tests, 95.29% |
 | [0030](0030-ui-component-test-runner.md) | 2026-08-19 | UI Component Test Runner (Vitest + React Testing Library) | 1,320 tests, 94.98% |
 | [0031](0031-native-xlsx-excel-reconciliation-support.md) | 2026-08-20 | Native .xlsx Excel Spreadsheet Support in Reconciler & API | 1,329 tests, 95.37% |
+| [0032](0032-resume-excludes-what-was-already-fetched.md) | 2026-08-20 | Resume skips already-fetched URLs instead of re-crawling the site | 1,354 py + 23 ui |
 
 
 ---

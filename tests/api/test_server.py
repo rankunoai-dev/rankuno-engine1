@@ -722,6 +722,50 @@ class TestResume:
         request = store.get(response.json()["id"]).request
         assert request["seed_urls"] == [f"{SAFE_URL}a", f"{SAFE_URL}b"]
 
+    def test_it_excludes_what_the_first_run_already_fetched(self, client, store, stub_tool):
+        """Seeding alone was never a resume.
+
+        `seed_urls` adds to the frontier and removes nothing from it, so the
+        crawl still began at the site root, followed every link out of it and
+        re-fetched the whole site. Live on gep.com: a resume advertising
+        "+2,940" rediscovered 5,311 URLs and started from zero.
+
+        The exclusion is the difference, and it is derived — everything the
+        checkpoint discovered, minus what it had still to fetch.
+        """
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        self._checkpoint(store, original, [f"{SAFE_URL}a"])
+
+        response = client.post(f"{API_PREFIX}/jobs/{original}/resume")
+        assert response.status_code == 202, response.text
+
+        request = store.get(response.json()["id"]).request
+        assert request["seed_urls"] == [f"{SAFE_URL}a"]
+        # The root was discovered and not outstanding, so it was fetched — and
+        # excluding it is what stops the traversal restarting from the homepage.
+        assert request["exclude_urls"] == [SAFE_URL]
+
+    def test_a_checkpoint_with_no_discovered_set_still_resumes(self, client, store, stub_tool):
+        """Old checkpoints predate `urls` and cannot say what was fetched.
+
+        Refusing would throw away real work; resuming without an exclusion
+        degrades to the old full re-crawl. It resumes, with an empty exclusion,
+        and the engine logs that it could not narrow the run.
+        """
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        store.write_checkpoint(
+            original,
+            {"base_url": SAFE_URL, "unfetched": [f"{SAFE_URL}a"], "saved_at_count": 1},
+        )
+
+        response = client.post(f"{API_PREFIX}/jobs/{original}/resume")
+        assert response.status_code == 202, response.text
+        request = store.get(response.json()["id"]).request
+        assert request["seed_urls"] == [f"{SAFE_URL}a"]
+        assert request["exclude_urls"] == []
+
     def test_the_label_states_how_much_is_left(self, client, store, stub_tool):
         stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
         original = run_job(client, store)

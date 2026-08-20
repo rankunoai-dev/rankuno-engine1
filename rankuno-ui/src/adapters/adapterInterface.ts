@@ -212,6 +212,11 @@ export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   // there is no UI control for it, and there should not be: a hand-typed seed
   // list is not a resume, it is a different crawl.
   seed_urls: [],
+  // Empty for anything an operator starts. Only a resume fills this, and the
+  // engine derives it from the interrupted job's checkpoint — there is no UI
+  // control for it, and there should not be: hand-typing "do not fetch these"
+  // is not a resume.
+  exclude_urls: [],
   max_pages: 500,
   rate_limit_rps: null,
   max_depth: null,
