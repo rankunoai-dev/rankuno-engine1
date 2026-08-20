@@ -877,7 +877,7 @@ def create_app(
                 "missed": len(report.missed_pages),
             },
         )
-        return ReconciliationSummary(
+        summary = ReconciliationSummary(
             job_id=target,
             source_job_id=job_id,
             base_url=before.base_url,
@@ -889,6 +889,44 @@ def create_app(
             frog_reasons=dict(report.frog_reasons),
             engine_reasons=dict(report.engine_reasons),
         )
+
+        # Saved against the *source* job, and saved with the URL lists rather
+        # than the counts alone. A cross-check costs an export somebody produced
+        # by hand in another tool, and it lived only in one component's state:
+        # leaving the panel threw it away, and getting it back meant exporting
+        # from Screaming Frog and uploading 4 MB again. The counts are the
+        # headline, but the URLs are the part an analyst acts on.
+        state.store.write_reconciliation(
+            job_id,
+            {
+                "summary": summary.model_dump(mode="json"),
+                "created_at": datetime.now(UTC).isoformat(),
+                "missed_pages": list(report.missed_pages),
+                "orphans": list(report.orphans),
+                "frog_only": [gap.model_dump(mode="json") for gap in report.frog_only],
+                "engine_only": [gap.model_dump(mode="json") for gap in report.engine_only],
+            },
+        )
+        return summary
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation")
+    def get_reconciliation(job_id: str) -> Mapping[str, object]:
+        """The last Screaming Frog cross-check run against this job.
+
+        Kept so the panel can be reopened. Returns the counts *and* the URL
+        lists behind them, because "892 missed pages" is the headline and the
+        892 addresses are the work.
+
+        Raises:
+            HTTPException: `404` if this job has never been cross-checked.
+        """
+        saved = state.store.read_reconciliation(job_id)
+        if saved is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} has no saved reconciliation",
+            )
+        return saved
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
     async def cancel_job(job_id: str) -> JobRecord:

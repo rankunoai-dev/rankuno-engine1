@@ -263,6 +263,14 @@ class JobStore(Protocol):
         """Read the saved homepage body, or `None` if none was kept."""
         ...
 
+    def write_reconciliation(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save a cross-check against a third-party crawl."""
+        ...
+
+    def read_reconciliation(self, job_id: str) -> Mapping[str, object] | None:
+        """Read the saved cross-check, or `None` if there is none."""
+        ...
+
     def recover_orphans(self) -> list[str]:
         """Fail every job left non-terminal by a previous process."""
         ...
@@ -328,6 +336,9 @@ class DiskJobStore:
 
     def _homepage_path(self, job_id: str) -> Path:
         return self._root / f"{job_id}.homepage.html"
+
+    def _reconciliation_path(self, job_id: str) -> Path:
+        return self._root / f"{job_id}.reconciliation.json"
 
     def _read(self, job_id: str) -> JobRecord:
         path = self._record_path(job_id)
@@ -547,6 +558,51 @@ class DiskJobStore:
         except OSError as exc:
             _logger.warning("homepage_read_failed", extra={"job_id": job_id, "error": str(exc)})
             return None
+
+    def write_reconciliation(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save a cross-check against a third-party crawl.
+
+        A reconciliation is expensive to obtain and trivial to lose: it needs an
+        export a person had to produce by hand in another tool, and until now it
+        lived only in one React component's state. Navigating away from the
+        panel discarded it, and getting it back meant re-exporting from
+        Screaming Frog and re-uploading a 4 MB file.
+
+        Stored against the **source** job rather than the merged one, because a
+        reconciliation that merges nothing creates no new job at all and would
+        otherwise have nowhere to live — and that is the outcome an operator is
+        most likely to want to look at twice.
+
+        Never raises. Losing the ability to re-read a cross-check must not fail
+        the request that produced it, and the summary is returned either way.
+        """
+        try:
+            with self._lock:
+                self._read(job_id)
+                _atomic_write(self._reconciliation_path(job_id), json.dumps(dict(payload)))
+        except (JobNotFoundError, OSError, TypeError) as exc:
+            _logger.warning(
+                "reconciliation_write_failed", extra={"job_id": job_id, "error": str(exc)}
+            )
+
+    def read_reconciliation(self, job_id: str) -> Mapping[str, object] | None:
+        """Read a job's saved cross-check.
+
+        `None` when there is none, which is the normal answer for every job
+        nobody has cross-checked.
+        """
+        path = self._reconciliation_path(job_id)
+        with self._lock:
+            if not path.exists():
+                return None
+            try:
+                loaded: Mapping[str, object] = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                _logger.warning(
+                    "reconciliation_read_failed", extra={"job_id": job_id, "error": str(exc)}
+                )
+                return None
+        return loaded
 
     def read_checkpoint(self, job_id: str) -> Mapping[str, object] | None:
         """Read a job's saved partial work.

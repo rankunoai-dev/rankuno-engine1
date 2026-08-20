@@ -88,6 +88,22 @@ export interface ReconciliationSummary {
 }
 
 /**
+ * A cross-check saved against a job, with the URLs behind the counts.
+ *
+ * Mirrors what `GET /jobs/{id}/reconciliation` returns. The lists are the point:
+ * "892 missed pages" is the headline and the 892 addresses are the work, and
+ * before this existed both were lost the moment the dialog closed.
+ */
+export interface SavedReconciliation {
+  summary: ReconciliationSummary;
+  created_at: string;
+  missed_pages: string[];
+  orphans: string[];
+  frog_only: { url: string; reason: string }[];
+  engine_only: { url: string; reason: string }[];
+}
+
+/**
  * How the UI reaches crawl data.
  *
  * One interface, two implementations: `MockAdapter` today, an HTTP adapter when
@@ -123,6 +139,9 @@ export interface CrawlDataAdapter {
    * hides it.
    */
   reconcileScreamingFrog?(jobId: string, export_: Blob): Promise<ReconciliationSummary>;
+
+  /** The last cross-check saved against a job, or `null` if there is none. */
+  getReconciliation?(jobId: string): Promise<SavedReconciliation | null>;
 
   /**
    * Start a new crawl, returning its job id.

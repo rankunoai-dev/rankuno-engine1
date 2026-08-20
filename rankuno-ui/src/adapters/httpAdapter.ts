@@ -7,6 +7,7 @@ import type {
   CrawlDataAdapter,
   CrawlJobSummary,
   ReconciliationSummary,
+  SavedReconciliation,
   JobProgress,
   JobStatus,
 } from "./adapterInterface";
@@ -191,6 +192,25 @@ export class HttpAdapter implements CrawlDataAdapter {
         body: export_,
       },
     );
+  }
+
+  /**
+   * The last cross-check saved against a job, or `null` if there is none.
+   *
+   * A reconciliation costs an export somebody produced by hand in another tool,
+   * and it used to live only in this dialog's state — closing it threw the
+   * result away. `404` is the ordinary answer for a job nobody has cross-checked
+   * and is not an error worth surfacing.
+   */
+  async getReconciliation(jobId: string): Promise<SavedReconciliation | null> {
+    try {
+      return await this.request<SavedReconciliation>(
+        `/jobs/${encodeURIComponent(jobId)}/reconciliation`,
+      );
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 404) return null;
+      throw cause;
+    }
   }
 
   async startJob(request: PageClassificationInput): Promise<string> {

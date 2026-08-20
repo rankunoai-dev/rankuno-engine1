@@ -1,6 +1,6 @@
 import { Alert, Button, Modal, Table, Tag, Upload } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReconciliationSummary } from "../../adapters/adapterInterface";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
@@ -66,10 +66,40 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
   const [busy, setBusy] = useState(false);
   const [summary, setSummary] = useState<ReconciliationSummary | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+
+  // Reload the last cross-check whenever the dialog opens. Without this, closing
+  // it discarded a result that cost an export produced by hand in another tool,
+  // and getting it back meant exporting and uploading 4 MB again.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      const adapter = useCrawlStore.getState().adapter;
+      if (!adapter?.getReconciliation) return;
+      try {
+        const saved = await adapter.getReconciliation(jobId);
+        // `cancelled` because the operator can close and reopen on another job
+        // faster than this resolves, and a late answer must not overwrite a
+        // newer one.
+        if (!cancelled && saved) {
+          setSummary(saved.summary);
+          setSavedAt(saved.created_at);
+        }
+      } catch {
+        // A missing or unreadable cross-check is not worth a banner: the drop
+        // zone below is a perfectly good next step.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, jobId]);
 
   function reset(): void {
     setSummary(null);
     setProblem(null);
+    setSavedAt(null);
     setBusy(false);
   }
 
@@ -97,6 +127,7 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
       // not exist in jsdom, so reading it here would also cost the component
       // its tests.
       const result = await reconcile(jobId, file);
+      setSavedAt(null);
       if (result === null) {
         setProblem("The reconciliation failed. See the error banner on the dashboard.");
       } else {
@@ -166,7 +197,27 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
           )}
         </>
       ) : (
-        <GapReport summary={summary} />
+        <>
+          {savedAt && (
+            /* Says plainly that this is a stored result rather than one just
+               computed, and offers the way to replace it. A cross-check read
+               back weeks later against a site that has moved on is exactly how
+               a stale number gets quoted to a client. */
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={`Saved cross-check from ${new Date(savedAt).toLocaleString()}`}
+              description="Drop a newer export to replace it."
+              action={
+                <Button size="small" onClick={reset}>
+                  New export
+                </Button>
+              }
+            />
+          )}
+          <GapReport summary={summary} />
+        </>
       )}
     </Modal>
   );

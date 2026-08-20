@@ -1097,3 +1097,57 @@ class TestScreamingFrogEndpoint:
                 headers={"Content-Type": "text/csv"},
             )
         assert response.json()["merged"] == 1
+
+
+class TestReconciliationIsKept:
+    """A cross-check must survive closing the dialog.
+
+    It costs an export somebody produced by hand in another tool, and it lived
+    only in one React component's state: navigating away discarded it, and
+    getting it back meant re-exporting and re-uploading several megabytes.
+    """
+
+    def test_a_saved_cross_check_round_trips(self, store):
+        record = store.create("tool", {"base_url": "https://e.com/"})
+        store.write_reconciliation(record.id, {"summary": {"in_both": 7}, "missed_pages": ["a"]})
+        assert store.read_reconciliation(record.id) == {
+            "summary": {"in_both": 7},
+            "missed_pages": ["a"],
+        }
+
+    def test_a_job_nobody_cross_checked_reads_as_none(self, store):
+        record = store.create("tool", {"base_url": "https://e.com/"})
+        assert store.read_reconciliation(record.id) is None
+
+    def test_writing_for_an_unknown_job_does_not_raise(self, store):
+        """Losing the ability to re-read one must not fail the request."""
+        store.write_reconciliation("nope", {"summary": {}})
+
+    def test_the_endpoint_returns_the_saved_lists_not_just_counts(self, store):
+        """The counts are the headline; the addresses are the work."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+        store.write_reconciliation(
+            record.id,
+            {"summary": {"in_both": 2}, "missed_pages": ["https://e.com/x"], "orphans": []},
+        )
+        with TestClient(app) as client:
+            body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation").json()
+        assert body["missed_pages"] == ["https://e.com/x"]
+
+    def test_an_uncross_checked_job_is_404(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation")
+        assert response.status_code == 404
+
+    def test_a_sidecar_is_not_mistaken_for_a_job(self, store):
+        """`list_jobs` reads `.jobs/` by filename and has been fooled before.
+
+        A checkpoint sidecar was once read as a job record, which meant every
+        request parsed 102 MB of JSON.
+        """
+        record = store.create("tool", {"base_url": "https://e.com/"})
+        store.write_reconciliation(record.id, {"summary": {}})
+        assert [job.id for job in store.list_jobs()] == [record.id]
