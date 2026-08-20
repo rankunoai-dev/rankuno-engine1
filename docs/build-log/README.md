@@ -63,6 +63,7 @@ which, for an AI-assisted codebase, is every session.
 | [0030](0030-ui-component-test-runner.md) | 2026-08-19 | UI Component Test Runner (Vitest + React Testing Library) | 1,320 tests, 94.98% |
 | [0031](0031-native-xlsx-excel-reconciliation-support.md) | 2026-08-20 | Native .xlsx Excel Spreadsheet Support in Reconciler & API | 1,329 tests, 95.37% |
 | [0032](0032-resume-excludes-what-was-already-fetched.md) | 2026-08-20 | Resume skips already-fetched URLs instead of re-crawling the site | 1,354 py + 23 ui |
+| [0033](0033-menus-that-declare-their-own-depth.md) | 2026-08-20 | Nav items declaring their own top level are promoted to roots | 1,369 py + 23 ui |
 
 
 ---

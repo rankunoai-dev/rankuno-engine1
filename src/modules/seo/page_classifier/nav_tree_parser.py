@@ -53,6 +53,32 @@ __all__ = [
 _logger = get_logger("modules.seo.nav_tree_parser")
 
 MAX_NAV_DEPTH = 3
+
+ROOT_LEVEL_ATTRS: dict[str, int] = {
+    # Vendor attributes, 0-based: level 0 is a top-level tab.
+    "data-menu-level": 0,
+    "data-level": 0,
+    # WAI-ARIA, 1-based by specification: `aria-level="1"` is a top-level item.
+    # Getting this wrong is not a cosmetic error — reading a compliant site's
+    # "1" as depth 1 would demote every top tab to a child of whatever preceded
+    # it, inverting the menu on exactly the sites that mark it up correctly.
+    "aria-level": 1,
+}
+"""Attributes by which markup can declare an item's own menu depth, and the
+value each uses for the top level.
+
+Read only to answer one question — *is this a top-level tab?* — never to
+override depth generally. Measured on the gep.com homepage: 26 of 609 anchors
+carry `data-menu-level`, and **none** of the 126 content links do. Only section
+labels declare a depth, so treating the attribute as the depth would put 4% of
+anchors on one scale and 96% on another and then compare them against each
+other in `_build_tree`.
+
+Why the signal is needed at all: gep.com renders its top tabs as
+`<div title="Careers">` and `<a data-bs-toggle="pill">` — neither is a link, and
+its hamburger menu is 52 sibling `<ul class="site-map-menu">` lists rather than
+one tree. No amount of DOM nesting can say those ten anchors are siblings. The
+attribute is the only place the site states it."""
 """Menu levels kept, counting the top tab as 0.
 
 Mega-menus occasionally nest four or five deep, but past three levels the
@@ -220,6 +246,12 @@ class _NavCollector(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.entries: list[tuple[int, str, str | None]] = []
+        self.declared_root_hrefs: list[str] = []
+        """Raw hrefs of anchors whose own markup calls them top-level.
+
+        Collected beside the entries rather than folded into them: depth stays
+        derived from nesting for every anchor, and this is consulted once, after
+        the tree is built, to lift the few the site declares as tabs."""
         self.containers = 0
         self._nav_depth = 0
         self._footer_depth = 0
@@ -334,6 +366,8 @@ class _NavCollector(HTMLParser):
                 # Recorded before the panel is reached: the tab always precedes
                 # the panel it opens.
                 self._panel_ids.add(match.group(1))
+            if href and _declares_root(mapping):
+                self.declared_root_hrefs.append(href)
             self._open(href)
             self._anchor_open = True
         elif tag in _HEADING_TAGS and not self._anchor_open and self._list_depth > 0:
@@ -504,6 +538,77 @@ def _build_tree(entries: list[tuple[int, str, str | None]]) -> tuple[NavNode, ..
     return tuple(roots)
 
 
+def _declares_root(attrs: dict[str, str]) -> bool:
+    """Whether an anchor's own attributes call it a top-level tab.
+
+    Each attribute is compared against its own base — 0 for the vendor ones, 1
+    for `aria-level` — so a compliant site is not inverted by the convention a
+    different one happens to use.
+
+    A non-numeric or absent value is simply not a declaration. Templates emit
+    `aria-level="{{level}}"` unrendered often enough that raising would turn a
+    templating slip into a failed crawl.
+    """
+    for attribute, top in ROOT_LEVEL_ATTRS.items():
+        raw = attrs.get(attribute)
+        if raw is None:
+            continue
+        try:
+            if int(raw.strip()) == top:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _promote_declared_roots(
+    nodes: tuple[NavNode, ...], declared: frozenset[str]
+) -> tuple[NavNode, ...]:
+    """Lift nodes the markup calls top-level out of wherever nesting put them.
+
+    Applied after the tree is built rather than by forcing depth during the
+    walk. Depth is a *position in a stream* to `_build_tree`: setting an entry
+    to 0 mid-stream closes every open level above it, so promoting gep.com's
+    `/careers` in place would have made the rest of the Company dropdown its
+    siblings instead of Company's children. Rebuilding the branch afterwards
+    moves one node and disturbs nothing else.
+
+    A promoted node keeps its own children. Its former parent may be left
+    childless, which `_prune_unlinked_leaves` removes on the next pass if it
+    also links nowhere — the reason promotion runs first.
+
+    Promoted nodes are appended after the roots nesting already found. Document
+    order is not recoverable here and inventing one would be a guess; the tree
+    is sorted for display by `dashboardModel` regardless.
+
+    Args:
+        nodes: The tree as nesting produced it.
+        declared: Resolved URLs whose anchors declared themselves top-level.
+
+    Returns:
+        The tree with those nodes at the root, each appearing exactly once.
+    """
+    if not declared:
+        # The overwhelmingly common case: no site in the corpus but gep.com
+        # declares a depth, so this returns untouched for everything else.
+        return nodes
+
+    lifted: list[NavNode] = []
+
+    def strip(branch: tuple[NavNode, ...], *, at_root: bool) -> tuple[NavNode, ...]:
+        kept: list[NavNode] = []
+        for node in branch:
+            rebuilt = node.model_copy(update={"children": strip(node.children, at_root=False)})
+            if not at_root and rebuilt.url is not None and rebuilt.url in declared:
+                lifted.append(rebuilt.model_copy(update={"depth": 0}))
+                continue
+            kept.append(rebuilt)
+        return tuple(kept)
+
+    remaining = strip(nodes, at_root=True)
+    return (*remaining, *lifted)
+
+
 def _prune_unlinked_leaves(nodes: tuple[NavNode, ...]) -> tuple[NavNode, ...]:
     """Drop nodes that neither link anywhere nor group anything.
 
@@ -635,7 +740,19 @@ def parse_navigation(html: str, base_url: str) -> NavigationTree:
             label = _label_from_url(url)
         resolved.append((depth, label, url))
 
-    roots = _prune_unlinked_leaves(_build_tree(resolved)) if resolved else ()
+    # Resolved through the same helper the entries used, so a declaration and
+    # its entry agree on what the URL is. A declared href the resolver refuses —
+    # off-host, unusable — simply never joins the set.
+    declared = frozenset(
+        url
+        for href in collector.declared_root_hrefs
+        if (url := _usable_href(href, base_url, base_host)) is not None
+    )
+    roots = (
+        _prune_unlinked_leaves(_promote_declared_roots(_build_tree(resolved), declared))
+        if resolved
+        else ()
+    )
     if roots:
         return NavigationTree(
             roots=roots,

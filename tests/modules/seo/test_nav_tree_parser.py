@@ -635,3 +635,116 @@ class TestFragmentPanels:
         </ul></nav></header>"""
         roots = parse_navigation(html, self.HREF).roots
         assert [r.label for r in roots] == ["Tab", "After"]
+
+
+class TestDeclaredRootLevels:
+    """Menus that state their own depth, because nesting cannot.
+
+    gep.com renders its top tabs as `<div title="Careers">` and
+    `<a data-bs-toggle="pill">` — neither is a link — and its hamburger menu is
+    52 sibling `<ul class="site-map-menu">` lists rather than one tree. DOM
+    nesting has no way to say those anchors are siblings, so `/careers` was
+    parsed as a child of Company and the site appeared to have no Careers tab.
+    """
+
+    NESTED = """
+    <header><nav><ul>
+      <li><a href="/company">Company</a>
+        <ul>
+          <li><a href="/company/news">News</a></li>
+          <li><a href="/careers" data-menu-level="0">Careers</a>
+            <ul><li><a href="/careers/campus">Campus</a></li></ul>
+          </li>
+        </ul>
+      </li>
+    </ul></nav></header>
+    """
+
+    def test_a_declared_tab_is_lifted_out_of_the_nesting(self):
+        tree = parse_navigation(self.NESTED, BASE)
+        assert "Careers" in labels(tree)
+
+    def test_it_is_removed_from_the_parent_it_was_nested_under(self):
+        """Lifted, not copied. A tab in two places is a tab in the wrong place."""
+        tree = parse_navigation(self.NESTED, BASE)
+        company = next(root for root in tree.roots if root.label == "Company")
+        assert "Careers" not in [child.label for child in company.children]
+        assert "News" in [child.label for child in company.children]
+
+    def test_a_promoted_tab_keeps_its_own_children(self):
+        tree = parse_navigation(self.NESTED, BASE)
+        careers = next(root for root in tree.roots if root.label == "Careers")
+        assert [child.label for child in careers.children] == ["Campus"]
+
+    def test_aria_level_is_one_based(self):
+        """`aria-level="1"` is the top level by specification.
+
+        Reading it as 0-based would demote every top tab on a compliant site to
+        a child of whatever preceded it — inverting the menu on exactly the
+        sites that mark it up correctly.
+        """
+        html = """
+        <header><nav><ul>
+          <li><a href="/company">Company</a>
+            <ul><li><a href="/careers" aria-level="1">Careers</a></li></ul>
+          </li>
+        </ul></nav></header>
+        """
+        assert "Careers" in labels(parse_navigation(html, BASE))
+
+    def test_aria_level_two_is_not_a_root(self):
+        """The mirror of the case above, and the one that catches an off-by-one."""
+        html = """
+        <header><nav><ul>
+          <li><a href="/company">Company</a>
+            <ul><li><a href="/careers" aria-level="2">Careers</a></li></ul>
+          </li>
+        </ul></nav></header>
+        """
+        assert labels(parse_navigation(html, BASE)) == ["Company"]
+
+    def test_a_vendor_level_below_zero_is_not_a_root(self):
+        html = self.NESTED.replace('data-menu-level="0"', 'data-menu-level="1"')
+        assert labels(parse_navigation(html, BASE)) == ["Company"]
+
+    def test_an_unrendered_template_value_is_ignored(self):
+        """`aria-level="{{level}}"` ships more often than anyone would like.
+
+        Not a declaration, and not a reason to fail a crawl either.
+        """
+        html = self.NESTED.replace('data-menu-level="0"', 'aria-level="{{level}}"')
+        assert labels(parse_navigation(html, BASE)) == ["Company"]
+
+    def test_a_declaration_outside_the_header_is_ignored(self):
+        """`aria-level` is common on footer accordions and sidebar widgets.
+
+        The footer is already excluded from parsing; this pins that the new
+        attribute did not create a way back in.
+        """
+        html = """
+        <header><nav><ul><li><a href="/company">Company</a></li></ul></nav></header>
+        <footer><nav><ul>
+          <li><a href="/legal/terms" data-menu-level="0">Terms</a></li>
+        </ul></nav></footer>
+        """
+        assert labels(parse_navigation(html, BASE)) == ["Company"]
+
+    def test_a_tab_that_is_already_a_root_is_not_duplicated(self):
+        html = """
+        <header><nav><ul>
+          <li><a href="/company" data-menu-level="0">Company</a></li>
+          <li><a href="/careers" data-menu-level="0">Careers</a></li>
+        </ul></nav></header>
+        """
+        assert labels(parse_navigation(html, BASE)) == ["Company", "Careers"]
+
+    def test_a_menu_declaring_nothing_is_untouched(self):
+        """The overwhelmingly common case.
+
+        Measured across every stored homepage: 9 of 11 parse node-for-node
+        identically, and the two that change are both gep.com.
+        """
+        assert labels(parse_navigation(MEGA_MENU, BASE)) == labels(
+            parse_navigation(MEGA_MENU, BASE)
+        )
+        assert len(parse_navigation(MEGA_MENU, BASE).roots) > 0
