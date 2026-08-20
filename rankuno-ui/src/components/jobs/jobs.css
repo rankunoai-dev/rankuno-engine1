@@ -202,3 +202,17 @@
   margin: 0;
   line-height: 1.5;
 }
+
+/* The cross-check download. A link rather than a button because it is one:
+   the browser saves the file, the app never holds a copy. */
+.jb-download {
+  display: inline-block;
+  margin-top: 14px;
+  font-size: 12px;
+  color: #7dd3fc;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.jb-download:hover {
+  color: #bae6fd;
+}

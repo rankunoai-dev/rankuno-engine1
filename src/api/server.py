@@ -34,15 +34,18 @@ open proxy. Local-only is the security boundary (ADR 0004).
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import threading
 import time
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import Field, ValidationError
 
@@ -300,6 +303,31 @@ class HealthView(StrictModel):
     status: str = "ok"
     active_jobs: int = 0
     max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS
+
+
+GAP_MEANINGS: Mapping[str, str] = MappingProxyType(
+    {
+        "REDIRECT": "Redirect source. Not a page; the destination is in both crawls.",
+        "OFF_SITE": "A different host. This engine is same-site by design.",
+        "CLIENT_ERROR": "4xx or 5xx when crawled. Not a page.",
+        "MEDIA_URL": "Image, stylesheet or script. Refused deliberately.",
+        "SPIDER_TRAP": "Refused by this engine's trap rules.",
+        "NON_INDEXABLE": "Live but canonicalised elsewhere or noindex.",
+        "MISSED_PAGE": "Live, indexable, in scope - and this engine did not reach it.",
+        "SITEMAP_ORPHAN": (
+            "Published but no internal link reaches it. A link crawler cannot see these."
+        ),
+        "REPEATED_SUFFIX_TRAP": "One page at many fabricated addresses, from a relative href.",
+        "MALFORMED_MARKUP": "Built from broken HTML on the site. Never a URL.",
+        "QUERY_VARIANT": "The same path with a query string the other crawler collapsed.",
+    }
+)
+"""Plain-language gloss for each gap reason, for the downloadable report.
+
+The enum names are precise and mean nothing to the client who receives the
+spreadsheet. Kept here rather than in the reconciler because this is presentation
+- the module that decides the reasons should not also own how they read.
+"""
 
 
 class ReconciliationSummary(StrictModel):
@@ -927,6 +955,64 @@ def create_app(
                 detail=f"job {job_id} has no saved reconciliation",
             )
         return saved
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation.csv")
+    def download_reconciliation(job_id: str) -> Response:
+        """The cross-check as a spreadsheet, one row per disagreement.
+
+        The saved JSON is for the panel to redraw itself; this is for a person
+        to keep. An analyst comparing two crawlers is already working in
+        Screaming Frog and Excel, so the artefact they can act on is a file that
+        opens there — not a modal they have to leave open.
+
+        One flat table rather than two, with a `found_by` column, because the
+        question is per URL: *which crawler saw this, and why did the other
+        one not?* Splitting the two sides into separate files makes the reader
+        do a join to answer it.
+
+        Only the disagreements are listed. The URLs both crawlers found are the
+        large majority and carry no finding; their count is in the summary rows
+        at the top of the file.
+
+        Raises:
+            HTTPException: `404` if this job has never been cross-checked.
+        """
+        saved = state.store.read_reconciliation(job_id)
+        if saved is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} has no saved reconciliation",
+            )
+
+        summary = saved.get("summary")
+        summary = summary if isinstance(summary, Mapping) else {}
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["url", "found_by", "reason", "meaning"])
+
+        # The counts ride in the same file as pseudo-rows. A spreadsheet handed
+        # to a client without them invites the reader to treat the gap lists as
+        # the whole site.
+        for key in ("base_url", "frog_rows", "in_both", "missed_pages", "orphans", "merged"):
+            writer.writerow([summary.get(key, ""), "summary", key, ""])
+
+        for side, rows in (
+            ("screaming_frog_only", saved.get("frog_only")),
+            ("rankuno_only", saved.get("engine_only")),
+        ):
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, Mapping):
+                    continue
+                reason = str(row.get("reason", ""))
+                writer.writerow([row.get("url", ""), side, reason, GAP_MEANINGS.get(reason, "")])
+
+        stamp = str(saved.get("created_at", ""))[:10]
+        name = f"cross-check-{job_id[:8]}-{stamp or 'undated'}.csv"
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
     async def cancel_job(job_id: str) -> JobRecord:

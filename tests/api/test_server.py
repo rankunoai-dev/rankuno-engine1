@@ -1195,3 +1195,64 @@ class TestReconciliationIsKept:
         record = store.create("tool", {"base_url": "https://e.com/"})
         store.write_reconciliation(record.id, {"summary": {}})
         assert [job.id for job in store.list_jobs()] == [record.id]
+
+
+class TestReconciliationDownload:
+    """The artefact a person keeps, as opposed to the JSON the panel redraws from."""
+
+    def _saved(self, store: DiskJobStore) -> JobRecord:
+        record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+        store.write_reconciliation(
+            record.id,
+            {
+                "summary": {"base_url": "https://e.com/", "in_both": 2, "missed_pages": 1},
+                "created_at": "2026-08-20T09:00:00+00:00",
+                "frog_only": [{"url": "https://e.com/x", "reason": "MISSED_PAGE"}],
+                "engine_only": [{"url": "https://e.com/y", "reason": "SITEMAP_ORPHAN"}],
+            },
+        )
+        return record
+
+    def test_both_sides_land_in_one_table(self, store):
+        """The question is per URL: which crawler saw this, and why not the other?
+
+        Two files would make the reader do a join to answer it.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
+
+        assert "https://e.com/x,screaming_frog_only,MISSED_PAGE" in body
+        assert "https://e.com/y,rankuno_only,SITEMAP_ORPHAN" in body
+
+    def test_the_counts_ride_along(self, store):
+        """Without them a reader treats the gap lists as the whole site."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
+        assert "2,summary,in_both," in body
+
+    def test_reasons_are_glossed_for_a_reader_who_is_not_an_engineer(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
+        assert "no internal link reaches it" in body
+
+    def test_it_downloads_as_a_named_file(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv")
+        assert response.headers["content-disposition"].startswith("attachment;")
+        assert "2026-08-20.csv" in response.headers["content-disposition"]
+
+    def test_a_job_never_cross_checked_is_404(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+        with TestClient(app) as client:
+            assert (
+                client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").status_code == 404
+            )

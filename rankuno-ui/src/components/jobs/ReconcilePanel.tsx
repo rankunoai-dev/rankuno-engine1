@@ -2,6 +2,7 @@ import { Alert, Button, Modal, Table, Tag, Upload } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 import { useEffect, useState } from "react";
 import type { ReconciliationSummary } from "../../adapters/adapterInterface";
+import { DEFAULT_API_BASE as API_BASE } from "../../adapters/httpAdapter";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
 import "./jobs.css";
@@ -217,6 +218,16 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
             />
           )}
           <GapReport summary={summary} />
+          {/* A plain anchor, not a fetch-and-blob. The endpoint already sets
+              Content-Disposition, so the browser saves the file itself and the
+              app never holds a second copy of a multi-megabyte export. */}
+          <a
+            className="jb-download"
+            href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.csv`}
+            download
+          >
+            Download the cross-check as CSV
+          </a>
         </>
       )}
     </Modal>
