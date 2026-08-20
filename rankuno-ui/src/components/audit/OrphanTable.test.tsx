@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildFindings, orphanKind, orphanPages } from "../../lib/audit";
 import { toCsv } from "../../lib/csv";
 import { crawl, page } from "../../test/factories";
+import type { FullPageIntelligenceProfile } from "../../types/schema";
 import { OrphanTable } from "./OrphanTable";
 
 /**
@@ -29,6 +30,42 @@ const cmsOrphan = page("https://e.com/draft/", {
 const linked = page("https://e.com/linked/", {
   inbound_internal_links_count: 4,
   discovery_sources: { sitemap: true, dom_link: true, cms_api: false },
+});
+
+/**
+ * A page exactly as `GET /jobs/{id}/result` serves it for a crawl stored before
+ * `discovery_sources` existed: the key is absent, not false. The endpoint returns
+ * the stored mapping without re-validating it through the model, so no default
+ * is ever filled in — which is why the generated type cannot be trusted here.
+ */
+function storedBeforeTheField(url: string): FullPageIntelligenceProfile {
+  const { discovery_sources: _dropped, ...rest } = page(url, {
+    inbound_internal_links_count: 0,
+  });
+  return rest as FullPageIntelligenceProfile;
+}
+
+describe("results that predate the discovery flags", () => {
+  it("classifies an orphan instead of throwing on the missing field", () => {
+    // The regression. Reading `page.discovery_sources.sitemap` directly threw a
+    // TypeError inside buildFindings, which took the entire app to a blank page.
+    expect(() => orphanKind(storedBeforeTheField("https://e.com/old/"))).not.toThrow();
+    expect(orphanKind(storedBeforeTheField("https://e.com/old/"))).toBe("unlinked");
+  });
+
+  it("builds the audit findings for a whole stored crawl", () => {
+    const legacy = crawl({ pages: [storedBeforeTheField("https://e.com/old/")] });
+    expect(() => buildFindings(legacy)).not.toThrow();
+    expect(buildFindings(legacy)[0]?.count).toBe(1);
+  });
+
+  it("renders the table without a provenance split", () => {
+    render(
+      <OrphanTable pages={[storedBeforeTheField("https://e.com/old/")]} baseUrl="https://e.com/" />,
+    );
+    expect(screen.getByText(/ran before the engine recorded which path/)).toBeInTheDocument();
+    expect(screen.getByText("https://e.com/old/")).toBeInTheDocument();
+  });
 });
 
 describe("orphan classification", () => {

@@ -166,3 +166,29 @@
   line-height: 1.5;
   margin: 0 0 8px;
 }
+
+.au-hint {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.au-members {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0 2px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.au-members li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.au-member-meta {
+  font-size: 10.5px;
+  color: #64748b;
+}

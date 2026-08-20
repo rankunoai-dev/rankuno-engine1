@@ -2,6 +2,7 @@ import { Empty, Tag } from "antd";
 import { useMemo, useState } from "react";
 import { buildFindings, type Finding } from "../../lib/audit";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { DuplicateTable } from "./DuplicateTable";
 import { OrphanTable } from "./OrphanTable";
 import "./audit.css";
 
@@ -66,14 +67,20 @@ export function AuditView(): JSX.Element {
                 <h3>{finding.title}</h3>
                 {/* Only findings that carry a worklist get a control. A button
                     that expands to nothing is worse than no button. */}
-                {finding.pages && (
+                {(finding.pages || finding.groups) && (
                   <button
                     type="button"
                     className="au-toggle"
                     aria-expanded={openId === finding.id}
                     onClick={() => setOpenId(openId === finding.id ? null : finding.id)}
                   >
-                    {openId === finding.id ? "Hide list" : `See all ${finding.count.toLocaleString()}`}
+                    {openId === finding.id
+                      ? "Hide list"
+                      : // "sets" for a grouped finding: its count is clusters,
+                        // not URLs, and "See all 262" beside a title reading
+                        // "1,920 URLs" invites the reader to pair the wrong two
+                        // numbers.
+                        `See all ${finding.count.toLocaleString()}${finding.groups ? " sets" : ""}`}
                   </button>
                 )}
               </header>
@@ -83,7 +90,9 @@ export function AuditView(): JSX.Element {
               </p>
               {/* Evidence, not decoration. A finding a client cannot spot-check
                   is one they are entitled to disbelieve. */}
-              {openId === finding.id && finding.pages ? (
+              {openId === finding.id && finding.groups ? (
+                <DuplicateTable groups={finding.groups} baseUrl={result.base_url} />
+              ) : openId === finding.id && finding.pages ? (
                 <OrphanTable pages={finding.pages} baseUrl={result.base_url} />
               ) : (
                 <ul className="au-examples">

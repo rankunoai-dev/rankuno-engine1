@@ -110,7 +110,15 @@ export function DashboardShell(): JSX.Element {
               the visualizer. The error banner above stays on both, because a
               rejected submission has no job row to be reported against. */}
           {view === "jobs" && <CrawlJobsView />}
-          {view === "audit" && <AuditView />}
+          {/* Boundaried for the reason stated on the boundary itself: a view
+              that reads a field an older stored result does not carry throws
+              during render, and an unboundaried throw blanks the whole
+              dashboard rather than the one panel at fault. */}
+          {view === "audit" && (
+            <ErrorBoundary label="The audit">
+              <AuditView />
+            </ErrorBoundary>
+          )}
 
           {view === "visualizer" && active?.synthetic && (
             <Alert

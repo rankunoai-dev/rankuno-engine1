@@ -4,7 +4,7 @@
 - **Scope**: Make the orphan finding a worklist an analyst can filter, read and
   export, and split it by the discovery path that found each page.
 - **Commit**: uncommitted at time of writing
-- **Quality gate**: `1372 passed` Python / `40 passed` UI / `Total coverage: 95.50%`
+- **Quality gate**: `1372 passed` Python / `43 passed` UI / `Total coverage: 95.50%`
 
 ---
 
@@ -16,14 +16,14 @@ PASSED: Lint
 Success: no issues found in 45 source files
 PASSED: Type check
 Required test coverage of 85.0% reached. Total coverage: 95.50%
-1372 passed, 1 warning in 121.77s (0:02:01)
+1372 passed, 1 warning in 110.17s (0:01:50)
 PASSED: Tests
  Test Files  6 passed (6)
-      Tests  40 passed (40)
+      Tests  43 passed (43)
 PASSED: UI Component Tests
 ```
 
-Frontend: `tsc --noEmit` exit 0, `vite build` exit 0 (10.68s).
+Frontend: `tsc --noEmit` exit 0, `vite build` exit 0 (8.89s).
 Drift audit: `PASSED: no drift detected across 81 markdown files.`
 
 ---
@@ -103,20 +103,46 @@ rows they deliberately excluded, with nothing in the file saying so.
 ## 4. Bugs found and fixed
 
 **A silent mislabelling of every crawl already on disk.** All 13 stored
-highradius results predate `discovery_sources`. They deserialise with all three
-flags `false` — indistinguishable from "found by no path at all" — so the first
-working version of this view labelled every orphan in every stored crawl `Crawl
-only` and drew a confident three-way split with 100% in the wrong bucket. It
-looked like a finding about the site. It was a gap in the data.
+highradius results predate `discovery_sources`, so none of them can be split.
+The first working version of this view labelled every orphan in every stored
+crawl `Crawl only` and drew a confident three-way split with 100% of the pages
+in the wrong bucket. It looked like a finding about the site. It was a gap in
+the data.
 
-Caught by opening a real stored crawl rather than a fixture. Fixed by
-`hasProvenance()`: when no page in the set carries any flag, the segmented
-filter and the `Why` column are withdrawn and the view states why. The list and
-the export still work — the URLs are the deliverable either way.
+Fixed by `hasProvenance()`: when no page in the set carries any flag, the
+segmented filter and the `Why` column are withdrawn and the view states why. The
+list and the export still work — the URLs are the deliverable either way.
 
 A reparse cannot recover this. `reparse_job` validates the *stored result*, so
 the defaults it fills in are the same defaults. Only a re-crawl restores the
 split, and the caveat text says so rather than implying otherwise.
+
+**The same gap, one layer deeper, blanked the entire dashboard.** Reported from
+the running app, not caught by the gate. `GET /jobs/{id}/result` returns the
+stored mapping **without re-validating it through the model** — a deliberate
+choice, documented on the endpoint, to avoid re-parsing 16 MB per fetch. The
+consequence is that no Pydantic default is ever filled in: on a stored crawl the
+key is *absent*, not `false`. Verified against the most recent highradius result
+— **12,807 of 12,807 pages carry no `discovery_sources` key**.
+
+`orphanKind` read `page.discovery_sources.sitemap` directly, which is a
+TypeError on `undefined`. It threw inside `buildFindings` during render, and
+because `AuditView` sat outside any boundary React unmounted the whole tree:
+`localhost:5173` went black with no message.
+
+Three fixes, because one was not enough:
+
+1. `discoverySourcesOf()` — the single place the flags are read, returning
+   `undefined` for a result older than the field. The cast it performs is the
+   honest one: the generated type says the field is required, and for anything
+   the engine produces today it is, but the API is not serving today's model.
+2. `AuditView` wrapped in `ErrorBoundary`, so the next instance of this costs
+   one panel and prints a reason instead of blanking the dashboard.
+3. A regression test that builds a page with the key **deleted** rather than set
+   to `false`, which is the shape the endpoint actually serves.
+
+Every test written before the report passed, because the factory always set the
+field. A fixture that is healthier than production data tests nothing.
 
 **CSV columns could shift silently.** `toCsv` quotes any field containing a
 comma, quote or newline. Without it a URL like `?a=1,2` opens in a spreadsheet
@@ -128,9 +154,14 @@ on Windows reads a UTF-8 CSV as the system codepage without one.
 
 ## 5. Corrections
 
+**This entry's own §4 previously said the mislabelling bug was "caught by
+opening a real stored crawl rather than a fixture."** That was false when
+written. It was found by reading the stored JSON, but only the labelling half —
+the crash beneath it survived into the running app and was reported by the
+operator. The corrected account is in §4.
+
 **Cycle 0034's build log records `29 passed` for the UI suite; the count is now
-40.** Ten came from `OrphanTable.test.tsx` in this cycle and one from the stale
-crawl guard. Nothing regressed — noted only because the two entries sit next to
+43.** All fourteen new UI tests are in `OrphanTable.test.tsx`. Nothing regressed — noted only because the two entries sit next to
 each other and the jump is otherwise unexplained.
 
 **A figure quoted in conversation before this cycle — "3,183 sitemap orphans on
@@ -177,6 +208,7 @@ src/modules/seo/page_classifier/signal_parsers.py   PageEvidence.discovery_sourc
 src/modules/seo/page_classifier/cascading_pipeline.py  passes both through
 rankuno-ui/src/types/schema.ts                      regenerated (exporter)
 rankuno-ui/src/lib/audit.ts                         orphanKind, orphanPages,
+                                                    discoverySourcesOf,
                                                     Finding.pages
 rankuno-ui/src/lib/csv.ts                           new — RFC 4180 export
 rankuno-ui/src/components/audit/OrphanTable.tsx     new — the worklist
@@ -184,7 +216,8 @@ rankuno-ui/src/components/audit/AuditView.tsx       drill-down toggle
 rankuno-ui/src/components/audit/audit.css           drill-down + caveat styles
 rankuno-ui/src/test/factories.ts                    new fields
 tests/modules/seo/test_discovery.py                 +3 (flags reach the profile)
-rankuno-ui/src/components/audit/OrphanTable.test.tsx  new — 11 tests
+rankuno-ui/src/components/audit/OrphanTable.test.tsx  new — 14 tests
+rankuno-ui/src/components/layout/DashboardShell.tsx  AuditView boundaried
 ```
 
 ---

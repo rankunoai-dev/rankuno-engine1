@@ -65,7 +65,8 @@ which, for an AI-assisted codebase, is every session.
 | [0032](0032-resume-excludes-what-was-already-fetched.md) | 2026-08-20 | Resume skips already-fetched URLs instead of re-crawling the site | 1,354 py + 23 ui |
 | [0033](0033-menus-that-declare-their-own-depth.md) | 2026-08-20 | Nav items declaring their own top level are promoted to roots | 1,369 py + 23 ui |
 | [0034](0034-focus-graph-overlap-in-the-others-lane.md) | 2026-08-20 | Focus graph stops stacking chain and children in the OTHERS lane | 1,369 py + 29 ui |
-| [0035](0035-the-orphan-worklist.md) | 2026-08-20 | Orphans become a filterable, exportable worklist split by discovery path | 1,372 py + 40 ui |
+| [0035](0035-the-orphan-worklist.md) | 2026-08-20 | Orphans become a filterable, exportable worklist split by discovery path | 1,372 py + 43 ui |
+| [0036](0036-duplicate-sets-as-a-worklist.md) | 2026-08-20 | Duplicate URL sets become an exportable worklist, clustered per page | 1,388 py + 57 ui |
 
 
 ---

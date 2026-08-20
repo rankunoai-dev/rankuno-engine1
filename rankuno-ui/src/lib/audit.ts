@@ -1,4 +1,8 @@
-import type { FullPageIntelligenceProfile, PageClassificationOutput } from "../types/schema";
+import type {
+  DiscoverySource,
+  FullPageIntelligenceProfile,
+  PageClassificationOutput,
+} from "../types/schema";
 
 /**
  * Site defects worth reporting to a client, derived from a finished crawl.
@@ -41,6 +45,44 @@ export interface Finding {
    * a card with examples, exactly as before.
    */
   pages?: FullPageIntelligenceProfile[];
+  /**
+   * The finding's pages clustered into the sets it is about.
+   *
+   * Set where the unit of work is a *group* rather than a page — duplicates are
+   * decided one cluster at a time, because the decision is which member of the
+   * cluster survives. A flat list of 1,920 URLs cannot express that; it is the
+   * pairing that carries the finding.
+   */
+  groups?: FullPageIntelligenceProfile[][];
+}
+
+/**
+ * The member of a duplicate set most likely to be the one worth keeping.
+ *
+ * A **suggestion**, and labelled as one wherever it is shown. It is not read
+ * from the page: `rel=canonical` is on the profile as `canonical_url`, but a
+ * site that had set it correctly would not have produced this finding, so
+ * trusting it here would recommend keeping the URL the site already lost track
+ * of. This ranks on evidence the crawl gathered independently instead.
+ *
+ * Ordered by inbound internal links first — the copy the site itself links to
+ * most is the one already holding the signal, and redirecting *to* it preserves
+ * the most. Ties break on the shortest path, then on the absence of a query
+ * string, then alphabetically so the choice is stable between runs rather than
+ * dependent on crawl order.
+ */
+export function suggestedSurvivor(
+  group: readonly FullPageIntelligenceProfile[],
+): FullPageIntelligenceProfile | undefined {
+  return [...group].sort((a, b) => {
+    const links = b.inbound_internal_links_count - a.inbound_internal_links_count;
+    if (links !== 0) return links;
+    const depth = segments(a.url).length - segments(b.url).length;
+    if (depth !== 0) return depth;
+    const query = Number(a.url.includes("?")) - Number(b.url.includes("?"));
+    if (query !== 0) return query;
+    return a.url.localeCompare(b.url);
+  })[0];
 }
 
 /**
@@ -59,9 +101,29 @@ export interface Finding {
 export type OrphanKind = "sitemap" | "cms" | "unlinked";
 
 export function orphanKind(page: FullPageIntelligenceProfile): OrphanKind {
-  if (page.discovery_sources.sitemap) return "sitemap";
-  if (page.discovery_sources.cms_api) return "cms";
+  const sources = discoverySourcesOf(page);
+  if (sources?.sitemap) return "sitemap";
+  if (sources?.cms_api) return "cms";
   return "unlinked";
+}
+
+/**
+ * The discovery flags, or `undefined` on a result that predates them.
+ *
+ * The generated type declares this field required, and for anything the engine
+ * produces today it is. It is **not** required of what the API returns:
+ * `GET /jobs/{id}/result` serves the stored mapping without re-validating it
+ * through the model, so a crawl saved before the field existed arrives with the
+ * key simply absent. Reading it directly threw a TypeError inside `buildFindings`
+ * and took the whole app to a blank page.
+ *
+ * Every read of the flags goes through here. The cast is the honest one: the
+ * value crossing this boundary is older than the type describing it.
+ */
+export function discoverySourcesOf(
+  page: FullPageIntelligenceProfile,
+): DiscoverySource | undefined {
+  return (page as { discovery_sources?: DiscoverySource }).discovery_sources;
 }
 
 /** Pages with no inbound internal link, most actionable kind first. */
@@ -295,6 +357,9 @@ function duplicateFindings(pages: readonly FullPageIntelligenceProfile[]): Findi
         const shown = group.slice(0, 3).map((page) => page.url).join("  ≡  ");
         return group.length > 3 ? `${shown}  ≡  (+${group.length - 3} more URLs)` : shown;
       }),
+      // Largest cluster first: a page reachable at seven addresses is a bigger
+      // problem than one reachable at two, and it is the one to fix first.
+      groups: [...groups].sort((a, b) => b.length - a.length),
     },
   ];
 }
