@@ -85,18 +85,23 @@ describe("ReconcilePanel", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("sends the file text for a file within the limit", async () => {
+  it("sends the file itself, not its text", async () => {
     const spy = stubReconcile();
     const { baseElement } = open();
     dropFile(baseElement as HTMLElement, csvFile(2048, "Address\nhttps://e.com/a/"));
 
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
-    const [jobId, text] = spy.mock.calls[0]!;
+    const [jobId, body] = spy.mock.calls[0]!;
     expect(jobId).toBe("job-1");
-    // The text, not a File or FormData: the endpoint takes a `text/csv` body
-    // because `python-multipart` is not a dependency of the engine.
-    expect(typeof text).toBe("string");
-    expect(text).toContain("https://e.com/a/");
+    // A Blob, not a string. Screaming Frog also exports .xlsx, and reading a
+    // workbook with `file.text()` turns it into mojibake the server cannot
+    // parse. Handing `fetch` the Blob also lets the browser stream it rather
+    // than holding a second copy of a 50 MB export in memory.
+    //
+    // Still not FormData: the endpoint takes a raw body because
+    // `python-multipart` is not a dependency of the engine.
+    expect(body).toBeInstanceOf(Blob);
+    expect(await (body as Blob).text()).toContain("https://e.com/a/");
   });
 
   it("never lets antd upload the file itself", async () => {

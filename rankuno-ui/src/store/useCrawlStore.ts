@@ -106,7 +106,7 @@ interface CrawlState {
    */
   reconcileScreamingFrog: (
     jobId: string,
-    csvText: string,
+    export_: Blob,
   ) => Promise<ReconciliationSummary | null>;
   refreshJobs: () => Promise<void>;
   loadCheckpoint: (jobId: string) => Promise<void>;
@@ -198,14 +198,14 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     }
   },
 
-  async reconcileScreamingFrog(jobId, csvText) {
+  async reconcileScreamingFrog(jobId, export_) {
     const adapter = get().adapter;
     if (!adapter?.reconcileScreamingFrog) {
       set({ error: "This data source cannot reconcile against Screaming Frog." });
       return null;
     }
     try {
-      const summary = await adapter.reconcileScreamingFrog(jobId, csvText);
+      const summary = await adapter.reconcileScreamingFrog(jobId, export_);
       // A merge creates a new job, so the list is stale the moment this
       // returns. Refreshed here rather than by the caller, or a panel that
       // forgot would leave the merged crawl unselectable.

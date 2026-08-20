@@ -18,6 +18,7 @@ from src.modules.seo.page_classifier.screaming_frog_reconciler import (
     ReconciliationReport,
     ScreamingFrogRow,
     load_screaming_frog_csv,
+    load_screaming_frog_export,
     normalise,
     reconcile,
     verify_missed_pages,
@@ -268,3 +269,70 @@ class TestBadInputIsRejectedClearly:
             )
             == 1
         )
+
+
+def workbook_bytes(rows: list[list[object]]) -> bytes:
+    """A real `.xlsx`, built the way Screaming Frog writes one."""
+    import io as _io
+
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    sheet = book.active
+    for row in rows:
+        sheet.append(row)
+    buffer = _io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
+class TestXlsxExports:
+    """Screaming Frog writes .csv and .xlsx side by side.
+
+    The spreadsheet is the one people reach for — it opens on a double-click —
+    and accepting only CSV meant the likelier file produced a parse failure that
+    surfaced as "Is the API server running?".
+    """
+
+    HEAD = ["Address", "Content Type", "Status Code", "Indexability", "Unique Inlinks"]
+    BODY = ["https://www.e.com/a", "text/html", 200, "Indexable", 7]
+
+    def test_a_workbook_reads_like_its_csv_twin(self):
+        """The format must not change a single field."""
+        xlsx = load_screaming_frog_export(workbook_bytes([self.HEAD, self.BODY]))
+        csv_text = "Address,Content Type,Status Code,Indexability,Unique Inlinks\n"
+        csv_text += "https://www.e.com/a,text/html,200,Indexable,7\n"
+        assert xlsx == load_screaming_frog_export(csv_text.encode("utf-8"))
+
+    def test_the_format_is_detected_from_content_not_a_name(self):
+        """A spreadsheet renamed `.csv` still has to read correctly.
+
+        The API receives a body with no filename, and a Content-Type set by a
+        file picker is whatever the operating system guessed.
+        """
+        (parsed,) = load_screaming_frog_export(workbook_bytes([self.HEAD, self.BODY]))
+        assert parsed.address == "https://www.e.com/a"
+        assert parsed.status_code == 200
+
+    def test_columns_are_read_by_name_in_a_workbook_too(self):
+        reordered = [["Unique Inlinks", "Address"], [4, "https://www.e.com/b"]]
+        (parsed,) = load_screaming_frog_export(workbook_bytes(reordered))
+        assert parsed.address == "https://www.e.com/b"
+        assert parsed.unique_inlinks == 4
+
+    def test_a_sheet_without_an_address_column_is_rejected(self):
+        with pytest.raises(ValueError, match="Address"):
+            load_screaming_frog_export(workbook_bytes([["Title 1"], ["Home"]]))
+
+    def test_an_archive_that_is_not_a_workbook_says_so(self):
+        """`PK` identifies a ZIP, which `.docx` and `.zip` also are."""
+        with pytest.raises(ValueError, match="not a readable Excel workbook"):
+            load_screaming_frog_export(b"PK\x03\x04 this is a zip but not a workbook")
+
+    def test_blank_trailing_rows_are_dropped(self):
+        rows = [self.HEAD, self.BODY, [None, None, None, None, None]]
+        assert len(load_screaming_frog_export(workbook_bytes(rows))) == 1
+
+    def test_text_input_still_works(self):
+        """The CSV path is unchanged; `str` bypasses detection entirely."""
+        assert len(load_screaming_frog_export("Address\nhttps://e.com/a\n")) == 1

@@ -87,11 +87,16 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
     }
     setBusy(true);
     try {
-      // `file.text()` decodes as UTF-8 and strips nothing. The byte-order mark
-      // Screaming Frog writes is handled server-side with `utf-8-sig`, so it
-      // does not matter that it survives the trip.
-      const text = await file.text();
-      const result = await reconcile(jobId, text);
+      // The `File` itself, never `file.text()` and never an ArrayBuffer.
+      // Screaming Frog exports .csv and .xlsx side by side and the spreadsheet
+      // is the one people reach for first; decoding a workbook to a string
+      // turns it into mojibake that fails to parse server-side.
+      //
+      // Handing `fetch` the Blob lets the browser stream it rather than holding
+      // a second copy of a 50 MB export in memory — and `File.arrayBuffer` does
+      // not exist in jsdom, so reading it here would also cost the component
+      // its tests.
+      const result = await reconcile(jobId, file);
       if (result === null) {
         setProblem("The reconciliation failed. See the error banner on the dashboard.");
       } else {
@@ -140,7 +145,7 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
             and posted to the local engine on this machine.
           </p>
           <Upload.Dragger
-            accept=".csv,text/csv"
+            accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             maxCount={1}
             disabled={busy}
             showUploadList={false}
@@ -153,7 +158,7 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
               return false;
             }}
           >
-            <p className="jb-drop-title">{busy ? "Reconciling…" : "Drop internal_html.csv"}</p>
+            <p className="jb-drop-title">{busy ? "Reconciling…" : "Drop internal_html.csv or .xlsx"}</p>
             <p className="jb-dim">or click to choose a file</p>
           </Upload.Dragger>
           {problem && (

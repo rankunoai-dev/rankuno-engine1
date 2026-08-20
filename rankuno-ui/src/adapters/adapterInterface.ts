@@ -122,7 +122,7 @@ export interface CrawlDataAdapter {
    * a UI that offers the control then fails on click is worse than one that
    * hides it.
    */
-  reconcileScreamingFrog?(jobId: string, csvText: string): Promise<ReconciliationSummary>;
+  reconcileScreamingFrog?(jobId: string, export_: Blob): Promise<ReconciliationSummary>;
 
   /**
    * Start a new crawl, returning its job id.

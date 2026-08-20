@@ -28,7 +28,7 @@ function focusOn(profileOverrides = {}) {
 }
 
 beforeEach(() => {
-  useDashboardStore.setState({ focus: null, expanded: new Set<number>() });
+  useDashboardStore.setState({ focus: null, open: new Set<number>() });
 });
 
 describe("NodeInspector", () => {

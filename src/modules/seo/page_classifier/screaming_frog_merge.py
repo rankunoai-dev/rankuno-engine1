@@ -39,7 +39,7 @@ from src.modules.seo.page_classifier.schemas import (
 from src.modules.seo.page_classifier.screaming_frog_reconciler import (
     ReconciliationReport,
     ScreamingFrogRow,
-    load_screaming_frog_csv,
+    load_screaming_frog_export,
     normalise,
     reconcile,
 )
@@ -131,7 +131,7 @@ def _resummarise(output: PageClassificationOutput) -> CrawlSummary:
     )
 
 
-def merge_reconciled_urls(output: PageClassificationOutput, csv_text: str) -> MergeOutcome:
+def merge_reconciled_urls(output: PageClassificationOutput, export: bytes | str) -> MergeOutcome:
     """Reconcile an export against a crawl and merge the pages it genuinely missed.
 
     Placement is done by re-running `reparse_placement` over the combined page
@@ -148,12 +148,14 @@ def merge_reconciled_urls(output: PageClassificationOutput, csv_text: str) -> Me
 
     Args:
         output: The crawl to merge into. Not modified.
-        csv_text: An `internal_html.csv` export, as text.
+        export: An `Internal → HTML` export — raw `.xlsx`/`.csv` bytes from an
+            upload, or CSV text already decoded. The format is detected from the
+            content, so a renamed file still reads correctly.
 
     Returns:
         The merged result, the reconciliation report, and the number added.
     """
-    rows = load_screaming_frog_csv(csv_text)
+    rows = load_screaming_frog_export(export)
     report = reconcile(output.base_url, tuple(page.url for page in output.pages), rows)
 
     missed = report.missed_pages

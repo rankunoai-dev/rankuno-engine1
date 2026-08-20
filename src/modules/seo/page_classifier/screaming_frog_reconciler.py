@@ -69,6 +69,7 @@ __all__ = [
     "MissedPageCheck",
     "MissedPageStatus",
     "load_screaming_frog_csv",
+    "load_screaming_frog_export",
     "normalise",
     "reconcile",
     "verify_missed_pages",
@@ -319,6 +320,139 @@ def _records(reader: csv.DictReader[str]) -> Iterator[dict[str, str | None]]:
         yield from reader
     except csv.Error as exc:
         raise ValueError(_NOT_A_CSV) from exc
+
+
+_XLSX_MAGIC = b"PK"
+"""ZIP local-file header, which is how an `.xlsx` starts.
+
+Detection is by content, not by filename. The API receives a body with no name
+attached, and a user who renames a spreadsheet to `.csv` should still get the
+right answer rather than a parse error about carriage returns.
+
+It identifies a **ZIP archive**, not specifically a spreadsheet — `.docx`,
+`.pptx` and a plain `.zip` share it. Anything else that gets this far fails in
+`openpyxl` and is reported as such, which is the honest outcome: the file really
+is an archive, and it really is not a workbook.
+"""
+
+_NEEDS_OPENPYXL = (
+    "this looks like an .xlsx file, but openpyxl is not installed. Install the "
+    "'seo' extra (pip install -e .[seo]) or export the sheet as CSV instead."
+)
+
+_COLUMNS = (
+    "Address",
+    "Content Type",
+    "Status Code",
+    "Indexability",
+    "Redirect URL",
+    "Crawl Depth",
+    "Unique Inlinks",
+)
+"""Columns read from a workbook. The export carries 145; these are the modelled ones."""
+
+
+def _rows_from_xlsx(body: bytes) -> tuple[ScreamingFrogRow, ...]:
+    """Read the first worksheet of a Screaming Frog `.xlsx` export.
+
+    `read_only=True` keeps openpyxl from building a cell object graph for the
+    whole sheet, which matters at 12,000 rows by 145 columns. It does **not**
+    make the request streaming: the caller already holds the entire body in
+    memory, because that is what reading an HTTP request gives you. The saving
+    is openpyxl's own overhead, not the upload's.
+
+    Header lookup is by name for the same reason the CSV path does it: Screaming
+    Frog reorders columns between versions, and an index would keep working
+    while silently reading the wrong ones.
+    """
+    try:
+        import openpyxl
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        raise ValueError(_NEEDS_OPENPYXL) from exc
+
+    try:
+        book = openpyxl.load_workbook(io.BytesIO(body), read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001 - openpyxl raises several unrelated types
+        raise ValueError(
+            "this file is a ZIP archive but not a readable Excel workbook. "
+            "Export Internal → HTML from Screaming Frog as .xlsx or .csv."
+        ) from exc
+
+    try:
+        sheet = book.active
+        if sheet is None:
+            raise ValueError("this workbook has no sheets.")
+        stream = sheet.iter_rows(values_only=True)
+        try:
+            header = [str(cell).strip() if cell is not None else "" for cell in next(stream)]
+        except StopIteration:
+            raise ValueError("this workbook's first sheet is empty.") from None
+
+        index = {name: header.index(name) for name in _COLUMNS if name in header}
+        if "Address" not in index:
+            raise ValueError(
+                "this sheet has no 'Address' column, so it is not a Screaming Frog "
+                "Internal → HTML export."
+            )
+
+        def cell(values: tuple[object, ...], name: str) -> str:
+            position = index.get(name)
+            if position is None or position >= len(values) or values[position] is None:
+                return ""
+            return str(values[position]).strip()
+
+        rows: list[ScreamingFrogRow] = []
+        for values in stream:
+            address = cell(values, "Address")
+            if not address:
+                continue
+            depth = cell(values, "Crawl Depth")
+            rows.append(
+                ScreamingFrogRow(
+                    address=address,
+                    status_code=_as_int(cell(values, "Status Code")),
+                    content_type=cell(values, "Content Type"),
+                    indexability=cell(values, "Indexability"),
+                    redirect_url=cell(values, "Redirect URL"),
+                    crawl_depth=_as_int(depth) if depth else None,
+                    unique_inlinks=_as_int(cell(values, "Unique Inlinks")),
+                )
+            )
+    finally:
+        # A read-only workbook holds the archive open; without this the handle
+        # survives the request on Windows and the file cannot be replaced.
+        book.close()
+
+    _logger.info("screaming_frog_loaded", extra={"rows": len(rows), "format": "xlsx"})
+    return tuple(rows)
+
+
+def load_screaming_frog_export(body: bytes | str) -> tuple[ScreamingFrogRow, ...]:
+    """Read a Screaming Frog export in whichever format it arrived.
+
+    Screaming Frog writes `.csv` and `.xlsx` side by side into the same folder,
+    and the spreadsheet is the one a person reaches for first — it opens on a
+    double-click. Accepting only CSV meant the likelier file produced a parse
+    failure, and for one upload it surfaced as "Is the API server running?".
+
+    Args:
+        body: Raw bytes from an upload, or text already decoded.
+
+    Returns:
+        One row per address.
+
+    Raises:
+        ValueError: If the payload is neither a readable workbook nor a CSV, or
+            if it is a workbook and `openpyxl` is not installed.
+    """
+    if isinstance(body, str):
+        return load_screaming_frog_csv(body)
+    if body.startswith(_XLSX_MAGIC):
+        return _rows_from_xlsx(body)
+    # `utf-8-sig`: Screaming Frog writes a byte-order mark, and without this the
+    # first header keeps an invisible prefix, never matches "Address", and the
+    # whole export reconciles to nothing.
+    return load_screaming_frog_csv(body.decode("utf-8-sig", errors="replace"))
 
 
 def _frog_reason(row: ScreamingFrogRow, base_host: str) -> FrogGapReason:

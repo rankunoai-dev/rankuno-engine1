@@ -178,11 +178,18 @@ export class HttpAdapter implements CrawlDataAdapter {
    */
   async reconcileScreamingFrog(
     jobId: string,
-    csvText: string,
+    export_: Blob,
   ): Promise<ReconciliationSummary> {
     return this.request<ReconciliationSummary>(
       `/jobs/${encodeURIComponent(jobId)}/reconcile/screaming-frog`,
-      { method: "POST", headers: { "Content-Type": "text/csv" }, body: csvText },
+      {
+        method: "POST",
+        // Deliberately generic. The server detects .csv from .xlsx by reading
+        // the first bytes, because a Content-Type set by a file picker is
+        // whatever the operating system guessed and a renamed file lies.
+        headers: { "Content-Type": "application/octet-stream" },
+        body: export_,
+      },
     );
   }
 

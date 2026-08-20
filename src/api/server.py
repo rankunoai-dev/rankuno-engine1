@@ -843,11 +843,13 @@ def create_app(
                 detail="this job's result predates the current output contract",
             ) from exc
 
-        # `utf-8-sig`: Screaming Frog writes a byte-order mark, and without this
-        # the first header keeps an invisible prefix, never matches "Address",
-        # and the whole export silently reconciles to nothing.
+        # Raw bytes, not text. The body may be an `.xlsx`, and decoding a
+        # spreadsheet to a string turns it into mojibake that fails to parse —
+        # which is how a dropped workbook once surfaced as "Is the API server
+        # running?". Format detection belongs with the parser, which reads the
+        # content rather than trusting a filename or a Content-Type header.
         try:
-            outcome = merge_reconciled_urls(before, body.decode("utf-8-sig", errors="replace"))
+            outcome = merge_reconciled_urls(before, body)
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
