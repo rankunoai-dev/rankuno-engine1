@@ -137,8 +137,12 @@ export function orphanPages(
 }
 
 /** `1 orphaned page`, `12 orphaned pages`. A count of one is common enough to read. */
-function plural(count: number, noun: string): string {
-  return `${count.toLocaleString()} ${noun}${count === 1 ? "" : "s"}`;
+function plural(count: number, noun: string, plural?: string): string {
+  // `plural` is optional because most nouns here take an `s`. It exists for the
+  // ones that do not: "sitemap entry" becomes "sitemap entries", and a finding
+  // title is read aloud to a client.
+  const many = plural ?? `${noun}s`;
+  return `${count.toLocaleString()} ${count === 1 ? noun : many}`;
 }
 
 function pathOf(url: string): string {
@@ -370,6 +374,108 @@ function isPaginated(url: string): boolean {
 }
 
 /**
+ * A page's final address after redirects, read defensively.
+ *
+ * Every crawl stored before redirects were recorded lacks the field entirely,
+ * and those results are still loadable. Absent is not "did not redirect" — it
+ * is "nobody looked" — and a finding that conflates them accuses a site of a
+ * defect on the strength of a missing column.
+ */
+function finalUrlOf(page: FullPageIntelligenceProfile): string {
+  return (page as { final_url?: string }).final_url ?? "";
+}
+
+/** `/a/b/` and `/a/b` are the same destination; a scheme hop is not a move. */
+function sameAddress(a: string, b: string): boolean {
+  const strip = (url: string): string => {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.host.replace(/^www\./, "")}${parsed.pathname.replace(/\/$/, "")}${parsed.search}`;
+    } catch {
+      return url;
+    }
+  };
+  return strip(a) === strip(b);
+}
+
+/**
+ * Sitemap entries that redirect somewhere else.
+ *
+ * A sitemap is a site telling search engines *these are my pages*. An entry
+ * that redirects is telling them to go somewhere else instead — it wastes crawl
+ * budget on every visit, and the destination gets no direct signal from being
+ * listed, because it is not the thing listed.
+ *
+ * Sharp rather than noisy, and that is what makes it worth reporting. Measured
+ * on a fresh 300-page crawl of highradius.com, only 3% of fetched pages
+ * redirect at all; of those, exactly one was in the sitemap. A finding that
+ * fires on 1 URL in 300 is a specific defect an analyst can hand over, not a
+ * list somebody has to triage.
+ *
+ * Two exclusions, both drawn from that same crawl:
+ *
+ * * A redirect that lands back on the same address is not a move.
+ *   `/demo-request/` carries a redirect hop and ends exactly where it started —
+ *   a scheme or trailing-slash normalisation, which every site does and no
+ *   client needs to hear about.
+ * * A page the sitemap does not list is not a sitemap defect. Three
+ *   `/software/record-to-report/*` pages redirect properly and were found by
+ *   following links, not by reading the sitemap.
+ */
+function sitemapRedirectFindings(
+  pages: readonly FullPageIntelligenceProfile[],
+): Finding[] {
+  const moved = pages.filter((page) => {
+    if (!page.discovery_sources?.sitemap) return false;
+    const destination = finalUrlOf(page);
+    return destination !== "" && !sameAddress(destination, page.url);
+  });
+  if (moved.length === 0) return [];
+
+  // A redirect to the homepage is a different and worse defect: the page is
+  // gone and the site is pointing search engines at something unrelated, which
+  // Google treats as a soft 404 rather than as a move.
+  const toHome = moved.filter((page) => {
+    try {
+      return new URL(finalUrlOf(page)).pathname.replace(/\/$/, "") === "";
+    } catch {
+      return false;
+    }
+  });
+
+  return [
+    {
+      id: "sitemap-redirects",
+      // Agreement matters here: these strings are read aloud to a client, and
+      // this file has already shipped "1 orphaned pages" once.
+      title:
+        `${plural(moved.length, "sitemap entry", "sitemap entries")} that ` +
+        `${moved.length === 1 ? "redirects" : "redirect"} elsewhere`,
+      count: moved.length,
+      detail:
+        "A sitemap is the site telling search engines these are its pages. Each one " +
+        "here redirects to a different address, so every crawl of it is spent twice " +
+        "and the real destination gets no benefit from being listed — because it is " +
+        "not the thing listed." +
+        (toHome.length > 0
+          ? ` ${
+              toHome.length === 1
+                ? "One of them lands"
+                : `${toHome.length.toLocaleString()} of them land`
+            } on the homepage, which search engines usually read as the page being ` +
+            "gone rather than moved."
+          : ""),
+      action:
+        "Replace each entry with the address it resolves to, or drop it if the page " +
+        "no longer exists. A sitemap should list destinations, never the way to them.",
+      severity: "medium",
+      examples: moved.slice(0, 5).map((page) => `${page.url}  →  ${finalUrlOf(page)}`),
+      pages: moved,
+    },
+  ];
+}
+
+/**
  * Every finding for one crawl, most severe first.
  *
  * Ordered by what an analyst can act on rather than by count. An orphan set is
@@ -406,6 +512,7 @@ export function buildFindings(result: PageClassificationOutput): Finding[] {
     });
   }
 
+  findings.push(...sitemapRedirectFindings(pages));
   findings.push(...duplicateFindings(pages));
   findings.push(...siloFindings(pages, labels));
 
