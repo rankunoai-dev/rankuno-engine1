@@ -48,6 +48,8 @@ __all__ = [
     "is_spider_trap",
     "is_locale_segment",
     "MARKUP_MARKERS",
+    "STRUCTURAL_ESCAPES",
+    "decode_percent_escapes",
     "is_tracking_param",
     "normalize_path",
     "normalize_url",
@@ -319,12 +321,101 @@ def strip_locale_prefix(
     return "/" + "/".join(remainder) + trailing, segments[0].lower()
 
 
+STRUCTURAL_ESCAPES: frozenset[str] = frozenset({"%2F", "%3F", "%23", "%25", "%5C"})
+"""Percent-escapes that must survive decoding, because decoding them changes
+what the URL *means* rather than how it is spelled.
+
+`/a%2Fb` is one path segment containing a slash; `/a/b` is two segments. RFC 3986
+§2.2 calls these reserved for exactly this reason — the escaped and unescaped
+forms are not equivalent, and folding them together would merge two different
+addresses into one node. `%25` is here because it is the escape character itself:
+decoding it first would make `%2520` decode twice.
+"""
+
+_ESCAPE_RUN = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def decode_percent_escapes(path: str) -> str:
+    """Decode the escapes in a path that carry no structural meaning.
+
+    RFC 3986 §6.2.2.2: percent-encoding an octet that did not need encoding does
+    not create a different URL. `%6D%79` and `my` address the same resource, and
+    so do `%E2%80%91` and a raw `‑` (U+2011) — the browser encodes the raw form
+    before sending it, so the server receives the same bytes either way.
+
+    The engine did not know that. Measured across 65 stored crawls and 476,067
+    URLs, three pages were held twice under two spellings of one address, and the
+    audit reported each pair to the client as a duplicate-content defect *on
+    their site*. One of them reached a client report:
+
+        gep.com/blog/technology/procurement%E2%80%91ai%E2%80%91agents-…
+        gep.com/blog/technology/procurement‑ai‑agents-…
+
+    **Runs are decoded whole, never escape by escape.** A UTF-8 character is
+    several octets — `%E2%80%91` is three — and `unquote("%E2")` alone yields a
+    replacement character, silently corrupting the key it was meant to repair.
+    An earlier draft of this function did exactly that and merged nothing while
+    appearing to work.
+
+    Invalid UTF-8 is left encoded rather than replaced. A path that does not
+    decode is not a path whose meaning we know, and `errors="replace"` would map
+    several distinct broken URLs onto one key.
+
+    Args:
+        path: URL path, encoded or not.
+
+    Returns:
+        The path with non-structural escapes decoded. Structural ones
+        (`STRUCTURAL_ESCAPES`) are preserved exactly.
+    """
+
+    def decode_run(match: re.Match[str]) -> str:
+        out: list[str] = []
+        pending: list[str] = []
+        for escape in _ESCAPE.findall(match.group(0)):
+            if escape.upper() in STRUCTURAL_ESCAPES:
+                out.append(_decode(pending))
+                pending = []
+                out.append(escape)
+            else:
+                pending.append(escape)
+        out.append(_decode(pending))
+        return "".join(out)
+
+    return _ESCAPE_RUN.sub(decode_run, path)
+
+
+def _decode(escapes: list[str]) -> str:
+    """Decode consecutive escapes as one UTF-8 sequence, or leave them alone."""
+    if not escapes:
+        return ""
+    joined = "".join(escapes)
+    try:
+        return unquote(joined, encoding="utf-8", errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return joined
+
+
 def normalize_path(path: str) -> str:
-    """Canonicalise a path: lowercase, single trailing slash, no empty segments."""
-    segments = [s for s in path.split("/") if s]
-    if not segments:
+    """Canonicalise a path to its dedup form.
+
+    Decoded, lowercased, one trailing slash, no empty segments.
+
+    Decoding runs first and is the reason the split on `/` is safe to do
+    afterwards: `decode_percent_escapes` preserves `%2F`, so nothing it returns
+    can grow a segment boundary that was not already there.
+
+    Segments are stripped of surrounding whitespace, which decoding can expose —
+    `/youtube-ranking-factors%20` becomes a segment with a trailing space, and no
+    server serves a different page at that address. Interior spaces are kept:
+    `Infosys ESG - climate change.pdf` is a real published filename.
+    """
+    segments = [s.strip() for s in decode_percent_escapes(path).split("/")]
+    kept = [s for s in segments if s]
+    if not kept:
         return "/"
-    return "/" + "/".join(s.lower() for s in segments) + "/"
+    return "/" + "/".join(s.lower() for s in kept) + "/"
 
 
 _logger = get_logger("modules.seo.url_rules")

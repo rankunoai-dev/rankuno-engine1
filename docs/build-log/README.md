@@ -67,6 +67,7 @@ which, for an AI-assisted codebase, is every session.
 | [0034](0034-focus-graph-overlap-in-the-others-lane.md) | 2026-08-20 | Focus graph stops stacking chain and children in the OTHERS lane | 1,369 py + 29 ui |
 | [0035](0035-the-orphan-worklist.md) | 2026-08-20 | Orphans become a filterable, exportable worklist split by discovery path | 1,372 py + 43 ui |
 | [0036](0036-duplicate-sets-as-a-worklist.md) | 2026-08-20 | Duplicate URL sets become an exportable worklist, clustered per page | 1,388 py + 57 ui |
+| [0037](0037-one-address-spelled-two-ways.md) | 2026-08-20 | normalize_path folds percent-encoding, ending a false duplicate finding | 1,398 py + 65 ui |
 
 
 ---

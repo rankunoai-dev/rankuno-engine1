@@ -9,6 +9,7 @@ from src.modules.seo.page_classifier.schemas import (
     PrimaryPageType,
 )
 from src.modules.seo.page_classifier.url_rules import (
+    decode_percent_escapes,
     depth_of,
     is_crawlable_url,
     is_faceted_filter,
@@ -540,3 +541,85 @@ class TestIsMalformedUrl:
     def test_an_unparseable_url_is_not_claimed_here(self):
         """`safe_split` refuses it earlier; claiming it would misattribute it."""
         assert is_malformed_url("http://[abc") is False
+
+
+class TestPercentEscapeDecoding:
+    """One address spelled two ways is one page.
+
+    RFC 3986 §6.2.2.2. Reported from a live gep.com audit, where the same blog
+    post appeared under a percent-encoded and a raw non-breaking hyphen and was
+    published to the client as a duplicate-content defect on their site.
+    """
+
+    def test_the_gep_pair_lands_on_one_key(self):
+        encoded = "https://www.gep.com/blog/technology/procurement%E2%80%91ai%E2%80%91agents"
+        raw = "https://www.gep.com/blog/technology/procurement\u2011ai\u2011agents"
+        assert normalize_url(encoded) == normalize_url(raw)
+
+    def test_a_multi_byte_sequence_decodes_whole(self):
+        """The trap that made an earlier attempt at this a no-op.
+
+        `%E2%80%91` is three octets of one character. Decoding escape by escape
+        yields replacement characters and quietly corrupts the key it was meant
+        to repair, while still appearing to do something.
+        """
+        assert decode_percent_escapes("/a%E2%80%91b") == "/a\u2011b"
+        assert "\ufffd" not in decode_percent_escapes("/a%E2%80%91b")
+
+    def test_encoded_unreserved_ascii_folds(self):
+        """`%6D%79` is `my`. Observed on kinsta.com."""
+        assert normalize_url("https://kinsta.com/%6D%79%6B%69%6E%73%74%61/") == normalize_url(
+            "https://kinsta.com/mykinsta/"
+        )
+
+    def test_an_encoded_slash_is_not_a_separator(self):
+        """The reason decoding cannot be blanket.
+
+        `/a%2Fb` is one segment containing a slash and `/a/b` is two. Folding
+        them would merge two different addresses onto one node.
+        """
+        assert normalize_url("https://e.com/a%2Fb/") != normalize_url("https://e.com/a/b/")
+
+    def test_the_escape_character_itself_is_preserved(self):
+        """`%2520` must decode once to `%20`, never twice to a space."""
+        assert decode_percent_escapes("/a%2520b") == "/a%2520b"
+
+    def test_invalid_utf8_is_left_encoded_rather_than_replaced(self):
+        """Distinct broken URLs must stay distinct.
+
+        `errors="replace"` would map every undecodable sequence onto U+FFFD and
+        collapse unrelated URLs onto one key.
+        """
+        assert decode_percent_escapes("/bad%FF%FE/") == "/bad%FF%FE/"
+        assert normalize_url("https://e.com/bad%FF/") != normalize_url("https://e.com/bad%FE/")
+
+    def test_a_decoded_trailing_space_does_not_fork_a_page(self):
+        """Observed on backlinko.com: `/x%20` and `/x` are one page."""
+        assert normalize_url("https://backlinko.com/youtube-ranking-factors%20") == normalize_url(
+            "https://backlinko.com/youtube-ranking-factors"
+        )
+
+    def test_an_interior_space_is_part_of_the_filename(self):
+        """Whitespace inside a segment is real and must survive.
+
+        387 URLs across the stored corpus carry a space that belongs to a
+        published filename — `Infosys ESG - climate change.pdf` among them.
+        Stripping whitespace anywhere but the segment edges would delete them.
+        """
+        assert normalize_path("/pdf/Infosys%20ESG%20-%20climate%20change.pdf") == (
+            "/pdf/infosys esg - climate change.pdf/"
+        )
+
+    def test_a_path_with_no_escapes_is_untouched(self):
+        """The overwhelmingly common case must cost nothing and change nothing."""
+        assert decode_percent_escapes("/blog/post/") == "/blog/post/"
+        assert normalize_url("https://e.com/blog/post/") == "https://e.com/blog/post/"
+
+    def test_the_menu_matcher_agrees_with_the_page_key(self):
+        """`_path_key` and `normalize_url` both go through `normalize_path`.
+
+        A menu href spelled one way and a crawled URL spelled the other would
+        otherwise fail to match, and the page would lose its navigation
+        placement for a reason invisible in the report.
+        """
+        assert normalize_path("/a%E2%80%91b") == normalize_path("/a‑b")
