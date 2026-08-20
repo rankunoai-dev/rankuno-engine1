@@ -60,6 +60,40 @@ function clampX(x: number, width: number): number {
   return Math.min(Math.max(x, min), max);
 }
 
+/**
+ * Centre of one row inside a lane, counted from the lane's top edge.
+ *
+ * Rows are placed against the top rather than spread around the centre because
+ * the ancestor chain occupies row 0 whenever it shares the lane with the
+ * children. Centring the chain and the children independently is what let them
+ * land on the same pixel: everything under OTHERS is assigned the OTHERS lane
+ * by design, so on that branch the focused card, its ancestors and all ten of
+ * its children were drawn at one lane centre, on top of each other, with the
+ * wires between them running flat across the whole stage.
+ *
+ * Args:
+ *   laneCentre: Measured vertical centre of the lane.
+ *   laneHeight: Measured height. Zero before the first measurement, in which
+ *     case the block is centred on `laneCentre` and rows still separate.
+ *   rowCount: Total rows the lane holds, chain row included.
+ *   rowSpacing: Vertical distance between row centres.
+ *   row: Zero-based row index.
+ *
+ * Returns:
+ *   The y coordinate for that row's card centres.
+ */
+export function rowCentre(
+  laneCentre: number,
+  laneHeight: number,
+  rowCount: number,
+  rowSpacing: number,
+  row: number,
+): number {
+  const block = rowSpacing * rowCount;
+  const top = laneHeight > 0 ? laneCentre - laneHeight / 2 : laneCentre - block / 2;
+  return top + (laneHeight > 0 ? (laneHeight - block) / 2 : 0) + (row + 0.5) * rowSpacing;
+}
+
 const NODE_CLASS = ["g0", "g1", "g2", "g3", "go"];
 const LANE_CLASS = ["ln0", "ln1", "ln2", "ln3", "lno"];
 
@@ -133,8 +167,25 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
   // `width` is 0 on the first paint, before the stage has been measured. A
   // typical stage width is assumed for that one frame so the lane does not
   // start at its one-column height and visibly jump.
-  const columns = columnsFor(geometry.width || 900, shown.length);
-  const rowCount = Math.max(1, Math.ceil(shown.length / columns));
+  // The pager is laid out as an ordinary card, in the slot after the last
+  // child. Floating it at `width - 110` put it on top of whatever card already
+  // occupied that corner, and off the lane entirely once the rows grew.
+  const hasPager = remaining > 0 || safePage > 0;
+  const slots = shown.length + (hasPager ? 1 : 0);
+
+  // A node and its children can share a lane. Everything beneath OTHERS is
+  // assigned the OTHERS lane by design — they are there precisely because they
+  // have no navigation depth — so on that branch the focused card, its
+  // ancestors and all ten children were positioned at the same lane centre and
+  // drawn on top of each other, with the wires between them running flat
+  // across the whole stage. Reserving the first row for the chain separates
+  // them.
+  const chainSharesLane = chain.some((index) => model.nodes[index]?.lv === expandedLane);
+  const reservedRows = chainSharesLane ? 1 : 0;
+
+  const columns = columnsFor(geometry.width || 900, slots);
+  const childRows = Math.max(1, Math.ceil(slots / columns));
+  const rowCount = reservedRows + childRows;
   // Capped at exactly what is left once the other lanes take their minimum, so
   // a tall expanded lane can never push the bottom band out of the stage. A
   // fractional cap looked safe and was not: at five lanes it still overflowed.
@@ -190,6 +241,7 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
   }, [measure]);
 
   const positions = new Map<number, Point>();
+  let pagerPoint: Point | undefined;
   const { centres, heights, width } = geometry;
 
   // Derived from the height the lane actually ended up with, not from the
@@ -202,6 +254,9 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
       ? Math.min(ROW_HEIGHT, Math.max(24, (laneHeight - 16) / rowCount))
       : ROW_HEIGHT;
 
+  const rowY = (row: number): number =>
+    rowCentre(centres[expandedLane] ?? 0, laneHeight, rowCount, rowSpacing, row);
+
   if (centres.length > 0 && width > 0) {
     chain.forEach((index, position) => {
       const lane = model.nodes[index]!.lv;
@@ -213,23 +268,30 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
         chain.length === 1
           ? width / 2
           : LANE_TAB_WIDTH + CARD_WIDTH / 2 + position * step;
-      positions.set(index, { x: clampX(raw, width), y: centres[lane] ?? 0 });
+      positions.set(index, {
+        x: clampX(raw, width),
+        // Row 0 of the expanded lane when it shares it; its own lane centre
+        // otherwise. Only the expanded lane has rows to sit on.
+        y: lane === expandedLane && chainSharesLane ? rowY(0) : (centres[lane] ?? 0),
+      });
     });
 
     const usable = width - LANE_TAB_WIDTH * 2;
 
-    shown.forEach((kid, position) => {
-      const lane = model.nodes[kid]!.lv;
+    /** Centre of grid slot `position`, in the expanded lane. */
+    const slotPoint = (position: number): Point => {
       const row = Math.floor(position / columns);
       const column = position % columns;
       // Cards in the final row are centred against a full row's spacing, so a
       // partial row does not stretch its cards apart.
       const raw = LANE_TAB_WIDTH + (usable / (columns + 1)) * (column + 1);
-      positions.set(kid, {
-        x: clampX(raw, width),
-        y: (centres[lane] ?? 0) + (row - (rowCount - 1) / 2) * rowSpacing,
-      });
+      return { x: clampX(raw, width), y: rowY(reservedRows + row) };
+    };
+
+    shown.forEach((kid, position) => {
+      positions.set(kid, slotPoint(position));
     });
+    if (hasPager) pagerPoint = slotPoint(shown.length);
   }
 
   const wires: JSX.Element[] = [];
@@ -298,14 +360,11 @@ export function FocusGraphStage({ model }: Props): JSX.Element {
             );
           })}
 
-          {(remaining > 0 || safePage > 0) && focusPoint && (
+          {hasPager && pagerPoint && (
             <button
               type="button"
               className="gn pager"
-              style={{
-                left: width - 110,
-                top: (centres[expandedLane] ?? 0) + (rowCount * rowSpacing) / 2 + 4,
-              }}
+              style={{ left: pagerPoint.x, top: pagerPoint.y }}
               onClick={() => focus !== null && nextChildPage(focus, pageCount)}
             >
               <div className="gt">

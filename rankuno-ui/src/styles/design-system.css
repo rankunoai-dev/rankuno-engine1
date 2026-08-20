@@ -770,11 +770,15 @@ svg.wires {
   pointer-events: none;
   z-index: 2;
 }
+/* Ten edges leave a single parent, so each one has to be quiet enough that
+   the fan reads as texture rather than as ten things to look at. The selected
+   path stays at full strength below, which is the one an operator is
+   following. */
 .wire {
   fill: none;
   stroke: #7d8aa0;
-  stroke-width: 1.3;
-  opacity: 0.55;
+  stroke-width: 1;
+  opacity: 0.3;
 }
 .wire.hot {
   stroke: var(--l1f);
