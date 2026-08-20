@@ -37,6 +37,8 @@ export function page(
     is_cross_silo_link: false,
     inbound_internal_links_count: 0,
     outbound_internal_links_count: 0,
+    discovery_sources: { sitemap: false, dom_link: true, cms_api: false },
+    sitemap_source: null,
     signals_evaluated: [],
     final_confidence_score: 0.9,
     consensus_method: "LAYER1_STRUCTURAL",

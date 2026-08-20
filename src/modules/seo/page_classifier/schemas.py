@@ -35,6 +35,7 @@ __all__ = [
     "SIGNAL_WEIGHTS",
     "ConsensusMethod",
     "ConversionRole",
+    "DiscoverySource",
     "FullPageIntelligenceProfile",
     "HierarchyLevel",
     "PrimaryPageType",
@@ -246,6 +247,34 @@ class SignalScore(StrictModel):
         return self.confidence * self.weight
 
 
+class DiscoverySource(StrictModel):
+    """Which paths surfaced a URL.
+
+    Kept as flags rather than a single winner, because agreement between paths
+    is itself information: a URL found by all three is certainly real, while one
+    found only by a DOM link may be a generated artefact.
+
+    Lives here rather than in `discovery` because it is no longer private to the
+    crawl. `FullPageIntelligenceProfile` carries it to the UI, and an orphan
+    that only a sitemap knows about is a different finding from one only the CMS
+    knows about — a distinction the consumer cannot draw without these flags.
+
+    Attributes:
+        sitemap: Listed in an XML sitemap.
+        dom_link: Reached by following a link from another page.
+        cms_api: Present in the CMS database.
+    """
+
+    sitemap: bool = False
+    dom_link: bool = False
+    cms_api: bool = False
+
+    @property
+    def count(self) -> int:
+        """How many independent paths surfaced this URL."""
+        return sum((self.sitemap, self.dom_link, self.cms_api))
+
+
 class FullPageIntelligenceProfile(StrictModel):
     """The complete classification of a single URL.
 
@@ -293,6 +322,14 @@ class FullPageIntelligenceProfile(StrictModel):
         inbound_internal_links_count: Signal 5 input. A page in a site-wide
             header accrues one per page on the site.
         outbound_internal_links_count: Internal links emitted.
+        discovery_sources: Which of the three discovery paths surfaced this URL.
+            Carried onto the profile so a consumer can separate a page the site
+            publishes but never links — a sitemap entry with no inbound link —
+            from one only the CMS database knows about. Both have zero inbound
+            links and they are not the same finding.
+        sitemap_source: Filename of the grouped sitemap that listed this URL,
+            when one did. `resource-pages-sitemap.xml` and `blog-pages-sitemap.xml`
+            are how an analyst tells which content team owns a page.
         signals_evaluated: Every signal that produced an opinion.
         final_confidence_score: Combined confidence after consensus.
         consensus_method: Which cascade layer settled it.
@@ -321,6 +358,9 @@ class FullPageIntelligenceProfile(StrictModel):
     is_cross_silo_link: bool = False
     inbound_internal_links_count: int = Field(default=0, ge=0)
     outbound_internal_links_count: int = Field(default=0, ge=0)
+
+    discovery_sources: DiscoverySource = DiscoverySource()
+    sitemap_source: str | None = Field(default=None, max_length=200)
 
     signals_evaluated: tuple[SignalScore, ...] = Field(min_length=1)
     final_confidence_score: float = Field(ge=0.0, le=1.0)

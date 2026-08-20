@@ -31,6 +31,7 @@ from pydantic import Field
 
 from src.core.schemas import StrictModel
 from src.modules.seo.page_classifier.schemas import (
+    DiscoverySource,
     HierarchyLevel,
     PrimaryPageType,
     SignalScore,
@@ -158,6 +159,11 @@ class PageEvidence(StrictModel):
         html: Raw HTML, if fetched. Absent for URLs resolved before fetching.
         nav_links: Links extracted from the site's navigation landmarks. Site
             level, not page level — the same tree for every page on the site.
+        discovery_sources: Which paths surfaced this URL. Carried through the
+            classification so the finished profile can say whether a page with
+            no inbound links is a published-but-unlinked sitemap entry or a CMS
+            record nothing ever linked. No signal reads it — it is provenance
+            travelling with the evidence, not evidence itself.
         sitemap_source: Filename of the grouped sitemap that listed this URL.
         cms_record: Parsed CMS API record for this URL, if one was found.
         inbound_internal_links: Count of internal links pointing here.
@@ -170,6 +176,7 @@ class PageEvidence(StrictModel):
     normalized_path: str = Field(min_length=1)
     html: str | None = None
     nav_links: tuple[NavLink, ...] = ()
+    discovery_sources: DiscoverySource = DiscoverySource()
     sitemap_source: str | None = None
     cms_record: CmsRecord | None = None
     inbound_internal_links: int = Field(default=0, ge=0)

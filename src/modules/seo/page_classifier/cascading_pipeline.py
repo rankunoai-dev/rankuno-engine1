@@ -322,6 +322,8 @@ def classify_page(
         conversion_role=infer_conversion_role(page_type),
         inbound_internal_links_count=evidence.inbound_internal_links,
         outbound_internal_links_count=evidence.outbound_internal_links,
+        discovery_sources=evidence.discovery_sources,
+        sitemap_source=evidence.sitemap_source,
         signals_evaluated=evaluated,
         final_confidence_score=outcome.confidence,
         consensus_method=outcome.method,

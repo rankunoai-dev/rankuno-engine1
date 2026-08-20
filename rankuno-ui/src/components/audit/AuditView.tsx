@@ -1,7 +1,8 @@
 import { Empty, Tag } from "antd";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { buildFindings, type Finding } from "../../lib/audit";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { OrphanTable } from "./OrphanTable";
 import "./audit.css";
 
 const SEVERITY_COLOUR: Record<Finding["severity"], string> = {
@@ -25,6 +26,9 @@ const SEVERITY_COLOUR: Record<Finding["severity"], string> = {
 export function AuditView(): JSX.Element {
   const result = useCrawlStore((state) => state.result);
   const findings = useMemo(() => (result ? buildFindings(result) : []), [result]);
+  // Collapsed by default. The audit is read top to bottom as a summary, and a
+  // 2,000-row table opened unasked buries the findings below it.
+  const [openId, setOpenId] = useState<string | null>(null);
 
   if (!result) {
     return (
@@ -60,6 +64,18 @@ export function AuditView(): JSX.Element {
               <header>
                 <Tag color={SEVERITY_COLOUR[finding.severity]}>{finding.severity}</Tag>
                 <h3>{finding.title}</h3>
+                {/* Only findings that carry a worklist get a control. A button
+                    that expands to nothing is worse than no button. */}
+                {finding.pages && (
+                  <button
+                    type="button"
+                    className="au-toggle"
+                    aria-expanded={openId === finding.id}
+                    onClick={() => setOpenId(openId === finding.id ? null : finding.id)}
+                  >
+                    {openId === finding.id ? "Hide list" : `See all ${finding.count.toLocaleString()}`}
+                  </button>
+                )}
               </header>
               <p className="au-detail">{finding.detail}</p>
               <p className="au-action">
@@ -67,16 +83,20 @@ export function AuditView(): JSX.Element {
               </p>
               {/* Evidence, not decoration. A finding a client cannot spot-check
                   is one they are entitled to disbelieve. */}
-              <ul className="au-examples">
-                {finding.examples.map((url) => (
-                  <li key={url}>{url}</li>
-                ))}
-                {finding.count > finding.examples.length && (
-                  <li className="au-more">
-                    + {(finding.count - finding.examples.length).toLocaleString()} more
-                  </li>
-                )}
-              </ul>
+              {openId === finding.id && finding.pages ? (
+                <OrphanTable pages={finding.pages} baseUrl={result.base_url} />
+              ) : (
+                <ul className="au-examples">
+                  {finding.examples.map((url) => (
+                    <li key={url}>{url}</li>
+                  ))}
+                  {finding.count > finding.examples.length && (
+                    <li className="au-more">
+                      + {(finding.count - finding.examples.length).toLocaleString()} more
+                    </li>
+                  )}
+                </ul>
+              )}
             </section>
           ))}
         </div>

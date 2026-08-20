@@ -53,6 +53,7 @@ from src.modules.seo.page_classifier.discovery_parsers import (
     wordpress_total_pages,
 )
 from src.modules.seo.page_classifier.relative_loops import LoopWatcher
+from src.modules.seo.page_classifier.schemas import DiscoverySource
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord, PageEvidence
 from src.modules.seo.page_classifier.url_rules import (
     is_crawlable_url,
@@ -180,27 +181,9 @@ def _notify(sink: ProgressSink | None, graph: SiteGraph, fetched: int, recent: l
         _logger.debug("progress_sink_failed", extra={"error": str(exc)})
 
 
-class DiscoverySource(StrictModel):
-    """Which paths surfaced a URL.
-
-    Kept as flags rather than a single winner, because agreement between paths
-    is itself information: a URL found by all three is certainly real, while one
-    found only by a DOM link may be a generated artefact.
-
-    Attributes:
-        sitemap: Listed in an XML sitemap.
-        dom_link: Reached by following a link from another page.
-        cms_api: Present in the CMS database.
-    """
-
-    sitemap: bool = False
-    dom_link: bool = False
-    cms_api: bool = False
-
-    @property
-    def count(self) -> int:
-        """How many independent paths surfaced this URL."""
-        return sum((self.sitemap, self.dom_link, self.cms_api))
+# `DiscoverySource` moved to `schemas` when the page profile began carrying it.
+# Re-exported here so every existing importer keeps working: the flags are still
+# a discovery concept, they are simply no longer private to this module.
 
 
 class DiscoveredNode(StrictModel):
@@ -609,6 +592,7 @@ class SiteGraph:
                     url=node.url,
                     normalized_path=node.normalized,
                     html=html,
+                    discovery_sources=node.sources,
                     sitemap_source=node.sitemap_source,
                     cms_record=node.cms_record,
                     inbound_internal_links=node.inbound_links,

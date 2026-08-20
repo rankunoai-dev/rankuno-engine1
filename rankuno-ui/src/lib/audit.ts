@@ -31,6 +31,47 @@ export interface Finding {
   severity: "high" | "medium" | "low";
   /** A handful of URLs, so the claim can be checked rather than trusted. */
   examples: string[];
+  /**
+   * Every page behind the count, when the finding is a worklist rather than an
+   * observation.
+   *
+   * Present only where acting on the finding means working through the pages
+   * one at a time — an orphan set is a list a content team is handed, while
+   * "41 duplicate title groups" is a report. A finding without this renders as
+   * a card with examples, exactly as before.
+   */
+  pages?: FullPageIntelligenceProfile[];
+}
+
+/**
+ * Why a page has no inbound internal link.
+ *
+ * The two are not the same finding and must not share a number. A sitemap entry
+ * nothing links to is a page the site publishes to search engines and hides
+ * from its own visitors — the recommendation writes itself. A page only the CMS
+ * database knows about was never published anywhere a crawler can see, so
+ * "add internal links" may be the wrong advice entirely.
+ *
+ * Measured on highradius.com: 2,182 pages have zero inbound links, but only
+ * 1,142 of them are in a sitemap. Reporting the larger number as "orphans the
+ * site publishes" overstates the finding by nearly a thousand pages.
+ */
+export type OrphanKind = "sitemap" | "cms" | "unlinked";
+
+export function orphanKind(page: FullPageIntelligenceProfile): OrphanKind {
+  if (page.discovery_sources.sitemap) return "sitemap";
+  if (page.discovery_sources.cms_api) return "cms";
+  return "unlinked";
+}
+
+/** Pages with no inbound internal link, most actionable kind first. */
+export function orphanPages(
+  result: PageClassificationOutput,
+): FullPageIntelligenceProfile[] {
+  const rank: Record<OrphanKind, number> = { sitemap: 0, cms: 1, unlinked: 2 };
+  return result.pages
+    .filter((page) => page.inbound_internal_links_count === 0)
+    .sort((a, b) => rank[orphanKind(a)] - rank[orphanKind(b)] || a.url.localeCompare(b.url));
 }
 
 /** `1 orphaned page`, `12 orphaned pages`. A count of one is common enough to read. */
@@ -275,21 +316,28 @@ export function buildFindings(result: PageClassificationOutput): Finding[] {
   const labels = menuLabels(result);
   const findings: Finding[] = [];
 
-  const orphans = pages.filter((page) => page.inbound_internal_links_count === 0);
+  const orphans = orphanPages(result);
   if (orphans.length > 0) {
+    const published = orphans.filter((page) => orphanKind(page) === "sitemap").length;
     findings.push({
       id: "orphans",
       title: `${plural(orphans.length, "orphaned page")}`,
       count: orphans.length,
       detail:
-        "Nothing on the site links to these. They exist in the sitemap, so search " +
-        "engines spend crawl budget reaching them, and they receive no internal " +
-        "link equity in return. Visitors cannot navigate to them at all.",
+        `Nothing on the site links to these. ${plural(published, "page")} of them ` +
+        "sit in a sitemap, so search engines spend crawl budget reaching pages " +
+        "visitors cannot navigate to, and no internal link equity flows back. The " +
+        "rest were found only in the CMS database and are not published anywhere " +
+        "a crawler can see them.",
       action:
-        "Link them from a relevant index or article, or remove them from the sitemap. " +
-        "Leaving them in both places is the one option with no upside.",
+        "Work the sitemap ones first: link each from a relevant index or article, " +
+        "or remove it from the sitemap. Leaving a page in both places is the one " +
+        "option with no upside. Cross the list against Search Console before " +
+        "deleting anything — an orphan already earning impressions is a page to " +
+        "link, not to cut.",
       severity: "high",
       examples: orphans.slice(0, 5).map((page) => page.url),
+      pages: orphans,
     });
   }
 

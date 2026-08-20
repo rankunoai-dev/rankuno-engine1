@@ -109,6 +109,8 @@ export interface FullPageIntelligenceProfile {
   is_cross_silo_link: boolean;
   inbound_internal_links_count: number;
   outbound_internal_links_count: number;
+  discovery_sources: DiscoverySource;
+  sitemap_source: string | null;
   signals_evaluated: SignalScore[];
   final_confidence_score: number;
   consensus_method: ConsensusMethod;

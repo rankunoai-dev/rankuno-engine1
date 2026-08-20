@@ -11,6 +11,7 @@ import httpx
 import pytest
 from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import HttpFetcher
+from src.modules.seo.page_classifier.cascading_pipeline import classify_page
 from src.modules.seo.page_classifier.discovery import (
     DiscoveredNode,
     DiscoverySource,
@@ -853,3 +854,40 @@ class TestExcludeUrls:
             site_fetcher(RESUME_SITE, settings), "https://e.com", exclude_urls=()
         )
         assert report.pages_fetched == 3
+
+
+class TestDiscoverySourcesReachTheProfile:
+    """The flags that let a consumer tell one kind of orphan from another.
+
+    Every page with no inbound link looks identical on the profile unless the
+    discovery path travels with it. Before this, the UI could report 2,182
+    orphans on highradius.com but could not say that only 1,142 of them were
+    pages the site actually publishes — and the recommendation differs entirely
+    between the two.
+    """
+
+    def test_evidence_carries_the_path_that_found_the_url(self, settings):
+        graph, _ = discover_site(site_fetcher(FULL_SITE, settings), "https://e.com")
+        evidence = {item.url: item for item in graph.to_page_evidence()}
+        assert evidence, "the fixture site must produce at least one page"
+        assert any(item.discovery_sources.count > 0 for item in evidence.values())
+
+    def test_a_sitemap_url_is_marked_as_such(self, settings):
+        graph, _ = discover_site(site_fetcher(FULL_SITE, settings), "https://e.com")
+        from_sitemap = [item for item in graph.to_page_evidence() if item.discovery_sources.sitemap]
+        assert from_sitemap, "the fixture publishes a sitemap"
+        # The grouped sitemap filename travels too: on a large site it is how an
+        # analyst tells which content team owns the page.
+        assert all(item.sitemap_source for item in from_sitemap)
+
+    def test_the_flags_survive_classification(self, settings):
+        """The whole point of carrying them.
+
+        A flag on the evidence that the profile drops is a flag the UI never
+        sees, and the split it enables silently becomes unavailable.
+        """
+        graph, _ = discover_site(site_fetcher(FULL_SITE, settings), "https://e.com")
+        evidence = next(item for item in graph.to_page_evidence() if item.discovery_sources.sitemap)
+        profile = classify_page(evidence)
+        assert profile.discovery_sources == evidence.discovery_sources
+        assert profile.sitemap_source == evidence.sitemap_source

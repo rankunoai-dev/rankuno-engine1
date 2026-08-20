@@ -114,3 +114,55 @@
   color: #64748b;
   font-style: italic;
 }
+
+/* Drill-down: the finding's full worklist, opened on demand. */
+
+.au-toggle {
+  margin-left: auto;
+  background: none;
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+  color: #7dd3fc;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.au-toggle:hover {
+  border-color: #38bdf8;
+}
+
+.au-drill {
+  margin-top: 8px;
+}
+
+.au-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.au-url {
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+/* The reading measure is for prose. A table of URLs needs the window. */
+.au-list:has(.au-drill) {
+  max-width: none;
+}
+
+.au-stale {
+  border: 1px solid #713f12;
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: #171310;
+  color: #fcd34d;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
