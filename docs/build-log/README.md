@@ -60,7 +60,8 @@ which, for an AI-assisted codebase, is every session.
 | [0027](0027-site-report-structural-depth-truncation.md) | 2026-08-19 | Site report structural container filtering & print spooler fix | 1,236 tests, 95.19% |
 | [0028](0028-screaming-frog-merge-and-optional-reconcile.md) | 2026-08-19 | Screaming Frog gap merge, optional reconcile endpoint & CLI | 1,280 tests, 95.21% |
 | [0029](0029-malformed-url-refusal-and-reconcile-ui.md) | 2026-08-19 | Markup-artefact URL refusal; Screaming Frog upload & gap panel | 1,315 tests, 95.29% |
-| [0030](0030-ui-component-test-runner.md) | 2026-08-19 | Vitest component runner in the gate; 23 UI tests | 1,320 py + 23 ui |
+| [0030](0030-ui-component-test-runner.md) | 2026-08-19 | UI Component Test Runner (Vitest + React Testing Library) | 1,320 tests, 94.98% |
+| [0031](0031-native-xlsx-excel-reconciliation-support.md) | 2026-08-20 | Native .xlsx Excel Spreadsheet Support in Reconciler & API | 1,329 tests, 95.37% |
 
 
 ---
