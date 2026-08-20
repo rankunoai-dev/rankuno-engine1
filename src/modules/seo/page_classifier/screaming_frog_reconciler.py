@@ -45,7 +45,7 @@ from __future__ import annotations
 import csv
 import io
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from enum import StrEnum
 from urllib.parse import urlsplit, urlunsplit
 
@@ -260,8 +260,18 @@ def load_screaming_frog_csv(text: str) -> tuple[ScreamingFrogRow, ...]:
         exports end with blank lines.
     """
     reader = csv.DictReader(io.StringIO(text))
+    try:
+        headers = reader.fieldnames or []
+    except csv.Error as exc:  # pragma: no cover - defensive, same cause as below
+        raise ValueError(_NOT_A_CSV) from exc
+    if "Address" not in headers:
+        raise ValueError(
+            "this file has no 'Address' column, so it is not a Screaming Frog "
+            "Internal → HTML export. Export that tab as CSV and try again."
+        )
+
     rows: list[ScreamingFrogRow] = []
-    for record in reader:
+    for record in _records(reader):
         address = (record.get("Address") or "").strip()
         if not address:
             continue
@@ -279,6 +289,36 @@ def load_screaming_frog_csv(text: str) -> tuple[ScreamingFrogRow, ...]:
         )
     _logger.info("screaming_frog_loaded", extra={"rows": len(rows)})
     return tuple(rows)
+
+
+_NOT_A_CSV = (
+    "this file is not a CSV. Screaming Frog also exports .xlsx, and a spreadsheet "
+    "dropped here arrives as binary. Use Export → Internal → HTML and choose CSV."
+)
+"""Message for input the CSV reader cannot parse at all.
+
+Worth naming the real mistake rather than repeating Python's. A user who has
+just exported from Screaming Frog has both files in the same folder, and
+`_csv.Error: new-line character seen in unquoted field` tells them nothing about
+which one to pick. Dropping the `.xlsx` is the mistake this text exists for, and
+it was made within a day of the feature shipping.
+"""
+
+
+def _records(reader: csv.DictReader[str]) -> Iterator[dict[str, str | None]]:
+    """Yield rows, turning a parse failure into a message a person can act on.
+
+    `csv.Error` is not a `ValueError`, so without this it escaped the API's
+    `except ValueError` handler and became a 500. The browser was still
+    uploading when the server gave up, so the connection reset mid-request and
+    `fetch` rejected — the UI then reported "Cannot reach the engine. Is the API
+    server running?" about a server that was running perfectly and had answered
+    a moment earlier.
+    """
+    try:
+        yield from reader
+    except csv.Error as exc:
+        raise ValueError(_NOT_A_CSV) from exc
 
 
 def _frog_reason(row: ScreamingFrogRow, base_host: str) -> FrogGapReason:

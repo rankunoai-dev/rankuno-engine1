@@ -225,3 +225,46 @@ class TestVerifyMissedPages:
         report = self._report()
         (check,) = verify_missed_pages(report, (), lambda _u: (0, ""))
         assert check.status == MissedPageStatus.UNREACHABLE
+
+
+class TestBadInputIsRejectedClearly:
+    """A wrong file must produce a message, not a 500.
+
+    Dropping the `.xlsx` instead of the `.csv` was made within a day of the
+    feature shipping: Screaming Frog writes both into the same folder. The parse
+    failure escaped the API's `except ValueError` as a raw `csv.Error`, the
+    server 500'd mid-upload, the connection reset, and the browser reported
+    "Cannot reach the engine" about a server that was answering fine.
+    """
+
+    def test_a_spreadsheet_dropped_as_csv_raises_valueerror(self):
+        """`csv.Error` is not a `ValueError`, which is exactly how it escaped.
+
+        A bare carriage return inside a field, which is what a binary file
+        decoded as text is full of. The header parses first — an `.xlsx` carries
+        the literal string `Address` in its shared-strings table — and the
+        failure comes mid-iteration, which is why the guard cannot live on
+        `fieldnames` alone. Verified against the real 4 MB export before being
+        reduced to this.
+        """
+        rubbish = "Address,Content Type" + chr(10) + "a" + chr(13) + "b,c" + chr(10)
+        with pytest.raises(ValueError, match="not a CSV"):
+            load_screaming_frog_csv(rubbish)
+
+    def test_a_csv_without_an_address_column_is_named(self):
+        """A real CSV, wrong export tab. Different mistake, different message."""
+        with pytest.raises(ValueError, match="Address"):
+            load_screaming_frog_csv("Title 1,Status Code\nHome,200\n")
+
+    def test_an_empty_file_is_rejected_not_silently_empty(self):
+        """Reconciling against nothing would report every URL as frog-missing."""
+        with pytest.raises(ValueError):
+            load_screaming_frog_csv("")
+
+    def test_a_valid_export_still_loads(self):
+        assert (
+            len(
+                load_screaming_frog_csv(f"{HEADER}\nhttps://e.com/a,text/html,200,Indexable,,1,3\n")
+            )
+            == 1
+        )
