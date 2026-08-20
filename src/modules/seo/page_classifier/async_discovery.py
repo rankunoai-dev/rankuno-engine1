@@ -223,6 +223,10 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
         return None
     if not result.is_html:
         return None
+    # Both crawl paths must record the same facts. Behavioural equivalence
+    # between them is this module's central claim, and a redirect chain present
+    # on one path and missing on the other would break it silently.
+    graph.record_fetch(url, result)
     return url, result.body
 
 

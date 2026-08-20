@@ -26,6 +26,7 @@ import json
 import re
 from collections.abc import Callable, Iterable
 from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 from pydantic import Field
 
@@ -37,13 +38,19 @@ from src.modules.seo.page_classifier.schemas import (
     SignalScore,
     SignalSource,
 )
-from src.modules.seo.page_classifier.url_rules import normalize_path, strip_locale_prefix
+from src.modules.seo.page_classifier.url_rules import (
+    is_malformed_url,
+    normalize_path,
+    safe_split,
+    strip_locale_prefix,
+)
 
 __all__ = [
     "L1_HUB_INBOUND_LINK_THRESHOLD",
     "CmsRecord",
     "NavLink",
     "PageEvidence",
+    "extract_canonical_url",
     "SignalParser",
     "collect_structural_signals",
     "extract_nav_links",
@@ -146,6 +153,72 @@ class CmsRecord(StrictModel):
     has_children: bool = False
 
 
+_HEAD_SCAN_BYTES = 200_000
+"""How much of a document to search for a canonical tag.
+
+`<link rel="canonical">` belongs in `<head>`, and a head that has not appeared
+in 200 KB is not going to. Bounding the scan keeps this off the critical path:
+it runs once per fetched page, and a full-document regex over a 1 MB body times
+ten thousand pages is real time spent for nothing.
+"""
+
+_LINK_TAG = re.compile(r"<link\s[^>]*>", re.IGNORECASE)
+_ATTR = re.compile(r"""([a-zA-Z-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s">]+))""")
+
+
+def extract_canonical_url(html: str, base_url: str) -> str:
+    """Read the `<link rel="canonical">` a page declares about itself.
+
+    Returned as an absolute URL, or `""` when the page declares none — which is
+    a fact about the page, not a failure. Measured on highradius.com every
+    sampled page carried one, but that is Yoast on WordPress; a site without an
+    SEO plugin will often have none at all.
+
+    A declaration, not a verdict
+    ---------------------------
+    This is what the *site says* about itself. It is much stronger evidence than
+    inferring duplicates from URL shape, and it is still not proof: 2 of 40
+    sampled highradius pages name a canonical that is neither the URL crawled
+    nor where it redirected, and a search engine may overrule the tag entirely.
+    Callers should treat it as a strong second opinion.
+
+    Attributes are parsed rather than matched in one pattern because their order
+    is not fixed — `href` before `rel` is as common as the reverse, and a single
+    regex expecting one order silently returns nothing for the other.
+
+    Args:
+        html: Raw page HTML.
+        base_url: The page's own URL, for resolving a relative `href`.
+
+    Returns:
+        The absolute canonical URL, or `""`.
+    """
+    for tag in _LINK_TAG.finditer(html[:_HEAD_SCAN_BYTES]):
+        attrs = {
+            name.lower(): (double or single or bare)
+            for name, double, single, bare in _ATTR.findall(tag.group(0))
+        }
+        # `rel` may carry several tokens: `rel="canonical alternate"` is legal.
+        if "canonical" not in attrs.get("rel", "").lower().split():
+            continue
+        href = attrs.get("href", "").strip()
+        if not href:
+            continue
+        try:
+            absolute = urljoin(base_url, href)
+        except ValueError:
+            continue
+        # Never fetched, only recorded, so this is not an SSRF surface — but a
+        # value that will not parse is noise in a client report. Screened with
+        # the same rule discovered URLs face, rather than a second standard:
+        # a site that emits `<a href=` into an address emits it into a canonical
+        # too, and 91 such URLs were measured on one crawl.
+        if safe_split(absolute) is None or is_malformed_url(absolute):
+            return ""
+        return str(absolute)
+    return ""
+
+
 class PageEvidence(StrictModel):
     """Everything known about one page before classification.
 
@@ -170,9 +243,21 @@ class PageEvidence(StrictModel):
         outbound_internal_links: Count of internal links emitted.
         total_pages_in_crawl: Crawl size, used to scale the in-degree threshold.
         breadcrumb_path: Breadcrumb trail if one was extracted.
+        final_url: Where the fetch actually landed after redirects. Equal to
+            `url` when nothing redirected, and `""` when the page was never
+            fetched — absent is not the same as "did not redirect".
+        redirect_chain: Hops traversed to reach `final_url`, in order. Already
+            SSRF-validated: the fetcher walks redirects itself precisely so
+            every hop is checked, so nothing here can name a private address.
+        canonical_url: The `<link rel="canonical">` the page declares, or `""`.
+            What the site claims, which is not necessarily what a search engine
+            honours.
     """
 
     url: str = Field(min_length=1)
+    final_url: str = ""
+    redirect_chain: tuple[str, ...] = ()
+    canonical_url: str = ""
     normalized_path: str = Field(min_length=1)
     html: str | None = None
     nav_links: tuple[NavLink, ...] = ()

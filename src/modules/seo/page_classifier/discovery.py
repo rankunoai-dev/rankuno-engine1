@@ -41,7 +41,7 @@ from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
-from src.integrations.http_fetcher import HttpFetcher
+from src.integrations.http_fetcher import FetchResult, HttpFetcher
 from src.modules.seo.page_classifier.breadcrumb_parser import extract_breadcrumb
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
@@ -54,7 +54,11 @@ from src.modules.seo.page_classifier.discovery_parsers import (
 )
 from src.modules.seo.page_classifier.relative_loops import LoopWatcher
 from src.modules.seo.page_classifier.schemas import DiscoverySource
-from src.modules.seo.page_classifier.signal_parsers import CmsRecord, PageEvidence
+from src.modules.seo.page_classifier.signal_parsers import (
+    CmsRecord,
+    PageEvidence,
+    extract_canonical_url,
+)
 from src.modules.seo.page_classifier.url_rules import (
     is_crawlable_url,
     is_faceted_filter,
@@ -198,6 +202,10 @@ class DiscoveredNode(StrictModel):
         inbound_links: Internal links pointing at it.
         outbound_links: Internal links it emits.
         depth: Link distance from the crawl root, `None` if never linked.
+        final_url: Where the fetch landed after redirects, `""` if not fetched.
+        redirect_chain: Hops traversed to get there, in order.
+        canonical_url: The `<link rel="canonical">` the page declares, `""` if
+            it declares none or was never fetched.
     """
 
     url: str = Field(min_length=1)
@@ -208,6 +216,9 @@ class DiscoveredNode(StrictModel):
     inbound_links: int = Field(default=0, ge=0)
     outbound_links: int = Field(default=0, ge=0)
     depth: int | None = None
+    final_url: str = ""
+    redirect_chain: tuple[str, ...] = ()
+    canonical_url: str = ""
 
     @property
     def is_orphan(self) -> bool:
@@ -522,6 +533,35 @@ class SiteGraph:
             recorded.append(target)
         return recorded
 
+    def record_fetch(self, url: str, result: FetchResult) -> None:
+        """Keep what the fetch learned about a URL, without moving it.
+
+        **Record-only, deliberately.** The node keeps the key it was discovered
+        under; `final_url` and the chain are stored beside it as facts, not
+        applied to it. Re-pointing a node at its destination would merge it with
+        whatever already sits there, and every count that hangs off the graph —
+        inbound links, orphan status, section totals, the page total itself —
+        would shift in the same change. That is a separate decision with its own
+        before-and-after, not a side effect of recording a redirect.
+
+        What this makes possible is the join: Search Console reports the URL
+        Google settled on, which is usually the canonical or the redirect
+        destination. Holding those as *aliases* of a page we already have is
+        enough to match them, and costs the graph nothing.
+
+        Nothing is fetched here. Both values were computed by the fetcher and
+        then discarded one line later, and every redirect hop was re-validated
+        against the SSRF policy on the way — the chain cannot name a private
+        address.
+        """
+        node = self._nodes.get(normalize_url(url))
+        if node is None:
+            return
+        node.final_url = result.final_url
+        node.redirect_chain = result.redirect_chain
+        if result.is_html and result.body:
+            node.canonical_url = extract_canonical_url(result.body, result.final_url or url)
+
     def store_html(self, url: str, html: str) -> None:
         """Retain a page's HTML for later evidence assembly."""
         self._html[normalize_url(url)] = html
@@ -601,6 +641,9 @@ class SiteGraph:
                     breadcrumb_path=(
                         trail.section_labels(self.base_url, node.url) if trail else ()
                     ),
+                    final_url=node.final_url,
+                    redirect_chain=node.redirect_chain,
+                    canonical_url=node.canonical_url,
                 )
             )
         return tuple(evidence)
@@ -981,4 +1024,8 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
         if is_refusal(result.status_code):
             graph.fetch_failures += 1
         return None
+    # Recorded here because this is where the fetcher's own answer is still in
+    # scope. One line further on it is a bare string and the redirect chain is
+    # gone, which is exactly how it came to be discarded in the first place.
+    graph.record_fetch(url, result)
     return result.body if result.is_html else None

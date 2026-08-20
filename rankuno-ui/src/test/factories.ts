@@ -22,6 +22,8 @@ export function page(
   return {
     url,
     canonical_url: url,
+    final_url: url,
+    redirect_chain: [],
     normalized_path: url,
     hierarchy_level: "L3_LEAF_PAGE",
     primary_page_type: "BLOG_ARTICLE",

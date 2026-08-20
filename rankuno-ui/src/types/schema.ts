@@ -98,6 +98,8 @@ export interface FullPageIntelligenceProfile {
   hierarchy_level: HierarchyLevel;
   primary_page_type: PrimaryPageType;
   depth_from_l0: number;
+  final_url: string;
+  redirect_chain: string[];
   nav_parent_url: string | null;
   breadcrumb_path: string[];
   own_breadcrumb: string[];
@@ -141,6 +143,9 @@ export interface DiscoveredNode {
   inbound_links: number;
   outbound_links: number;
   depth: number | null;
+  final_url: string;
+  redirect_chain: string[];
+  canonical_url: string;
 }
 
 /** Summary of one discovery pass. */

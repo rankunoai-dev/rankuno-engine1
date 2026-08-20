@@ -310,7 +310,12 @@ def classify_page(
 
     return FullPageIntelligenceProfile(
         url=evidence.url,
-        canonical_url=evidence.url,
+        # The page's own declaration when it makes one, and the URL itself
+        # otherwise — the contract has always promised that, and until now
+        # delivered only the second half.
+        canonical_url=evidence.canonical_url or evidence.url,
+        final_url=evidence.final_url,
+        redirect_chain=evidence.redirect_chain,
         normalized_path=evidence.normalized_path,
         hierarchy_level=level,
         primary_page_type=page_type,

@@ -284,7 +284,24 @@ class FullPageIntelligenceProfile(StrictModel):
 
     Attributes:
         url: Absolute URL as crawled.
-        canonical_url: Value of `<link rel="canonical">`, or the URL itself.
+        canonical_url: The `<link rel="canonical">` the page declares, or the
+            URL itself when it declares none. **A claim by the site, not a
+            verdict**: 2 of 40 sampled highradius pages name a canonical that is
+            neither the URL crawled nor where it redirected, and a search engine
+            may overrule the tag. Strong evidence for duplicate detection;
+            not proof.
+
+            Empty on every crawl stored before this was captured. Absent is not
+            the same as "declares none", and a reader that conflates them
+            reports a site defect that is really a missing field.
+        final_url: Where the fetch landed after redirects, or `""` if the page
+            was never fetched. Recorded, never applied — the graph keeps the key
+            the URL was discovered under, so counts and hierarchy are unchanged.
+            Held so Search Console's chosen URL can be matched to a page we
+            already have.
+        redirect_chain: Hops traversed to reach `final_url`, in order. Empty
+            when nothing redirected *and* when the page was never fetched; use
+            `final_url` to tell those apart.
             Drives SKU variant clustering on large catalogues.
         normalized_path: Path after locale-prefix and tracking-parameter
             stripping. The join key for deduplication.
@@ -342,6 +359,9 @@ class FullPageIntelligenceProfile(StrictModel):
     hierarchy_level: HierarchyLevel
     primary_page_type: PrimaryPageType
     depth_from_l0: int = Field(ge=0, le=MAX_CRAWL_DEPTH)
+
+    final_url: str = ""
+    redirect_chain: tuple[str, ...] = ()
 
     nav_parent_url: str | None = None
     breadcrumb_path: tuple[str, ...] = ()
