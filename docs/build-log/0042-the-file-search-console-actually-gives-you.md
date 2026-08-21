@@ -135,6 +135,21 @@ button now uses `perf-download`, defined in `jobs.css` beside it. Borrowing a
 class across feature folders made this component's appearance depend on a
 refactor happening in another one, which is a coupling neither side can see.
 
+**Download links ignored the machine-local API base.** This machine runs the
+engine on 8001, because port 8000 belongs to a different project — a "RankUno
+Crawl Toolkit API" that answers `/` with 200 and every engine route with 404.
+`.env.local` redirects the UI, and `App.tsx` reads it, but the panels imported
+`DEFAULT_API_BASE` directly for their anchor `href`s.
+
+So the Download CSV button pointed at another application's server. Not a
+diagnosable 404 either: the host answers, with someone else's routes. Found by
+starting the server rather than by any test, since a hard-coded constant in an
+`href` is exactly what a component test cannot see.
+
+`API_BASE` now resolves the override once in `httpAdapter`, and both this panel
+and `ReconcilePanel` use it — the reconciliation download had the same defect
+and has had it since cycle 0029.
+
 **Two of my own test fixtures were wrong, and both taught something.** A bare
 decimal comma in a comma-delimited CSV is a sixth column, not a decimal — which
 is precisely why the locales that write it that way use semicolons, and the test
@@ -228,6 +243,8 @@ invented data and would have appeared in the UI as a real report.
 | `rankuno-ui/src/components/jobs/PerformancePanel.test.tsx` | new — 12 tests |
 | `rankuno-ui/src/components/jobs/CrawlJobsView.tsx` | Search Console button |
 | `rankuno-ui/src/components/jobs/jobs.css` | panel layout |
+| `rankuno-ui/src/adapters/httpAdapter.ts` | `API_BASE` resolves `VITE_API_BASE` for download links |
+| `rankuno-ui/src/components/jobs/ReconcilePanel.tsx`, `App.tsx` | use the resolved base |
 | `docs/ARCHITECTURE.md`, `docs/build-log/` | this entry, index, module tree |
 
 ## 9. Follow-ups

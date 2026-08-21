@@ -2,7 +2,7 @@ import { Alert, Button, Modal, Table, Tag, Upload } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 import { useEffect, useState } from "react";
 import type { ReconciliationSummary } from "../../adapters/adapterInterface";
-import { DEFAULT_API_BASE as API_BASE } from "../../adapters/httpAdapter";
+import { API_BASE } from "../../adapters/httpAdapter";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
 import "./jobs.css";

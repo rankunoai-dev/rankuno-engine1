@@ -2,12 +2,10 @@ import { Alert, Spin } from "antd";
 import { useEffect, useState } from "react";
 import "./styles/design-system.css";
 import type { CrawlDataAdapter } from "./adapters/adapterInterface";
-import { DEFAULT_API_BASE, HttpAdapter } from "./adapters/httpAdapter";
+import { API_BASE, HttpAdapter } from "./adapters/httpAdapter";
 import { MockAdapter } from "./adapters/mockAdapter";
 import { DashboardShell } from "./components/layout/DashboardShell";
 import { useCrawlStore } from "./store/useCrawlStore";
-
-const API_BASE = import.meta.env["VITE_API_BASE"] ?? DEFAULT_API_BASE;
 
 /**
  * Pick the live API when it answers, and fixtures when it does not.

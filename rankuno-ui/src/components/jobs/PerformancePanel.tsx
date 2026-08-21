@@ -5,7 +5,7 @@ import type {
   PerformanceSummary,
   SectionPerformance,
 } from "../../adapters/adapterInterface";
-import { DEFAULT_API_BASE as API_BASE } from "../../adapters/httpAdapter";
+import { API_BASE } from "../../adapters/httpAdapter";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import "./jobs.css";
 

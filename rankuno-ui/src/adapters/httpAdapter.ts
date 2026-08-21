@@ -33,6 +33,21 @@ interface JobRecord {
 export const DEFAULT_API_BASE = "http://127.0.0.1:8000/api/v1";
 
 /**
+ * Where the engine actually is, honouring the machine-local override.
+ *
+ * `DEFAULT_API_BASE` is the fallback, not the answer. On a machine where port
+ * 8000 belongs to another project the engine runs elsewhere and `.env.local`
+ * says so — and a component that reads the constant instead of this builds
+ * links to whatever else is on 8000. That is not a 404 an operator can
+ * diagnose: the app answers, with someone else's routes.
+ *
+ * Anything constructing a URL for the browser to follow — a download link, an
+ * anchor — must use this. The adapter is already given the resolved base by
+ * `App.tsx`, so its own requests are unaffected either way.
+ */
+export const API_BASE: string = import.meta.env["VITE_API_BASE"] ?? DEFAULT_API_BASE;
+
+/**
  * Polling delays in milliseconds, then the last value repeats forever.
  *
  * Backoff rather than a fixed interval because crawl durations differ by orders
