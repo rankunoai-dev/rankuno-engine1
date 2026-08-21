@@ -104,6 +104,103 @@ export interface SavedReconciliation {
 }
 
 /**
+ * Totals for one navigation section and everything beneath it.
+ *
+ * Mirrors `SectionPerformance` in `src/modules/seo/performance/schemas.py`.
+ * Hand-written for the same reason as `ReconciliationSummary`: this reaches the
+ * UI through the API layer, which the contract exporter does not read.
+ *
+ * `path` is the identity, not `label`. Up to 68 labels per crawl are reused
+ * under different parents, so keying a row by its label merges unrelated
+ * sections.
+ */
+export interface SectionPerformance {
+  path: string[];
+  label: string;
+  depth: number;
+  pages: number;
+  /** How many of those pages any export row reached. */
+  pages_with_data: number;
+  /** Pages whose trail is exactly `path`, excluding descendants. */
+  direct_pages: number;
+  direct_clicks: number;
+  clicks: number;
+  impressions: number;
+  /** Impression-weighted. `null` when the subtree drew no impressions — never
+   *  `0`, which would read as better than rank 1. */
+  position: number | null;
+  sessions: number;
+  engaged_sessions: number;
+  engagement_time_sec: number;
+  conversions: number;
+  revenue: number;
+  ctr: number;
+  data_coverage: number;
+}
+
+/** One ranked recommendation. Mirrors `Opportunity` in the scorer. */
+export interface Opportunity {
+  kind: string;
+  url: string;
+  section: string[];
+  /** Rank within this kind, 0-100. Not comparable across kinds. */
+  score: number;
+  clicks: number;
+  impressions: number;
+  position: number | null;
+  inbound_internal_links: number;
+  reference_url: string | null;
+  reason: string;
+}
+
+/** Mirrors `OpportunityReport`. */
+export interface OpportunityReport {
+  opportunities: Opportunity[];
+  found: Record<string, number>;
+  /** How many of each kind the cap dropped. */
+  truncated: Record<string, number>;
+  /** Kinds not evaluated, and why. Absence of a finding is not absence of one. */
+  skipped: Record<string, string>;
+  limit_per_kind: number;
+}
+
+/**
+ * What a Search Console upload produced against one crawl.
+ *
+ * Mirrors `PerformanceSummary` in `src/api/server.py`. The resolution figures
+ * come first here as they do there: every total below them is derived from a
+ * join, and a reader who sees the sections without knowing a third of the
+ * export failed to resolve is reading a confident understatement.
+ */
+export interface PerformanceSummary {
+  job_id: string;
+  base_url: string;
+  /** The archive entry or worksheet the rows came from. */
+  source_name: string;
+  rows: number;
+  skipped_rows: number;
+  matched: number;
+  match_rate_pct: number;
+  is_reliable: boolean;
+  /** Against `pages`, the coverage question the match rate cannot answer. */
+  pages_with_data: number;
+  pages: number;
+  rollup: {
+    site: SectionPerformance;
+    sections: SectionPerformance[];
+    unattributed: { rows: number; clicks: number; impressions: number; sessions: number };
+    attributed_share: number;
+  };
+  opportunities: OpportunityReport;
+}
+
+/** A performance report saved against a job. */
+export interface SavedPerformance {
+  summary: PerformanceSummary;
+  created_at: string;
+}
+
+/**
  * How the UI reaches crawl data.
  *
  * One interface, two implementations: `MockAdapter` today, an HTTP adapter when
@@ -142,6 +239,18 @@ export interface CrawlDataAdapter {
 
   /** The last cross-check saved against a job, or `null` if there is none. */
   getReconciliation?(jobId: string): Promise<SavedReconciliation | null>;
+
+  /**
+   * Attach a Search Console page export to a finished job.
+   *
+   * Optional like `reconcileScreamingFrog`, and for the same reason: fixtures
+   * have no Search Console data, and a control that fails on click is worse
+   * than one that is not there.
+   */
+  uploadGscExport?(jobId: string, export_: Blob): Promise<PerformanceSummary>;
+
+  /** The last Search Console report saved against a job, or `null`. */
+  getPerformance?(jobId: string): Promise<SavedPerformance | null>;
 
   /**
    * Start a new crawl, returning its job id.

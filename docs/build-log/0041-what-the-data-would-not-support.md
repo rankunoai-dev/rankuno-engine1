@@ -37,7 +37,7 @@ is at depth 0 or 1** — the homepage of gep.com reads as depth 2.
 
 The cause is one line, `cascading_pipeline.py:322`:
 
-```python
+```text
 depth_from_l0=depth_of(evidence.normalized_path),
 ```
 

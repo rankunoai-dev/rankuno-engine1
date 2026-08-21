@@ -6,7 +6,9 @@ import type {
 import type {
   CrawlDataAdapter,
   CrawlJobSummary,
+  PerformanceSummary,
   ReconciliationSummary,
+  SavedPerformance,
   SavedReconciliation,
   JobProgress,
   JobStatus,
@@ -206,6 +208,45 @@ export class HttpAdapter implements CrawlDataAdapter {
     try {
       return await this.request<SavedReconciliation>(
         `/jobs/${encodeURIComponent(jobId)}/reconciliation`,
+      );
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 404) return null;
+      throw cause;
+    }
+  }
+
+  /**
+   * Attach a Search Console page export to a finished job.
+   *
+   * The `File` goes straight to `fetch` as the body — no `FormData`, no
+   * base64. The browser streams it, and the server detects the container by
+   * reading the first bytes rather than trusting a `Content-Type` that a file
+   * picker guessed from an extension.
+   *
+   * Whatever Search Console produced is accepted: the ZIP from Export → CSV is
+   * the default download and the one an analyst actually has.
+   */
+  async uploadGscExport(jobId: string, export_: Blob): Promise<PerformanceSummary> {
+    return this.request<PerformanceSummary>(
+      `/jobs/${encodeURIComponent(jobId)}/performance/gsc`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: export_,
+      },
+    );
+  }
+
+  /**
+   * The last Search Console report saved against a job, or `null`.
+   *
+   * `404` is the ordinary answer for a job nobody has uploaded an export
+   * against, and is not an error worth surfacing.
+   */
+  async getPerformance(jobId: string): Promise<SavedPerformance | null> {
+    try {
+      return await this.request<SavedPerformance>(
+        `/jobs/${encodeURIComponent(jobId)}/performance`,
       );
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 404) return null;

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   CrawlDataAdapter,
   CrawlJobSummary,
+  PerformanceSummary,
   ReconciliationSummary,
   JobStatus,
 } from "../adapters/adapterInterface";
@@ -108,6 +109,14 @@ interface CrawlState {
     jobId: string,
     export_: Blob,
   ) => Promise<ReconciliationSummary | null>;
+  /**
+   * Attach a Search Console export to a finished job.
+   *
+   * Returns `null` when the adapter cannot ingest one, with the reason set on
+   * `error` — the same shape as `reconcileScreamingFrog`, so the panel handles
+   * both failures identically.
+   */
+  uploadGscExport: (jobId: string, export_: Blob) => Promise<PerformanceSummary | null>;
   refreshJobs: () => Promise<void>;
   loadCheckpoint: (jobId: string) => Promise<void>;
   /**
@@ -195,6 +204,23 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       });
     } catch (cause) {
       set({ status: "failed", error: describe(cause) });
+    }
+  },
+
+  async uploadGscExport(jobId, export_) {
+    const adapter = get().adapter;
+    if (!adapter?.uploadGscExport) {
+      set({ error: "This data source cannot ingest Search Console data." });
+      return null;
+    }
+    try {
+      // No `refreshJobs` here, unlike a reconciliation. Attaching performance
+      // data creates no job and mutates no result — it writes a sidecar the
+      // crawl knows nothing about — so the job list is not stale afterwards.
+      return await adapter.uploadGscExport(jobId, export_);
+    } catch (cause) {
+      set({ error: cause instanceof Error ? cause.message : String(cause) });
+      return null;
     }
   },
 

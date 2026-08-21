@@ -83,6 +83,14 @@ from src.modules.seo.page_classifier.tool import (
     reparse_placement,
 )
 from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
+from src.modules.seo.performance.aggregator import merge_page_metrics, rollup_of
+from src.modules.seo.performance.gsc_export import load_gsc_export
+from src.modules.seo.performance.opportunity_scorer import (
+    OpportunityReport,
+    score_opportunities,
+)
+from src.modules.seo.performance.schemas import PerformanceRollup
+from src.modules.seo.performance.url_identity import UrlResolutionIndex
 
 __all__ = ["ApiState", "CrawlCheckpointer", "TelemetryRecorder", "create_app", "serve"]
 
@@ -328,6 +336,56 @@ The enum names are precise and mean nothing to the client who receives the
 spreadsheet. Kept here rather than in the reconciler because this is presentation
 - the module that decides the reasons should not also own how they read.
 """
+
+
+MAX_PERFORMANCE_UPLOAD = 32 * 1024 * 1024
+"""Largest Search Console upload accepted, before decompression.
+
+The UI export caps at 1,000 rows and the API at 50,000, so a real export is
+kilobytes to a few megabytes. This bounds what an accident or a hostile client
+can push into memory; `gsc_export.MAX_UNPACKED_BYTES` bounds what it becomes
+once unpacked, which is the separate question a compressed archive raises.
+"""
+
+
+class PerformanceSummary(StrictModel):
+    """What a Search Console upload produced against one crawl.
+
+    The resolution figures come first deliberately. Every number below them is
+    derived from a join between Google's URLs and ours, and a reader who sees
+    the section totals without knowing that a third of the export failed to
+    resolve is reading a confident understatement.
+    """
+
+    job_id: str
+    base_url: str
+
+    source_name: str = ""
+    """The archive entry or worksheet the rows were read from. Reported because
+    the choice is made by inspecting content rather than names, and a silent
+    choice is one nobody can check."""
+
+    rows: int = 0
+    """Rows read from the export."""
+
+    skipped_rows: int = 0
+    """Rows in that table with no usable address."""
+
+    matched: int = 0
+    match_rate_pct: float = 0.0
+    is_reliable: bool = False
+    """Whether the match rate cleared the threshold. False means the totals
+    below understate traffic by an unknown amount that is not evenly spread."""
+
+    pages_with_data: int = 0
+    """Crawled pages the export reached. Against `pages`, this is the coverage
+    question the match rate cannot answer: a 1,000-row UI export against a
+    12,000-page site resolves perfectly and still describes 8% of the site."""
+
+    pages: int = 0
+
+    rollup: PerformanceRollup = PerformanceRollup()
+    opportunities: OpportunityReport = OpportunityReport()
 
 
 class ReconciliationSummary(StrictModel):
@@ -1008,6 +1066,198 @@ def create_app(
 
         stamp = str(saved.get("created_at", ""))[:10]
         name = f"cross-check-{job_id[:8]}-{stamp or 'undated'}.csv"
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
+    @app.post(
+        f"{API_PREFIX}/jobs/{{job_id}}/performance/gsc",
+        response_model=PerformanceSummary,
+    )
+    async def upload_gsc(job_id: str, request: Request) -> PerformanceSummary:
+        """Attach a Search Console page export to a finished crawl.
+
+        The body is the raw file, sent as `application/octet-stream` — not
+        `multipart/form-data`, for the same reason as the Screaming Frog
+        endpoint: FastAPI's file upload needs `python-multipart`, and adding a
+        dependency to accept one file that Starlette already hands over as a
+        request body is a poor trade. The browser passes the `File` straight to
+        `fetch`, which streams it.
+
+        Whatever Search Console produced is accepted — the ZIP from Export →
+        CSV, the workbook from Export → Excel, or a bare CSV somebody unpacked.
+        The parser picks the pages tab by content, because the archive is
+        written in the account's display language.
+
+        Synchronous and offline, like reparse and reconcile: no worker thread,
+        no concurrency slot, no network. Resolving 1,000 rows against a
+        12,787-page crawl and rolling them up takes under a second.
+
+        **Nothing about the crawl changes.** No new job, no mutation of the
+        result. The report is a sidecar the crawl knows nothing about, so a job
+        that never sees an export behaves exactly as it always has.
+
+        Re-uploading replaces the previous report. That is how somebody corrects
+        a wrong date range or the wrong property, and keeping the superseded one
+        would leave two reports with no way to tell which is being looked at.
+
+        Raises:
+            HTTPException: `404` if there is no such job, `409` if its result
+                predates the current output contract, `400` if the body is
+                empty, oversized, or not a readable export.
+        """
+        body = await request.body()
+        if not body.strip():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="empty body: POST the Search Console export as the request body",
+            )
+        if len(body) > MAX_PERFORMANCE_UPLOAD:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"upload is {len(body) // (1024 * 1024)} MB, over the "
+                    f"{MAX_PERFORMANCE_UPLOAD // (1024 * 1024)} MB limit"
+                ),
+            )
+
+        try:
+            stored = state.store.read_result(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"no job {job_id} with a result"
+            ) from exc
+
+        try:
+            crawl = PageClassificationOutput.model_validate(stored)
+        except ValidationError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="this job's result predates the current output contract",
+            ) from exc
+
+        # Raw bytes, never decoded first. The body is usually a ZIP, and
+        # decoding an archive to a string turns it into mojibake that parses as
+        # nothing — the failure the Screaming Frog endpoint already shipped once
+        # and surfaced as "Is the API server running?".
+        try:
+            export = load_gsc_export(body)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        index = UrlResolutionIndex(crawl.pages)
+        metrics = merge_page_metrics(index, export.rows)
+        rollup = rollup_of(index, metrics)
+        opportunities = score_opportunities(index, metrics)
+
+        summary = PerformanceSummary(
+            job_id=job_id,
+            base_url=crawl.base_url,
+            source_name=export.source_name,
+            rows=len(export.rows),
+            skipped_rows=export.skipped_rows,
+            matched=rollup.gsc_resolution.matched_count,
+            match_rate_pct=rollup.gsc_resolution.match_rate_pct,
+            is_reliable=rollup.gsc_resolution.is_reliable,
+            pages_with_data=rollup.site.pages_with_data,
+            pages=rollup.site.pages,
+            rollup=rollup,
+            opportunities=opportunities,
+        )
+        _logger.info(
+            "performance_attached",
+            extra={
+                "job_id": job_id,
+                "rows": len(export.rows),
+                "match_rate_pct": summary.match_rate_pct,
+                "source": export.source_name,
+            },
+        )
+        state.store.write_performance(
+            job_id,
+            {
+                "summary": summary.model_dump(mode="json"),
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        return summary
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/performance")
+    def get_performance(job_id: str) -> Mapping[str, object]:
+        """The last Search Console report attached to this job.
+
+        Kept so the panel redraws itself without asking for the file again — the
+        export took a person a trip to another product to obtain.
+
+        Raises:
+            HTTPException: `404` if no export has been attached to this job.
+        """
+        saved = state.store.read_performance(job_id)
+        if saved is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} has no attached Search Console data",
+            )
+        return saved
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/opportunities.csv")
+    def download_opportunities(job_id: str) -> Response:
+        """The recommendations as a spreadsheet, one row per finding.
+
+        The panel is for reading; this is the artefact that gets assigned. It
+        carries the plain-language reason rather than the enum, because the
+        person who acts on the row is usually not the person who ran the crawl.
+
+        The kinds that were **skipped** ride in the same file as pseudo-rows. A
+        list of recommendations handed over without them invites the reader to
+        conclude the site has no orphans, when the truth is that this crawl
+        could not tell.
+
+        Raises:
+            HTTPException: `404` if no export has been attached to this job.
+        """
+        saved = state.store.read_performance(job_id)
+        if saved is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} has no attached Search Console data",
+            )
+        summary = saved.get("summary")
+        summary = summary if isinstance(summary, Mapping) else {}
+        report = summary.get("opportunities")
+        report = report if isinstance(report, Mapping) else {}
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(
+            ["kind", "score", "url", "section", "clicks", "impressions", "position", "reason"]
+        )
+        rows = report.get("opportunities")
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, Mapping):
+                continue
+            section = row.get("section")
+            writer.writerow(
+                [
+                    row.get("kind", ""),
+                    row.get("score", ""),
+                    row.get("url", ""),
+                    " > ".join(str(part) for part in section) if isinstance(section, list) else "",
+                    row.get("clicks", ""),
+                    row.get("impressions", ""),
+                    row.get("position", ""),
+                    row.get("reason", ""),
+                ]
+            )
+
+        skipped = report.get("skipped")
+        for kind, gap in (skipped if isinstance(skipped, Mapping) else {}).items():
+            writer.writerow([kind, "", "", "", "", "", "", f"not evaluated: {gap}"])
+
+        stamp = str(saved.get("created_at", ""))[:10]
+        name = f"opportunities-{job_id[:8]}-{stamp or 'undated'}.csv"
         return Response(
             content=buffer.getvalue(),
             media_type="text/csv; charset=utf-8",

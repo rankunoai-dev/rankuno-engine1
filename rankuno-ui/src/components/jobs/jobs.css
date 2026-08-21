@@ -132,11 +132,29 @@
   overflow: hidden;
 }
 
+/* No wrap. Wrapping is what turned this cell into two rows of controls; with
+   at most three children it now fits on one line at any sane column width. */
 .jb-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
+
+/* Menu entries carry their own explanation, so each is a two-line block rather
+   than a label needing a hover to be understood. */
+.jb-menuitem {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+  padding: 2px 0;
+}
+
+.jb-menuitem em {
+  font-style: normal;
+  font-size: 10.5px;
+  opacity: 0.65;
 }
 
 /* ---- Screaming Frog cross-check panel ----
@@ -215,4 +233,91 @@
 }
 .jb-download:hover {
   color: #bae6fd;
+}
+
+/* --- Search Console panel -------------------------------------------------
+   Layout only. Colour comes from antd's dark algorithm, as everywhere else in
+   this file, so a theme change does not need a second edit here. */
+
+.jb-alert {
+  margin: 12px 0;
+}
+
+/* Sits under a stat, for the denominator behind a percentage. A percentage
+   without its denominator is how "100% matched" hides a 1,000-row export
+   describing 8% of a site. */
+.jb-stat-hint {
+  font-size: 10px;
+  color: var(--jb-dim);
+  line-height: 1.3;
+}
+
+.perf-source {
+  font-size: 11px;
+  color: var(--jb-dim);
+  margin: 8px 0 0;
+}
+
+.perf-heading {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 18px 0 8px;
+}
+
+.perf-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.perf-kind {
+  margin-top: 14px;
+}
+
+.perf-kind-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.perf-kind-count {
+  margin: 0;
+}
+
+/* The truncation notice. Never omitted: a list that stops at 50 and says
+   nothing reads as "there were 50". */
+.perf-kind-more {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--jb-dim);
+}
+
+.perf-url {
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+/* The recommendations download. Filled rather than outlined: the outlined
+   version of this same control in the audit view went unnoticed for a whole
+   cycle (build-log 0038). A link, not a button, because it is one — the
+   browser saves the file and the app never holds a copy. */
+.perf-download {
+  display: inline-block;
+  border: 1px solid #16a34a;
+  border-radius: 6px;
+  background: #14532d;
+  color: #dcfce7;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  text-decoration: none;
+}
+.perf-download:hover {
+  background: #166534;
+  color: #f0fdf4;
 }

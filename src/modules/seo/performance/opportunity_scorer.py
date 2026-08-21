@@ -329,7 +329,10 @@ def score_opportunities(
     record(OpportunityKind.INDEXED_CRAWL_TRAP, _traps(metrics))
 
     if links_usable:
-        record(OpportunityKind.UNDERPERFORMING_SIBLING, _siblings(measured, min_impressions))
+        record(
+            OpportunityKind.UNDERPERFORMING_SIBLING,
+            _siblings(measured, min_impressions, orphan_urls),
+        )
     else:
         skipped[OpportunityKind.UNDERPERFORMING_SIBLING] = SignalGap.INBOUND_LINKS_UNRELIABLE
 
@@ -402,7 +405,9 @@ def _traps(metrics: PageMetricSet) -> list[tuple[float, Opportunity]]:
     return items
 
 
-def _siblings(measured: _Measured, min_impressions: int) -> list[tuple[float, Opportunity]]:
+def _siblings(
+    measured: _Measured, min_impressions: int, orphans: set[str]
+) -> list[tuple[float, Opportunity]]:
     """Pages ranking off page one beside a well-linked sibling in their section.
 
     **This does not know whether the link already exists.** The crawl stores
@@ -410,6 +415,10 @@ def _siblings(measured: _Measured, min_impressions: int) -> list[tuple[float, Op
     hub already link here" is possible. The finding is therefore the
     underperformance, which stands on its own; the sibling is named as the
     obvious place to look first, not as a confirmed missing link.
+
+    Pages already reported as orphans are excluded. "Nothing links here" and
+    "a sibling with four links outranks you" are the same instruction delivered
+    twice, and the orphan finding says it with more force.
     """
     by_section: dict[tuple[str, ...], _Measured] = defaultdict(list)
     for page, gsc in measured:
@@ -424,7 +433,7 @@ def _siblings(measured: _Measured, min_impressions: int) -> list[tuple[float, Op
         if hub[0].inbound_internal_links_count == 0:
             continue
         for page, gsc in members:
-            if page.url == hub[0].url:
+            if page.url == hub[0].url or page.url in orphans:
                 continue
             if gsc.impressions < min_impressions or not low <= gsc.position <= high:
                 continue

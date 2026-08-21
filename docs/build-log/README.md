@@ -72,6 +72,7 @@ which, for an AI-assisted codebase, is every session.
 | [0039](0039-the-google-url-join.md) | 2026-08-21 | Google URL to crawled page: alias index, match rate, duplicate profiles found | 1,430 py + 76 ui |
 | [0040](0040-rolling-metrics-up-the-nav-tree.md) | 2026-08-21 | Section rollups: whole-trail keys, weighted position, nothing dropped | 1,458 py + 76 ui |
 | [0041](0041-what-the-data-would-not-support.md) | 2026-08-21 | Opportunity scorer; depth_from_l0 found to hold path depth, not click depth | 1,481 py + 76 ui |
+| [0042](0042-the-file-search-console-actually-gives-you.md) | 2026-08-21 | Search Console upload, sidecar and panel; the export is a ZIP of localised tabs | 1,526 py + 88 ui |
 
 
 ---

@@ -76,9 +76,12 @@ src/
     │       ├── aggregator.py          # Section rollups keyed by whole trail.
     │       │                          # Rates recomputed, never averaged;
     │       │                          # unresolved rows held, never dropped
-    │       └── opportunity_scorer.py  # Ranked recommendations. Refuses a kind
-    │                                  # whose signal the crawl never collected,
-    │                                  # and names the reason
+    │       ├── opportunity_scorer.py  # Ranked recommendations. Refuses a kind
+    │       │                          # whose signal the crawl never collected,
+    │       │                          # and names the reason
+    │       └── gsc_export.py          # Reads the ZIP/xlsx/CSV Search Console
+    │                                  # actually produces. Picks the pages tab
+    │                                  # by content — the names are localised
     ├── ppc/                     # Reserved namespace, no implementation
     └── research/                # Reserved namespace, no implementation
 ```
@@ -90,7 +93,7 @@ src/
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
-| `integrations/google_search_console.py`, `google_analytics.py` | No connector exists. `modules/seo/performance/` resolves URLs and models metrics, but nothing fetches them — see build-log 0039 |
+| `integrations/google_search_console.py`, `google_analytics.py` | No connector exists. Search Console data arrives only by **manual upload** (`POST /jobs/{id}/performance/gsc`); nothing fetches it. GA4 has no ingestion at all — see build-log 0042 |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
 
 > Two rows were removed from this table in cycle 0039 because they were false.

@@ -1,4 +1,5 @@
-import { Button, Empty, Popconfirm, Progress, Table, Tag, Tooltip } from "antd";
+import { Button, Dropdown, Empty, Popconfirm, Progress, Table, Tag, Tooltip } from "antd";
+import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useState } from "react";
 import type { CrawlJobSummary, JobStatus } from "../../adapters/adapterInterface";
@@ -12,6 +13,7 @@ import { formatCrawlTime } from "../../lib/time";
 import type { LiveJob } from "../../store/useCrawlStore";
 import { isLive, useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
+import { PerformancePanel } from "./PerformancePanel";
 import { ReconcilePanel } from "./ReconcilePanel";
 import { UrlTicker } from "../telemetry/UrlTicker";
 import "./jobs.css";
@@ -68,7 +70,12 @@ export function CrawlJobsView(): JSX.Element {
   const canReconcile = useCrawlStore(
     (state) => state.adapter?.reconcileScreamingFrog !== undefined,
   );
+  // Same reasoning as `canReconcile`: fixtures have no Search Console data.
+  const canIngestGsc = useCrawlStore(
+    (state) => state.adapter?.uploadGscExport !== undefined,
+  );
   const [reconciling, setReconciling] = useState<JobRow | null>(null);
+  const [performing, setPerforming] = useState<JobRow | null>(null);
 
   // Drives the elapsed clocks only. The crawl's own numbers arrive on the
   // adapter's poll; this is a second-hand, and it stops when nothing is running
@@ -126,7 +133,7 @@ export function CrawlJobsView(): JSX.Element {
     {
       title: "",
       key: "actions",
-      width: 210,
+      width: 150,
       render: (_value, row) => (
         <ActionCell
           row={row}
@@ -134,8 +141,10 @@ export function CrawlJobsView(): JSX.Element {
           onRelaunch={(mode) => void relaunch(row.id, mode, `${row.label} (${mode})`)}
           onCancel={() => void cancel(row.id)}
           onReconcile={() => setReconciling(row)}
+          onPerformance={() => setPerforming(row)}
           canRelaunch={canRelaunch}
           canReconcile={canReconcile}
+          canIngestGsc={canIngestGsc}
         />
       ),
     },
@@ -176,6 +185,15 @@ export function CrawlJobsView(): JSX.Element {
           label={reconciling.label}
           open
           onClose={() => setReconciling(null)}
+        />
+      )}
+
+      {performing && (
+        <PerformancePanel
+          jobId={performing.id}
+          label={performing.label}
+          open
+          onClose={() => setPerforming(null)}
         />
       )}
     </div>
@@ -238,16 +256,20 @@ function ActionCell({
   onRelaunch,
   onCancel,
   onReconcile,
+  onPerformance,
   canRelaunch,
   canReconcile,
+  canIngestGsc,
 }: {
   row: JobRow;
   onOpen: () => void;
   onRelaunch: (mode: "retry" | "resume") => void;
   onCancel: () => void;
   onReconcile: () => void;
+  onPerformance: () => void;
   canRelaunch: boolean;
   canReconcile: boolean;
+  canIngestGsc: boolean;
 }): JSX.Element {
   const ready = row.status === "succeeded" || row.status === "partial";
   const finished = ready || row.status === "failed";
@@ -258,6 +280,74 @@ function ActionCell({
   // promising work on every completed crawl. A crawl that genuinely stopped
   // early is one that failed or hit its ceiling, and left a checkpoint.
   const stoppedEarly = row.hasCheckpoint && (row.status === "failed" || row.status === "partial");
+  const running = row.status === "running" || row.status === "queued";
+
+  /*
+   * Everything that is not the main action, behind one menu.
+   *
+   * Five buttons were rendered side by side and wrapped onto a second line at
+   * the column's width, which made a table of crawls read as a wall of controls
+   * and buried the one an analyst actually wants. These four are each optional
+   * or occasional; `View tree` is the one taken almost every time, so it stays
+   * out here and the rest move behind `⋯`.
+   *
+   * Each item carries its own one-line explanation rather than a hover tooltip.
+   * A tooltip inside an already-open menu is a second hover on top of a first,
+   * and the explanations are the part an analyst new to the tool needs most.
+   */
+  const extras: MenuProps["items"] = [];
+
+  if (canIngestGsc && ready) {
+    extras.push({
+      key: "gsc",
+      label: (
+        <span className="jb-menuitem">
+          Search Console
+          <em>Add clicks and impressions. The crawl is not changed.</em>
+        </span>
+      ),
+      onClick: onPerformance,
+    });
+  }
+
+  if (canReconcile && ready) {
+    extras.push({
+      key: "frog",
+      label: (
+        <span className="jb-menuitem">
+          Cross-check
+          <em>Compare against a Screaming Frog export.</em>
+        </span>
+      ),
+      onClick: onReconcile,
+    });
+  }
+
+  if (canRelaunch && stoppedEarly) {
+    extras.push({
+      key: "resume",
+      label: (
+        <span className="jb-menuitem">
+          Resume
+          <em>Crawl the URLs this run never fetched, as a separate job.</em>
+        </span>
+      ),
+      onClick: () => onRelaunch("resume"),
+    });
+  }
+
+  if (canRelaunch && finished) {
+    extras.push({
+      key: "retry",
+      label: (
+        <span className="jb-menuitem">
+          Run again
+          <em>Re-crawl from scratch with the same settings. This job is kept.</em>
+        </span>
+      ),
+      onClick: () => onRelaunch("retry"),
+    });
+  }
 
   return (
     <div className="jb-actions">
@@ -273,35 +363,21 @@ function ActionCell({
         </Button>
       )}
 
-      {canReconcile && ready && (
-        <Tooltip title="Optional. Upload a Screaming Frog export to see what each crawler found and the other did not, and fold in any live pages this crawl missed.">
-          <Button size="small" onClick={onReconcile}>
-            Cross-check
+      {extras.length > 0 && (
+        <Dropdown menu={{ items: extras }} trigger={["click"]} placement="bottomRight">
+          <Button size="small" aria-label="More actions for this crawl">
+            ⋯
           </Button>
-        </Tooltip>
+        </Dropdown>
       )}
 
-      {canRelaunch && stoppedEarly && (
-        <Tooltip title="Crawl the URLs this run discovered but never fetched. Starts a separate job — the results are not merged into this one, because inbound-link counts and orphan flags are properties of the whole graph.">
-          <Button size="small" onClick={() => onRelaunch("resume")}>
-            Resume
-          </Button>
-        </Tooltip>
-      )}
-
-      {canRelaunch && finished && (
-        <Tooltip title="Run this crawl again from scratch with the settings it originally used. The original job is kept.">
-          <Button size="small" type="text" onClick={() => onRelaunch("retry")}>
-            Retry
-          </Button>
-        </Tooltip>
-      )}
-
-      {/* Only while the job still holds a slot. The tooltip states the limit
-          plainly: a worker thread cannot be interrupted from outside, so this
-          reclaims capacity rather than stopping traffic, and a button that
-          implied otherwise would mislead exactly when trust is lowest. */}
-      {canRelaunch && (row.status === "running" || row.status === "queued") && (
+      {/* Destructive, and deliberately not in the menu: a kill needs to be
+          visible and deliberate, not two clicks deep beside four routine
+          actions. Shown only while the job still holds a slot — the tooltip
+          states the limit plainly, because a worker thread cannot be
+          interrupted from outside, so this reclaims capacity rather than
+          stopping traffic. */}
+      {canRelaunch && running && (
         <Tooltip title="Give this crawl's slot back so other crawls can start. The crawl itself keeps running on the server until it finishes or the server restarts — its result is discarded.">
           <Popconfirm
             title="Abandon this crawl?"

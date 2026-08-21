@@ -271,6 +271,14 @@ class JobStore(Protocol):
         """Read the saved cross-check, or `None` if there is none."""
         ...
 
+    def write_performance(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save the Search Console report computed against this job."""
+        ...
+
+    def read_performance(self, job_id: str) -> Mapping[str, object] | None:
+        """Read the saved performance report, or `None` if there is none."""
+        ...
+
     def recover_orphans(self) -> list[str]:
         """Fail every job left non-terminal by a previous process."""
         ...
@@ -339,6 +347,9 @@ class DiskJobStore:
 
     def _reconciliation_path(self, job_id: str) -> Path:
         return self._root / f"{job_id}.reconciliation.json"
+
+    def _performance_path(self, job_id: str) -> Path:
+        return self._root / f"{job_id}.performance.json"
 
     def _read(self, job_id: str) -> JobRecord:
         path = self._record_path(job_id)
@@ -600,6 +611,48 @@ class DiskJobStore:
             except (OSError, ValueError) as exc:
                 _logger.warning(
                     "reconciliation_read_failed", extra={"job_id": job_id, "error": str(exc)}
+                )
+                return None
+        return loaded
+
+    def write_performance(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save the Search Console report computed against this job.
+
+        Same reasoning as `write_reconciliation`, and the same failure it
+        prevents: the input is a file a person had to fetch from another
+        product by hand, and a report that lives only in component state is one
+        that a navigation away destroys.
+
+        Replaces any previous report rather than accumulating. A second upload
+        is how somebody corrects a wrong date range or a wrong property, and
+        keeping the superseded one would leave two reports with no way to tell
+        which describes the export the analyst is looking at.
+
+        Never raises. Losing the ability to re-read the report must not fail the
+        request that produced it, and the summary is returned either way.
+        """
+        try:
+            with self._lock:
+                self._read(job_id)
+                _atomic_write(self._performance_path(job_id), json.dumps(dict(payload)))
+        except (JobNotFoundError, OSError, TypeError) as exc:
+            _logger.warning("performance_write_failed", extra={"job_id": job_id, "error": str(exc)})
+
+    def read_performance(self, job_id: str) -> Mapping[str, object] | None:
+        """Read a job's saved Search Console report.
+
+        `None` when there is none, which is the normal answer for every job
+        nobody has uploaded an export against.
+        """
+        path = self._performance_path(job_id)
+        with self._lock:
+            if not path.exists():
+                return None
+            try:
+                loaded: Mapping[str, object] = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                _logger.warning(
+                    "performance_read_failed", extra={"job_id": job_id, "error": str(exc)}
                 )
                 return None
         return loaded
