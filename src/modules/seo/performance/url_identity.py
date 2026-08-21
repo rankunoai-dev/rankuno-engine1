@@ -50,6 +50,7 @@ from src.modules.seo.page_classifier.url_rules import (
     is_tracking_param,
     normalize_path,
     normalize_url,
+    registrable_domain,
     safe_split,
     site_host,
 )
@@ -234,6 +235,7 @@ class UrlResolutionIndex:
         recomputes the dedup key over a whole result and can therefore see it.
         """
         self._hosts = frozenset(self._host_of(page.url) for page in pages) - {""}
+        self._domains = frozenset(registrable_domain(host) for host in self._hosts)
 
         absolute: list[_Tier] = []
         with_query: list[_Tier] = []
@@ -301,8 +303,18 @@ class UrlResolutionIndex:
             # cross-domain canonical — a page that names another property as its
             # canonical is exactly the case where Google reports the other host,
             # and it is already in the index under that address.
-            if self._host_of(google_url) not in self._hosts:
-                return UrlFailure(google_url=google_url, reason=MatchFailure.OFF_SITE)
+            host = self._host_of(google_url)
+            if host not in self._hosts:
+                # Same organisation, different host, is its own answer. Reported
+                # as plain off-site noise it disappears into the count of
+                # unrelated domains, which is exactly what happened to 558 rows
+                # of indexed spam on two gep.com subdomains.
+                reason = (
+                    MatchFailure.OTHER_SUBDOMAIN
+                    if registrable_domain(host) in self._domains
+                    else MatchFailure.OFF_SITE
+                )
+                return UrlFailure(google_url=google_url, reason=reason)
 
         return self._by_path(google_url, parts)
 

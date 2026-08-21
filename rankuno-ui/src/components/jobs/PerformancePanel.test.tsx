@@ -28,6 +28,7 @@ function summary(overrides: Partial<PerformanceSummary> = {}): PerformanceSummar
     is_reliable: true,
     pages_with_data: 1000,
     pages: 12787,
+    unmatched: [],
     rollup: {
       site: {
         path: [],
@@ -232,6 +233,62 @@ describe("PerformancePanel", () => {
 
     await screen.findByText("Resources");
     expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
+  it("shows where the unmatched rows went, grouped by host", async () => {
+    /*
+     * The arithmetic behind the match rate. "41.5% matched" asks to be taken on
+     * trust; this partitions the other 58.5% so it can be checked. On the first
+     * real export the two largest groups were single hosts carrying 558 rows of
+     * indexed spam between them, and no other grouping would have put them next
+     * to each other.
+     */
+    stubUpload(
+      summary({
+        rows: 1000,
+        matched: 415,
+        match_rate_pct: 41.5,
+        is_reliable: false,
+        unmatched: [
+          {
+            host: "smartstaging-auth.e.com",
+            reason: "other_subdomain",
+            urls: 283,
+            clicks: 400000,
+            impressions: 5000000,
+            examples: ["http://smartstaging-auth.e.com/cop/video/x-138.html"],
+          },
+          {
+            host: "e.com",
+            reason: "not_crawled",
+            urls: 16,
+            clicks: 900,
+            impressions: 40000,
+            examples: [],
+          },
+        ],
+      }),
+    );
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, exportFile(2048));
+
+    // The count is stated against the total, not left as a percentage.
+    expect(await screen.findByText(/Rows that matched no page \(585 of 1,?000\)/)).toBeInTheDocument();
+    expect(screen.getByText("smartstaging-auth.e.com")).toBeInTheDocument();
+    // And the reason reads as a sentence, not an enum.
+    expect(
+      screen.getByText(/A subdomain of this site the crawl never covered/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("other_subdomain")).not.toBeInTheDocument();
+  });
+
+  it("says nothing about unmatched rows when every row matched", async () => {
+    stubUpload();
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, exportFile(2048));
+
+    await screen.findByText("Resources");
+    expect(screen.queryByText(/Rows that matched no page/)).not.toBeInTheDocument();
   });
 
   it("says when a recommendation kind was not evaluated", async () => {

@@ -315,3 +315,23 @@
   background: #cdeedb;
   color: var(--l3);
 }
+
+/* Section-level download. Same affordance as the whole-report button, sized to
+   sit inside a section heading rather than above the panel. */
+.perf-download-sm {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+
+/* Example addresses inside an unmatched-group row. Monospace and wrapped: these
+   are the URLs an analyst copies out. */
+.perf-examples {
+  margin: 0;
+  padding-left: 18px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  word-break: break-all;
+}

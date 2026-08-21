@@ -4,6 +4,7 @@ import type {
   Opportunity,
   PerformanceSummary,
   SectionPerformance,
+  UnmatchedGroup,
 } from "../../adapters/adapterInterface";
 import { API_BASE } from "../../adapters/httpAdapter";
 import { downloadCsv, toCsv } from "../../lib/csv";
@@ -189,6 +190,7 @@ export function PerformancePanel({ jobId, label, open, onClose }: Props): JSX.El
             />
           )}
           <Quality summary={summary} />
+          <Unmatched summary={summary} jobId={jobId} />
           <Sections summary={summary} />
           <Opportunities summary={summary} jobId={jobId} />
         </>
@@ -262,6 +264,111 @@ function Stat({
       <span className="jb-stat-l">{label}</span>
       {hint && <span className="jb-stat-hint">{hint}</span>}
     </div>
+  );
+}
+
+/**
+ * Plain-English meaning for each reason a row reached no page.
+ *
+ * `other_subdomain` leads because it is the one that is usually a finding
+ * rather than an explanation.
+ */
+const REASON_LABELS: Record<string, string> = {
+  other_subdomain: "A subdomain of this site the crawl never covered",
+  off_site: "A different domain — another property",
+  not_crawled: "On this site, but this crawl never reached it",
+  ambiguous: "Several crawled pages claim this address",
+  unparseable: "Not a URL",
+};
+
+/**
+ * Where the rows that matched nothing went.
+ *
+ * Sits directly under the match rate and above every total, because it is the
+ * arithmetic behind that percentage. "41.5% matched" asks to be taken on trust;
+ * this partitions the other 58.5% by host, and the groups add back up.
+ *
+ * Grouped by host rather than by reason because that is the axis the answer
+ * usually lies along — on the first real export the two largest groups were one
+ * host each, 558 rows between them, and no other view would have put them side
+ * by side.
+ */
+function Unmatched({
+  summary,
+  jobId,
+}: {
+  summary: PerformanceSummary;
+  jobId: string;
+}): JSX.Element | null {
+  const groups = summary.unmatched ?? [];
+  if (groups.length === 0) return null;
+
+  return (
+    <>
+      <div className="perf-heading-row">
+        <h4 className="perf-heading">
+          Rows that matched no page ({summary.rows - summary.matched} of {summary.rows})
+        </h4>
+        <a
+          className="perf-download"
+          href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/unmatched.csv`}
+        >
+          Download CSV
+        </a>
+      </div>
+      <Table<UnmatchedGroup>
+        dataSource={groups}
+        rowKey={(group) => `${group.host}:${group.reason}`}
+        size="small"
+        pagination={false}
+        scroll={{ y: 240 }}
+        expandable={{
+          expandedRowRender: (group) => (
+            <ul className="perf-examples">
+              {group.examples.map((url) => (
+                <li key={url}>{url}</li>
+              ))}
+            </ul>
+          ),
+          rowExpandable: (group) => group.examples.length > 0,
+        }}
+        columns={[
+          {
+            title: "Host",
+            dataIndex: "host",
+            key: "host",
+            render: (host: string) => <span className="perf-url">{host || "(no host)"}</span>,
+          },
+          {
+            title: "Why",
+            dataIndex: "reason",
+            key: "reason",
+            render: (reason: string) => REASON_LABELS[reason] ?? reason,
+          },
+          {
+            title: "URLs",
+            dataIndex: "urls",
+            key: "urls",
+            align: "right",
+            render: (urls: number) => urls.toLocaleString(),
+          },
+          {
+            title: "Clicks",
+            dataIndex: "clicks",
+            key: "clicks",
+            align: "right",
+            render: (clicks: number) => clicks.toLocaleString(),
+          },
+          {
+            title: "Impressions",
+            dataIndex: "impressions",
+            key: "impressions",
+            align: "right",
+            render: (value: number) => value.toLocaleString(),
+          },
+        ]}
+      />
+    </>
   );
 }
 

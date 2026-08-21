@@ -53,6 +53,7 @@ __all__ = [
     "is_tracking_param",
     "normalize_path",
     "normalize_url",
+    "registrable_domain",
     "same_site",
     "site_host",
     "strip_locale_prefix",
@@ -632,6 +633,49 @@ def site_host(netloc: str) -> str:
     else:
         host = host.split(":", 1)[0]
     return host[4:] if host.startswith("www.") else host
+
+
+_SECOND_LEVEL = frozenset({"co", "com", "org", "net", "ac", "gov", "edu", "gob", "or", "ne"})
+"""Second-level labels that behave like a suffix: `co.uk`, `com.au`, `ac.jp`.
+
+A heuristic, and named as one. The correct answer needs the Public Suffix List,
+which is a network-fetched dataset with its own update problem; this covers the
+shapes that actually appear in client work and errs toward treating two hosts as
+*different* domains, which is the safer mistake — it under-reports a
+relationship rather than inventing one.
+"""
+
+
+def registrable_domain(host: str) -> str:
+    """The domain two hosts must share to be the same organisation.
+
+    `smartstaging-auth.gep.com` and `www.gep.com` are both `gep.com`;
+    `gep.com` and `example.com` are not. This exists because "not the site we
+    crawled" and "a subdomain of the site we crawled" are very different
+    findings, and the first real Search Console export made the difference
+    urgent: 558 rows on two gep.com subdomains read as ordinary off-site noise.
+
+    Args:
+        host: A bare host, already stripped of port and credentials.
+
+    Returns:
+        The registrable domain, or the host unchanged when it has too few
+        labels or is an IP literal.
+    """
+    lowered = host.lower().strip(".")
+    if not lowered or lowered.startswith("["):
+        return lowered
+    labels = lowered.split(".")
+    if len(labels) < 3:
+        return lowered
+    if all(label.isdigit() for label in labels):
+        # An IPv4 literal has no registrable domain, and slicing its last two
+        # labels invents one: `1.2.3.4` became `3.4`, which would make every
+        # host on 10.x look like it shared an organisation.
+        return lowered
+    if labels[-2] in _SECOND_LEVEL and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
 
 
 def same_site(a: str, b: str) -> bool:

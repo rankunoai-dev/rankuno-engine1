@@ -37,6 +37,7 @@ Pure domain logic: no I/O, no settings, no clock.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -45,9 +46,11 @@ from pydantic import Field
 from src.core.schemas import StrictModel
 from src.modules.seo.page_classifier.logical_hierarchy import OTHERS_LABEL
 from src.modules.seo.page_classifier.schemas import FullPageIntelligenceProfile
+from src.modules.seo.page_classifier.url_rules import safe_split, site_host
 from src.modules.seo.performance.schemas import (
     Ga4PageMetrics,
     GscPageMetrics,
+    MatchFailure,
     PagePerformance,
     PerformanceRollup,
     ResolutionOutcome,
@@ -59,11 +62,14 @@ from src.modules.seo.performance.schemas import (
 from src.modules.seo.performance.url_identity import UrlResolutionIndex
 
 __all__ = [
+    "MAX_GROUP_EXAMPLES",
     "PageMetricSet",
+    "UnmatchedGroup",
     "aggregate",
     "merge_page_metrics",
     "rollup_of",
     "section_path_of",
+    "unmatched_groups",
 ]
 
 
@@ -150,6 +156,77 @@ class PageMetricSet(StrictModel):
     unresolved_ga4: tuple[Ga4PageMetrics, ...] = ()
     gsc_resolution: ResolutionOutcome = ResolutionOutcome(total=0)
     ga4_resolution: ResolutionOutcome = ResolutionOutcome(total=0)
+
+
+class UnmatchedGroup(StrictModel):
+    """Every export row that reached no page, gathered by host and reason.
+
+    The answer to "where did the other 58% go?". A match rate on its own asks
+    to be taken on trust; this is the arithmetic behind it, and it adds up: the
+    groups partition the unresolved rows exactly, so a reader can check the
+    total rather than believe it.
+
+    Grouped by **host** because that is the axis the answer usually lies along.
+    On the first real export the two largest groups were one host each, 558 rows
+    between them, and no other view would have put them next to each other.
+
+    Attributes:
+        host: The host these rows are on, `""` for rows with no parseable host.
+        reason: Why they did not resolve. One host can appear under two reasons.
+        urls: How many distinct rows.
+        clicks: Search Console clicks across them — the cost of the gap.
+        impressions: Impressions across them.
+        examples: A handful of the addresses, so the group is recognisable
+            without downloading anything.
+    """
+
+    host: str = ""
+    reason: MatchFailure
+    urls: int = Field(default=0, ge=0)
+    clicks: int = Field(default=0, ge=0)
+    impressions: int = Field(default=0, ge=0)
+    examples: tuple[str, ...] = ()
+
+
+MAX_GROUP_EXAMPLES = 3
+"""Addresses shown per group. Enough to recognise it; the CSV holds the rest."""
+
+
+def unmatched_groups(metrics: PageMetricSet) -> tuple[UnmatchedGroup, ...]:
+    """Gather the rows that reached no page, largest by clicks first.
+
+    Args:
+        metrics: The merged result whose failures are being explained.
+
+    Returns:
+        One group per (host, reason), ordered by clicks then row count, so the
+        first row is the largest part of the gap.
+    """
+    reasons = {
+        failure.google_url: failure.reason
+        for failure in (*metrics.gsc_resolution.failures, *metrics.ga4_resolution.failures)
+    }
+    tally: dict[tuple[str, MatchFailure], list[GscPageMetrics]] = defaultdict(list)
+    for row in metrics.unresolved_gsc:
+        reason = reasons.get(row.url, MatchFailure.NOT_CRAWLED)
+        parts = safe_split(row.url)
+        host = site_host(parts.netloc) if parts is not None else ""
+        tally[(host, reason)].append(row)
+
+    groups = [
+        UnmatchedGroup(
+            host=host,
+            reason=reason,
+            urls=len(rows),
+            clicks=sum(row.clicks for row in rows),
+            impressions=sum(row.impressions for row in rows),
+            examples=tuple(
+                row.url for row in sorted(rows, key=lambda r: -r.clicks)[:MAX_GROUP_EXAMPLES]
+            ),
+        )
+        for (host, reason), rows in tally.items()
+    ]
+    return tuple(sorted(groups, key=lambda g: (-g.clicks, -g.urls, g.host)))
 
 
 def merge_page_metrics(

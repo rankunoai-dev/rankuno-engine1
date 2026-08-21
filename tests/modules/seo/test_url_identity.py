@@ -246,14 +246,32 @@ class TestFailuresNameSomethingActionable:
         idx = index(profile("https://e.com/a/"))
         assert idx.resolve("https://elsewhere.com/a/").reason is MatchFailure.OFF_SITE
 
-    def test_a_subdomain_is_off_site_not_missing(self):
-        """A subdomain is off-site, not missing.
+    def test_a_subdomain_is_not_missing_and_not_a_stranger_either(self):
+        """A subdomain of the audited site gets its own answer.
 
-        `blog.e.com` is a different property, and merging it would collapse a
-        real distinction the rest of the engine is careful to keep.
+        `blog.e.com` is still not a page this crawl holds, so it does not
+        resolve — the rest of the engine keeps subdomains apart deliberately and
+        merging them here would undo that. But it is not the same finding as an
+        unrelated domain, and reporting both as `off_site` is what hid 558 rows
+        of indexed spam on two gep.com subdomains inside a count of ordinary
+        third-party noise.
         """
         idx = index(profile("https://e.com/a/"))
-        assert idx.resolve("https://blog.e.com/a/").reason is MatchFailure.OFF_SITE
+        assert idx.resolve("https://blog.e.com/a/").reason is MatchFailure.OTHER_SUBDOMAIN
+
+    def test_an_unrelated_domain_is_still_off_site(self):
+        idx = index(profile("https://e.com/a/"))
+        assert idx.resolve("https://elsewhere.org/a/").reason is MatchFailure.OFF_SITE
+
+    def test_a_shared_public_suffix_is_not_a_shared_organisation(self):
+        """`a.co.uk` and `b.co.uk` are different companies.
+
+        Slicing the last two labels would make them one, which would report
+        every UK site as a subdomain of every other.
+        """
+        idx = index(profile("https://shop.a.co.uk/x/"))
+        assert idx.resolve("https://shop.b.co.uk/x/").reason is MatchFailure.OFF_SITE
+        assert idx.resolve("https://mail.a.co.uk/x/").reason is MatchFailure.OTHER_SUBDOMAIN
 
     def test_things_that_are_not_urls(self):
         idx = index(profile("https://e.com/a/"))

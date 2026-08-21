@@ -75,7 +75,9 @@ which, for an AI-assisted codebase, is every session.
 | [0042](0042-the-file-search-console-actually-gives-you.md) | 2026-08-21 | Search Console upload, sidecar and panel; the export is a ZIP of localised tabs | 1,526 py + 88 ui |
 | [0043](0043-the-refusal-that-described-the-wrong-file.md) | 2026-08-21 | A refusal that names what it found, after a real upload of the wrong GSC report | 1,527 py + 98 ui |
 | [0044](0044-the-first-real-export.md) | 2026-08-21 | First real GSC export: spam subdomains surfaced, three scorer defects fixed | 1,530 py + 101 ui |
-| [0043](0043-the-buttons-that-could-not-win.md) | 2026-08-21 | A global button reset was silently discarding component styling | 1,526 py + 90 ui |
+| [0045](0045-the-buttons-that-could-not-win.md) | 2026-08-21 | A global button reset was silently discarding component styling | 1,526 py + 90 ui |
+| [0046](0046-a-download-per-section.md) | 2026-08-21 | Per-section CSV export; the panel's sections are not the visualizer's tabs | 1,530 py + 103 ui |
+| [0047](0047-showing-the-other-585-rows.md) | 2026-08-21 | The unmatched rows become visible: subdomain split, grouped gap, CSV | 1,535 py + 105 ui |
 
 
 ---

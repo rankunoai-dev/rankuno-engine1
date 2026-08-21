@@ -83,7 +83,18 @@ class MatchFailure(StrEnum):
     """Not a URL. A malformed export cell, or a header row read as data."""
 
     OFF_SITE = "off_site"
-    """A host the crawl never covered — a different subdomain or property."""
+    """A host on a different domain entirely. Genuinely another property."""
+
+    OTHER_SUBDOMAIN = "other_subdomain"
+    """A **subdomain of the site being audited** that the crawl never covered.
+
+    Split out from `OFF_SITE` because the two need opposite responses, and
+    merging them hid something serious. On the first real export, 558 of 1,000
+    rows were two gep.com subdomains serving indexed spam — filed as ordinary
+    off-site noise alongside genuinely unrelated domains, and therefore
+    invisible. A subdomain of the audited site carrying indexed traffic is
+    always worth a look: an uncrawled property, a staging host that escaped, or
+    a compromised one."""
 
     AMBIGUOUS = "ambiguous"
     """Several crawled pages claim this address. Attributing it to one of them

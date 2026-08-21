@@ -165,6 +165,22 @@ export interface OpportunityReport {
 }
 
 /**
+ * Where the export rows that reached no page went.
+ *
+ * Mirrors `UnmatchedGroup`. The arithmetic behind the match rate: these groups
+ * partition the unresolved rows exactly, so a reader can check the percentage
+ * rather than take it on trust.
+ */
+export interface UnmatchedGroup {
+  host: string;
+  reason: string;
+  urls: number;
+  clicks: number;
+  impressions: number;
+  examples: string[];
+}
+
+/**
  * What a Search Console upload produced against one crawl.
  *
  * Mirrors `PerformanceSummary` in `src/api/server.py`. The resolution figures
@@ -185,6 +201,8 @@ export interface PerformanceSummary {
   /** Against `pages`, the coverage question the match rate cannot answer. */
   pages_with_data: number;
   pages: number;
+  /** Where the unresolved rows went, largest by clicks first. */
+  unmatched: UnmatchedGroup[];
   rollup: {
     site: SectionPerformance;
     sections: SectionPerformance[];

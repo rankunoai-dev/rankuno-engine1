@@ -288,6 +288,67 @@ class TestDownload:
         text = client.get(f"{API_PREFIX}/jobs/{record.id}/opportunities.csv").text
         assert "not evaluated: inbound_links_unreliable" in text
 
+    def test_the_unmatched_csv_lists_every_row_with_its_reason(self, client, crawl):
+        """The evidence behind the match rate.
+
+        "41.5% matched" is a number an analyst has to take on trust. This is the
+        other 58.5%, one row each, so it can be checked instead — and so the
+        addresses themselves can be acted on.
+        """
+        upload(
+            client,
+            crawl.id,
+            PAGES_CSV
+            + "https://staging.e.com/spam/,900,50000,1.8%,3.0\n"
+            + "https://elsewhere.org/x/,5,50,10%,9.0\n",
+        )
+        text = client.get(f"{API_PREFIX}/jobs/{crawl.id}/unmatched.csv").text
+        assert "https://staging.e.com/spam/" in text
+        assert "other_subdomain" in text
+        assert "elsewhere.org" in text
+        assert "off_site" in text
+        # The plain-language gloss travels with it: the person who acts on the
+        # row is usually not the person who ran the crawl.
+        assert "subdomain of this site" in text
+        # And the group totals ride at the top, or the reader counts rows and
+        # thinks that is the finding.
+        assert "group total" in text
+
+    def test_a_subdomain_is_reported_apart_from_a_stranger(self, client, crawl):
+        """Merging the two is what hid 558 rows of indexed spam on gep.com."""
+        response = upload(
+            client,
+            crawl.id,
+            PAGES_CSV
+            + "https://staging.e.com/spam/,900,50000,1.8%,3.0\n"
+            + "https://elsewhere.org/x/,5,50,10%,9.0\n",
+        )
+        groups = {g["host"]: g for g in response.json()["unmatched"]}
+        assert groups["staging.e.com"]["reason"] == "other_subdomain"
+        assert groups["elsewhere.org"]["reason"] == "off_site"
+        # Ordered by clicks: the largest part of the gap reads first.
+        assert response.json()["unmatched"][0]["host"] == "staging.e.com"
+
+    def test_the_groups_account_for_every_unmatched_row(self, client, crawl):
+        """The groups account for every unmatched row.
+
+        They partition the gap, so the match rate can be checked rather than
+        believed. A group view that does not add up is worse than none.
+        """
+        response = upload(
+            client,
+            crawl.id,
+            PAGES_CSV
+            + "https://staging.e.com/one/,1,10,10%,3.0\n"
+            + "https://staging.e.com/two/,2,20,10%,3.0\n"
+            + "https://elsewhere.org/x/,5,50,10%,9.0\n",
+        )
+        body = response.json()
+        assert sum(g["urls"] for g in body["unmatched"]) == body["rows"] - body["matched"]
+        assert (
+            sum(g["clicks"] for g in body["unmatched"]) == body["rollup"]["unattributed"]["clicks"]
+        )
+
     def test_a_job_with_no_export_has_nothing_to_download(self, client, crawl):
         assert client.get(f"{API_PREFIX}/jobs/{crawl.id}/opportunities.csv").status_code == 404
 

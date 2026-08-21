@@ -82,14 +82,25 @@ from src.modules.seo.page_classifier.tool import (
     PageClassificationTool,
     reparse_placement,
 )
+from src.modules.seo.page_classifier.url_rules import safe_split, site_host
 from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
-from src.modules.seo.performance.aggregator import merge_page_metrics, rollup_of
+from src.modules.seo.performance.aggregator import (
+    PageMetricSet,
+    UnmatchedGroup,
+    merge_page_metrics,
+    rollup_of,
+    unmatched_groups,
+)
 from src.modules.seo.performance.gsc_export import load_gsc_export
 from src.modules.seo.performance.opportunity_scorer import (
     OpportunityReport,
     score_opportunities,
 )
-from src.modules.seo.performance.schemas import PerformanceRollup
+from src.modules.seo.performance.schemas import (
+    GscPageMetrics,
+    MatchFailure,
+    PerformanceRollup,
+)
 from src.modules.seo.performance.url_identity import UrlResolutionIndex
 
 __all__ = ["ApiState", "CrawlCheckpointer", "TelemetryRecorder", "create_app", "serve"]
@@ -348,6 +359,35 @@ once unpacked, which is the separate question a compressed archive raises.
 """
 
 
+UNMATCHED_MEANINGS: Mapping[str, str] = MappingProxyType(
+    {
+        "other_subdomain": (
+            "A subdomain of this site that the crawl never covered. Worth a look "
+            "on its own: an uncrawled property, a staging host that escaped, or a "
+            "compromised one."
+        ),
+        "off_site": "A different domain entirely — another property.",
+        "not_crawled": "On this site, but this crawl never reached it.",
+        "ambiguous": "Several crawled pages claim this address; attributing it would be a guess.",
+        "unparseable": "Not a URL. A malformed export cell.",
+    }
+)
+"""Plain-language gloss for each unmatched reason, for the download.
+
+Same reasoning as `GAP_MEANINGS`: the enum names are precise and mean nothing to
+whoever receives the spreadsheet.
+"""
+
+
+def _unmatched_rows(metrics: PageMetricSet) -> list[tuple[GscPageMetrics, str]]:
+    """Each unresolved Search Console row paired with why it did not resolve."""
+    reasons = {f.google_url: f.reason.value for f in metrics.gsc_resolution.failures}
+    return [
+        (row, reasons.get(row.url, MatchFailure.NOT_CRAWLED.value))
+        for row in metrics.unresolved_gsc
+    ]
+
+
 def _csv_response(body: str, filename: str) -> Response:
     """A CSV a spreadsheet will open with its accents intact.
 
@@ -399,6 +439,13 @@ class PerformanceSummary(StrictModel):
     12,000-page site resolves perfectly and still describes 8% of the site."""
 
     pages: int = 0
+
+    unmatched: tuple[UnmatchedGroup, ...] = ()
+    """Where the rows that reached no page went, by host and reason.
+
+    Carried beside the match rate rather than behind a second request. A rate
+    on its own asks to be taken on trust; these groups partition the unresolved
+    rows exactly, so it can be checked instead."""
 
     rollup: PerformanceRollup = PerformanceRollup()
     opportunities: OpportunityReport = OpportunityReport()
@@ -1175,6 +1222,7 @@ def create_app(
             is_reliable=rollup.gsc_resolution.is_reliable,
             pages_with_data=rollup.site.pages_with_data,
             pages=rollup.site.pages,
+            unmatched=unmatched_groups(metrics),
             rollup=rollup,
             opportunities=opportunities,
         )
@@ -1192,6 +1240,19 @@ def create_app(
             {
                 "summary": summary.model_dump(mode="json"),
                 "created_at": datetime.now(UTC).isoformat(),
+                # Every unresolved row, not just the grouping. "585 rows reached
+                # no page" is the headline and the 585 addresses are what an
+                # analyst checks it against — and re-deriving them would mean
+                # asking for the export again.
+                "unmatched_rows": [
+                    {
+                        "url": row.url,
+                        "clicks": row.clicks,
+                        "impressions": row.impressions,
+                        "reason": reason,
+                    }
+                    for row, reason in _unmatched_rows(metrics)
+                ],
             },
         )
         return summary
@@ -1270,6 +1331,78 @@ def create_app(
 
         stamp = str(saved.get("created_at", ""))[:10]
         name = f"opportunities-{job_id[:8]}-{stamp or 'undated'}.csv"
+        return _csv_response(buffer.getvalue(), name)
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/unmatched.csv")
+    def download_unmatched(job_id: str) -> Response:
+        """Every export row that reached no crawled page.
+
+        The evidence behind the match rate. "41.5% matched" is a number an
+        analyst has to take on trust; this is the other 58.5%, one row each,
+        with the clicks they carry and the reason they did not land — so the
+        rate can be checked rather than believed, and so the URLs themselves can
+        be acted on.
+
+        Sorted by clicks, because the gap is not evenly distributed and the
+        first rows are usually the whole story.
+
+        The group totals ride at the top as summary rows, for the same reason
+        they do in the cross-check download: a list of addresses handed over
+        without them invites the reader to count the rows and think that is the
+        finding.
+
+        Raises:
+            HTTPException: `404` if no export has been attached to this job.
+        """
+        saved = state.store.read_performance(job_id)
+        if saved is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} has no attached Search Console data",
+            )
+        summary = saved.get("summary")
+        summary = summary if isinstance(summary, Mapping) else {}
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["url", "host", "reason", "meaning", "clicks", "impressions"])
+
+        groups = summary.get("unmatched")
+        for group in groups if isinstance(groups, list) else []:
+            if not isinstance(group, Mapping):
+                continue
+            reason = str(group.get("reason", ""))
+            writer.writerow(
+                [
+                    f"{group.get('urls', 0)} URLs",
+                    group.get("host", ""),
+                    reason,
+                    "group total",
+                    group.get("clicks", 0),
+                    group.get("impressions", 0),
+                ]
+            )
+
+        rows = saved.get("unmatched_rows")
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, Mapping):
+                continue
+            url = str(row.get("url", ""))
+            parts = safe_split(url)
+            reason = str(row.get("reason", ""))
+            writer.writerow(
+                [
+                    url,
+                    site_host(parts.netloc) if parts is not None else "",
+                    reason,
+                    UNMATCHED_MEANINGS.get(reason, ""),
+                    row.get("clicks", 0),
+                    row.get("impressions", 0),
+                ]
+            )
+
+        stamp = str(saved.get("created_at", ""))[:10]
+        name = f"unmatched-{job_id[:8]}-{stamp or 'undated'}.csv"
         return _csv_response(buffer.getvalue(), name)
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
