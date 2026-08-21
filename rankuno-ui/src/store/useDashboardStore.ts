@@ -182,7 +182,20 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   },
 
   collapseAll(model) {
-    const open = new Set(model.roots);
+    // Empty, not `new Set(model.roots)`. Seeding the roots left every top-level
+    // tab expanded, so "Collapse all" on highradius still showed About Us,
+    // Customers and Partners open and the analyst closed them by hand — the
+    // one thing the button exists to save.
+    //
+    // The tree cannot collapse to nothing: `flatten` always emits the roots and
+    // only descends into open nodes, so an empty set renders exactly the top
+    // level, closed. That is what makes this safe, and it is why the seeding
+    // was never needed.
+    //
+    // `setModel` still opens the roots on load. A first paint showing only
+    // closed tabs hides the site behind a click; collapsing is a thing the
+    // analyst asks for.
+    const open = new Set<number>();
     set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
   },
 

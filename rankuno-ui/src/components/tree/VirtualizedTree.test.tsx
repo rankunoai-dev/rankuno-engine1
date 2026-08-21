@@ -152,8 +152,9 @@ describe("whole-branch expand and collapse", () => {
 
   it("expands the whole branch on a shift-click of a closed node", () => {
     const model = nested();
-    // `collapseAll` leaves roots open by design, so a root is the one row whose
-    // control collapses rather than expands. Close it explicitly first.
+    // Close the root explicitly. `collapseAll` would also do it now, but
+    // spelling it out keeps this test about the shift-click and not about
+    // whatever `collapseAll` happens to mean.
     useDashboardStore.getState().collapseBranch(model.roots[0]!, model);
     const before = useDashboardStore.getState().flat.length;
 
@@ -164,21 +165,48 @@ describe("whole-branch expand and collapse", () => {
     expect(useDashboardStore.getState().flat).toHaveLength(model.nodes.length);
   });
 
-  it("collapses a root that `collapseAll` left open", () => {
+  it("collapses the roots too, not only the sections under them", () => {
     /*
-     * Pins a semantic that surprised this test first time round: "collapse all"
-     * closes every *section* but keeps the roots themselves open, so the tree
-     * never collapses to nothing. A root's branch control therefore reads as
-     * collapse, not expand, immediately after it.
+     * Reported from the app: pressing "Collapse all" on highradius left About
+     * Us, Customers and Partners expanded, and the analyst closed each one by
+     * hand — the single thing the button exists to save.
+     *
+     * `collapseAll` seeded its open set with `model.roots`, so every top-level
+     * tab survived it. This is the assertion that was inverted before.
+     */
+    const model = nested();
+    useDashboardStore.getState().expandBranch(model.roots[0]!, model);
+    useDashboardStore.getState().collapseAll(model);
+
+    expect(useDashboardStore.getState().open.has(model.roots[0]!)).toBe(false);
+    expect(useDashboardStore.getState().open.size).toBe(0);
+  });
+
+  it("still shows the roots after collapsing them", () => {
+    /*
+     * The reason the roots were seeded in the first place, and why removing the
+     * seed is safe: `flatten` always emits a root and only descends into open
+     * nodes, so an empty set renders the top level closed rather than an empty
+     * pane.
      */
     const model = nested();
     useDashboardStore.getState().collapseAll(model);
-    expect(useDashboardStore.getState().open.has(model.roots[0]!)).toBe(true);
+
+    const { flat } = useDashboardStore.getState();
+    expect(flat).toHaveLength(model.roots.length);
+    expect(flat.every((row) => row.depth === 0)).toBe(true);
+  });
+
+  it("reopens from fully collapsed", () => {
+    /* A one-way collapse would be worse than none. */
+    const model = nested();
+    useDashboardStore.getState().collapseAll(model);
 
     const { container } = render(<VirtualizedTree model={model} />);
     fireEvent.click(container.querySelector(".vrow .tw")!, { shiftKey: true });
 
-    expect(useDashboardStore.getState().open.has(model.roots[0]!)).toBe(false);
+    expect(useDashboardStore.getState().open.has(model.roots[0]!)).toBe(true);
+    expect(useDashboardStore.getState().flat).toHaveLength(model.nodes.length);
   });
 
   it("still opens one level on a plain click", () => {
