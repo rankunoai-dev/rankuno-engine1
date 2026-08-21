@@ -4,7 +4,7 @@
 - **Scope**: `INDEXED_SUBDOMAIN` and `Severity` in the opportunity scorer; the
   panel and CSV that carry them.
 - **Commit**: uncommitted at time of writing
-- **Quality gate**: `1543 passed, 1 warning in 113.38s`, total coverage 95.74%
+- **Quality gate**: `1568 passed, 1 warning in 108.52s`, total coverage 96%
 
 ## 1. Gate results
 
@@ -12,11 +12,11 @@
 PASSED: Format
 PASSED: Lint
 PASSED: Type check
-Required test coverage of 85.0% reached. Total coverage: 95.74%
-1543 passed, 1 warning in 113.38s (0:01:53)
+Total coverage: 96%
+1568 passed, 1 warning in 108.52s (0:01:48)
 PASSED: Tests
- Test Files  11 passed (11)
-      Tests  108 passed (108)
+ Test Files  12 passed (12)
+      Tests  131 passed (131)
 PASSED: UI Component Tests
 ALL GATES PASSED.
 ```
@@ -114,6 +114,29 @@ that, and the correct response is to take the host down rather than to audit it.
 The toggle is worth having for `blog.example.com`. It should be its own cycle,
 with the host bound designed rather than discovered.
 
+## 4b. The same guard on one endpoint and not the other
+
+Found by clicking the link, which is the only way it could have been found.
+
+`unmatched.csv` returned **200 with a header row and nothing else** for a report
+saved before 0047 stored the rows. `matched.csv`, written in the same cycle from
+the same reasoning, correctly returned `409` with "upload the export again". The
+guard was written once, reasoned about in that cycle's own log — *"an empty file
+reads as nothing matched"* — and then applied to one of the two endpoints.
+
+A header-only `unmatched.csv` reads as **"every row matched"**, which is the
+exact opposite of what an older report means, and is the more misleading of the
+two failures: it agrees with a 100% match rate that never happened.
+
+Both now carry the guard, and the test is parametrised over both so a third
+download cannot repeat it.
+
+**It was also invisible until the server restarted.** The route returned FastAPI's
+own `{"detail":"Not Found"}` because the running process predated cycles 0047
+and 0048 — Python does not reload a running server, and nothing in the product
+says which build is answering. That is now twice in this session that stale
+process state produced a symptom that looked like a code defect.
+
 ## 5. Corrections
 
 None. Cycle 0044's §2 called this "a compromised-host signature" and this cycle
@@ -139,7 +162,7 @@ can say what the engine must not.
 | File | Change |
 | :--- | :--- |
 | `src/modules/seo/performance/opportunity_scorer.py` | `INDEXED_SUBDOMAIN`, `Severity`, `_subdomains`, severity-first ordering |
-| `src/api/server.py` | `severity` leads `opportunities.csv` |
+| `src/api/server.py` | `severity` leads `opportunities.csv`; the stale-report guard on `unmatched.csv` too |
 | `tests/modules/seo/test_opportunity_scorer.py` | 6 new tests |
 | `rankuno-ui/…/PerformancePanel.tsx` + test | critical badge, kind label; 1 new test |
 | `rankuno-ui/src/adapters/adapterInterface.ts` | `severity` |

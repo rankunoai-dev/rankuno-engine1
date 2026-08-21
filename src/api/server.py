@@ -1479,6 +1479,19 @@ def create_app(
                 status.HTTP_404_NOT_FOUND,
                 detail=f"job {job_id} has no attached Search Console data",
             )
+        rows = saved.get("unmatched_rows")
+        if not isinstance(rows, list):
+            # The same guard `matched.csv` carries, and for the same reason: a
+            # header-only file reads as "every row matched", which is the
+            # opposite of what an older report means. Shipped on one endpoint
+            # and not the other, and found by clicking the link.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    "this report was saved before the unmatched rows were kept. "
+                    "Upload the export again to produce it."
+                ),
+            )
         summary = saved.get("summary")
         summary = summary if isinstance(summary, Mapping) else {}
 
@@ -1502,8 +1515,7 @@ def create_app(
                 ]
             )
 
-        rows = saved.get("unmatched_rows")
-        for row in rows if isinstance(rows, list) else []:
+        for row in rows:
             if not isinstance(row, Mapping):
                 continue
             url = str(row.get("url", ""))

@@ -308,13 +308,22 @@ class TestDownload:
         assert "BLOG_ARTICLE" in response.text
         assert "S" in response.text
 
-    def test_a_report_saved_before_page_rows_says_so(self, client, crawl, store):
-        """An empty file would read as "nothing matched"."""
+    @pytest.mark.parametrize(
+        ("field", "path"),
+        [("matched_rows", "matched.csv"), ("unmatched_rows", "unmatched.csv")],
+    )
+    def test_a_report_saved_before_these_rows_says_so(self, client, crawl, store, field, path):
+        """Both downloads, because the guard shipped on only one of them.
+
+        A header-only file reads as "every row matched" from `unmatched.csv` and
+        as "nothing matched" from `matched.csv`. Both are the opposite of what an
+        older report means, and both were reachable from a link in the panel.
+        """
         upload(client, crawl.id, PAGES_CSV)
         saved = dict(store.read_performance(crawl.id) or {})
-        saved.pop("matched_rows", None)
+        saved.pop(field, None)
         store.write_performance(crawl.id, saved)
-        response = client.get(f"{API_PREFIX}/jobs/{crawl.id}/matched.csv")
+        response = client.get(f"{API_PREFIX}/jobs/{crawl.id}/{path}")
         assert response.status_code == 409
         assert "Upload the export again" in response.json()["detail"]
 
