@@ -32,6 +32,30 @@ interface DashboardState {
   nextChildPage: (index: number, total: number) => void;
   expandAll: (model: DashModel, toDepth: number) => void;
   collapseAll: (model: DashModel) => void;
+  /** Open one node and everything beneath it, however deep. */
+  expandBranch: (index: number, model: DashModel) => void;
+  /** Close one node and everything beneath it. */
+  collapseBranch: (index: number, model: DashModel) => void;
+}
+
+/**
+ * Every node in the subtree rooted at `index`, including `index` itself.
+ *
+ * An explicit stack rather than recursion, for the reason `flatten` uses one: a
+ * section of a real crawl can nest arbitrarily, and `BLOGS` on gep.com holds
+ * 2,937 descendants on its own.
+ */
+function subtree(model: DashModel, index: number): number[] {
+  const found: number[] = [];
+  const stack = [index];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    found.push(current);
+    const node = model.nodes[current];
+    if (!node) continue;
+    for (const kid of node.kids) stack.push(kid);
+  }
+  return found;
 }
 
 function passes(
@@ -159,6 +183,21 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
   collapseAll(model) {
     const open = new Set(model.roots);
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
+  },
+
+  expandBranch(index, model) {
+    // Merged into the current set rather than replacing it: opening one section
+    // in full must not close the others the analyst already opened. That is the
+    // difference between this and `expandAll`, which is a whole-tree command.
+    const open = new Set(get().open);
+    for (const node of subtree(model, index)) open.add(node);
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
+  },
+
+  collapseBranch(index, model) {
+    const open = new Set(get().open);
+    for (const node of subtree(model, index)) open.delete(node);
     set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
   },
 }));

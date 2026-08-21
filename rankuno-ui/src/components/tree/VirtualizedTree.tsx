@@ -37,6 +37,8 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
   const focus = useDashboardStore((state) => state.focus);
   const toggleOpen = useDashboardStore((state) => state.toggleOpen);
   const setFocus = useDashboardStore((state) => state.setFocus);
+  const expandBranch = useDashboardStore((state) => state.expandBranch);
+  const collapseBranch = useDashboardStore((state) => state.collapseBranch);
 
   const viewport = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: 40 });
@@ -97,10 +99,20 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
       >
         <span
           className={`tw${open.has(node.i) ? " open" : ""}`}
+          title={hasChildren ? "Click to open one level · Shift-click for the whole branch" : ""}
           onClick={(event) => {
             // Stop the row's own select handler: expanding a branch and moving
             // the focus are different intentions.
             event.stopPropagation();
+            // Shift is the power path for the same intention the ⇊ button
+            // carries. Both exist because the button is discoverable and the
+            // modifier is fast, and an analyst opening a 2,937-node section
+            // one level at a time is doing it 30 times.
+            if (event.shiftKey && hasChildren) {
+              if (open.has(node.i)) collapseBranch(node.i, model);
+              else expandBranch(node.i, model);
+              return;
+            }
             toggleOpen(node.i, model);
           }}
         >
@@ -116,6 +128,27 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
             title={`Section built from: ${TRAIL_SOURCE_BADGE[node.src]}`}
           >
             {TRAIL_SOURCE_BADGE[node.src]}
+          </span>
+        )}
+        {/* Whole-branch control, revealed on hover so it costs no width until
+            wanted. A `span` rather than a `button` because the row itself is a
+            button and nesting one inside another is invalid — the same reason
+            the twisty above is a span. */}
+        {hasChildren && (
+          <span
+            className="tbranch"
+            title={
+              open.has(node.i)
+                ? `Collapse ${node.label} and everything under it`
+                : `Expand ${node.label} and everything under it (${node.cnt.toLocaleString()} pages)`
+            }
+            onClick={(event) => {
+              event.stopPropagation();
+              if (open.has(node.i)) collapseBranch(node.i, model);
+              else expandBranch(node.i, model);
+            }}
+          >
+            {open.has(node.i) ? "⇈" : "⇊"}
           </span>
         )}
         {hasChildren && <span className="tcnt">{node.cnt.toLocaleString()}</span>}

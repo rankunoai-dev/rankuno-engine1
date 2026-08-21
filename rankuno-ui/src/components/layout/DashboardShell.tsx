@@ -195,18 +195,37 @@ export function DashboardShell(): JSX.Element {
                     </div>
                     <TeleportSearch model={model} />
                     <LevelFilterRow model={model} />
+                    {/* `All` and `Collapse` were the labels here and read as
+                        filters beside the L1/L2 depth buttons rather than as the
+                        whole-tree commands they are. Named for what they do. */}
                     <Space size={4} style={{ padding: "0 10px 8px" }}>
-                      <Button size="small" onClick={() => expandAll(model, 1)}>
+                      <Button
+                        size="small"
+                        title="Open the first level only"
+                        onClick={() => expandAll(model, 1)}
+                      >
                         L1
                       </Button>
-                      <Button size="small" onClick={() => expandAll(model, 2)}>
+                      <Button
+                        size="small"
+                        title="Open the first two levels"
+                        onClick={() => expandAll(model, 2)}
+                      >
                         L2
                       </Button>
-                      <Button size="small" onClick={() => expandAll(model, 99)}>
-                        All
+                      <Button
+                        size="small"
+                        title={`Open every section, to the bottom — ${model.nodes.length.toLocaleString()} nodes`}
+                        onClick={() => expandAll(model, 99)}
+                      >
+                        Expand all
                       </Button>
-                      <Button size="small" onClick={() => collapseAll(model)}>
-                        Collapse
+                      <Button
+                        size="small"
+                        title="Close every section back to the top level"
+                        onClick={() => collapseAll(model)}
+                      >
+                        Collapse all
                       </Button>
                     </Space>
                     <VirtualizedTree model={model} />

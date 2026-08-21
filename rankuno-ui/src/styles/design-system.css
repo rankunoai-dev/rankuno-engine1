@@ -643,8 +643,27 @@
   color: #94a3b8;
   overflow-wrap: anywhere;
 }
-.tcnt {
+/* Whole-branch expand/collapse. Held at opacity 0 rather than display:none so
+   it keeps its box — revealing it on hover must not shift the count beside it. */
+.tbranch {
   margin-left: auto;
+  flex: none;
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--faint);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.vrow:hover .tbranch,
+.vrow.sel .tbranch {
+  opacity: 1;
+}
+.tbranch:hover {
+  color: var(--l1f);
+}
+
+.tcnt {
   font-family: var(--mono);
   font-size: 9.5px;
   color: var(--faint);

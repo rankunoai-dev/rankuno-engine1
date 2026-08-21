@@ -68,6 +68,7 @@ which, for an AI-assisted codebase, is every session.
 | [0035](0035-the-orphan-worklist.md) | 2026-08-20 | Orphans become a filterable, exportable worklist split by discovery path | 1,372 py + 43 ui |
 | [0036](0036-duplicate-sets-as-a-worklist.md) | 2026-08-20 | Duplicate URL sets become an exportable worklist, clustered per page | 1,388 py + 57 ui |
 | [0037](0037-one-address-spelled-two-ways.md) | 2026-08-20 | normalize_path folds percent-encoding, ending a false duplicate finding | 1,398 py + 65 ui |
+| [0038](0038-expand-one-branch-not-the-whole-tree.md) | 2026-08-20 | Whole-branch expand/collapse on any tree row; honest whole-tree labels | 1,398 py + 76 ui |
 
 
 ---
