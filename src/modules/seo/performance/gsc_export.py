@@ -103,6 +103,21 @@ _NOT_AN_EXPORT = (
     "from inside either one."
 )
 
+_WRONG_REPORT = (
+    "no tab in this file holds page addresses, so there is nothing to attach "
+    "to the crawl. Found: {tabs}. That looks like a different Search Console "
+    "report — Page indexing, Sitemaps and Core Web Vitals all export counts "
+    "rather than URLs. The one with pages in it is Performance: open "
+    "Performance → search results, then Export at the top right."
+)
+
+_NO_ADDRESSES = (
+    "this file's first column holds no page addresses, so there is nothing to "
+    "attach to the crawl. A Search Console Performance export lists one "
+    "URL per row with its clicks and impressions; a queries, dates or "
+    "countries tab does not, and neither does the Page indexing report."
+)
+
 _NEEDS_OPENPYXL = (
     "this looks like an Excel workbook, but openpyxl is not installed. Export "
     "the report as CSV instead."
@@ -297,8 +312,22 @@ def _pick(tables: list[_Table]) -> _Table:
     """
     scored = [(_address_share(rows), len(rows), name, rows) for name, rows in tables if rows]
     best = max(scored, default=None, key=lambda item: (item[0], item[1]))
-    if best is None or best[0] < _ADDRESS_SHARE:
+    if best is None:
+        # Nothing readable at all — an empty body, or a file with no rows in it.
+        # A message about which column holds addresses would be answering a
+        # question this reader has not reached yet.
         raise ValueError(_NOT_AN_EXPORT)
+    if best[0] < _ADDRESS_SHARE:
+        # Name what was found. The first version of this message described the
+        # file it wanted and not the file it got, which is no help at all to
+        # somebody holding the Page indexing export — four tabs, not one URL in
+        # any of them, and every word of the refusal still true of a file they
+        # would never have produced. Real case, 2026-08-21.
+        named = [name for _, _, name, _ in scored if name]
+        if named:
+            shown = ", ".join(named[:6])
+            raise ValueError(_WRONG_REPORT.format(tabs=shown))
+        raise ValueError(_NO_ADDRESSES)
     return best[2], best[3]
 
 

@@ -128,9 +128,44 @@ class TestPickingTheRightTab:
         assert result.source_name == "Seiten.csv"
 
     def test_an_archive_of_only_wrong_tabs_is_refused(self):
-        """Better to say the file holds no pages than to report on queries."""
-        with pytest.raises(ValueError, match="not a readable Search Console"):
+        """Better to say the file holds no pages than to report on queries.
+
+        And to name the tabs it does hold, so the reader can see they have the
+        wrong export rather than a broken one.
+        """
+        with pytest.raises(ValueError, match="no tab in this file holds page") as caught:
             load_gsc_export(archive(Queries_csv=QUERIES, Dates_csv=DATES))
+        assert "Queries.csv" in str(caught.value)
+
+    def test_the_page_indexing_report_says_which_report_to_use(self):
+        """The wrong Search Console report, named by what it contains.
+
+        A real upload, 2026-08-21: `rankuno.com-Coverage-2026-08-21.xlsx`, the
+        Page indexing report. Four sheets, not one URL in any of them — Chart is
+        dates against counts, both issues sheets are reasons against page
+        *counts*, and Metadata is a property list.
+
+        Refusing it is right. The first version of the refusal described the
+        file it wanted and never the file it got, so somebody holding this one
+        read a message that was true of every word and no help at all.
+        """
+        coverage = workbook(
+            Chart="Date,Not indexed,Indexed,Impressions\n2026-05-23,98,62,88",
+            Critical__issues=(
+                "Reason,Source,Validation,Pages\nPage with redirect,Website,Not Started,26"
+            ),
+            Metadata="Property,Value\nSitemap,All known pages",
+        )
+        with pytest.raises(ValueError) as caught:
+            load_gsc_export(coverage)
+        message = str(caught.value)
+        # What it found, so the reader can see it is holding the wrong export.
+        assert "Chart" in message
+        assert "Critical issues" in message
+        # And which report does have pages in it.
+        assert "Performance" in message
+        # Plain text: this reaches a banner that does not render markdown.
+        assert "**" not in message
 
     def test_a_one_row_tab_does_not_beat_the_real_one(self):
         """A one row tab does not beat the real one.
@@ -228,9 +263,10 @@ class TestColumnsAndNumbers:
 
         It applies to a lone CSV as much as to a tab inside an archive: someone
         who unpacks the ZIP and picks the wrong file is told so, rather than
-        handed a rollup of search phrases.
+        handed a rollup of search phrases. With no tab names to list, the
+        message names the column instead.
         """
-        with pytest.raises(ValueError, match="not a readable Search Console"):
+        with pytest.raises(ValueError, match="first column holds no page addresses"):
             load_gsc_export(QUERIES)
 
 
@@ -264,7 +300,7 @@ class TestRefusals:
             load_gsc_export("")
 
     def test_a_header_with_no_data_under_it(self):
-        with pytest.raises(ValueError, match="not a readable Search Console"):
+        with pytest.raises(ValueError, match="first column holds no page addresses"):
             load_gsc_export("Top pages,Clicks,Impressions,CTR,Position\n")
 
 
