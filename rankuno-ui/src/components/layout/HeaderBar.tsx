@@ -8,8 +8,6 @@ import { isLive, newestLiveJob, useCrawlStore } from "../../store/useCrawlStore"
 import { useUiStore } from "../../store/useUiStore";
 
 interface Props {
-  /** Node count for the status readout. Zero when no crawl is loaded. */
-  nodeCount: number;
   /** True when a header menu was parsed, so navigation grouping is meaningful. */
   navParsed: boolean;
   onNewCrawl: () => void;
@@ -24,7 +22,7 @@ interface Props {
  * component that is mounted above the view switch rather than inside one of the
  * views.
  */
-export function HeaderBar({ nodeCount, navParsed, onNewCrawl, onPrint }: Props): JSX.Element {
+export function HeaderBar({ navParsed, onNewCrawl, onPrint }: Props): JSX.Element {
   const result = useCrawlStore((state) => state.result);
   const jobs = useCrawlStore((state) => state.jobs);
   const activeJobId = useCrawlStore((state) => state.activeJobId);
@@ -43,9 +41,14 @@ export function HeaderBar({ nodeCount, navParsed, onNewCrawl, onPrint }: Props):
 
   return (
     <header className="hdr">
-      <h1>
-        Rankuno Engine <span>— {result ? result.base_url : "no crawl loaded"}</span>
-      </h1>
+      {/*
+        The site, once. This read `Rankuno Engine — https://www.gep.com/` while
+        the selector beside it read `https://www.gep.com/ (+14 from Screaming
+        Frog)`: the same address twice, taking half the bar between them, and
+        the product name is already on the rail. The host alone is what an
+        analyst checks to be sure they are looking at the right client.
+      */}
+      <h1>{result ? hostOf(result.base_url) : "No crawl loaded"}</h1>
 
       <Space size={8}>
         <Select
@@ -83,22 +86,40 @@ export function HeaderBar({ nodeCount, navParsed, onNewCrawl, onPrint }: Props):
             PDF
           </Button>
         )}
-        <Segmented
-          size="small"
-          value={grouping}
-          onChange={(value) => setGrouping(value as "navigation" | "path")}
-          options={[
-            { label: "Navigation", value: "navigation", disabled: !navParsed },
-            { label: "URL path", value: "path" },
-          ]}
-        />
+        {/* The one control here whose effect is not obvious from its label:
+            it changes what a lane *means*, not merely how rows are sorted. */}
+        <Tooltip title="Group the tree by the site's own header menu, or by URL path depth. Navigation needs a menu the crawl could parse.">
+          <Segmented
+            size="small"
+            value={grouping}
+            onChange={(value) => setGrouping(value as "navigation" | "path")}
+            options={[
+              { label: "Navigation", value: "navigation", disabled: !navParsed },
+              { label: "URL path", value: "path" },
+            ]}
+          />
+        </Tooltip>
       </Space>
 
       {lead ? (
         <BackgroundPill lead={lead} runningCount={runningCount} />
       ) : (
         <div className={`perf${result?.discovery.truncated ? " stale" : ""}`}>
-          {result ? `${nodeCount.toLocaleString()} nodes · virtual list` : status.toUpperCase()}
+          {/*
+            Pages, not nodes, and no "virtual list".
+
+            `nodes` counted tree nodes, which include the structural groupings
+            the tree needs to hold its children — 29,248 against 27,656 pages on
+            kinsta. Putting that figure in the header beside a KPI card reading
+            the smaller one is the same mismatch cycle 0022 fixed in the audit.
+            "virtual list" was a note about how the pane is rendered, which is
+            not a fact about the site.
+          */}
+          {result
+            ? `${result.summary.pages_classified.toLocaleString()} pages${
+                result.discovery.truncated ? " · partial crawl" : ""
+              }`
+            : status.toUpperCase()}
         </div>
       )}
     </header>

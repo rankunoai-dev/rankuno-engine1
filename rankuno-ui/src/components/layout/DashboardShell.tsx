@@ -70,7 +70,6 @@ export function DashboardShell(): JSX.Element {
 
         <div className="rk-app">
           <HeaderBar
-            nodeCount={model.nodes.length}
             navParsed={navParsed}
             onNewCrawl={() => setCrawlOpen(true)}
             onPrint={() => {

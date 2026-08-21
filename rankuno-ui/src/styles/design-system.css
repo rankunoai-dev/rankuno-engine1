@@ -285,10 +285,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.hdr h1 span {
-  color: var(--dim);
-  font-weight: 500;
-}
 /* One row of the crawl selector. Two lines, because the same site is crawled
    repeatedly while settings are tuned and the URL alone does not distinguish
    the runs. */
