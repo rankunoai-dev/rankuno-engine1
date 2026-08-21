@@ -74,6 +74,74 @@
   color: inherit;
 }
 
+/*
+ * Buttons that are meant to look like buttons.
+ *
+ * The reset above is `.rk-dash button` — specificity (0,1,1) — which beats any
+ * single class a component declares on its own. Every hand-styled button in the
+ * app was therefore stripped back to bare text: the audit card's export and
+ * drill-in rendered as grey words with no background, no border and no affordance
+ * at all, and were reported as invisible twice. Restyling them in their own
+ * stylesheet could not work, because the reset outranked it.
+ *
+ * These rules are scoped under `.rk-dash` for exactly that reason — (0,2,0)
+ * outranks the reset. Any component wanting a visible button uses these classes
+ * rather than inventing its own and losing the same fight again.
+ */
+.rk-dash .rk-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 5px;
+  /* The design system's own tokens. These were literal dark colours while the
+     audit cards and jobs table drew dark surfaces of their own; both are white
+     now, so a dark button on them was the invisibility problem inverted. */
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 12px;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.rk-dash .rk-btn:hover {
+  background: var(--bg);
+  border-color: var(--blue);
+  color: var(--ink);
+}
+
+.rk-dash .rk-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* One primary per group. The action the analyst came to this card to take. */
+.rk-dash .rk-btn-primary {
+  background: var(--l3bg);
+  border-color: var(--l3f);
+  color: var(--l3);
+}
+
+.rk-dash .rk-btn-primary:hover {
+  background: #cdeedb;
+  border-color: var(--l3);
+}
+
+.rk-dash .rk-btn-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+  font-weight: 500;
+}
+
+.rk-dash .rk-btn-quiet:hover {
+  background: var(--bg);
+  border-color: var(--line2);
+  color: var(--ink);
+}
+
 .rk-dash :focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
@@ -103,7 +171,8 @@
   font-size: 15px;
   margin-bottom: 14px;
 }
-.rit {
+/* Scoped for the same reason as `.gn` above: `color` here loses to the reset. */
+.rk-dash .rit {
   width: 60px;
   padding: 9px 0 7px;
   border-radius: 9px;
@@ -804,7 +873,12 @@ svg.wires {
   stroke-width: 2;
   opacity: 1;
 }
-.gn {
+/* Scoped under `.rk-dash` for specificity, not for nesting: these cards are
+   `<button>` elements, and the `.rk-dash button` reset above resets exactly the
+   two properties that make them cards — `background` and `border`. A bare `.gn`
+   is (0,1,0) and loses to the reset's (0,1,1). Same defect as the audit card's
+   controls; found by auditing the reset rather than by report. */
+.rk-dash .gn {
   position: absolute;
   z-index: 3;
   transform: translate(-50%, -50%);
@@ -836,11 +910,16 @@ svg.wires {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.g0 { border-color: var(--l0f); }
-.g1 { border-color: var(--l1f); }
-.g2 { border-color: var(--l2f); }
-.g3 { border-color: var(--l3f); }
-.go { border-color: var(--othf); background: var(--othbg); }
+/* Lifted to `.rk-dash` specificity to match `.rk-dash .gn` above. At (0,1,0)
+   these lost first to the button reset and then to the scoped `.gn` rule that
+   replaced it, and every node card would have taken a currentcolor border
+   instead of its lane colour. Declared after `.gn` so equal specificity
+   resolves in their favour. */
+.rk-dash .g0 { border-color: var(--l0f); }
+.rk-dash .g1 { border-color: var(--l1f); }
+.rk-dash .g2 { border-color: var(--l2f); }
+.rk-dash .g3 { border-color: var(--l3f); }
+.rk-dash .go { border-color: var(--othf); background: var(--othbg); }
 .gn.sel {
   box-shadow:
     0 0 0 3px rgba(160, 110, 245, 0.35),
@@ -965,11 +1044,11 @@ svg.wires {
 .rk-boundary {
   margin: 10px;
   padding: 10px 12px;
-  border: 1px solid #7f1d1d;
+  border: 1px solid #f0b4b4;
   border-left-width: 3px;
   border-radius: 4px;
-  background: #1a1013;
-  color: #fca5a5;
+  background: #fdeaea;
+  color: var(--danger);
   font-size: 12px;
 }
 

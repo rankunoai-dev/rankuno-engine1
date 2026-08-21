@@ -1,24 +1,18 @@
 /*
  * Crawl jobs table.
  *
- * Colours are declared here rather than taken from the design system, and that
- * is not duplication. `main.tsx` configures antd with `theme.darkAlgorithm`, so
- * this table paints itself on a dark ground, while the design-system palette is
- * a light one — `--ink` is #1d2635, a near-black. Using it here rendered the
- * progress counts as dark text on a dark row: the numbers were present, sized
- * and positioned correctly, and invisible unless you selected them.
- *
- * The two tokens below are the dark-ground equivalents of `--ink` and `--dim`,
- * scoped to this view so nothing outside it is affected.
+ * Takes its colours from the design system. This file used to define its own
+ * light-on-dark ink and dim tokens, because antd ran on `darkAlgorithm` and
+ * painted this table on a dark ground inside a white dashboard — black rows
+ * under a white header, which is what got it reported. antd now follows the
+ * design system (`main.tsx`), so `--ink` and `--dim` are correct again: one
+ * theme, not two reconciled at the edges.
  */
 
 .jb-wrap {
   padding: 14px 18px 20px;
   overflow: auto;
   height: 100%;
-
-  --jb-ink: #e6edf7;
-  --jb-dim: #94a3b8;
 }
 
 .jb-head {
@@ -32,12 +26,12 @@
   font-size: 14px;
   font-weight: 700;
   margin: 0;
-  color: var(--jb-ink);
+  color: var(--ink);
 }
 
 .jb-sub {
   font-size: 11.5px;
-  color: var(--jb-dim);
+  color: var(--dim);
   margin-right: auto;
 }
 
@@ -51,7 +45,7 @@
   font-weight: 600;
   font-size: 12.5px;
   word-break: break-all;
-  color: var(--jb-ink);
+  color: var(--ink);
 }
 
 .jb-meta {
@@ -64,7 +58,7 @@
 .jb-when {
   font-family: var(--mono);
   font-size: 10.5px;
-  color: var(--jb-dim);
+  color: var(--dim);
 }
 
 /* The row whose tree is currently on screen, so the table and the visualizer
@@ -85,7 +79,7 @@
 .jb-clock {
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--jb-dim);
+  color: var(--dim);
 }
 
 .jb-progress {
@@ -105,18 +99,18 @@
   /* The headline number of this table — how far a crawl has got. Weighted up
      as well as brightened: at 10.5px monospace on a dark row, colour alone was
      not enough separation from the ETA beside it. */
-  color: var(--jb-ink);
+  color: var(--ink);
   font-weight: 600;
   cursor: help;
 }
 
 .jb-eta {
-  color: var(--jb-dim);
+  color: var(--dim);
   margin-left: auto;
 }
 
 .jb-dim {
-  color: var(--jb-dim);
+  color: var(--dim);
   font-size: 10.5px;
 }
 
@@ -248,13 +242,13 @@
    describing 8% of a site. */
 .jb-stat-hint {
   font-size: 10px;
-  color: var(--jb-dim);
+  color: var(--dim);
   line-height: 1.3;
 }
 
 .perf-source {
   font-size: 11px;
-  color: var(--jb-dim);
+  color: var(--dim);
   margin: 8px 0 0;
 }
 
@@ -293,7 +287,7 @@
 .perf-kind-more {
   font-size: 11px;
   font-weight: 400;
-  color: var(--jb-dim);
+  color: var(--dim);
 }
 
 .perf-url {
@@ -308,16 +302,16 @@
    browser saves the file and the app never holds a copy. */
 .perf-download {
   display: inline-block;
-  border: 1px solid #16a34a;
+  border: 1px solid var(--l3f);
   border-radius: 6px;
-  background: #14532d;
-  color: #dcfce7;
+  background: var(--l3bg);
+  color: var(--l3);
   font-size: 12px;
   font-weight: 600;
   padding: 4px 12px;
   text-decoration: none;
 }
 .perf-download:hover {
-  background: #166534;
-  color: #f0fdf4;
+  background: #cdeedb;
+  color: var(--l3);
 }
