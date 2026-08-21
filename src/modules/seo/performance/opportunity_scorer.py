@@ -225,6 +225,25 @@ def _measured(index: UrlResolutionIndex, metrics: PageMetricSet) -> _Measured:
     return out
 
 
+MAX_FINDINGS_PER_KIND = 1_000
+"""Safety ceiling on findings returned per kind.
+
+Deliberately far above what anyone reads on screen, because this is not the
+number of rows to *show* — it is the number that exists at all. The two were the
+same value once, at 50, and the consequence was that the CSV an analyst hands to
+a content team was silently truncated to fit a panel: gep.com found 82 pages
+earning clicks from deep in the navigation and 202 ranking off page one, and the
+export carried 50 of each. The other 32 and 152 were scored, counted into
+`truncated`, and discarded before the response was built, so no later download
+could recover them.
+
+A ceiling is still needed — the report is stored per job and served whole — but
+it belongs at "this site is pathological" rather than at "this is a readable
+page". Every kind is capped independently, so the worst case is
+`MAX_FINDINGS_PER_KIND` times the number of kinds.
+"""
+
+
 def _rank(items: list[tuple[float, Opportunity]], limit: int) -> tuple[int, list[Opportunity]]:
     """Score a kind's findings against its own largest, then cap.
 
@@ -246,7 +265,7 @@ def score_opportunities(
     index: UrlResolutionIndex,
     metrics: PageMetricSet,
     *,
-    limit_per_kind: int = 50,
+    limit_per_kind: int = MAX_FINDINGS_PER_KIND,
     min_clicks: int = 1,
     min_impressions: int = 100,
 ) -> OpportunityReport:
@@ -256,7 +275,9 @@ def score_opportunities(
         index: The resolver for the crawl.
         metrics: Merged per-page metrics from `merge_page_metrics`.
         limit_per_kind: Most findings to return per kind. What the cap drops is
-            counted in `truncated`.
+            counted in `truncated`. This is a **safety ceiling, not a display
+            limit** — see `MAX_FINDINGS_PER_KIND`. A caller wanting a short list
+            should take the first N of the result, which is already ranked.
         min_clicks: Floor for the click-driven kinds. Period-dependent — see the
             module docstring — and intended to keep the list finite rather than
             to express a judgement.

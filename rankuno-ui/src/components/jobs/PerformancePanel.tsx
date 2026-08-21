@@ -6,6 +6,7 @@ import type {
   SectionPerformance,
 } from "../../adapters/adapterInterface";
 import { API_BASE } from "../../adapters/httpAdapter";
+import { downloadCsv, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import "./jobs.css";
 
@@ -20,6 +21,16 @@ import "./jobs.css";
  * 1,000 rows and the API at 50,000, so these files are kilobytes.
  */
 const MAX_EXPORT_BYTES = 32 * 1_000_000;
+
+/**
+ * Findings listed per kind on screen.
+ *
+ * A reading limit, and only that. The download carries every scored row and the
+ * heading says so. These were the same number until an analyst asked why a
+ * section holding 202 findings offered a "Download 50" button: the panel's
+ * readable length had quietly become the size of the deliverable.
+ */
+const DISPLAY_ROWS = 50;
 
 /**
  * Plain-English heading for each recommendation kind.
@@ -268,7 +279,22 @@ function Sections({ summary }: { summary: PerformanceSummary }): JSX.Element {
 
   return (
     <>
-      <h4 className="perf-heading">Sections</h4>
+      <div className="perf-heading-row">
+        <h4 className="perf-heading">
+          Sections
+          <Tag className="perf-kind-count">{roots.length}</Tag>
+        </h4>
+        {/* Stated because the two are easy to assume identical and are not.
+            The visualizer groups a localised page under its URL locale prefix
+            — `/de-de/…` becomes its own tab — while this rolls it up under the
+            breadcrumb its page publishes, which is itself translated. On
+            gep.com that is 30 sections here against 36 tabs there; on
+            highradius.com both are 31 and the *sets* still differ. */}
+        <span className="perf-kind-more">
+          grouped by published breadcrumb — the visualizer&rsquo;s tabs also split by
+          URL locale, so the two lists differ on a multilingual site
+        </span>
+      </div>
       <Table<SectionPerformance>
         dataSource={roots}
         rowKey={(section) => section.path.join(" > ")}
@@ -322,6 +348,58 @@ function Sections({ summary }: { summary: PerformanceSummary }): JSX.Element {
 /**
  * The recommendations, grouped by kind, with what was skipped shown beside them.
  */
+/** Columns of a recommendations export, matching the server's whole-report CSV. */
+const OPPORTUNITY_HEADERS = [
+  "kind",
+  "score",
+  "url",
+  "section",
+  "clicks",
+  "impressions",
+  "position",
+  "inbound_internal_links",
+  "reason",
+] as const;
+
+/**
+ * One section's recommendations as a file.
+ *
+ * Built in the browser rather than added as a second server endpoint, because
+ * the rows here **are** the rows the server would send. Capping happens in
+ * `opportunity_scorer` before anything is stored, so the sidecar holds the same
+ * top-N per kind that this panel received — a `?kind=` parameter on
+ * `opportunities.csv` would re-serve this list from disk and call it complete.
+ *
+ * The header order matches the whole-report CSV so the two files concatenate.
+ */
+function exportSection(label: string, rows: readonly Opportunity[]): void {
+  const csv = toCsv(
+    OPPORTUNITY_HEADERS,
+    rows.map((row) => [
+      row.kind,
+      row.score,
+      row.url,
+      row.section.join(" > "),
+      row.clicks,
+      row.impressions,
+      row.position,
+      row.inbound_internal_links,
+      row.reason,
+    ]),
+  );
+  downloadCsv(`${slug(label)}.csv`, csv);
+}
+
+/** `earning-clicks-with-no-internal-link` from a section heading. */
+function slug(label: string): string {
+  return (
+    label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "recommendations"
+  );
+}
+
 function Opportunities({
   summary,
   jobId,
@@ -362,6 +440,9 @@ function Opportunities({
 
       {kinds.map((kind) => {
         const rows = report.opportunities.filter((item) => item.kind === kind);
+        // Shown on screen; `rows` is what the download gets. Reading is
+        // bounded here, the export is not.
+        const visible = rows.slice(0, DISPLAY_ROWS);
         const dropped = report.truncated[kind] ?? 0;
         return (
           <div key={kind} className="perf-kind">
@@ -370,14 +451,39 @@ function Opportunities({
               <Tag className="perf-kind-count">{report.found[kind] ?? rows.length}</Tag>
               {/* Never silent. A list that stops at 50 and says nothing reads
                   as "there were 50". */}
-              {dropped > 0 && (
+              {rows.length > visible.length && (
                 <span className="perf-kind-more">
-                  showing the top {rows.length} of {report.found[kind]}
+                  showing {visible.length} here · all {rows.length.toLocaleString()} in the
+                  download
                 </span>
               )}
+              {/* A different truncation, and conflating the two is what made
+                  the old message misleading. This one means the rows do not
+                  exist: they were scored, counted, and discarded. */}
+              {dropped > 0 && (
+                <span className="perf-kind-more">
+                  · {dropped.toLocaleString()} beyond the scoring ceiling were not kept
+                </span>
+              )}
+              {/* Per section, because each one goes to a different person. The
+                  internal-link findings are a content job and the navigation
+                  depth findings are an information-architecture job; handing
+                  either owner the combined file makes them filter it first. */}
+              <button
+                type="button"
+                className="perf-download perf-download-sm"
+                title={
+                  dropped > 0
+                    ? `Download all ${rows.length.toLocaleString()} scored rows. A further ${dropped.toLocaleString()} passed the filters but fell beyond the scoring ceiling and are not stored anywhere.`
+                    : `Download all ${rows.length.toLocaleString()} rows`
+                }
+                onClick={() => exportSection(KIND_LABELS[kind] ?? kind, rows)}
+              >
+                Download {rows.length.toLocaleString()}
+              </button>
             </h5>
             <Table<Opportunity>
-              dataSource={rows}
+              dataSource={visible}
               rowKey={(item) => `${item.kind}:${item.url}`}
               size="small"
               pagination={false}
