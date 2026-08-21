@@ -22,6 +22,7 @@ from src.modules.seo.performance.aggregator import merge_page_metrics
 from src.modules.seo.performance.opportunity_scorer import (
     Opportunity,
     OpportunityKind,
+    Severity,
     SignalGap,
     score_opportunities,
 )
@@ -368,6 +369,95 @@ class TestUnderperformingSiblings:
             ],
         )
         assert of_kind(result, OpportunityKind.UNDERPERFORMING_SIBLING) == []
+
+
+class TestIndexedSubdomains:
+    """The one finding here that can be a security matter, not an SEO one."""
+
+    def rows(self, host: str, count: int, clicks: int) -> list:
+        return [gsc(f"https://{host}/p{n}/", clicks, clicks * 10) for n in range(count)]
+
+    def test_a_subdomain_google_indexes_and_the_crawl_missed(self):
+        result = report(
+            [profile("https://e.com/a/", inbound=3)],
+            [gsc("https://e.com/a/", 10, 100), *self.rows("staging.e.com", 4, 900)],
+        )
+        found = of_kind(result, OpportunityKind.INDEXED_SUBDOMAIN)
+        assert [item.url for item in found] == ["staging.e.com"]
+        assert found[0].severity is Severity.CRITICAL
+        assert "4 URLs on staging.e.com" in found[0].reason
+        # It points at a real address, so the claim can be checked.
+        assert found[0].reference_url is not None
+
+    def test_a_suspicious_name_sharpens_the_wording(self):
+        """5 of gep.com's 11 subdomains name themselves — including the largest."""
+        result = report(
+            [profile("https://e.com/a/", inbound=3)],
+            [gsc("https://e.com/a/", 10, 100), *self.rows("uat-auth.e.com", 4, 900)],
+        )
+        reason = of_kind(result, OpportunityKind.INDEXED_SUBDOMAIN)[0].reason
+        assert "never meant to be public" in reason
+        assert "noindex" in reason
+
+    def test_an_unremarkable_name_is_still_reported(self):
+        """An unremarkable name is still reported.
+
+        `leodsaks-us.gep.com` carries 275 of the 558 spam URLs and names itself
+        nothing at all. Firing on the name would have hidden half of it.
+        """
+        result = report(
+            [profile("https://e.com/a/", inbound=3)],
+            [gsc("https://e.com/a/", 10, 100), *self.rows("leodsaks-us.e.com", 4, 900)],
+        )
+        found = of_kind(result, OpportunityKind.INDEXED_SUBDOMAIN)
+        assert len(found) == 1
+        # No diagnosis it cannot support: both branches are offered.
+        assert "If it is a real property" in found[0].reason
+
+    def test_severity_is_magnitude_not_the_name(self):
+        """A login host with two indexed URLs and no clicks is not critical.
+
+        An earlier version made a suspicious name sufficient, which put exactly
+        that above findings worth thousands of clicks.
+        """
+        result = report(
+            [profile(f"https://e.com/p{n}/", inbound=3) for n in range(200)],
+            [
+                *[gsc(f"https://e.com/p{n}/", 50, 500) for n in range(200)],
+                gsc("https://loginqc.e.com/x/", 0, 1),
+            ],
+        )
+        found = of_kind(result, OpportunityKind.INDEXED_SUBDOMAIN)
+        assert [item.severity for item in found] == [Severity.ROUTINE]
+        # Still named as non-production, because it is.
+        assert "never meant to be public" in found[0].reason
+
+    def test_an_unrelated_domain_is_not_reported_here(self):
+        """It is somebody else's site. Nothing to recommend about it."""
+        result = report(
+            [profile("https://e.com/a/", inbound=3)],
+            [gsc("https://e.com/a/", 10, 100), gsc("https://elsewhere.org/x/", 900, 9000)],
+        )
+        assert of_kind(result, OpportunityKind.INDEXED_SUBDOMAIN) == []
+
+    def test_a_critical_finding_sorts_above_every_other_kind(self):
+        """A critical finding sorts above every other kind.
+
+        `score` ranks within a kind and says nothing across kinds, so without
+        severity this sorted by enum position — below link suggestions.
+        """
+        pages = [profile(f"https://e.com/p{n}/", inbound=0) for n in range(3)]
+        pages += [profile(f"https://e.com/q{n}/", inbound=7) for n in range(7)]
+        result = report(
+            pages,
+            [
+                *[gsc(f"https://e.com/p{n}/", 500, 5000) for n in range(3)],
+                *self.rows("staging.e.com", 3, 10),
+            ],
+        )
+        first = result.opportunities[0]
+        assert first.kind is OpportunityKind.INDEXED_SUBDOMAIN
+        assert first.severity is Severity.CRITICAL
 
 
 class TestRankingAndReporting:

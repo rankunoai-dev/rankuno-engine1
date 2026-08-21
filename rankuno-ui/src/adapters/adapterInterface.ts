@@ -151,6 +151,8 @@ export interface Opportunity {
   inbound_internal_links: number;
   reference_url: string | null;
   reason: string;
+  /** `"critical"` reads before everything else; `score` cannot express this. */
+  severity?: string;
 }
 
 /** Mirrors `OpportunityReport`. */

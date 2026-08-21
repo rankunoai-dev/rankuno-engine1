@@ -324,6 +324,41 @@ describe("PerformancePanel", () => {
     expect(screen.getByText(/Drop the export in again/)).toBeInTheDocument();
   });
 
+  it("marks a critical finding so it is not read as one more suggestion", async () => {
+    stubUpload(
+      summary({
+        opportunities: {
+          opportunities: [
+            {
+              kind: "indexed_subdomain",
+              url: "smartstaging-auth.e.com",
+              section: [],
+              score: 100,
+              clicks: 396200,
+              impressions: 5000000,
+              position: null,
+              inbound_internal_links: 0,
+              reference_url: "http://smartstaging-auth.e.com/cop/video/x-138.html",
+              reason: "Google has indexed 283 URLs on smartstaging-auth.e.com…",
+              severity: "critical",
+            },
+          ],
+          found: { indexed_subdomain: 1 },
+          truncated: {},
+          skipped: {},
+          limit_per_kind: 50,
+        },
+      }),
+    );
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, exportFile(2048));
+
+    expect(await screen.findByText("Critical")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Google indexes a subdomain this crawl did not cover/),
+    ).toBeInTheDocument();
+  });
+
   it("says when a recommendation kind was not evaluated", async () => {
     /*
      * The most important thing this panel does. A list with a silent omission

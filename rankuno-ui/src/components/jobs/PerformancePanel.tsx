@@ -44,6 +44,7 @@ const KIND_LABELS: Record<string, string> = {
   buried_with_traffic: "Earning clicks from deep in the navigation",
   indexed_crawl_trap: "Crawl traps Google has indexed",
   underperforming_sibling: "Ranking off page one beside a linked sibling",
+  indexed_subdomain: "Google indexes a subdomain this crawl did not cover",
 };
 
 /**
@@ -575,6 +576,14 @@ function Opportunities({
         return (
           <div key={kind} className="perf-kind">
             <h5 className="perf-kind-title">
+              {/* Severity sits on the group, not the row: every finding of a
+                  kind shares it here, and a badge repeated down a column stops
+                  being read. */}
+              {rows.some((item) => item.severity === "critical") && (
+                <Tag color="red" className="perf-kind-count">
+                  Critical
+                </Tag>
+              )}
               {KIND_LABELS[kind] ?? kind}
               <Tag className="perf-kind-count">{report.found[kind] ?? rows.length}</Tag>
               {/* Never silent. A list that stops at 50 and says nothing reads

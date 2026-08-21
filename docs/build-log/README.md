@@ -78,6 +78,7 @@ which, for an AI-assisted codebase, is every session.
 | [0045](0045-the-buttons-that-could-not-win.md) | 2026-08-21 | A global button reset was silently discarding component styling | 1,526 py + 90 ui |
 | [0046](0046-a-download-per-section.md) | 2026-08-21 | Per-section CSV export; the panel's sections are not the visualizer's tabs | 1,530 py + 103 ui |
 | [0047](0047-showing-the-other-585-rows.md) | 2026-08-21 | Both halves of the join downloadable; subdomain split from off-site | 1,537 py + 107 ui |
+| [0048](0048-a-finding-that-is-not-about-a-page.md) | 2026-08-21 | Indexed uncrawled subdomains become a critical finding; severity added | 1,543 py + 108 ui |
 
 
 ---

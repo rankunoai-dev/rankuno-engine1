@@ -1353,7 +1353,17 @@ def create_app(
         buffer = io.StringIO()
         writer = csv.writer(buffer)
         writer.writerow(
-            ["kind", "score", "url", "section", "clicks", "impressions", "position", "reason"]
+            [
+                "severity",
+                "kind",
+                "score",
+                "url",
+                "section",
+                "clicks",
+                "impressions",
+                "position",
+                "reason",
+            ]
         )
         rows = report.get("opportunities")
         for row in rows if isinstance(rows, list) else []:
@@ -1362,6 +1372,9 @@ def create_app(
             section = row.get("section")
             writer.writerow(
                 [
+                    # First column, so a critical row is visible before anybody
+                    # widens anything or sorts anything.
+                    row.get("severity", ""),
                     row.get("kind", ""),
                     row.get("score", ""),
                     row.get("url", ""),
@@ -1375,7 +1388,7 @@ def create_app(
 
         skipped = report.get("skipped")
         for kind, gap in (skipped if isinstance(skipped, Mapping) else {}).items():
-            writer.writerow([kind, "", "", "", "", "", "", f"not evaluated: {gap}"])
+            writer.writerow(["", kind, "", "", "", "", "", "", f"not evaluated: {gap}"])
 
         stamp = str(saved.get("created_at", ""))[:10]
         name = f"opportunities-{job_id[:8]}-{stamp or 'undated'}.csv"

@@ -59,8 +59,12 @@ from pydantic import Field
 from src.core.schemas import StrictModel
 from src.modules.seo.page_classifier.schemas import FullPageIntelligenceProfile
 from src.modules.seo.page_classifier.url_rules import is_malformed_url, is_spider_trap
-from src.modules.seo.performance.aggregator import PageMetricSet, section_path_of
-from src.modules.seo.performance.schemas import GscPageMetrics
+from src.modules.seo.performance.aggregator import (
+    PageMetricSet,
+    section_path_of,
+    unmatched_groups,
+)
+from src.modules.seo.performance.schemas import GscPageMetrics, MatchFailure
 from src.modules.seo.performance.url_identity import UrlResolutionIndex
 
 __all__ = [
@@ -68,9 +72,11 @@ __all__ = [
     "MAX_ORPHAN_SHARE",
     "SITEWIDE_LINK_SHARE",
     "STRIKING_BAND",
+    "CRITICAL_SUBDOMAIN_CLICK_SHARE",
     "Opportunity",
     "OpportunityKind",
     "OpportunityReport",
+    "Severity",
     "SignalGap",
     "score_opportunities",
 ]
@@ -106,6 +112,45 @@ zero and navigation sits in the top one percent, with nothing in between. 20%
 falls in that gap.
 """
 
+CRITICAL_SUBDOMAIN_CLICK_SHARE = 0.01
+"""Share of an export — of its clicks *or* its rows — to call a subdomain critical.
+
+Either measure, because they fail apart: a staging copy can hold thousands of
+indexed URLs and almost no clicks, and a single spam page can take a great many.
+
+**Assumed, not measured.** Every other threshold in this module was placed by
+looking at the stored corpus; there is exactly one real Search Console export to
+look at, so this is a judgement rather than a finding. It is set low because the
+failure it catches is asymmetric: a subdomain nobody meant to publish taking 1%
+of a site's search traffic is worth an hour of somebody's time, and being told
+about a legitimate one costs a minute.
+"""
+
+_NON_PRODUCTION = (
+    "staging",
+    "stage",
+    "uat",
+    "qc",
+    "qa",
+    "dev",
+    "test",
+    "sandbox",
+    "preprod",
+    "preview",
+    "internal",
+    "auth",
+    "sso",
+    "login",
+    "admin",
+)
+"""Host-name fragments that suggest a subdomain was never meant to be public.
+
+Used only to **sharpen the wording**, never to decide whether to report. On the
+gep.com export it identifies 5 of 11 subdomains, including the largest —
+`smartstaging-auth` — and misses the second largest, `leodsaks-us`, entirely. A
+finding that fired only on the name would have missed 275 of the 558 URLs.
+"""
+
 STRIKING_BAND = (5.0, 20.0)
 """Average-position range where a ranking gain is plausibly worth chasing.
 
@@ -134,6 +179,30 @@ class OpportunityKind(StrEnum):
     UNDERPERFORMING_SIBLING = "underperforming_sibling"
     """Draws impressions but ranks off page one, beside a well-linked sibling."""
 
+    INDEXED_SUBDOMAIN = "indexed_subdomain"
+    """Google indexes a subdomain of this site that the crawl never covered.
+
+    The one finding here that is **about a host rather than a page**, and the
+    one that can be a security matter rather than an SEO one. Its `url` carries
+    the host; `reference_url` carries the most-clicked address on it."""
+
+
+class Severity(StrEnum):
+    """How much a finding is unlike the others in the list.
+
+    Two levels, deliberately. `score` ranks within a kind and says nothing
+    across kinds, so without this there was no way for the report to mark one
+    finding as needing attention before the rest — and the first real export
+    produced exactly such a finding, sitting silently among ordinary link
+    recommendations.
+    """
+
+    ROUTINE = "routine"
+    """Ordinary optimisation work. Read in whatever order suits."""
+
+    CRITICAL = "critical"
+    """Read this first. Something is indexed that probably should not be."""
+
 
 class SignalGap(StrEnum):
     """Why a kind was not evaluated. Absence of a finding is not absence of one."""
@@ -161,9 +230,13 @@ class Opportunity(StrictModel):
             drew no impressions.
         inbound_internal_links: What the crawl counted pointing at this page.
         reference_url: The related page a recommendation refers to — the
-            well-linked sibling for `UNDERPERFORMING_SIBLING`, `None` otherwise.
+            well-linked sibling for `UNDERPERFORMING_SIBLING`, the most-clicked
+            address for `INDEXED_SUBDOMAIN`, `None` otherwise.
         reason: The finding in plain words, for a reader who will not open the
             schema.
+        severity: Whether this needs reading before the rest. `score` orders
+            within a kind and cannot express this, which is how a critical
+            finding once sat unremarked among link suggestions.
     """
 
     kind: OpportunityKind
@@ -176,6 +249,7 @@ class Opportunity(StrictModel):
     inbound_internal_links: int = Field(default=0, ge=0)
     reference_url: str | None = None
     reason: str = ""
+    severity: Severity = Severity.ROUTINE
 
 
 class OpportunityReport(StrictModel):
@@ -369,6 +443,12 @@ def score_opportunities(
 
     record(OpportunityKind.INDEXED_CRAWL_TRAP, _traps(metrics))
 
+    exported_clicks = sum(gsc.clicks for _, gsc in measured) + metrics.unattributed.clicks
+    record(
+        OpportunityKind.INDEXED_SUBDOMAIN,
+        _subdomains(metrics, exported_clicks, metrics.gsc_resolution.total),
+    )
+
     if links_usable:
         record(
             OpportunityKind.UNDERPERFORMING_SIBLING,
@@ -377,8 +457,18 @@ def score_opportunities(
     else:
         skipped[OpportunityKind.UNDERPERFORMING_SIBLING] = SignalGap.INBOUND_LINKS_UNRELIABLE
 
+    # Severity first, then kind, then size. Without the first term a critical
+    # finding sorts by whatever position its kind happens to occupy in the enum,
+    # which put "Google indexes your staging server" below a list of internal
+    # link suggestions.
     order = list(OpportunityKind)
-    out.sort(key=lambda item: (order.index(item.kind), -item.score))
+    out.sort(
+        key=lambda item: (
+            item.severity is not Severity.CRITICAL,
+            order.index(item.kind),
+            -item.score,
+        )
+    )
     return OpportunityReport(
         opportunities=tuple(out),
         found=found,
@@ -439,6 +529,73 @@ def _traps(metrics: PageMetricSet) -> list[tuple[float, Opportunity]]:
                         f"Google has indexed this URL and shown it {row.impressions} "
                         f"times, but it is {kind} rather than a page. It spends crawl "
                         f"budget and competes with the real page it duplicates."
+                    ),
+                ),
+            )
+        )
+    return items
+
+
+def _subdomains(
+    metrics: PageMetricSet, exported_clicks: int, exported_rows: int
+) -> list[tuple[float, Opportunity]]:
+    """Subdomains of the audited site that Google indexes and the crawl missed.
+
+    The finding is the **observation**, never a diagnosis. What is known is that
+    Search Console reports traffic on a host this crawl did not cover; whether
+    that host is a legitimate property nobody thought to include, a staging
+    server that escaped, or something worse is a judgement for a person with
+    access to the infrastructure. The wording gives both branches and asks.
+
+    Reported for every such host rather than only for suspicious-looking ones.
+    On the gep.com export the name test identifies `smartstaging-auth` and misses
+    `leodsaks-us`, which carries 275 of the 558 URLs — firing on the name alone
+    would have hidden half of it.
+    """
+    items: list[tuple[float, Opportunity]] = []
+    for group in unmatched_groups(metrics):
+        if group.reason is not MatchFailure.OTHER_SUBDOMAIN or not group.host:
+            continue
+        label = group.host.split(".")[0].lower()
+        suspicious = [token for token in _NON_PRODUCTION if token in label]
+        share = group.clicks / exported_clicks if exported_clicks else 0.0
+        row_share = group.urls / exported_rows if exported_rows else 0.0
+        # Severity is magnitude, and only magnitude. An earlier version made a
+        # suspicious host name sufficient, which marked a login page with two
+        # indexed URLs and no clicks as critical — sitting above findings worth
+        # thousands of clicks. The name shapes the wording; the size decides how
+        # urgently it reads.
+        severity = (
+            Severity.CRITICAL
+            if max(share, row_share) >= CRITICAL_SUBDOMAIN_CLICK_SHARE
+            else Severity.ROUTINE
+        )
+        if suspicious:
+            verdict = (
+                f"Its name ({', '.join(suspicious)}) suggests it was never meant to be "
+                f"public. If so, put it behind a password and serve noindex — an "
+                f"indexed staging copy competes with the real site for the same terms."
+            )
+        else:
+            verdict = (
+                "If it is a real property, crawl it separately to audit it. If it is "
+                "not meant to be public, put it behind a password and serve noindex."
+            )
+        items.append(
+            (
+                float(group.clicks),
+                Opportunity(
+                    kind=OpportunityKind.INDEXED_SUBDOMAIN,
+                    url=group.host,
+                    clicks=group.clicks,
+                    impressions=group.impressions,
+                    reference_url=group.examples[0] if group.examples else None,
+                    severity=severity,
+                    reason=(
+                        f"Google has indexed {group.urls} URLs on {group.host}, a "
+                        f"subdomain of this site that this crawl did not cover, and "
+                        f"they take {group.clicks:,} clicks — "
+                        f"{share:.1%} of everything in this export. {verdict}"
                     ),
                 ),
             )
