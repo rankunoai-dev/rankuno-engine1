@@ -70,6 +70,7 @@ which, for an AI-assisted codebase, is every session.
 | [0037](0037-one-address-spelled-two-ways.md) | 2026-08-20 | normalize_path folds percent-encoding, ending a false duplicate finding | 1,398 py + 65 ui |
 | [0038](0038-expand-one-branch-not-the-whole-tree.md) | 2026-08-20 | Whole-branch expand/collapse on any tree row; honest whole-tree labels | 1,398 py + 76 ui |
 | [0039](0039-the-google-url-join.md) | 2026-08-21 | Google URL to crawled page: alias index, match rate, duplicate profiles found | 1,430 py + 76 ui |
+| [0040](0040-rolling-metrics-up-the-nav-tree.md) | 2026-08-21 | Section rollups: whole-trail keys, weighted position, nothing dropped | 1,458 py + 76 ui |
 
 
 ---

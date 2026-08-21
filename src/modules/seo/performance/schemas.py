@@ -31,7 +31,10 @@ __all__ = [
     "MatchFailure",
     "MatchTier",
     "PagePerformance",
+    "PerformanceRollup",
     "ResolutionOutcome",
+    "SectionPerformance",
+    "UnattributedTotals",
     "UrlFailure",
     "UrlMatch",
 ]
@@ -244,3 +247,140 @@ class PagePerformance(StrictModel):
     def has_data(self) -> bool:
         """Whether any source resolved to this page."""
         return self.gsc is not None or self.ga4 is not None
+
+
+class SectionPerformance(StrictModel):
+    """Totals for one navigation section and everything beneath it.
+
+    Attributes:
+        path: The whole trail, outermost first, and **the identity of this row**.
+            Not the label: up to 68 labels per crawl appear under more than one
+            parent, so an `Overview` under Products and an `Overview` under
+            Company would merge into one wrong row if the label were the key.
+            The empty tuple is the whole site.
+        label: The last element of `path`, for display only.
+        depth: Length of `path`. Zero is the site row.
+        pages: Crawled pages in this section and everything under it.
+        pages_with_data: How many of those any Google row reached. Reported
+            beside `pages` because a section of 400 pages with 3 measured is a
+            very different object from one with 400 measured, and their click
+            totals can be identical.
+        direct_pages: Pages whose trail is *exactly* this path, excluding
+            descendants. 1,220 trails in the stored corpus are a strict prefix
+            of a deeper trail, so a section routinely has a landing page of its
+            own; without this, "is the section big or is its landing page big"
+            has no answer.
+        direct_clicks: Clicks on those pages alone.
+        clicks: Clicks across the subtree. Sums.
+        impressions: Impressions across the subtree. Sums.
+        position: Impression-weighted average position, or `None` when the
+            subtree drew no impressions. **Never 0.0** — position zero reads as
+            better than rank 1, so an unmeasured section would sort to the top
+            of a best-performing list purely for having no data.
+        sessions: GA4 sessions across the subtree.
+        engaged_sessions: GA4 engaged sessions across the subtree.
+        engagement_time_sec: Total engagement seconds, not an average, because
+            an average cannot be re-aggregated.
+        conversions: GA4 key events.
+        revenue: Attributed revenue in the property's currency, which this model
+            does not carry — do not sum it across properties.
+    """
+
+    path: tuple[str, ...] = ()
+    label: str = ""
+    depth: int = Field(default=0, ge=0)
+
+    pages: int = Field(default=0, ge=0)
+    pages_with_data: int = Field(default=0, ge=0)
+    direct_pages: int = Field(default=0, ge=0)
+    direct_clicks: int = Field(default=0, ge=0)
+
+    clicks: int = Field(default=0, ge=0)
+    impressions: int = Field(default=0, ge=0)
+    position: float | None = Field(default=None, ge=0.0)
+
+    sessions: int = Field(default=0, ge=0)
+    engaged_sessions: int = Field(default=0, ge=0)
+    engagement_time_sec: float = Field(default=0.0, ge=0.0)
+    conversions: float = Field(default=0.0, ge=0.0)
+    revenue: float = Field(default=0.0, ge=0.0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ctr(self) -> float:
+        """Clicks per impression for the subtree, recomputed from the sums.
+
+        Not the mean of the pages' CTRs. Averaging rates weights a page with two
+        impressions the same as one with twenty thousand.
+        """
+        if self.impressions == 0:
+            return 0.0
+        return self.clicks / self.impressions
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def data_coverage(self) -> float:
+        """Fraction of this section's pages any Google row reached, 0.0–1.0."""
+        if self.pages == 0:
+            return 0.0
+        return self.pages_with_data / self.pages
+
+
+class UnattributedTotals(StrictModel):
+    """Metrics from export rows that resolved to no crawled page.
+
+    Held rather than dropped. Without this the sum of the sections is quietly
+    smaller than the total in the Search Console UI, and comparing the two is
+    the first thing an analyst does.
+
+    Attributes:
+        rows: Export rows that reached no page, across both sources.
+        clicks: Search Console clicks on those rows.
+        impressions: Search Console impressions on those rows.
+        sessions: GA4 sessions on those rows.
+    """
+
+    rows: int = Field(default=0, ge=0)
+    clicks: int = Field(default=0, ge=0)
+    impressions: int = Field(default=0, ge=0)
+    sessions: int = Field(default=0, ge=0)
+
+
+class PerformanceRollup(StrictModel):
+    """Google metrics attached to one crawl's navigation tree.
+
+    Attributes:
+        site: The whole-site row — every crawled page, `path == ()`.
+        sections: One row per trail prefix, sorted by path. The top-level rows
+            sum to `site`, because every page carries exactly one trail and is
+            therefore counted once per ancestor level.
+        unattributed: What reached no page at all.
+        gsc_resolution: How much of the Search Console export landed, and why
+            the rest did not.
+        ga4_resolution: The same for GA4.
+        duplicate_profiles: Pages the crawl emitted more than once, collapsed
+            before counting. Non-zero means the source crawl inflates page
+            counts elsewhere in the product — see build-log 0039.
+    """
+
+    site: SectionPerformance = SectionPerformance()
+    sections: tuple[SectionPerformance, ...] = ()
+    unattributed: UnattributedTotals = UnattributedTotals()
+    gsc_resolution: ResolutionOutcome = ResolutionOutcome(total=0)
+    ga4_resolution: ResolutionOutcome = ResolutionOutcome(total=0)
+    duplicate_profiles: int = Field(default=0, ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def attributed_share(self) -> float:
+        """Fraction of exported clicks that reached a section, 0.0–1.0.
+
+        The honest headline. `site.clicks` and `unattributed.clicks` partition
+        the export by construction, so this is the one number that says how much
+        of what Google reported this rollup actually explains. Returns 1.0 when
+        the export carried no clicks at all — there is nothing unexplained.
+        """
+        total = self.site.clicks + self.unattributed.clicks
+        if total == 0:
+            return 1.0
+        return self.site.clicks / total

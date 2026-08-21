@@ -44,6 +44,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from urllib.parse import SplitResult, parse_qsl, urlencode
 
+from src.modules.seo.page_classifier.logical_hierarchy import OTHERS_LABEL
 from src.modules.seo.page_classifier.schemas import FullPageIntelligenceProfile
 from src.modules.seo.page_classifier.url_rules import (
     is_tracking_param,
@@ -61,7 +62,7 @@ from src.modules.seo.performance.schemas import (
     UrlMatch,
 )
 
-__all__ = ["UrlResolutionIndex"]
+__all__ = ["UrlResolutionIndex", "dedupe_profiles", "placement_depth"]
 
 # Alias sources in descending order of evidence. Order is load-bearing: the
 # merge below stops at the first tier that names an owner, so a canonical tag
@@ -96,6 +97,68 @@ def _path_key(parts: SplitResult) -> str:
     query = _query_key(parts)
     path = normalize_path(parts.path or "/")
     return f"{path}?{query}" if query else path
+
+
+def placement_depth(trail: tuple[str, ...]) -> int:
+    """How specifically a trail places a page. Zero means it does not.
+
+    Mirrors `tool._menu_depth`: a trail headed by `OTHERS` is the bucket for
+    pages nothing placed, and it is two elements long — `(OTHERS, <page type>)`
+    — so it *looks* as specific as a real two-crumb trail and would win a naive
+    length comparison. It is not a placement and scores zero.
+    """
+    if not trail or trail[0] == OTHERS_LABEL:
+        return 0
+    return len(trail)
+
+
+def dedupe_profiles(
+    profiles: Iterable[FullPageIntelligenceProfile],
+) -> tuple[tuple[FullPageIntelligenceProfile, ...], int]:
+    """Collapse profiles the engine's own dedup key already calls one page.
+
+    Measured across 70 stored crawls and 483,450 pages, results contain 3,491
+    rows whose `normalize_url` key is already present — 20 in a fresh
+    12,807-page highradius crawl, 863 in an older 33,439-page one. Two shapes
+    produce them::
+
+        /en-gb/whats-new/?ref=navbar   vs   /en-gb/whats-new/
+        /value-creation//konica-…/     vs   /value-creation/konica-…/
+
+    Treating those as competing pages would be the wrong kind of honest: they
+    are one page the crawl emitted twice, and refusing them as ambiguous would
+    drop up to 7% of an export over a defect the analyst cannot see or fix.
+    Keying on a recomputed `normalize_url` rather than the stored
+    `normalized_path` means this holds for crawls written before that field
+    settled.
+
+    **Which copy survives is not arbitrary, because the copies disagree.** 516
+    of 2,544 duplicate groups place their members differently — one copy under
+    `("Home",)` and the other in `("OTHERS", "UNKNOWN")`. Keeping whichever
+    arrived first would hand a fifth of them to the wrong section, and the
+    section totals built on top would be wrong with nothing to indicate it. The
+    best-placed copy wins, ties going to the first seen so the result does not
+    depend on dict ordering.
+
+    Args:
+        profiles: Pages from one crawl. Consumed once.
+
+    Returns:
+        The surviving profiles in first-seen order, and how many were dropped.
+    """
+    best: dict[str, tuple[int, FullPageIntelligenceProfile]] = {}
+    duplicates = 0
+    for page in profiles:
+        key = normalize_url(page.url)
+        depth = placement_depth(page.breadcrumb_path)
+        held = best.get(key)
+        if held is None:
+            best[key] = (depth, page)
+            continue
+        duplicates += 1
+        if depth > held[0]:
+            best[key] = (depth, page)
+    return tuple(page for _, page in best.values()), duplicates
 
 
 def _tier_index(aliases: Iterable[tuple[str, str]], tier: MatchTier) -> _Tier:
@@ -160,32 +223,8 @@ class UrlResolutionIndex:
                 once; order is irrelevant, since clashes are recorded rather
                 than resolved by arrival.
         """
-        # Collapse profiles the engine's own dedup key already calls one page.
-        # Measured across 70 stored crawls, results contain rows whose
-        # `normalized_path` is identical — 20 in a fresh 12,807-page highradius
-        # crawl, 863 in an older 33,439-page one. Two shapes produce them:
-        #
-        #     /en-gb/whats-new/?ref=navbar   vs   /en-gb/whats-new/
-        #     /value-creation//konica-…/     vs   /value-creation/konica-…/
-        #
-        # Refusing those as ambiguous would be the wrong kind of honest: they
-        # are not two pages competing for one address, they are one page the
-        # crawl emitted twice, and treating them as a conflict would drop up to
-        # 7% of an export for a defect the analyst cannot see or fix. Keying on
-        # `normalize_url` rather than the stored `normalized_path` means this
-        # holds even on crawls stored before that field settled.
-        #
-        # The duplicates are an upstream defect and are counted, not hidden —
-        # see `duplicate_profiles`.
-        by_key: dict[str, FullPageIntelligenceProfile] = {}
-        duplicates = 0
-        for page in profiles:
-            key = normalize_url(page.url)
-            if key in by_key:
-                duplicates += 1
-            else:
-                by_key[key] = page
-        pages = tuple(by_key.values())
+        pages, duplicates = dedupe_profiles(profiles)
+        self._pages = pages
         self.duplicate_profiles = duplicates
         """Profiles dropped as re-emissions of a page already held.
 
@@ -220,9 +259,20 @@ class UrlResolutionIndex:
         return site_host(parts.netloc) if parts is not None else ""
 
     @property
+    def pages(self) -> tuple[FullPageIntelligenceProfile, ...]:
+        """The deduplicated pages this index was built from.
+
+        Exposed so a rollup aggregates over exactly the page set the resolver
+        maps onto. Deduplicating again at the call site would be a second copy
+        of the rule, and the two would eventually disagree about the page count
+        on the same screen.
+        """
+        return self._pages
+
+    @property
     def page_count(self) -> int:
         """Distinct crawled pages the index can resolve to."""
-        return len({owner for owner, _ in self._absolute.values()})
+        return len(self._pages)
 
     def resolve(self, google_url: str) -> UrlMatch | UrlFailure:
         """Resolve one Google-reported address, with its evidence or its reason.
