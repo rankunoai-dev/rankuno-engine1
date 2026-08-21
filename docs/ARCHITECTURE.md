@@ -67,6 +67,12 @@ src/
     │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       └── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
+    │   └── performance/         # GSC + GA4 joined onto a crawl. Pure domain:
+    │       │                    # no I/O, no settings. Ingestion belongs in
+    │       │                    # integrations/, persistence in the job store.
+    │       ├── schemas.py             # GSC/GA4 metrics + resolution outcome
+    │       └── url_identity.py        # Google URL -> crawled page, with the
+    │                                  # match rate and why each miss missed
     ├── ppc/                     # Reserved namespace, no implementation
     └── research/                # Reserved namespace, no implementation
 ```
@@ -76,11 +82,16 @@ src/
 | Path | Purpose |
 | :--- | :--- |
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
-| Crawl checkpointing | `core/state_store.py` records whole jobs, but does not checkpoint *within* a crawl — an interrupted crawl still loses its work |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
-| `modules/seo/page_classifier/tree_visualizer.py` | Standalone interactive HTML site tree |
+| `integrations/google_search_console.py`, `google_analytics.py` | No connector exists. `modules/seo/performance/` resolves URLs and models metrics, but nothing fetches them — see build-log 0039 |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
+
+> Two rows were removed from this table in cycle 0039 because they were false.
+> Crawl checkpointing **exists** (`CrawlCheckpointer`, cycle 0019) and
+> `tree_visualizer.py` **shipped** — it was listed in the tree above and in this
+> table at the same time. Both were already ruled closed in
+> [CLAUDE.md](../CLAUDE.md) §8; this table had not caught up.
 
 > **Pipeline status**: `base_tool.py` implements 7 of the specified 10 steps. Idempotency
 > key validation, circuit breaker checks, and state checkpointing are **not** implemented.

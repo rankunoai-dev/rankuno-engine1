@@ -69,6 +69,7 @@ which, for an AI-assisted codebase, is every session.
 | [0036](0036-duplicate-sets-as-a-worklist.md) | 2026-08-20 | Duplicate URL sets become an exportable worklist, clustered per page | 1,388 py + 57 ui |
 | [0037](0037-one-address-spelled-two-ways.md) | 2026-08-20 | normalize_path folds percent-encoding, ending a false duplicate finding | 1,398 py + 65 ui |
 | [0038](0038-expand-one-branch-not-the-whole-tree.md) | 2026-08-20 | Whole-branch expand/collapse on any tree row; honest whole-tree labels | 1,398 py + 76 ui |
+| [0039](0039-the-google-url-join.md) | 2026-08-21 | Google URL to crawled page: alias index, match rate, duplicate profiles found | 1,430 py + 76 ui |
 
 
 ---
