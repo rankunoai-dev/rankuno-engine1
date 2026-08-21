@@ -73,9 +73,12 @@ src/
     │       ├── schemas.py             # GSC/GA4 metrics + resolution outcome
     │       ├── url_identity.py        # Google URL -> crawled page, with the
     │       │                          # match rate and why each miss missed
-    │       └── aggregator.py          # Section rollups keyed by whole trail.
-    │                                  # Rates recomputed, never averaged;
-    │                                  # unresolved rows held, never dropped
+    │       ├── aggregator.py          # Section rollups keyed by whole trail.
+    │       │                          # Rates recomputed, never averaged;
+    │       │                          # unresolved rows held, never dropped
+    │       └── opportunity_scorer.py  # Ranked recommendations. Refuses a kind
+    │                                  # whose signal the crawl never collected,
+    │                                  # and names the reason
     ├── ppc/                     # Reserved namespace, no implementation
     └── research/                # Reserved namespace, no implementation
 ```
