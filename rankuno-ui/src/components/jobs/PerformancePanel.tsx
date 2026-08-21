@@ -189,8 +189,8 @@ export function PerformancePanel({ jobId, label, open, onClose }: Props): JSX.El
               message={`Saved report from ${new Date(savedAt).toLocaleString()}. Drop a new export to replace it.`}
             />
           )}
-          <Quality summary={summary} />
-          <Unmatched summary={summary} jobId={jobId} />
+          <Quality summary={summary} jobId={jobId} />
+          <Unmatched summary={summary} />
           <Sections summary={summary} />
           <Opportunities summary={summary} jobId={jobId} />
         </>
@@ -206,7 +206,13 @@ export function PerformancePanel({ jobId, label, open, onClose }: Props): JSX.El
  * UI export against a 12,000-page site resolves every row — a perfect match
  * rate — while describing 8% of the site. Only coverage says so.
  */
-function Quality({ summary }: { summary: PerformanceSummary }): JSX.Element {
+function Quality({
+  summary,
+  jobId,
+}: {
+  summary: PerformanceSummary;
+  jobId: string;
+}): JSX.Element {
   const coverage = summary.pages ? summary.pages_with_data / summary.pages : 0;
   return (
     <>
@@ -238,6 +244,20 @@ function Quality({ summary }: { summary: PerformanceSummary }): JSX.Element {
             hint={`${summary.rollup.unattributed.rows.toLocaleString()} rows reached no page`}
           />
         )}
+      </div>
+      <div className="perf-downloads">
+        <a
+          className="perf-download"
+          href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/matched.csv`}
+        >
+          Download the {summary.matched.toLocaleString()} matched pages
+        </a>
+        <a
+          className="perf-download perf-download-muted"
+          href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/unmatched.csv`}
+        >
+          Download the {(summary.rows - summary.matched).toLocaleString()} unmatched rows
+        </a>
       </div>
       {summary.source_name && (
         <p className="perf-source">
@@ -293,29 +313,30 @@ const REASON_LABELS: Record<string, string> = {
  * host each, 558 rows between them, and no other view would have put them side
  * by side.
  */
-function Unmatched({
-  summary,
-  jobId,
-}: {
-  summary: PerformanceSummary;
-  jobId: string;
-}): JSX.Element | null {
-  const groups = summary.unmatched ?? [];
+function Unmatched({ summary }: { summary: PerformanceSummary }): JSX.Element | null {
+  const groups = summary.unmatched;
+  if (groups === undefined) {
+    // Absent, not empty. A report saved before this existed would otherwise
+    // render nothing at all, and "the buttons are missing" is what that looks
+    // like from the outside.
+    return (
+      <Alert
+        type="info"
+        showIcon
+        className="jb-alert"
+        message="This saved report predates the breakdown of unmatched rows."
+        description="Drop the export in again to see which URLs did not match, and why."
+      />
+    );
+  }
   if (groups.length === 0) return null;
 
   return (
     <>
-      <div className="perf-heading-row">
-        <h4 className="perf-heading">
-          Rows that matched no page ({summary.rows - summary.matched} of {summary.rows})
-        </h4>
-        <a
-          className="perf-download"
-          href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/unmatched.csv`}
-        >
-          Download CSV
-        </a>
-      </div>
+      <h4 className="perf-heading">
+        Rows that matched no page ({(summary.rows - summary.matched).toLocaleString()} of{" "}
+        {summary.rows.toLocaleString()})
+      </h4>
       <Table<UnmatchedGroup>
         dataSource={groups}
         rowKey={(group) => `${group.host}:${group.reason}`}

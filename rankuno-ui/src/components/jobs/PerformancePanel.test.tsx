@@ -291,6 +291,39 @@ describe("PerformancePanel", () => {
     expect(screen.queryByText(/Rows that matched no page/)).not.toBeInTheDocument();
   });
 
+  it("offers both halves of the join, not only the gap", async () => {
+    /*
+     * The matched download is the deliverable: Search Console knows clicks and
+     * nothing about where a URL sits; the crawl knows the section and nothing
+     * about traffic. Only the joined file answers "which section earns".
+     * Shipping the unmatched download alone left the useful half unreachable.
+     */
+    stubUpload(summary({ rows: 1000, matched: 415 }));
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, exportFile(2048));
+
+    const matched = await screen.findByText(/Download the 415 matched pages/);
+    expect(matched.getAttribute("href")).toContain("/matched.csv");
+    const unmatched = screen.getByText(/Download the 585 unmatched rows/);
+    expect(unmatched.getAttribute("href")).toContain("/unmatched.csv");
+  });
+
+  it("says a saved report is too old rather than rendering nothing", async () => {
+    /*
+     * A report saved before the gap breakdown existed has no `unmatched` field
+     * at all. Rendering nothing for it is indistinguishable from "the controls
+     * are missing", which is exactly how it was reported.
+     */
+    const stale = summary();
+    delete (stale as { unmatched?: unknown }).unmatched;
+    stubUpload(stale);
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, exportFile(2048));
+
+    expect(await screen.findByText(/predates the breakdown/)).toBeInTheDocument();
+    expect(screen.getByText(/Drop the export in again/)).toBeInTheDocument();
+  });
+
   it("says when a recommendation kind was not evaluated", async () => {
     /*
      * The most important thing this panel does. A list with a silent omission

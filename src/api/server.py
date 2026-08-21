@@ -89,6 +89,7 @@ from src.modules.seo.performance.aggregator import (
     UnmatchedGroup,
     merge_page_metrics,
     rollup_of,
+    section_path_of,
     unmatched_groups,
 )
 from src.modules.seo.performance.gsc_export import load_gsc_export
@@ -377,6 +378,49 @@ UNMATCHED_MEANINGS: Mapping[str, str] = MappingProxyType(
 Same reasoning as `GAP_MEANINGS`: the enum names are precise and mean nothing to
 whoever receives the spreadsheet.
 """
+
+
+def _matched_rows(index: UrlResolutionIndex, metrics: PageMetricSet) -> list[dict[str, object]]:
+    """Every crawled page an export row reached, with the crawl's own columns.
+
+    The working dataset, and the reason it is stored rather than derived: the
+    summary records *which* pages matched but not what they earned, so a
+    download built from it could list addresses and nothing else.
+
+    Carries the section trail, page type and inbound-link count alongside the
+    Search Console figures, because the join is the whole point — clicks next to
+    where the page sits in the navigation is a thing a spreadsheet cannot
+    produce on its own.
+    """
+    profiles = {page.url: page for page in index.pages}
+    # Sorted on the counter rather than on the rendered dict: reading `clicks`
+    # back out of a `dict[str, object]` is an unchecked cast, and the value has
+    # already been turned into a display string one field along.
+    rows: list[tuple[int, dict[str, object]]] = []
+    for page_url, held in metrics.pages.items():
+        gsc = held.gsc
+        if gsc is None:
+            continue
+        profile = profiles.get(page_url)
+        rows.append(
+            (
+                gsc.clicks,
+                {
+                    "url": page_url,
+                    "section": " > ".join(section_path_of(profile)) if profile else "",
+                    "clicks": gsc.clicks,
+                    "impressions": gsc.impressions,
+                    "ctr": round(gsc.ctr, 6),
+                    "position": round(gsc.position, 2) if gsc.impressions else "",
+                    "page_type": profile.primary_page_type.value if profile else "",
+                    "hierarchy_level": profile.hierarchy_level.value if profile else "",
+                    "inbound_internal_links": (
+                        profile.inbound_internal_links_count if profile else ""
+                    ),
+                },
+            )
+        )
+    return [row for _, row in sorted(rows, key=lambda pair: -pair[0])]
 
 
 def _unmatched_rows(metrics: PageMetricSet) -> list[tuple[GscPageMetrics, str]]:
@@ -1244,6 +1288,10 @@ def create_app(
                 # no page" is the headline and the 585 addresses are what an
                 # analyst checks it against — and re-deriving them would mean
                 # asking for the export again.
+                "matched_rows": _matched_rows(index, metrics),
+                # Every unresolved row, not just the grouping. "585 rows reached
+                # no page" is the headline and the 585 addresses are what an
+                # analyst checks it against.
                 "unmatched_rows": [
                     {
                         "url": row.url,
@@ -1331,6 +1379,64 @@ def create_app(
 
         stamp = str(saved.get("created_at", ""))[:10]
         name = f"opportunities-{job_id[:8]}-{stamp or 'undated'}.csv"
+        return _csv_response(buffer.getvalue(), name)
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/matched.csv")
+    def download_matched(job_id: str) -> Response:
+        """The pages the export did reach, with the crawl's columns beside them.
+
+        The other half of `unmatched.csv`, and the more useful half: this is the
+        joined dataset. Search Console gives clicks against a URL and knows
+        nothing about where that URL sits; the crawl knows the navigation
+        section, the page type and the inbound-link count and nothing about
+        traffic. Neither file answers "which section earns" on its own.
+
+        Sorted by clicks. One row per crawled page, not per export row — several
+        Google URLs can name one page, and they were summed on the way in.
+
+        Raises:
+            HTTPException: `404` if no export has been attached, or `409` if the
+                attached report predates this download and holds no page rows.
+        """
+        saved = state.store.read_performance(job_id)
+        if saved is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} has no attached Search Console data",
+            )
+        rows = saved.get("matched_rows")
+        if not isinstance(rows, list):
+            # An older report. Saying so beats an empty file, which reads as
+            # "nothing matched" when the truth is "this was saved before the
+            # download existed".
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    "this report was saved before per-page rows were kept. "
+                    "Upload the export again to produce it."
+                ),
+            )
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        columns = [
+            "url",
+            "section",
+            "clicks",
+            "impressions",
+            "ctr",
+            "position",
+            "page_type",
+            "hierarchy_level",
+            "inbound_internal_links",
+        ]
+        writer.writerow(columns)
+        for row in rows:
+            if isinstance(row, Mapping):
+                writer.writerow([row.get(column, "") for column in columns])
+
+        stamp = str(saved.get("created_at", ""))[:10]
+        name = f"matched-{job_id[:8]}-{stamp or 'undated'}.csv"
         return _csv_response(buffer.getvalue(), name)
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/unmatched.csv")

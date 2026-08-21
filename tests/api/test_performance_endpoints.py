@@ -288,6 +288,36 @@ class TestDownload:
         text = client.get(f"{API_PREFIX}/jobs/{record.id}/opportunities.csv").text
         assert "not evaluated: inbound_links_unreliable" in text
 
+    def test_the_matched_csv_joins_google_to_the_crawl(self, client, crawl):
+        """The deliverable, not the diagnostic.
+
+        Search Console knows clicks against a URL and nothing about where that
+        URL sits; the crawl knows the section, page type and inbound links and
+        nothing about traffic. Neither file answers "which section earns" alone,
+        which is the whole reason this one exists.
+        """
+        upload(client, crawl.id, PAGES_CSV)
+        response = client.get(f"{API_PREFIX}/jobs/{crawl.id}/matched.csv")
+        assert response.status_code == 200
+        lines = response.text.splitlines()
+        assert lines[0].lstrip(chr(65279)).startswith("url,section,clicks,impressions,ctr,position")
+        # Sorted by clicks, so the largest row reads first.
+        assert lines[1].startswith("https://e.com/a/")
+        assert ",120,4000," in lines[1]
+        # And the crawl's own columns travel with it.
+        assert "BLOG_ARTICLE" in response.text
+        assert "S" in response.text
+
+    def test_a_report_saved_before_page_rows_says_so(self, client, crawl, store):
+        """An empty file would read as "nothing matched"."""
+        upload(client, crawl.id, PAGES_CSV)
+        saved = dict(store.read_performance(crawl.id) or {})
+        saved.pop("matched_rows", None)
+        store.write_performance(crawl.id, saved)
+        response = client.get(f"{API_PREFIX}/jobs/{crawl.id}/matched.csv")
+        assert response.status_code == 409
+        assert "Upload the export again" in response.json()["detail"]
+
     def test_the_unmatched_csv_lists_every_row_with_its_reason(self, client, crawl):
         """The evidence behind the match rate.
 

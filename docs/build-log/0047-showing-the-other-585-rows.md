@@ -1,10 +1,10 @@
-# Cycle 0047: Showing the other 585 rows
+# Cycle 0047: Both halves of the join, downloadable
 
 - **Date**: 2026-08-21
-- **Scope**: split `off_site` from `other_subdomain`; group and download every
-  export row that reached no page; surface it in the panel.
+- **Scope**: split `off_site` from `other_subdomain`; download both the pages
+  that matched and the rows that did not; surface the gap in the panel.
 - **Commit**: uncommitted at time of writing
-- **Quality gate**: `1535 passed, 1 warning in 133.59s`, total coverage 95.76%
+- **Quality gate**: `1537 passed, 1 warning in 133.12s`, total coverage 95.72%
 
 > Numbered 0047, not 0045. A parallel session landed 0045 and 0046 while this
 > was being written, and both were on disk before this entry was committed.
@@ -16,11 +16,11 @@
 PASSED: Format
 PASSED: Lint
 PASSED: Type check
-Required test coverage of 85.0% reached. Total coverage: 95.76%
-1535 passed, 1 warning in 133.59s (0:02:13)
+Required test coverage of 85.0% reached. Total coverage: 95.72%
+1537 passed, 1 warning in 133.12s (0:02:13)
 PASSED: Tests
  Test Files  11 passed (11)
-      Tests  105 passed (105)
+      Tests  107 passed (107)
 PASSED: UI Component Tests
 ALL GATES PASSED.
 ```
@@ -52,6 +52,41 @@ them, and no other view puts them side by side.
 `sum(urls) == rows - matched` and `sum(clicks) == unattributed.clicks`. A group
 view that does not add up is worse than none, because it invites a reader to
 trust it twice.
+
+## 2b. Only one half was downloadable, and it was the wrong half
+
+Shipped mid-cycle and corrected on the spot. The first version of this work gave
+a download for the **unmatched** rows and none for the matched ones, which is
+backwards: the gap is the diagnostic, and the join is the deliverable. Search
+Console knows clicks against a URL and nothing about where that URL sits; the
+crawl knows the navigation section, page type and inbound-link count and nothing
+about traffic. **Neither file answers "which section earns" on its own**, and
+only the matched download puts them in one table.
+
+`GET /jobs/{id}/matched.csv` now does, sorted by clicks, one row per crawled
+page rather than per export row — several Google URLs can name one page and were
+summed on the way in.
+
+**It needed the sidecar to change.** The saved report recorded *which* pages
+matched and not what they earned, so a download derived from it could have
+listed addresses and nothing else. Per-page rows are now stored alongside the
+unmatched ones.
+
+**A report saved before that says so.** `matched.csv` returns `409` with "upload
+the export again" rather than an empty file, because an empty file reads as
+"nothing matched".
+
+## 2c. And the panel rendered nothing for an older report
+
+The same defect from the other end, and the reason this was reported as "the
+button is missing". A report saved before §2 has no `unmatched` field at all,
+and the panel's `?? []` turned that into "no gap to show" — indistinguishable
+from an export where everything matched, and identical on screen to a broken
+component.
+
+`unmatched` is now optional in the TypeScript contract so absent and empty are
+different states, and the absent one renders a note saying the report predates
+the breakdown and to upload again.
 
 ## 3. `off_site` was doing two jobs
 
@@ -129,9 +164,9 @@ and the docstring now says why rather than restating the assertion.
 | `src/modules/seo/performance/schemas.py` | `MatchFailure.OTHER_SUBDOMAIN` |
 | `src/modules/seo/performance/url_identity.py` | tells a subdomain from a stranger |
 | `src/modules/seo/performance/aggregator.py` | `UnmatchedGroup`, `unmatched_groups` |
-| `src/api/server.py` | `unmatched` on the summary; `unmatched.csv`; rows in the sidecar |
+| `src/api/server.py` | `unmatched` on the summary; `matched.csv` and `unmatched.csv`; both row sets in the sidecar |
 | `tests/…/test_url_identity.py`, `test_performance_endpoints.py` | 6 new tests |
-| `rankuno-ui/…/PerformancePanel.tsx` + test | the gap table, 2 new tests |
+| `rankuno-ui/…/PerformancePanel.tsx` + test | the gap table, both downloads, the stale-report note; 4 new tests |
 | `rankuno-ui/src/adapters/adapterInterface.ts` | `UnmatchedGroup` |
 
 ## 8. Follow-ups

@@ -335,3 +335,25 @@
   line-height: 1.6;
   word-break: break-all;
 }
+
+/* The two halves of the join, side by side and both above the totals. Asking
+   "which 41.5% matched?" and "which 58.5% did not?" are the same question from
+   two ends, and offering only one of them was the gap. */
+.perf-downloads {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+/* The unmatched half, deliberately quieter: it is the diagnostic, not the
+   deliverable. */
+.perf-download-muted {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.22);
+  color: var(--jb-dim);
+}
+.perf-download-muted:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e2e8f0;
+}

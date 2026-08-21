@@ -201,8 +201,13 @@ export interface PerformanceSummary {
   /** Against `pages`, the coverage question the match rate cannot answer. */
   pages_with_data: number;
   pages: number;
-  /** Where the unresolved rows went, largest by clicks first. */
-  unmatched: UnmatchedGroup[];
+  /**
+   * Where the unresolved rows went, largest by clicks first.
+   *
+   * Optional because a report saved before this existed has no such field, and
+   * the panel must tell that apart from an export where everything matched.
+   */
+  unmatched?: UnmatchedGroup[];
   rollup: {
     site: SectionPerformance;
     sections: SectionPerformance[];
