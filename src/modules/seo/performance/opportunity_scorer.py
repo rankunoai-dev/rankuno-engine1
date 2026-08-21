@@ -66,6 +66,7 @@ from src.modules.seo.performance.url_identity import UrlResolutionIndex
 __all__ = [
     "BURIED_TRAIL_DEPTH",
     "MAX_ORPHAN_SHARE",
+    "SITEWIDE_LINK_SHARE",
     "STRIKING_BAND",
     "Opportunity",
     "OpportunityKind",
@@ -89,6 +90,20 @@ BURIED_TRAIL_DEPTH = 3
 Trail depth, not `depth_from_l0` — see the module docstring. 26.9% of corpus
 pages sit at depth 3 or deeper, so this is a filter rather than a finding on its
 own; earning real clicks from down there is what makes it one.
+"""
+
+SITEWIDE_LINK_SHARE = 0.2
+"""Above this share of the site linking to it, a page is navigation, not a hub.
+
+The first real run made this necessary. Every "well-linked sibling" the
+recommendation named on gep.com was a site-wide link: `/info-guide` at 78% of
+the site, the homepage at 88%, the locale switchers at 85%. "Check whether that
+page links here" was pointing at the footer.
+
+Measured across the eight largest stored crawls, the 95th percentile of inbound
+share is at most 0.9% and the 99th at most 20.6% — real content pages sit near
+zero and navigation sits in the top one percent, with nothing in between. 20%
+falls in that gap.
 """
 
 STRIKING_BAND = (5.0, 20.0)
@@ -276,13 +291,17 @@ def score_opportunities(
             skipped[kind] = SignalGap.NO_SEARCH_DATA
         return OpportunityReport(skipped=skipped, limit_per_kind=limit_per_kind)
 
-    orphan_urls: set[str] = set()
+    # One finding per page, across every kind. Reporting a page as an orphan and
+    # again as an underperforming sibling is the same instruction twice, and the
+    # first real run produced seven such pairs between buried and sibling — the
+    # third pairing, after 0041 and 0042 each caught one of the other two.
+    reported: set[str] = set()
     if links_usable:
         items = []
         for page, gsc in measured:
             if page.inbound_internal_links_count or gsc.clicks < min_clicks:
                 continue
-            orphan_urls.add(page.url)
+            reported.add(page.url)
             items.append(
                 (
                     float(gsc.clicks),
@@ -305,10 +324,11 @@ def score_opportunities(
     items = []
     for page, gsc in measured:
         trail = section_path_of(page)
-        if page.url in orphan_urls or len(trail) < BURIED_TRAIL_DEPTH:
+        if page.url in reported or len(trail) < BURIED_TRAIL_DEPTH:
             continue
         if gsc.clicks < min_clicks:
             continue
+        reported.add(page.url)
         items.append(
             (
                 float(gsc.clicks),
@@ -331,7 +351,7 @@ def score_opportunities(
     if links_usable:
         record(
             OpportunityKind.UNDERPERFORMING_SIBLING,
-            _siblings(measured, min_impressions, orphan_urls),
+            _siblings(measured, min_impressions, reported, len(index.pages)),
         )
     else:
         skipped[OpportunityKind.UNDERPERFORMING_SIBLING] = SignalGap.INBOUND_LINKS_UNRELIABLE
@@ -406,7 +426,7 @@ def _traps(metrics: PageMetricSet) -> list[tuple[float, Opportunity]]:
 
 
 def _siblings(
-    measured: _Measured, min_impressions: int, orphans: set[str]
+    measured: _Measured, min_impressions: int, reported: set[str], site_pages: int
 ) -> list[tuple[float, Opportunity]]:
     """Pages ranking off page one beside a well-linked sibling in their section.
 
@@ -416,9 +436,22 @@ def _siblings(
     underperformance, which stands on its own; the sibling is named as the
     obvious place to look first, not as a confirmed missing link.
 
-    Pages already reported as orphans are excluded. "Nothing links here" and
-    "a sibling with four links outranks you" are the same instruction delivered
-    twice, and the orphan finding says it with more force.
+    Pages already reported under another kind are excluded. "Nothing links here"
+    and "a sibling with four links outranks you" are the same instruction twice,
+    and the earlier finding says it with more force.
+
+    **The hub must not be a site-wide link.** The first real run named
+    `/info-guide` — in the footer of 78% of gep.com — as the page to link from,
+    for every one of that section's findings. A page already linked from most of
+    the site is navigation, and "check whether that page links here" is advice
+    about the footer.
+
+    **And the page must be converting worse than its own section.** `/gep.com/login`
+    was reported as underperforming at position 5.3 while taking 89,220 clicks on
+    589,390 impressions — a 15% click-through rate, which is a page winning a
+    navigational query, not one starved of links. Comparing a page against its
+    siblings' combined rate needs no assumed click-through curve: the benchmark
+    is the client's own data.
     """
     by_section: dict[tuple[str, ...], _Measured] = defaultdict(list)
     for page, gsc in measured:
@@ -429,13 +462,24 @@ def _siblings(
     for section, members in by_section.items():
         if len(members) < 2:
             continue
-        hub = max(members, key=lambda pair: pair[0].inbound_internal_links_count)
+        ceiling = site_pages * SITEWIDE_LINK_SHARE
+        topical = [pair for pair in members if pair[0].inbound_internal_links_count <= ceiling]
+        if not topical:
+            continue
+        hub = max(topical, key=lambda pair: pair[0].inbound_internal_links_count)
         if hub[0].inbound_internal_links_count == 0:
             continue
+
+        clicks = sum(gsc.clicks for _, gsc in members)
+        impressions = sum(gsc.impressions for _, gsc in members)
+        section_ctr = clicks / impressions if impressions else 0.0
+
         for page, gsc in members:
-            if page.url == hub[0].url or page.url in orphans:
+            if page.url == hub[0].url or page.url in reported:
                 continue
             if gsc.impressions < min_impressions or not low <= gsc.position <= high:
+                continue
+            if gsc.ctr >= section_ctr:
                 continue
             items.append(
                 (

@@ -60,6 +60,16 @@ def gsc(url: str, clicks: int = 0, impressions: int = 0, position: float = 0.0):
     return GscPageMetrics(url=url, clicks=clicks, impressions=impressions, position=position)
 
 
+def filler(count: int, section: tuple[str, ...] = ("Z",)) -> list:
+    """Pages that only exist to give the site a realistic size.
+
+    `SITEWIDE_LINK_SHARE` is a share *of the site*, so a two-page fixture makes
+    every link count site-wide and every hub disappear. These carry one inbound
+    link each so they do not trip the orphan-reliability gate either.
+    """
+    return [profile(f"https://e.com/filler{n}/", section, inbound=1) for n in range(count)]
+
+
 def report(pages, rows=(), **kwargs: int):
     index = UrlResolutionIndex(pages)
     return score_opportunities(index, merge_page_metrics(index, rows), **kwargs)
@@ -211,8 +221,9 @@ class TestIndexedCrawlTraps:
 class TestUnderperformingSiblings:
     def test_a_striking_distance_page_beside_a_linked_hub(self):
         result = report(
-            [
-                profile("https://e.com/hub/", ("S",), inbound=40),
+            filler(40)
+            + [
+                profile("https://e.com/hub/", ("S",), inbound=6),
                 profile("https://e.com/weak/", ("S",), inbound=1),
             ],
             [
@@ -224,6 +235,74 @@ class TestUnderperformingSiblings:
         assert [item.url for item in found] == ["https://e.com/weak/"]
         assert found[0].reference_url == "https://e.com/hub/"
         assert "Check whether that page links here" in found[0].reason
+
+    def test_a_site_wide_link_is_not_a_hub(self):
+        """A site-wide link is navigation, not a hub to link from.
+
+        The first real run named `/info-guide` — in the footer of 78% of
+        gep.com — as the page to link from, for every finding in its section.
+        The homepage at 88% and the locale switchers at 85% were named for
+        others. "Check whether that page links here" was advice about the
+        footer, delivered with a score attached.
+        """
+        pages = filler(40) + [
+            # Linked from most of the site: the footer, not a hub.
+            profile("https://e.com/footer-link/", ("S",), inbound=30),
+            # A real topical hub, well linked but not site-wide.
+            profile("https://e.com/topic-hub/", ("S",), inbound=5),
+            profile("https://e.com/weak/", ("S",), inbound=1),
+        ]
+        rows = [
+            gsc("https://e.com/footer-link/", 400, 1000, position=2.0),
+            gsc("https://e.com/topic-hub/", 50, 1000, position=3.0),
+            gsc("https://e.com/weak/", 1, 900, position=12.0),
+        ]
+        found = of_kind(report(pages, rows), OpportunityKind.UNDERPERFORMING_SIBLING)
+        assert [item.url for item in found] == ["https://e.com/weak/"]
+        # The topical hub, never the footer link.
+        assert found[0].reference_url == "https://e.com/topic-hub/"
+
+    def test_a_page_beating_its_section_is_not_underperforming(self):
+        """A page beating its own section is not underperforming.
+
+        `gep.com/login` was reported at position 5.3 while taking 89,220 clicks
+        on 589,390 impressions — a 15% click-through rate. That is a page
+        winning a navigational query, not one starved of links. The benchmark is
+        the section's own combined rate, so no click-through curve is assumed.
+        """
+        result = report(
+            filler(40)
+            + [
+                profile("https://e.com/hub/", ("S",), inbound=6),
+                profile("https://e.com/login/", ("S",), inbound=1),
+                profile("https://e.com/dull/", ("S",), inbound=1),
+            ],
+            [
+                gsc("https://e.com/hub/", 10, 5000, position=2.0),
+                gsc("https://e.com/login/", 900, 6000, position=5.3),
+                gsc("https://e.com/dull/", 1, 5000, position=12.0),
+            ],
+        )
+        found = of_kind(result, OpportunityKind.UNDERPERFORMING_SIBLING)
+        assert [item.url for item in found] == ["https://e.com/dull/"]
+
+    def test_a_page_is_reported_under_one_kind_only(self):
+        """A page is reported under one kind only.
+
+        The first real run produced seven pages appearing as both buried and
+        underperforming — the third such pairing, after 0041 and 0042 each
+        caught one of the other two. One page, one instruction.
+        """
+        pages = [profile(f"https://e.com/f{n}/", ("A", "B", "C"), inbound=1) for n in range(9)]
+        pages.append(profile("https://e.com/hub/", ("A", "B", "C"), inbound=2))
+        pages.append(profile("https://e.com/deep/", ("A", "B", "C"), inbound=1))
+        rows = [
+            gsc("https://e.com/hub/", 50, 500, position=2.0),
+            gsc("https://e.com/deep/", 40, 9000, position=12.0),
+        ]
+        result = report(pages, rows)
+        appearances = [i.kind for i in result.opportunities if i.url == "https://e.com/deep/"]
+        assert appearances == [OpportunityKind.BURIED_WITH_TRAFFIC]
 
     def test_a_page_already_winning_is_not_an_opportunity(self):
         result = report(

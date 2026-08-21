@@ -348,6 +348,22 @@ once unpacked, which is the separate question a compressed archive raises.
 """
 
 
+def _csv_response(body: str, filename: str) -> Response:
+    """A CSV a spreadsheet will open with its accents intact.
+
+    The byte-order mark is the whole point. Excel reads a `.csv` in the system
+    codepage unless a BOM says otherwise, so UTF-8 without one arrives as
+    mojibake — the first real report handed back `EspaÃ±ol` and `PortuguÃ©s`
+    for gep.com's locale sections, in a file meant for a client. The
+    `charset=utf-8` in the media type does not reach Excel; only the BOM does.
+    """
+    return Response(
+        content="﻿" + body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 class PerformanceSummary(StrictModel):
     """What a Search Console upload produced against one crawl.
 
@@ -1066,11 +1082,7 @@ def create_app(
 
         stamp = str(saved.get("created_at", ""))[:10]
         name = f"cross-check-{job_id[:8]}-{stamp or 'undated'}.csv"
-        return Response(
-            content=buffer.getvalue(),
-            media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{name}"'},
-        )
+        return _csv_response(buffer.getvalue(), name)
 
     @app.post(
         f"{API_PREFIX}/jobs/{{job_id}}/performance/gsc",
@@ -1258,11 +1270,7 @@ def create_app(
 
         stamp = str(saved.get("created_at", ""))[:10]
         name = f"opportunities-{job_id[:8]}-{stamp or 'undated'}.csv"
-        return Response(
-            content=buffer.getvalue(),
-            media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{name}"'},
-        )
+        return _csv_response(buffer.getvalue(), name)
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
     async def cancel_job(job_id: str) -> JobRecord:

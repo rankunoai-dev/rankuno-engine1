@@ -74,6 +74,7 @@ which, for an AI-assisted codebase, is every session.
 | [0041](0041-what-the-data-would-not-support.md) | 2026-08-21 | Opportunity scorer; depth_from_l0 found to hold path depth, not click depth | 1,481 py + 76 ui |
 | [0042](0042-the-file-search-console-actually-gives-you.md) | 2026-08-21 | Search Console upload, sidecar and panel; the export is a ZIP of localised tabs | 1,526 py + 88 ui |
 | [0043](0043-the-refusal-that-described-the-wrong-file.md) | 2026-08-21 | A refusal that names what it found, after a real upload of the wrong GSC report | 1,527 py + 98 ui |
+| [0044](0044-the-first-real-export.md) | 2026-08-21 | First real GSC export: spam subdomains surfaced, three scorer defects fixed | 1,530 py + 101 ui |
 | [0043](0043-the-buttons-that-could-not-win.md) | 2026-08-21 | A global button reset was silently discarding component styling | 1,526 py + 90 ui |
 
 
