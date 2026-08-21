@@ -34,9 +34,19 @@ jobs:
           cache: pip
 
       - name: Install
+        # `[api]` as well as `[dev]`, because both later steps need it and
+        # neither says so on its own. `mypy src` type-checks `src/api/server.py`,
+        # which imports fastapi and uvicorn, and `tests/api/` imports
+        # `fastapi.testclient`. Without the extra, mypy reported 21 errors in one
+        # file and pytest could not collect two modules — a red build that says
+        # nothing about the code.
+        #
+        # `pyproject.toml` already records the reason under the `api` extra, and
+        # `scripts/bootstrap.ps1` installs it for exactly this. CI was the one
+        # place that did not, so the gate passed locally and failed here.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,api]"
 
       - name: Format check
         run: ruff format --check .
