@@ -111,6 +111,13 @@ _WRONG_REPORT = (
     "Performance → search results, then Export at the top right."
 )
 
+_NO_METRICS = (
+    "this table lists addresses but no clicks or impressions{where}. That is the "
+    "shape of a Page indexing export — it says which URLs are indexed, not how "
+    "they perform. The Performance report carries clicks and impressions per "
+    "URL: open Performance → search results, then Export at the top right."
+)
+
 _NO_ADDRESSES = (
     "this file's first column holds no page addresses, so there is nothing to "
     "attach to the crawl. A Search Console Performance export lists one "
@@ -402,6 +409,16 @@ def load_gsc_export(body: bytes | str) -> GscExport:
         )
     if not parsed:
         raise ValueError(_NOT_AN_EXPORT)
+    if not any(row.clicks or row.impressions for row in parsed):
+        # Addresses without metrics is a *different* wrong file from addresses
+        # missing altogether, and it is the more dangerous one: the Page
+        # indexing "valid pages" export is a list of real URLs, so it resolves
+        # against the crawl and produces a confident report of 967 pages with
+        # zero traffic. That one overwrote a real report before this guard
+        # existed. A Performance export always carries at least one impression;
+        # a site with none has nothing to report either way.
+        where = f" — read from {name}" if name else ""
+        raise ValueError(_NO_METRICS.format(where=where))
     _logger.info(
         "gsc_export_read",
         extra={"source": name, "rows": len(parsed), "skipped": skipped},

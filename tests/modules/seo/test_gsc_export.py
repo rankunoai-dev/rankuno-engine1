@@ -167,6 +167,42 @@ class TestPickingTheRightTab:
         # Plain text: this reaches a banner that does not render markdown.
         assert "**" not in message
 
+    def test_a_page_indexing_url_list_is_refused_despite_holding_addresses(self):
+        """Addresses without metrics is the dangerous wrong file.
+
+        A real upload, 2026-08-21: `gep.com-Coverage-Valid-2026-08-21.xlsx`, the
+        Page indexing "valid pages" export. Its `Table` sheet is `URL, Last
+        crawled` — 1,000 genuine addresses and not one number.
+
+        The address gate passes it, so it resolved against the crawl and
+        produced a confident report of 967 matched pages with zero traffic,
+        replacing a real one. Missing addresses is caught by the share gate;
+        this is the case where the addresses are real and the report is not.
+        """
+        indexing = workbook(
+            Chart="Date,Affected pages\n2026-05-25,5843",
+            Table="URL,Last crawled\nhttps://e.com/a/,2026-08-18\nhttps://e.com/b/,2026-08-18",
+            Metadata="Property,Value\nSitemap,All known pages",
+        )
+        with pytest.raises(ValueError, match="no clicks or impressions") as caught:
+            load_gsc_export(indexing)
+        message = str(caught.value)
+        # Names the sheet it read, so the reader can see which one was tried.
+        assert "Table" in message
+        assert "Performance" in message
+
+    def test_an_export_where_every_row_is_zero_is_refused_too(self):
+        """The same guard, and the right answer.
+
+        A Performance export with no impressions anywhere describes a property
+        with nothing to report; saying so beats a page of zeroes that reads like
+        a finding.
+        """
+        with pytest.raises(ValueError, match="no clicks or impressions"):
+            load_gsc_export(
+                "Top pages,Clicks,Impressions,CTR,Position\nhttps://e.com/a/,0,0,0%,0\n"
+            )
+
     def test_a_one_row_tab_does_not_beat_the_real_one(self):
         """A one row tab does not beat the real one.
 
@@ -237,7 +273,17 @@ class TestColumnsAndNumbers:
         assert row.position == pytest.approx(3.1)
 
     def test_blank_and_dashed_cells_read_as_zero_not_as_an_error(self):
-        text = "Top pages,Clicks,Impressions,CTR,Position\nhttps://e.com/a/,,-,,\n"
+        """One empty row is a cell to parse, not a file to refuse.
+
+        The second row exists because the whole-file guard rejects an export
+        where *nothing* has clicks or impressions. That guard is about the file;
+        this is about a cell, and a real export routinely carries both.
+        """
+        text = (
+            "Top pages,Clicks,Impressions,CTR,Position\n"
+            "https://e.com/a/,,-,,\n"
+            "https://e.com/b/,9,90,10%,3.0\n"
+        )
         row = load_gsc_export(text).rows[0]
         assert (row.clicks, row.impressions, row.position) == (0, 0, 0.0)
 
