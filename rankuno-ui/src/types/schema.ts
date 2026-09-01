@@ -161,6 +161,7 @@ export interface DiscoveryReport {
   sitemaps_fetched: number;
   pages_fetched: number;
   fetch_failures: number;
+  fetch_outcomes: Record<string, number>;
   media_skipped: number;
   malformed_skipped: number;
   loop_urls_skipped: number;

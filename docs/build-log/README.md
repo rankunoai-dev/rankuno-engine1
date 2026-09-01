@@ -80,6 +80,7 @@ which, for an AI-assisted codebase, is every session.
 | [0047](0047-showing-the-other-585-rows.md) | 2026-08-21 | Both halves of the join downloadable; subdomain split from off-site | 1,537 py + 107 ui |
 | [0048](0048-a-finding-that-is-not-about-a-page.md) | 2026-08-21 | Indexed uncrawled subdomains become a critical finding; severity added | 1,568 py + 131 ui |
 | [0049](0049-lp-demo-is-not-a-language.md) | 2026-08-21 | A hyphenated segment is a locale only when one half is a real language | 1,568 py + 131 ui |
+| [0050](0050-where-the-unfetched-urls-went.md) | 2026-09-01 | A per-outcome fetch ledger; 442 URLs that were counted nowhere | 1,572 py + 131 ui |
 
 
 ---

@@ -34,8 +34,8 @@ looks complete is worse than one that says it stopped.
 
 from __future__ import annotations
 
-from collections import deque
-from collections.abc import Callable, Iterator
+from collections import Counter, deque
+from collections.abc import Callable, Iterator, Mapping
 
 from pydantic import Field
 
@@ -264,6 +264,21 @@ class DiscoveryReport(StrictModel):
     sitemaps_fetched: int = Field(default=0, ge=0)
     pages_fetched: int = Field(default=0, ge=0)
     fetch_failures: int = Field(default=0, ge=0)
+    fetch_outcomes: Mapping[str, int] = Field(default_factory=dict)
+    """What happened to every URL this crawl tried to fetch, by outcome.
+
+    `fetch_failures` counts refusals and transport errors, and deliberately
+    excludes `404` so that speculative sitemap probes do not mark healthy
+    crawls as failed. The consequence went unnoticed until a real crawl was
+    read closely: on an 8,293-URL gep.com run, 7,015 pages were fetched and
+    1,278 were not, while only 833 refusals and 3 refused URLs were counted.
+    The ~442 in between were `404`s and non-HTML `200`s — retrieved, discarded,
+    and recorded nowhere.
+
+    A 404 on a URL something linked to is a broken internal link, which is a
+    finding rather than noise. This ledger keeps every outcome so the totals
+    reconcile and the interesting ones can be named.
+    """
     media_skipped: int = Field(default=0, ge=0)
     """Entries refused because they address a file, not a page.
 
@@ -357,6 +372,14 @@ class SiteGraph:
         self.stopped_reason: str | None = None
         """Set when the crawl is abandoned rather than completed. See
         `DiscoveryReport.stopped_reason`."""
+        self.fetch_outcomes: Counter[str] = Counter()
+        """Every fetch attempt by outcome — see `DiscoveryReport.fetch_outcomes`.
+
+        Recorded through `record_outcome` alone, so the serial and async paths
+        cannot drift. Behavioural equivalence between them is the central claim
+        of `async_discovery`, and a ledger filled in two places would break it
+        the first time one path grew a branch the other lacked.
+        """
         self.fetch_failures = 0
         """Requests actively **refused** by the server, plus transport failures.
 
@@ -533,6 +556,15 @@ class SiteGraph:
             recorded.append(target)
         return recorded
 
+    def record_outcome(self, outcome: str) -> None:
+        """Note what became of one fetch attempt.
+
+        The single entry point, deliberately. Two crawl paths increment
+        `fetch_failures` in six places between them; a ledger written the same
+        way would drift the first time one path grew a branch the other lacked.
+        """
+        self.fetch_outcomes[outcome] += 1
+
     def record_fetch(self, url: str, result: FetchResult) -> None:
         """Keep what the fetch learned about a URL, without moving it.
 
@@ -665,6 +697,7 @@ class SiteGraph:
             dom_only=sum(1 for n in nodes if n.sources.dom_link and not n.sources.sitemap),
             orphans=sum(1 for n in nodes if n.is_orphan),
             fetch_failures=self.fetch_failures,
+            fetch_outcomes=dict(self.fetch_outcomes),
             media_skipped=self.media_skipped,
             traps_skipped=self.traps_skipped,
             loop_urls_skipped=self.loop_urls_skipped,
@@ -852,8 +885,10 @@ def _paginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> Iterator
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
             _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
             graph.fetch_failures += 1
+            graph.record_outcome(OUTCOME_TRANSPORT)
             return
         if not result.ok:
+            graph.record_outcome(outcome_for(result.status_code))
             if is_refusal(result.status_code):
                 graph.fetch_failures += 1
             return
@@ -972,6 +1007,45 @@ def _crawl_dom(
     return fetched
 
 
+OUTCOME_OK = "ok"
+OUTCOME_NOT_FOUND = "not_found"
+OUTCOME_REFUSED = "refused"
+OUTCOME_SERVER_ERROR = "server_error"
+OUTCOME_OTHER_STATUS = "other_status"
+OUTCOME_NOT_HTML = "not_html"
+OUTCOME_TRANSPORT = "transport_error"
+
+OUTCOME_MEANINGS: Mapping[str, str] = {
+    OUTCOME_OK: "Fetched and read as HTML.",
+    OUTCOME_NOT_FOUND: "404 — something links here and the page is gone.",
+    OUTCOME_REFUSED: "401, 403, 407 or 429 — the server declined.",
+    OUTCOME_SERVER_ERROR: "5xx — the server broke rather than answered.",
+    OUTCOME_OTHER_STATUS: "Answered with a status that is neither success nor one of the above.",
+    OUTCOME_NOT_HTML: "Answered 200 with something that is not a page.",
+    OUTCOME_TRANSPORT: "No answer at all — timeout, DNS or connection failure.",
+}
+"""Plain-language gloss per outcome, for a report handed to somebody else."""
+
+
+def outcome_for(status_code: int) -> str:
+    """Name the outcome of a completed response.
+
+    Separate from `is_refusal` because the two answer different questions.
+    `is_refusal` decides whether to *blame* the server, and excludes `404` on
+    purpose. This one records what happened, and a `404` is very much something
+    that happened.
+    """
+    if 200 <= status_code < 300:
+        return OUTCOME_OK
+    if status_code == 404:
+        return OUTCOME_NOT_FOUND
+    if status_code >= 500:
+        return OUTCOME_SERVER_ERROR
+    if status_code in {401, 403, 407, 429}:
+        return OUTCOME_REFUSED
+    return OUTCOME_OTHER_STATUS
+
+
 def is_refusal(status_code: int) -> bool:
     """Whether a status means the server *declined* rather than lacked the page.
 
@@ -998,11 +1072,14 @@ def _safe_body(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | None:
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
+        graph.record_outcome(OUTCOME_TRANSPORT)
         return None
     if not result.ok:
+        graph.record_outcome(outcome_for(result.status_code))
         if is_refusal(result.status_code):
             graph.fetch_failures += 1
         return None
+    graph.record_outcome(OUTCOME_OK)
     return result.body
 
 
@@ -1019,8 +1096,10 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
+        graph.record_outcome(OUTCOME_TRANSPORT)
         return None
     if not result.ok:
+        graph.record_outcome(outcome_for(result.status_code))
         if is_refusal(result.status_code):
             graph.fetch_failures += 1
         return None
@@ -1028,4 +1107,8 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
     # scope. One line further on it is a bare string and the redirect chain is
     # gone, which is exactly how it came to be discarded in the first place.
     graph.record_fetch(url, result)
-    return result.body if result.is_html else None
+    if not result.is_html:
+        graph.record_outcome(OUTCOME_NOT_HTML)
+        return None
+    graph.record_outcome(OUTCOME_OK)
+    return result.body

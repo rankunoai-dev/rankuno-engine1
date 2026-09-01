@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import collections.abc
 import json
 import sys
 import types
@@ -194,7 +195,11 @@ def ts_type(annotation: object) -> str:
         inner = ts_type(members[0])
         return f"({inner})[]" if "|" in inner else f"{inner}[]"
 
-    if origin is dict:
+    # `dict` and `Mapping` are the same shape to TypeScript. Both appear in the
+    # models: a field the engine mutates is a `dict`, one it only publishes is a
+    # `Mapping`, and that distinction is a Python one with no reader on the
+    # other side.
+    if origin in (dict, collections.abc.Mapping, collections.abc.MutableMapping):
         key, value = (ts_type(arg) for arg in args)
         return f"Record<{key}, {value}>"
 

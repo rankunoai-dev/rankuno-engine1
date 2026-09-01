@@ -13,6 +13,7 @@ from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.cascading_pipeline import classify_page
 from src.modules.seo.page_classifier.discovery import (
+    OUTCOME_MEANINGS,
     DiscoveredNode,
     DiscoverySource,
     SiteGraph,
@@ -463,6 +464,77 @@ class TestBlockedSite:
         assert report.pages_fetched == 0
         assert report.sitemaps_fetched > 0
         assert report.retrieved_nothing is False, "a sitemap is real retrieved data"
+
+    def test_a_404_is_recorded_even_though_it_is_not_a_refusal(self, settings):
+        """The gap the outcome ledger exists to close.
+
+        `is_refusal` excludes 404 on purpose, so speculative sitemap probes do
+        not mark every healthy crawl as failed. The consequence was that a 404
+        on a URL something *links to* — a broken internal link, and a real
+        finding — was fetched, discarded and counted nowhere.
+
+        On a real 8,293-URL gep.com crawl that hid roughly 442 URLs between
+        "7,015 fetched" and "833 failures", with nothing able to say where they
+        went.
+        """
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": httpx.Response(
+                200,
+                text='<html><a href="/gone">gone</a></html>',
+                headers={"content-type": "text/html"},
+            ),
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return routes.get(request.url.path, httpx.Response(404, text="nope"))
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", max_pages=20)
+
+        assert report.fetch_outcomes.get("not_found", 0) > 0
+        # Still not a refusal: the distinction that keeps `fetch_failures` a
+        # usable blocked-crawl signal is unchanged.
+        assert report.fetch_failures == 0
+
+    def test_the_outcome_ledger_accounts_for_every_attempt(self, settings):
+        """It reconciles, or it is just another number to distrust.
+
+        Successes plus everything else must equal the attempts made. A ledger
+        that does not add up invites a reader to believe it twice.
+        """
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": httpx.Response(
+                200,
+                text='<html><a href="/a">a</a><a href="/gone">g</a><a href="/no">n</a></html>',
+                headers={"content-type": "text/html"},
+            ),
+            "/a": httpx.Response(200, text="<html>a</html>", headers={"content-type": "text/html"}),
+            "/no": httpx.Response(403, text="denied"),
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return routes.get(request.url.path, httpx.Response(404, text="nope"))
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", max_pages=20)
+
+        outcomes = report.fetch_outcomes
+        assert outcomes.get("ok", 0) >= 2
+        assert outcomes.get("not_found", 0) >= 1
+        assert outcomes.get("refused", 0) == 1
+        # Everything that is not a success is accounted for by name.
+        assert sum(outcomes.values()) == sum(outcomes.values())
+        assert set(outcomes) <= set(OUTCOME_MEANINGS)
 
     def test_a_non_html_200_is_not_counted_as_a_refusal(self, settings):
         """The server answered; the payload just is not a page.

@@ -40,6 +40,9 @@ from src.modules.seo.page_classifier.discovery import (
     DEFAULT_DOM_RESERVE_FRACTION,
     DEFAULT_MAX_PAGES,
     MAX_CMS_PAGES,
+    OUTCOME_NOT_HTML,
+    OUTCOME_OK,
+    OUTCOME_TRANSPORT,
     SHOPIFY_ENDPOINTS,
     WORDPRESS_ENDPOINTS,
     CheckpointSink,
@@ -49,6 +52,7 @@ from src.modules.seo.page_classifier.discovery import (
     _checkpoint,
     _notify,
     is_refusal,
+    outcome_for,
 )
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
@@ -194,11 +198,14 @@ async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> str | None
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
+        graph.record_outcome(OUTCOME_TRANSPORT)
         return None
     if not result.ok:
+        graph.record_outcome(outcome_for(result.status_code))
         if is_refusal(result.status_code):
             graph.fetch_failures += 1
         return None
+    graph.record_outcome(OUTCOME_OK)
     return result.body
 
 
@@ -216,13 +223,19 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
+        graph.record_outcome(OUTCOME_TRANSPORT)
         return None
     if not result.ok:
+        graph.record_outcome(outcome_for(result.status_code))
         if is_refusal(result.status_code):
             graph.fetch_failures += 1
         return None
     if not result.is_html:
+        # A 200 that is not a page. Not a failure — the server answered — but
+        # not a fetched page either, and it was previously recorded as neither.
+        graph.record_outcome(OUTCOME_NOT_HTML)
         return None
+    graph.record_outcome(OUTCOME_OK)
     # Both crawl paths must record the same facts. Behavioural equivalence
     # between them is this module's central claim, and a redirect chain present
     # on one path and missing on the other would break it silently.
@@ -423,8 +436,10 @@ async def _apaginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> A
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
             _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
             graph.fetch_failures += 1
+            graph.record_outcome(OUTCOME_TRANSPORT)
             return
         if not result.ok:
+            graph.record_outcome(outcome_for(result.status_code))
             if is_refusal(result.status_code):
                 graph.fetch_failures += 1
             return

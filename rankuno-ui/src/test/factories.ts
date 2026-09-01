@@ -61,6 +61,7 @@ export function discovery(overrides: Partial<DiscoveryReport> = {}): DiscoveryRe
     sitemaps_fetched: 0,
     pages_fetched: 1,
     fetch_failures: 0,
+    fetch_outcomes: {},
     media_skipped: 0,
     malformed_skipped: 0,
     loop_urls_skipped: 0,

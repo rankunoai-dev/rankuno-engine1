@@ -225,7 +225,19 @@ function ProgressCell({ row }: { row: JobRow }): JSX.Element {
         showInfo={false}
       />
       <div className="jb-numbers">
-        <Tooltip title="Pages fetched against URLs discovered. Sitemap URLs count toward the total but are never fetched, so a sitemap-heavy crawl completes below 100%.">
+        {/* The old wording here said sitemap URLs "are never fetched", which is
+            simply untrue — they are. It sent a reader looking for a cause that
+            does not exist, when the real gap is URLs that were tried and did not
+            come back: 404s, refusals, timeouts and non-HTML replies. On an
+            8,293-URL gep.com crawl that gap was 1,278, and this tooltip
+            explained none of it. */}
+        <Tooltip
+          title={
+            done
+              ? "Pages fetched against URLs found. A finished crawl normally ends below the total: some URLs 404, some are refused, some time out, and some answer with a file rather than a page. The crawl's own report breaks them down."
+              : "Pages fetched so far against URLs found. The total keeps growing while discovery runs."
+          }
+        >
           <span className="jb-count">
             {discovered > 0
               ? `${completed.toLocaleString()} / ${discovered.toLocaleString()}`
