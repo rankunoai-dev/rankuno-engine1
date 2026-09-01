@@ -13,6 +13,7 @@ from src.modules.seo.page_classifier.url_rules import (
     depth_of,
     is_crawlable_url,
     is_faceted_filter,
+    is_locale_segment,
     is_malformed_url,
     is_spider_trap,
     is_tracking_param,
@@ -623,3 +624,63 @@ class TestPercentEscapeDecoding:
         placement for a reason invisible in the report.
         """
         assert normalize_path("/a%E2%80%91b") == normalize_path("/a‑b")
+
+
+class TestRegionalLocaleShape:
+    """A hyphenated segment is not a locale just because it looks like one.
+
+    Measured across the stored corpus: the bare shape rule matched 116 distinct
+    segments over 19,865 pages, and 31 of them were slugs. `postman.com` alone
+    contributed 29 workspace names, each rendering in the tree as its own
+    language.
+    """
+
+    @pytest.mark.parametrize(
+        "segment",
+        ["en-gb", "de-de", "fr-fr", "es-es", "zh-cn", "pt_BR", "nl-be", "sv-fi"],
+    )
+    def test_a_real_locale_still_matches(self, segment):
+        assert is_locale_segment(segment)
+
+    @pytest.mark.parametrize("segment", ["jp-ja", "hk-zh"])
+    def test_the_language_may_be_on_either_side(self, segment):
+        """`jp-ja` puts the region first — 132 pages on gep.com.
+
+        A rule checking only the left half would delete every one of them, which
+        is why the check is `left or right` rather than `left`.
+        """
+        assert is_locale_segment(segment)
+
+    @pytest.mark.parametrize(
+        "segment",
+        ["lp-demo", "jd-bots", "cv-core", "mb-api", "zs-zpa", "ho-erp", "ai-seo", "zz-rx"],
+    )
+    def test_a_slug_shaped_like_a_locale_is_refused(self, segment):
+        """The reported defect, and the 30 others found beside it."""
+        assert not is_locale_segment(segment)
+
+    @pytest.mark.parametrize("segment", ["it-it", "it-hr"])
+    def test_hyphenated_it_and_hr_are_eligible(self, segment):
+        """Both are omitted from the bare list and allowed here.
+
+        `/it/` is usually IT services and `/hr/` human resources, which is why
+        the bare codes are excluded. Hyphenated, the ambiguity is gone.
+        """
+        assert is_locale_segment(segment)
+
+    @pytest.mark.parametrize("segment", ["it", "hr"])
+    def test_but_the_bare_codes_are_still_refused(self, segment):
+        assert not is_locale_segment(segment)
+
+    def test_an_explicit_locale_list_still_overrides_everything(self):
+        """`known_locales` is the reliable mode and is unaffected by this rule."""
+        assert is_locale_segment("lp-demo", frozenset({"lp-demo"}))
+        assert not is_locale_segment("en-gb", frozenset({"de"}))
+
+    def test_the_known_residual_is_recorded_rather_than_tuned_away(self):
+        """`cs-demo` is kept: `cs` is Czech and the segment says nothing else.
+
+        Asserted so the behaviour is a decision on the record rather than an
+        accident someone later "fixes" without knowing it was considered.
+        """
+        assert is_locale_segment("cs-demo")

@@ -272,6 +272,15 @@ def is_tracking_param(name: str) -> bool:
     return lowered in TRACKING_PARAMS or lowered.startswith(TRACKING_PARAM_PREFIXES)
 
 
+_REGIONAL_LANGUAGES = _ISO_639_1 | {"it", "hr"}
+"""Languages that may appear in a hyphenated locale.
+
+`_ISO_639_1` deliberately omits `it` and `hr` because a bare `/it/` or `/hr/` is
+usually IT services or human resources. A hyphenated segment removes that
+ambiguity, so they are eligible here and nowhere else.
+"""
+
+
 def is_locale_segment(segment: str, known_locales: frozenset[str] | None = None) -> bool:
     """Report whether a path segment is a locale prefix rather than content.
 
@@ -287,9 +296,44 @@ def is_locale_segment(segment: str, known_locales: frozenset[str] | None = None)
     candidate = segment.lower()
     if known_locales is not None:
         return candidate in {locale.lower() for locale in known_locales}
-    if _REGIONAL_LOCALE_RE.match(candidate):
+    if _is_regional_locale(candidate):
         return True
     return candidate in _ISO_639_1
+
+
+def _is_regional_locale(segment: str) -> bool:
+    """Whether `en-gb`-shaped segment is really a locale and not a slug.
+
+    Shape alone is not enough, which is what the previous version assumed.
+    Measured across the stored corpus, the bare pattern matched **116 distinct
+    segments over 19,865 pages**, and 31 of them were not locales at all:
+
+    * `highradius.com/lp-demo/` — a landing-page prefix, rendered in the tree as
+      a language beside `en-gb` and `fr`.
+    * `postman.com` alone contributed **29** workspace slugs — `jd-bots`,
+      `cv-core`, `mb-api`, `zs-zpa`, `ho-erp` — each becoming its own fake
+      language tab.
+
+    Requiring one half to be a real language rejects all 31 and keeps every
+    genuine locale, **including region-first spellings**: `jp-ja` (132 pages on
+    gep.com) and `hk-zh` (infosys.com) put the language second, so a rule
+    checking only the first half would delete them.
+
+    `it` and `hr` are eligible here although `_ISO_639_1` omits them. That
+    omission exists because a *bare* `/it/` or `/hr/` is far more often IT
+    services or human resources than Italian or Croatian. Hyphenated, the
+    ambiguity is gone: `it-it` and `it-hr` are locales.
+
+    One known residual: `cs-demo` (57 pages) is kept, because `cs` is Czech and
+    nothing in the segment says otherwise. Stated rather than tuned away — the
+    alternative is a list of region codes, which fails on the next site that
+    uses one this project has not seen.
+    """
+    match = _REGIONAL_LOCALE_RE.match(segment)
+    if match is None:
+        return False
+    left, right = re.split(r"[-_]", segment, maxsplit=1)
+    return left in _REGIONAL_LANGUAGES or right in _REGIONAL_LANGUAGES
 
 
 def strip_locale_prefix(

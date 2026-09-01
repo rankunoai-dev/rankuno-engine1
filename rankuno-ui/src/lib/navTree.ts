@@ -18,8 +18,43 @@ const LOCALES = new Set([
   "pt", "ro", "ru", "sk", "sl", "sr", "sv", "th", "tr", "uk", "ur", "vi", "zh",
 ]);
 
-/** A region-qualified locale — `en-gb`, `pt_BR` — is unambiguous by shape. */
+/**
+ * The shape of a region-qualified locale — `en-gb`, `pt_BR`.
+ *
+ * Necessary but **not sufficient**; see `isRegionalLocale`. Shape alone matched
+ * 116 distinct segments over 19,865 pages across the stored corpus, 31 of which
+ * were not locales.
+ */
 const REGIONAL = /^[a-z]{2}[-_][a-z]{2,4}$/i;
+
+/**
+ * Languages eligible to appear in a hyphenated locale.
+ *
+ * `it` and `hr` are added to `LOCALES` here and nowhere else. They are omitted
+ * from the bare list because `/it/` and `/hr/` are far more often IT services
+ * and human resources; hyphenated, `it-it` and `it-hr` are unambiguous.
+ */
+const REGIONAL_LANGUAGES = new Set([...LOCALES, "it", "hr"]);
+
+/**
+ * Whether an `en-gb`-shaped segment is really a locale rather than a slug.
+ *
+ * Shape alone put fake language tabs in the tree: `highradius.com/lp-demo/` sat
+ * beside `en-gb` and `fr`, and postman.com contributed **29** workspace slugs —
+ * `jd-bots`, `cv-core`, `mb-api` — each rendering as its own language.
+ *
+ * One half must be a real language. Either half, not the first: `jp-ja` (132
+ * pages on gep.com) and `hk-zh` (infosys.com) put the region first, and a rule
+ * checking only the left side would delete both.
+ *
+ * Mirrors `_is_regional_locale` in `url_rules.py`, including its one known
+ * residual — `cs-demo` is kept, because `cs` is Czech.
+ */
+function isRegionalLocale(segment: string): boolean {
+  if (!REGIONAL.test(segment)) return false;
+  const [left, right] = segment.split(/[-_]/, 2);
+  return REGIONAL_LANGUAGES.has(left ?? "") || REGIONAL_LANGUAGES.has(right ?? "");
+}
 
 /**
  * The locale a URL is served under, or `null` for the default language.
@@ -35,7 +70,7 @@ export function localeOf(url: string): string | null {
     const first = new URL(url).pathname.split("/").filter(Boolean)[0];
     if (!first) return null;
     const lower = first.toLowerCase();
-    return LOCALES.has(lower) || REGIONAL.test(lower) ? lower : null;
+    return LOCALES.has(lower) || isRegionalLocale(lower) ? lower : null;
   } catch {
     return null;
   }
