@@ -43,6 +43,7 @@ from src.core.logger import get_logger
 from src.core.rate_limiter import CostLedger
 from src.core.schemas import RiskClass, StrictModel, ToolMetadata
 from src.core.url_safety import UrlSafetyPolicy
+from src.integrations.gsc_client import GscApiClient
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.async_discovery import (
     DEFAULT_CONCURRENCY,
@@ -64,6 +65,7 @@ from src.modules.seo.page_classifier.discovery import (
     SiteGraph,
     discover_site,
 )
+from src.modules.seo.page_classifier.gsc_aggregator import GscMetricsAggregator
 from src.modules.seo.page_classifier.logical_hierarchy import (
     OTHERS_LABEL,
     NavCoverageReport,
@@ -229,6 +231,13 @@ class PageClassificationInput(StrictModel):
     pages the sitemap omits — the ones an audit most wants — are structurally
     excluded. Setting this to `0.0` restores that behaviour and is almost never
     what you want (ADR 0007)."""
+
+    gsc_property_url: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Optional GSC property URL for metrics enrichment (Phase 6)",
+    )
+    """If provided, fetch GSC metrics and enrich pages with clicks, impressions, position, CTR."""
 
 
 class CrawlSummary(StrictModel):
@@ -412,6 +421,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             evidence = graph.to_page_evidence()
             pages = self._classify_all(evidence, site_profile, payload)
             navigation, nav_coverage, pages = self._apply_navigation(graph, payload.base_url, pages)
+            pages = self._enrich_with_gsc(pages, payload)
         finally:
             if owns_fetcher:
                 fetcher.close()
@@ -459,6 +469,86 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             except Exception:  # noqa: BLE001 - a re-parsing aid must not fail a crawl
                 _logger.warning("homepage_sink_failed", extra={"base_url": base_url})
         return place_pages(homepage_html, base_url, pages)
+
+    def _enrich_with_gsc(
+        self,
+        pages: tuple[FullPageIntelligenceProfile, ...],
+        payload: PageClassificationInput,
+    ) -> tuple[FullPageIntelligenceProfile, ...]:
+        """Optionally enrich pages with GSC metrics (Phase 6).
+
+        If gsc_property_url is provided, fetch metrics and aggregate to pages.
+        On error, log warning and return pages unchanged (graceful degradation).
+
+        Args:
+            pages: Classified pages.
+            payload: Crawl parameters including optional gsc_property_url.
+
+        Returns:
+            Pages with gsc_* fields populated, or unchanged if no property URL.
+        """
+        if not payload.gsc_property_url:
+            return pages
+
+        try:
+            client = GscApiClient()
+            response = client.fetch_analytics(
+                property_url=payload.gsc_property_url,
+                start_date="2026-01-01",
+                end_date="2026-12-31",
+            )
+
+            aggregator = GscMetricsAggregator()
+            result = aggregator.aggregate(
+                gsc_property_url=payload.gsc_property_url,
+                crawl_base_url=payload.base_url,
+                gsc_response=response,
+                crawled_pages=list(pages),
+            )
+
+            if result.validation_error:
+                _logger.warning(
+                    "gsc_validation_failed",
+                    extra={"error": result.validation_error},
+                )
+                return pages
+
+            # Map enriched pages back (maintaining order and unmatched pages)
+            enriched_by_url = {p.page.url: p for p in result.matched_pages}
+            enriched_pages = []
+
+            for page in pages:
+                enriched = enriched_by_url.get(page.url)
+                if enriched and enriched.gsc_signals:
+                    # Create new page with GSC fields populated
+                    enriched_page = page.model_copy(
+                        update={
+                            "gsc_clicks": enriched.gsc_signals.clicks,
+                            "gsc_impressions": enriched.gsc_signals.impressions,
+                            "gsc_avg_position": enriched.gsc_signals.avg_position,
+                            "gsc_ctr": enriched.gsc_signals.ctr,
+                        }
+                    )
+                    enriched_pages.append(enriched_page)
+                else:
+                    enriched_pages.append(page)
+
+            _logger.info(
+                "gsc_enrichment_complete",
+                extra={
+                    "matched": len([p for p in enriched_pages if p.gsc_clicks is not None]),
+                    "unmatched_gsc": len(result.unmatched_gsc_urls),
+                },
+            )
+
+            return tuple(enriched_pages)
+
+        except Exception as exc:  # noqa: BLE001 - GSC failure must not fail the crawl
+            _logger.warning(
+                "gsc_enrichment_failed",
+                extra={"error": str(exc)},
+            )
+            return pages
 
     # -- internals ---------------------------------------------------------
 

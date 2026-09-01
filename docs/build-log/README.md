@@ -88,7 +88,9 @@ which, for an AI-assisted codebase, is every session.
 | [0055](0055-gsc-api-phase-3-client.md) | 2026-09-01 | GSC API integration Phase 3: API client with rate limiting & error handling | 53 tests, 100% |
 | [0056](0056-gsc-api-phase-4-url-validator.md) | 2026-09-01 | GSC API integration Phase 4: Property URL validation | 96 tests, 100% |
 | [0057](0057-gsc-api-phase-5-metrics-aggregator.md) | 2026-09-01 | GSC API integration Phase 5: Metrics aggregation to crawled pages | 1671 tests, 95.21% |
-| [0053](0053-a-banner-that-outlived-its-cause.md) | 2026-09-01 | The offline banner never retracted; a failed poll pinned it until reload | 140 ui |
+| [0058](0058-gsc-api-phase-6-tool-integration.md) | 2026-09-01 | GSC API integration Phase 6: Tool integration with enrichment | 1678 tests, 95.21% |
+| [0060](0060-gsc-api-phase-7-integration-tests.md) | 2026-09-01 | GSC API integration Phase 7: End-to-end integration tests | 1690 tests, 95.21% |
+| [0059](0059-a-banner-that-outlived-its-cause.md) | 2026-09-01 | The offline banner never retracted; a failed poll pinned it until reload | 140 ui |
 
 
 ---

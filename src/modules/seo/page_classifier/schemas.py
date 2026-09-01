@@ -386,6 +386,16 @@ class FullPageIntelligenceProfile(StrictModel):
     final_confidence_score: float = Field(ge=0.0, le=1.0)
     consensus_method: ConsensusMethod
 
+    # GSC enrichment (Phase 6: optional metrics from Google Search Console)
+    gsc_clicks: int | None = Field(default=None, ge=0, description="Clicks from GSC")
+    gsc_impressions: int | None = Field(default=None, ge=0, description="Impressions from GSC")
+    gsc_avg_position: float | None = Field(
+        default=None, ge=1.0, description="Average position in search results"
+    )
+    gsc_ctr: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Click-through rate from GSC"
+    )
+
     @model_validator(mode="after")
     def _check_taxonomy_pair(self) -> FullPageIntelligenceProfile:
         """Reject incoherent level/type combinations at construction time.
