@@ -150,6 +150,15 @@ interface CrawlState {
  * modal was only the visible symptom.
  */
 
+/**
+ * The message the last failed poll put on screen, or `null`.
+ *
+ * Module state rather than store state: it exists only so the poller can
+ * recognise its own banner and take it back down, and putting it in the store
+ * would invite a component to render it as a second error.
+ */
+let lastPollError: string | null = null;
+
 export const useCrawlStore = create<CrawlState>((set, get) => ({
   adapter: null,
 
@@ -247,9 +256,23 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     const adapter = get().adapter;
     if (!adapter) return;
     try {
-      set({ jobs: await adapter.listJobs() });
+      const jobs = await adapter.listJobs();
+      // Retract the banner this poller raised. Without this the first failed
+      // poll pinned "Cannot reach the engine" permanently: every later poll
+      // succeeded and refreshed the list underneath it, so the screen showed
+      // live crawl data sitting below a claim that the engine was unreachable.
+      // Restarting the API — which this project does often — was enough to
+      // cause it, and nothing short of a page reload cleared it.
+      //
+      // Only the poller's own message is cleared, never one raised by something
+      // the operator did. "This data source cannot start crawls" is still true
+      // after a successful poll; "cannot reach the engine" is not.
+      const stale = lastPollError !== null && get().error === lastPollError;
+      set(stale ? { jobs, error: null } : { jobs });
+      lastPollError = null;
     } catch (cause) {
-      set({ error: describe(cause) });
+      lastPollError = describe(cause);
+      set({ error: lastPollError });
     }
   },
 
