@@ -1262,21 +1262,47 @@ class TestReconciliationDownload:
             "application/vnd.openxmlformats-officedocument"
         )
         book = load_workbook(io.BytesIO(response.content))
-        assert book.sheetnames == [
-            "Summary",
-            "Missed pages",
-            "Orphans",
-            "Screaming Frog only",
-            "Rankuno only",
-        ]
-        frog = book["Screaming Frog only"]
-        assert [cell.value for cell in frog[2]] == [
-            "https://e.com/x",
-            "MISSED_PAGE",
-            frog[2][2].value,
-        ]
-        # The gloss travels, as it does in the CSV.
-        assert "did not reach it" in str(frog[2][2].value)
+        # One sheet per reason, the two findings first. Both sides land in the
+        # same list because `FrogGapReason` and `EngineGapReason` share no
+        # member, so a reason already names its side.
+        assert book.sheetnames == ["Summary", "Missed pages", "Orphans"]
+        assert [cell.value for cell in book["Missed pages"][2]] == ["https://e.com/x"]
+        assert [cell.value for cell in book["Orphans"][2]] == ["https://e.com/y"]
+
+    def test_a_reason_sheet_carries_urls_and_nothing_else(self, store):
+        """The reason is the sheet; repeating it down the rows is noise.
+
+        The flat version put `SITEMAP_ORPHAN` and its gloss in every one of 801
+        rows, and `MEDIA_URL` in 16,162 — the same two values, over and over,
+        occupying the two columns beside the only one that varies.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
+        book = load_workbook(io.BytesIO(response.content))
+        assert [cell.value for cell in book["Orphans"][1]] == ["url"]
+        assert book["Orphans"].max_column == 1
+
+    def test_the_summary_is_a_contents_page(self, store):
+        """Where each reason's meaning lives now that it is not on every row.
+
+        With a dozen sheets the reader has to know which to open, and the tab
+        strip says `Media files` without saying that it is 16,162 URLs the
+        engine refused on purpose.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
+        rows = list(
+            load_workbook(io.BytesIO(response.content))["Summary"].iter_rows(values_only=True)
+        )
+        contents = [row for row in rows if row and row[0] == "Missed pages"]
+        assert contents, "the contents page names every sheet"
+        assert contents[0][1] == "Screaming Frog"
+        assert contents[0][2] == 1
+        assert "did not reach it" in str(contents[0][3])
 
     def test_every_sheet_keeps_its_header_in_view(self, store):
         """A 16,000-row sheet whose header scrolls away is unreadable.

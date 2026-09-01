@@ -560,6 +560,36 @@ class PerformanceSummary(StrictModel):
     opportunities: OpportunityReport = OpportunityReport()
 
 
+SHEET_TITLES: Mapping[str, str] = MappingProxyType(
+    {
+        # The two findings.
+        "MISSED_PAGE": "Missed pages",
+        "SITEMAP_ORPHAN": "Orphans",
+        # Everything else is a difference with an explanation.
+        "CLIENT_ERROR": "4xx and 5xx",
+        "REDIRECT": "Redirect sources",
+        "NON_INDEXABLE": "Noindex or canonicalised",
+        "OFF_SITE": "Off-site",
+        "MEDIA_URL": "Media files",
+        "SPIDER_TRAP": "Crawl traps",
+        "QUERY_VARIANT": "Query variants",
+        "REPEATED_SUFFIX_TRAP": "Loop URLs",
+        "MALFORMED_MARKUP": "Malformed markup",
+    }
+)
+"""Worksheet name per gap reason.
+
+Plain language, because a tab strip is read at a glance and `REPEATED_SUFFIX_
+TRAP` is not. Every name is well inside Excel's 31-character limit, which
+`_workbook_response` truncates to rather than raising — a reason added later
+with a long title would quietly lose its ending, so keep them short here.
+
+The names need no side prefix: `FrogGapReason` and `EngineGapReason` share no
+member, so a reason already says which crawler saw the URL. The contents page
+states it anyway, for a reader who does not know that.
+"""
+
+
 class ReconciliationSummary(StrictModel):
     """What a Screaming Frog reconciliation found, and what it did about it.
 
@@ -1639,21 +1669,30 @@ def create_app(
         summary = saved.get("summary")
         summary = summary if isinstance(summary, Mapping) else {}
 
-        def urls(key: str) -> list[list[object]]:
+        # One bucket per reason, across both sides. The two vocabularies are
+        # disjoint — `FrogGapReason` and `EngineGapReason` share no member — so a
+        # reason names its side without needing a prefix, and the dedicated
+        # `missed_pages` and `orphans` lists are exactly the `MISSED_PAGE` and
+        # `SITEMAP_ORPHAN` buckets rather than anything extra.
+        buckets: dict[str, list[str]] = {}
+        sides: dict[str, str] = {}
+        for key, side in (("frog_only", "Screaming Frog"), ("engine_only", "Rankuno")):
             found = saved.get(key)
-            return (
-                [[url] for url in found if isinstance(url, str)] if isinstance(found, list) else []
-            )
-
-        def gaps(key: str) -> list[list[object]]:
-            found = saved.get(key)
-            rows: list[list[object]] = []
             for row in found if isinstance(found, list) else []:
                 if not isinstance(row, Mapping):
                     continue
                 reason = str(row.get("reason", ""))
-                rows.append([row.get("url", ""), reason, GAP_MEANINGS.get(reason, "")])
-            return rows
+                buckets.setdefault(reason, []).append(str(row.get("url", "")))
+                sides[reason] = side
+
+        # The two findings first, then the rest largest first. On a real
+        # cross-check `MEDIA_URL` is 16,162 of 16,337 rows, so by size alone the
+        # 15 pages the crawl missed would sit at the far end of the workbook.
+        def rank(reason: str) -> tuple[int, int]:
+            lead = {"MISSED_PAGE": 0, "SITEMAP_ORPHAN": 1}.get(reason, 2)
+            return (lead, -len(buckets[reason]))
+
+        ordered = sorted(buckets, key=rank)
 
         counts: list[list[object]] = [
             ["Cross-checked", summary.get("base_url", "")],
@@ -1679,13 +1718,30 @@ def create_app(
         counts.append(["Why this crawl saw a URL Screaming Frog did not", "URLs", "Meaning"])
         counts.extend(tally("engine_reasons"))
 
-        sheets: list[Sheet] = [
-            ("Summary", ["Measure", "Value", "Meaning"], counts),
-            ("Missed pages", ["url"], urls("missed_pages")),
-            ("Orphans", ["url"], urls("orphans")),
-            ("Screaming Frog only", ["url", "reason", "meaning"], gaps("frog_only")),
-            ("Rankuno only", ["url", "reason", "meaning"], gaps("engine_only")),
-        ]
+        # A contents page. With a dozen sheets the reader needs to know which
+        # one to open, and this is also where each reason's meaning lives now
+        # that it is not repeated down every row of its own sheet.
+        counts.append([])
+        counts.append(["Sheet", "Found by", "URLs", "What it means"])
+        counts.extend(
+            [
+                SHEET_TITLES.get(reason, reason),
+                sides.get(reason, ""),
+                len(buckets[reason]),
+                GAP_MEANINGS.get(reason, ""),
+            ]
+            for reason in ordered
+        )
+
+        sheets: list[Sheet] = [("Summary", ["Measure", "Value", "Meaning"], counts)]
+        sheets.extend(
+            # One column, not three. The reason is the sheet and the meaning is
+            # on the contents page, so carrying both down every row repeats one
+            # value 16,162 times — which is what the flat version looked like
+            # and why it was unreadable.
+            (SHEET_TITLES.get(reason, reason), ["url"], [[url] for url in buckets[reason]])
+            for reason in ordered
+        )
         stamp = str(saved.get("created_at", ""))[:10]
         name = f"cross-check-{job_id[:8]}-{stamp or 'undated'}.xlsx"
         return _workbook_response(sheets, name)

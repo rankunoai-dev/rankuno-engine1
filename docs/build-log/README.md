@@ -82,7 +82,7 @@ which, for an AI-assisted codebase, is every session.
 | [0049](0049-lp-demo-is-not-a-language.md) | 2026-08-21 | A hyphenated segment is a locale only when one half is a real language | 1,568 py + 131 ui |
 | [0050](0050-where-the-unfetched-urls-went.md) | 2026-09-01 | A per-outcome fetch ledger; 442 URLs that were counted nowhere | 1,572 py + 131 ui |
 | [0051](0051-a-file-behind-every-number.md) | 2026-09-01 | A download behind every cross-check figure; the agreement list was discarded | 1,576 py + 135 ui |
-| [0052](0052-one-sheet-per-question.md) | 2026-09-01 | The cross-check becomes a workbook; the 15 missed pages stop hiding in 17,640 rows | 1,579 py + 135 ui |
+| [0052](0052-one-sheet-per-question.md) | 2026-09-01 | The cross-check becomes a workbook, one sheet per reason | 1,581 py + 135 ui |
 
 
 ---

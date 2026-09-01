@@ -1,9 +1,9 @@
-# Cycle 0052: One sheet per question
+# Cycle 0052: One sheet per reason
 
 - **Date**: 2026-09-01
 - **Scope**: `reconciliation.xlsx` — the cross-check as a workbook.
 - **Commit**: uncommitted at time of writing
-- **Quality gate**: `1579 passed`, UI `135 passed`. See §6 on the two files
+- **Quality gate**: `1581 passed`, UI `135 passed`. See §6 on the two files
   blocking a full green run, neither of them from this cycle.
 
 ## 1. What was wrong with the report
@@ -36,17 +36,34 @@ is the one to feed another tool.
 
 ## 3. The sheets, and why in that order
 
+Two sheets was not enough. `Screaming Frog only` was still 16,337 rows of six
+different things, and **`MEDIA_URL` alone is 16,162 of them** — a single,
+entirely explained category burying the 15 that matter. One sheet per *reason*:
+
 ```text
-Summary                  the counts, and every reason with what it means
-Missed pages          15 live, in-scope pages this crawl never reached
-Orphans              801 published, no internal link — the finding
-Screaming Frog only  16,337 explained differences
-Rankuno only          1,215 explained differences
+Summary                     the counts, and a contents page
+Missed pages             15 live, in-scope pages this crawl never reached
+Orphans                 801 published, no internal link — the finding
+Media files          16,162 images and scripts, refused deliberately
+Query variants          333
+Loop URLs                81
+4xx and 5xx              80
+Redirect sources         65
+Noindex or canonicalised 13
+Crawl traps               2
 ```
 
-**Smallest and most actionable first.** The order is the argument of the report:
-15 rows are the work, 17,552 are the evidence that the rest is accounted for.
-Reversed, it reads as a list of 17,640 problems.
+**No side prefix on the names**, because none is needed: `FrogGapReason` and
+`EngineGapReason` share no member, so a reason already says which crawler saw
+the URL. The contents page states it anyway for a reader who does not know that.
+
+**The two findings first, then the rest largest first.** By size alone the 15
+missed pages would sit at the far end of the workbook, behind 16,162 images.
+
+**Each sheet is one column.** The reason is the sheet and the meaning is on the
+contents page, so carrying both down every row repeats one value 16,162 times —
+which is exactly what the flat version looked like on screen, and the reason it
+could not be read.
 
 ## 4. Bugs found and fixed
 
@@ -97,6 +114,11 @@ implementation.
   is the markdown trap documented in cycle 0042 §4. Both belong to somebody
   else's working tree and were left alone. Ruff and format pass on everything
   else; 1,579 Python and 135 UI tests pass.
+- **The dedicated `missed_pages` and `orphans` lists in the saved payload are
+  now unused by this endpoint.** They are exactly the `MISSED_PAGE` and
+  `SITEMAP_ORPHAN` buckets — verified against a real cross-check, 15 and 801 on
+  both paths — so the reason split reproduces them rather than duplicating them.
+  The CSV still reads them, and the payload keeps them.
 - **`matched.csv`, `unmatched.csv` and `opportunities.csv` are still CSVs.**
   They are single tables and do not have this problem, though the performance
   report has the same shape of argument waiting: a summary, an actionable list,
