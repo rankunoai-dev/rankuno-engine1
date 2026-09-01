@@ -61,6 +61,13 @@ seo = [
     "sentence-transformers>=3.0",
     "playwright>=1.44",
 ]
+gsc = [
+    # Google Search Console API client. Used by src/integrations/gsc_client.py
+    # for read-only access to GSC analytics and property metadata.
+    "google-auth>=2.32,<3.0",
+    "google-api-python-client>=2.100,<3.0",
+    "requests>=2.32,<3.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

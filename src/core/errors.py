@@ -11,6 +11,11 @@ __all__ = [
     "BudgetExceededError",
     "ConfigurationError",
     "CrawlBlockedError",
+    "GscAuthenticationError",
+    "GscAuthorizationError",
+    "GscPropertyNotFoundError",
+    "GscQuotaExceededError",
+    "GscApiDeprecatedError",
     "GuardrailViolationError",
     "IntegrationError",
     "RankunoError",
@@ -128,3 +133,72 @@ class IntegrationError(RankunoError):
 
 class ToolExecutionError(RankunoError):
     """A tool's own logic failed. Wraps the original exception as `__cause__`."""
+
+
+class GscAuthenticationError(IntegrationError):
+    """OAuth token is invalid, expired, or revoked.
+
+    Covers: 401 Unauthorized, invalid_grant, token refresh failure.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Record the authentication failure reason."""
+        self.reason = reason
+        super().__init__("google.search_console", f"Authentication failed: {reason}")
+
+
+class GscAuthorizationError(IntegrationError):
+    """Authenticated user lacks permission for the requested resource.
+
+    Covers: 403 Forbidden for property access, scope mismatch.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Record the authorization failure reason."""
+        self.reason = reason
+        super().__init__("google.search_console", f"Authorization failed: {reason}")
+
+
+class GscPropertyNotFoundError(IntegrationError):
+    """GSC property does not exist or has been deleted.
+
+    Covers: 404 Not Found for a specific property.
+    """
+
+    def __init__(self, property_url: str) -> None:
+        """Record the missing property."""
+        self.property_url = property_url
+        super().__init__(
+            "google.search_console",
+            f"Property '{property_url}' not found in GSC. It may have been deleted.",
+        )
+
+
+class GscQuotaExceededError(IntegrationError):
+    """Rate limit or quota exhausted on GSC API.
+
+    Covers: 429 Too Many Requests (quota throttling).
+    """
+
+    def __init__(self, retry_after_s: float | None = None) -> None:
+        """Record the quota exhaustion and optional retry window."""
+        self.retry_after_s = retry_after_s
+        msg = "GSC API quota exhausted"
+        if retry_after_s:
+            msg += f"; retry after {retry_after_s:.1f}s"
+        super().__init__("google.search_console", msg)
+
+
+class GscApiDeprecatedError(IntegrationError):
+    """GSC API endpoint is deprecated or no longer available.
+
+    Covers: 410 Gone, 501 Not Implemented.
+    """
+
+    def __init__(self, http_status: int, detail: str) -> None:
+        """Record the HTTP status and details."""
+        self.http_status = http_status
+        super().__init__(
+            "google.search_console",
+            f"API endpoint deprecated or unavailable ({http_status}): {detail}",
+        )
