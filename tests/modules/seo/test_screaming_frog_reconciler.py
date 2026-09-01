@@ -172,6 +172,48 @@ class TestOverlap:
         assert report.frog_only == ()
         assert report.engine_only == ()
 
+    def test_the_agreement_is_kept_as_addresses_not_only_a_count(self):
+        """`in_both` was computed and discarded on the next line.
+
+        Every other figure on the cross-check panel could be handed to someone
+        as a list of URLs; the agreement could not, which made it the one number
+        a reader had to take on trust.
+        """
+        report = reconcile(
+            BASE,
+            ("https://www.e.com/a/", "https://www.e.com/b/"),
+            (row("http://e.com/a"), row("https://www.e.com/b")),
+        )
+        assert report.in_both == 2
+        assert len(report.in_both_urls) == report.in_both
+
+    def test_the_agreement_carries_this_engine_s_spelling(self):
+        """So the list joins against the crawl result without re-normalising.
+
+        Screaming Frog wrote `http://e.com/a`; the crawl holds
+        `https://www.e.com/a/`. Both are the same page, and the one worth
+        exporting is the one the rest of the report uses.
+        """
+        report = reconcile(BASE, ("https://www.e.com/a/",), (row("http://e.com/a"),))
+        assert report.in_both_urls == ("https://www.e.com/a/",)
+
+    def test_the_agreement_is_ordered_so_two_runs_can_be_compared(self):
+        """Two runs over the same inputs must produce the same order.
+
+        A set's iteration order is not stable, and an export that reshuffles
+        itself between runs cannot be diffed against last week's.
+        """
+        urls = ("https://www.e.com/c/", "https://www.e.com/a/", "https://www.e.com/b/")
+        rows = tuple(row(url) for url in urls)
+        first = reconcile(BASE, urls, rows).in_both_urls
+        second = reconcile(BASE, tuple(reversed(urls)), tuple(reversed(rows))).in_both_urls
+        assert first == second
+
+    def test_no_overlap_leaves_the_list_empty_rather_than_absent(self):
+        report = reconcile(BASE, ("https://www.e.com/a",), (row("https://www.e.com/z"),))
+        assert report.in_both == 0
+        assert report.in_both_urls == ()
+
     def test_counts_describe_the_inputs(self):
         report = reconcile(
             BASE,

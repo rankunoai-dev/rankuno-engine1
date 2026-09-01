@@ -1,6 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ReconciliationSummary } from "../../adapters/adapterInterface";
+import type {
+  ReconciliationSummary,
+  SavedReconciliation,
+} from "../../adapters/adapterInterface";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
 import { ReconcilePanel } from "./ReconcilePanel";
@@ -55,8 +58,86 @@ function open() {
   );
 }
 
+/** A stored cross-check, with the addresses behind each figure. */
+function saved(overrides: Partial<SavedReconciliation> = {}): SavedReconciliation {
+  return {
+    summary: SUMMARY,
+    created_at: "2026-08-21T12:00:00Z",
+    missed_pages: ["https://e.com/missed-a/", "https://e.com/missed-b/"],
+    orphans: ["https://e.com/orphan/"],
+    in_both: ["https://e.com/shared/"],
+    frog_only: [{ url: "https://e.com/frog/", reason: "MISSED_PAGE" }],
+    engine_only: [{ url: "https://e.com/ours/", reason: "SITEMAP_ORPHAN" }],
+    ...overrides,
+  };
+}
+
+function stubSaved(value: SavedReconciliation | null) {
+  useCrawlStore.setState({
+    adapter: { getReconciliation: vi.fn().mockResolvedValue(value) },
+  } as never);
+}
+
+/** Capture a download without writing a file. */
+function stubDownload() {
+  const clicked = vi.fn();
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(clicked);
+  URL.createObjectURL = vi.fn(() => "blob:x");
+  URL.revokeObjectURL = vi.fn();
+  return clicked;
+}
+
 afterEach(() => {
   useUiStore.setState({ view: "visualizer" });
+  vi.restoreAllMocks();
+});
+
+describe("per-figure downloads", () => {
+  it("offers a file for every figure whose addresses were recorded", async () => {
+    stubReconcile();
+    stubSaved(saved());
+    open();
+
+    // Pages we missed (2), Sitemap orphans (1), Found by both (1), and one per
+    // gap table. Each is labelled with its own count, so a reader can tell
+    // which figure a button belongs to without reading the tile above it.
+    expect(await screen.findByRole("button", { name: "Download 2" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Download 1" }).length).toBeGreaterThan(1);
+  });
+
+  it("writes the URLs of the figure that was clicked", async () => {
+    const clicked = stubDownload();
+    stubReconcile();
+    stubSaved(saved());
+    open();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Download 2" }));
+    expect(clicked).toHaveBeenCalledTimes(1);
+  });
+
+  it("says why the agreement has no file on a cross-check saved before it was kept", async () => {
+    /*
+     * Every sidecar written before `in_both` was stored omits it — the
+     * intersection was counted and discarded. Showing no button and no reason
+     * on one tile of four reads as a defect in the app; showing an empty file
+     * would be a lie about the site.
+     */
+    stubReconcile();
+    stubSaved(saved({ in_both: undefined }));
+    open();
+
+    expect(await screen.findByText(/re-run the cross-check to list these/)).toBeInTheDocument();
+  });
+
+  it("never offers the export back as a download", async () => {
+    // 23,500 rows the analyst uploaded themselves. Storing them to hand back
+    // their own file would double the sidecar for nothing.
+    stubReconcile();
+    stubSaved(saved());
+    open();
+
+    expect(await screen.findByText("your own export")).toBeInTheDocument();
+  });
 });
 
 describe("ReconcilePanel", () => {

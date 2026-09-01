@@ -99,6 +99,14 @@ export interface SavedReconciliation {
   created_at: string;
   missed_pages: string[];
   orphans: string[];
+  /**
+   * URLs both crawlers found.
+   *
+   * Optional because every cross-check saved before this field existed omits
+   * it — the intersection was counted and discarded. A panel reading a stored
+   * sidecar must treat its absence as "not recorded", never as "none agreed".
+   */
+  in_both?: string[];
   frog_only: { url: string; reason: string }[];
   engine_only: { url: string; reason: string }[];
 }

@@ -185,6 +185,12 @@ class ReconciliationReport(StrictModel):
         frog_live: Rows with a 200 status.
         engine_urls: Distinct URLs in the crawl result.
         in_both: URLs present on both sides after normalisation.
+        in_both_urls: The addresses behind `in_both`, in the engine's own
+            spelling. Kept because the count alone cannot be handed to anyone:
+            an analyst asking "which 7,078 did we agree on?" had no answer, and
+            the intersection was computed and thrown away on the next line.
+            The engine's spelling rather than Screaming Frog's, so these join
+            against the crawl result without re-normalising.
         frog_only: URLs Screaming Frog holds alone, each with a reason.
         engine_only: URLs this engine holds alone, each with a reason.
         frog_reasons: Counts per `FrogGapReason`, summing to `len(frog_only)`.
@@ -197,6 +203,7 @@ class ReconciliationReport(StrictModel):
     frog_live: int = Field(default=0, ge=0)
     engine_urls: int = Field(default=0, ge=0)
     in_both: int = Field(default=0, ge=0)
+    in_both_urls: tuple[str, ...] = ()
     frog_only: tuple[UrlGap, ...] = ()
     engine_only: tuple[UrlGap, ...] = ()
     frog_reasons: dict[str, int] = Field(default_factory=dict)
@@ -552,12 +559,18 @@ def reconcile(
         for key in sorted(engine_only_keys)
     )
 
+    # Sorted so the list is stable between two runs over the same pair of
+    # inputs; a set's iteration order is not, and an export that reorders itself
+    # for no reason cannot be diffed against last week's.
+    shared_keys = sorted(frog_by_key.keys() & engine_by_key.keys())
+
     report = ReconciliationReport(
         base_url=base_url,
         frog_rows=len(frog_rows),
         frog_live=sum(1 for row in frog_rows if row.status_code == 200),
         engine_urls=len(engine_by_key),
-        in_both=len(frog_by_key.keys() & engine_by_key.keys()),
+        in_both=len(shared_keys),
+        in_both_urls=tuple(engine_by_key[key] for key in shared_keys),
         frog_only=frog_only,
         engine_only=engine_only,
         frog_reasons=dict(Counter(gap.reason for gap in frog_only)),
