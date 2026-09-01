@@ -76,14 +76,14 @@ export function AuditView(): JSX.Element {
                         clicks behind a control nobody could see. */}
                     <button
                       type="button"
-                      className="au-export"
+                      className="rk-btn rk-btn-primary"
                       onClick={() => exportFinding(finding, result.base_url)}
                     >
                       Download CSV
                     </button>
                     <button
                       type="button"
-                      className="au-toggle"
+                      className="rk-btn"
                       aria-expanded={openId === finding.id}
                       onClick={() => setOpenId(openId === finding.id ? null : finding.id)}
                     >
