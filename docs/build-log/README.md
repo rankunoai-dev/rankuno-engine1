@@ -83,6 +83,11 @@ which, for an AI-assisted codebase, is every session.
 | [0050](0050-where-the-unfetched-urls-went.md) | 2026-09-01 | A per-outcome fetch ledger; 442 URLs that were counted nowhere | 1,572 py + 131 ui |
 | [0051](0051-a-file-behind-every-number.md) | 2026-09-01 | A download behind every cross-check figure; the agreement list was discarded | 1,576 py + 135 ui |
 | [0052](0052-one-sheet-per-question.md) | 2026-09-01 | The cross-check becomes a workbook, one sheet per reason | 1,581 py + 135 ui |
+| [0053](0053-gsc-api-phase-1-schemas-errors.md) | 2026-09-01 | GSC API integration Phase 1: Pydantic schemas & error types | 28 tests, 100% |
+| [0054](0054-gsc-api-phase-2-token-manager.md) | 2026-09-01 | GSC API integration Phase 2: OAuth token lifecycle management | 43 tests, 100% |
+| [0055](0055-gsc-api-phase-3-client.md) | 2026-09-01 | GSC API integration Phase 3: API client with rate limiting & error handling | 53 tests, 100% |
+| [0056](0056-gsc-api-phase-4-url-validator.md) | 2026-09-01 | GSC API integration Phase 4: Property URL validation | 96 tests, 100% |
+| [0057](0057-gsc-api-phase-5-metrics-aggregator.md) | 2026-09-01 | GSC API integration Phase 5: Metrics aggregation to crawled pages | 1671 tests, 95.21% |
 
 
 ---
