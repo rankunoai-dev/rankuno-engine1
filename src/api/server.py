@@ -38,7 +38,7 @@ import csv
 import io
 import threading
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,6 +47,8 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 from pydantic import Field, ValidationError
 
 from src.core.errors import UnsafeUrlError
@@ -429,6 +431,69 @@ def _unmatched_rows(metrics: PageMetricSet) -> list[tuple[GscPageMetrics, str]]:
     return [
         (row, reasons.get(row.url, MatchFailure.NOT_CRAWLED.value))
         for row in metrics.unresolved_gsc
+    ]
+
+
+Sheet = tuple[str, Sequence[str], Sequence[Sequence[object]]]
+"""One worksheet: its name, its header row, and its data rows."""
+
+
+def _workbook_response(sheets: Sequence[Sheet], filename: str) -> Response:
+    """Render sheets as an `.xlsx` a person can actually work in.
+
+    A CSV is one table, and the cross-check is five: a summary, two lists an
+    analyst acts on, and two long lists they mostly scroll past. Flattened into
+    one sheet with a `found_by` column — which is what cycle 0028 chose, for the
+    good reason that splitting into separate *files* forces a join — a real
+    report came out at 17,640 rows with the 14 that matter buried near the
+    bottom. Sheets in one workbook are not separate files; nothing has to be
+    joined, and each list is a click away.
+
+    `write_only` because these run to tens of thousands of rows: the normal mode
+    builds a cell object per value and holds the lot.
+
+    Sheets are ordered smallest and most actionable first. That order is the
+    argument of the report — the 14 pages the crawl missed are the finding, and
+    16,465 rows of explained differences are the evidence behind it.
+    """
+    book = Workbook(write_only=True)
+    for title, headers, rows in sheets:
+        # Excel refuses a sheet name over 31 characters or holding []:*?/\ ,
+        # and openpyxl raises rather than truncating.
+        sheet = book.create_sheet(title[:31])
+        # Both of these must be set *before* the first `append`. A write-only
+        # sheet accepts them afterwards and silently discards them — verified,
+        # because the first version of this did exactly that and shipped a
+        # 16,000-row sheet whose header scrolled away, which is the one thing
+        # this endpoint exists to fix.
+        sheet.freeze_panes = "A2"
+        for index, width in enumerate(_column_widths(headers), start=1):
+            sheet.column_dimensions[get_column_letter(index)].width = width
+        sheet.append(list(headers))
+        for row in rows:
+            sheet.append(list(row))
+
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _column_widths(headers: Sequence[str]) -> list[int]:
+    """Column widths by what the header says the column holds.
+
+    Guessed from the name rather than measured from the data, which would mean
+    reading every row twice. A URL column at the default width shows about
+    eight characters, which is the difference between a usable report and one
+    the reader has to resize before they can start.
+    """
+    wide = {"url", "meaning", "reason", "section", "base_url"}
+    return [
+        60 if header.lower() in {"url", "meaning"} else 22 if header.lower() in wide else 14
+        for header in headers
     ]
 
 
@@ -1096,6 +1161,11 @@ def create_app(
                 "created_at": datetime.now(UTC).isoformat(),
                 "missed_pages": list(report.missed_pages),
                 "orphans": list(report.orphans),
+                # The agreement, not only its size. Every other number on the
+                # panel could be handed to someone as a list of addresses and
+                # this one could not, which made it the only figure a reader had
+                # to take on trust.
+                "in_both": list(report.in_both_urls),
                 "frog_only": [gap.model_dump(mode="json") for gap in report.frog_only],
                 "engine_only": [gap.model_dump(mode="json") for gap in report.engine_only],
             },
@@ -1535,6 +1605,90 @@ def create_app(
         stamp = str(saved.get("created_at", ""))[:10]
         name = f"unmatched-{job_id[:8]}-{stamp or 'undated'}.csv"
         return _csv_response(buffer.getvalue(), name)
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation.xlsx")
+    def download_reconciliation_workbook(job_id: str) -> Response:
+        """The cross-check as a workbook, one sheet per question.
+
+        The same data as `reconciliation.csv`, which stays for anything already
+        linking to it. This is the one to hand somebody: a real gep.com
+        cross-check is 17,640 rows, and in a single sheet the 14 pages the crawl
+        actually missed sit below 16,000 rows of differences that are explained
+        and need no action.
+
+        Five sheets, smallest first:
+
+        * **Summary** — the counts, and every reason with what it means.
+        * **Missed pages** — live, in-scope pages the crawl never reached. The
+          engine's own defect, and already merged.
+        * **Orphans** — published pages no internal link reaches. Found only by
+          this engine, and left alone: their absence from the other crawl *is*
+          the finding.
+        * **Screaming Frog only** / **Rankuno only** — every remaining
+          difference with the reason it is not a defect.
+
+        Raises:
+            HTTPException: `404` if this job has never been cross-checked.
+        """
+        saved = state.store.read_reconciliation(job_id)
+        if saved is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} has no saved cross-check",
+            )
+        summary = saved.get("summary")
+        summary = summary if isinstance(summary, Mapping) else {}
+
+        def urls(key: str) -> list[list[object]]:
+            found = saved.get(key)
+            return (
+                [[url] for url in found if isinstance(url, str)] if isinstance(found, list) else []
+            )
+
+        def gaps(key: str) -> list[list[object]]:
+            found = saved.get(key)
+            rows: list[list[object]] = []
+            for row in found if isinstance(found, list) else []:
+                if not isinstance(row, Mapping):
+                    continue
+                reason = str(row.get("reason", ""))
+                rows.append([row.get("url", ""), reason, GAP_MEANINGS.get(reason, "")])
+            return rows
+
+        counts: list[list[object]] = [
+            ["Cross-checked", summary.get("base_url", "")],
+            ["Run at", str(saved.get("created_at", ""))[:19]],
+            ["Rows in the Screaming Frog export", summary.get("frog_rows", "")],
+            ["Found by both crawlers", summary.get("in_both", "")],
+            ["Pages this crawl missed (merged)", summary.get("missed_pages", "")],
+            ["Orphans only this crawl found", summary.get("orphans", "")],
+            ["URLs merged into a new job", summary.get("merged", "")],
+            [],
+            ["Why Screaming Frog saw a URL this crawl did not", "URLs", "Meaning"],
+        ]
+
+        def tally(key: str) -> list[list[object]]:
+            found = summary.get(key)
+            return [
+                [reason, count, GAP_MEANINGS.get(str(reason), "")]
+                for reason, count in (found if isinstance(found, Mapping) else {}).items()
+            ]
+
+        counts.extend(tally("frog_reasons"))
+        counts.append([])
+        counts.append(["Why this crawl saw a URL Screaming Frog did not", "URLs", "Meaning"])
+        counts.extend(tally("engine_reasons"))
+
+        sheets: list[Sheet] = [
+            ("Summary", ["Measure", "Value", "Meaning"], counts),
+            ("Missed pages", ["url"], urls("missed_pages")),
+            ("Orphans", ["url"], urls("orphans")),
+            ("Screaming Frog only", ["url", "reason", "meaning"], gaps("frog_only")),
+            ("Rankuno only", ["url", "reason", "meaning"], gaps("engine_only")),
+        ]
+        stamp = str(saved.get("created_at", ""))[:10]
+        name = f"cross-check-{job_id[:8]}-{stamp or 'undated'}.xlsx"
+        return _workbook_response(sheets, name)
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
     async def cancel_job(job_id: str) -> JobRecord:

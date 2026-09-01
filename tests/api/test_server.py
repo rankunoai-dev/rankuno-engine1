@@ -12,11 +12,13 @@ it out of. Most of these tests are about those two properties.
 
 from __future__ import annotations
 
+import io
 import time
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from src.api import server as server_module
 from src.api.server import API_PREFIX, create_app
 from src.core.state_store import MAX_HOMEPAGE_BYTES, DiskJobStore, JobRecord, JobStatus
@@ -1240,6 +1242,63 @@ class TestReconciliationDownload:
         with TestClient(app) as client:
             body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
         assert "no internal link reaches it" in body
+
+    def test_the_workbook_splits_the_lists_into_sheets(self, store):
+        """One sheet per question, and the actionable lists come first.
+
+        The flat CSV was the right call when the argument was "two files force a
+        join". Sheets in one workbook are not two files — nothing has to be
+        joined — and a real gep.com cross-check is 17,640 rows, in which the 15
+        pages the crawl actually missed sat below sixteen thousand differences
+        that need no action.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument"
+        )
+        book = load_workbook(io.BytesIO(response.content))
+        assert book.sheetnames == [
+            "Summary",
+            "Missed pages",
+            "Orphans",
+            "Screaming Frog only",
+            "Rankuno only",
+        ]
+        frog = book["Screaming Frog only"]
+        assert [cell.value for cell in frog[2]] == [
+            "https://e.com/x",
+            "MISSED_PAGE",
+            frog[2][2].value,
+        ]
+        # The gloss travels, as it does in the CSV.
+        assert "did not reach it" in str(frog[2][2].value)
+
+    def test_every_sheet_keeps_its_header_in_view(self, store):
+        """A 16,000-row sheet whose header scrolls away is unreadable.
+
+        `freeze_panes` is silently dropped by a write-only worksheet if it is set
+        after the first row is appended — openpyxl accepts the assignment and
+        discards it. The first version of this endpoint did exactly that.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
+
+        book = load_workbook(io.BytesIO(response.content))
+        assert all(sheet.freeze_panes == "A2" for sheet in book.worksheets)
+        # And a URL column wide enough to read a URL in.
+        assert book["Orphans"].column_dimensions["A"].width == 60
+
+    def test_the_workbook_needs_a_saved_cross_check(self, store):
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        with TestClient(app) as client:
+            assert client.get(f"{API_PREFIX}/jobs/nope/reconciliation.xlsx").status_code == 404
 
     def test_it_downloads_as_a_named_file(self, store):
         app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))

@@ -208,6 +208,48 @@
   font-size: 12px;
   font-weight: 700;
   margin: 4px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Per-figure download. Sits under the label inside the tile, so the number, the
+   thing it counts, and the file that lists it read as one unit. */
+.jb-stat-dl {
+  margin-top: 6px;
+  align-self: flex-start;
+  border: 1px solid #34d399;
+  border-radius: 4px;
+  background: #0e3a2f;
+  color: #a7f3d0;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.jb-stat-dl:hover {
+  background: #14523f;
+  border-color: #6ee7b7;
+}
+
+/* Beside a section heading rather than inside a tile. */
+.jb-gap-dl {
+  margin-top: 0;
+}
+
+/* Why a figure has no file, where it has none. Muted: it is an explanation,
+   not a control, and it must not read as a disabled button.
+
+   Not `.jb-stat-hint` — that name is already taken further down by the
+   denominator line under a performance stat, and two rules sharing a class for
+   two different jobs is how a style silently half-applies. */
+.jb-stat-why {
+  margin-top: 6px;
+  font-size: 10px;
+  font-style: italic;
+  opacity: 0.5;
 }
 
 .jb-gap-note {
@@ -356,4 +398,14 @@
 .perf-download-muted:hover {
   background: rgba(255, 255, 255, 0.06);
   color: #e2e8f0;
+}
+
+/* The secondary download. Quieter, because the workbook is the one to hand
+   somebody and the flat CSV is for feeding another tool. */
+.jb-download-muted {
+  margin-left: 14px;
+  color: var(--jb-dim);
+}
+.jb-download-muted:hover {
+  color: #cbd5e1;
 }

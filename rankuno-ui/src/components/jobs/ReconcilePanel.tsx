@@ -1,8 +1,9 @@
 import { Alert, Button, Modal, Table, Tag, Upload } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 import { useEffect, useState } from "react";
-import type { ReconciliationSummary } from "../../adapters/adapterInterface";
+import type { ReconciliationSummary, SavedReconciliation } from "../../adapters/adapterInterface";
 import { API_BASE } from "../../adapters/httpAdapter";
+import { downloadCsv, hostSlug, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
 import "./jobs.css";
@@ -68,6 +69,10 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
   const [summary, setSummary] = useState<ReconciliationSummary | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  // The URL lists behind the counts, held so each figure can be downloaded on
+  // its own. The panel used to keep `saved.summary` and drop the rest, which
+  // meant the addresses were fetched, parsed and then discarded one line later.
+  const [lists, setLists] = useState<SavedReconciliation | null>(null);
 
   // Reload the last cross-check whenever the dialog opens. Without this, closing
   // it discarded a result that cost an export produced by hand in another tool,
@@ -86,6 +91,7 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
         if (!cancelled && saved) {
           setSummary(saved.summary);
           setSavedAt(saved.created_at);
+          setLists(saved);
         }
       } catch {
         // A missing or unreadable cross-check is not worth a banner: the drop
@@ -101,6 +107,7 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
     setSummary(null);
     setProblem(null);
     setSavedAt(null);
+    setLists(null);
     setBusy(false);
   }
 
@@ -133,6 +140,17 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
         setProblem("The reconciliation failed. See the error banner on the dashboard.");
       } else {
         setSummary(result);
+        // The reconcile response carries the counts only. The per-figure
+        // downloads need the addresses, and the server has just written them,
+        // so read the sidecar back rather than widening the response shape.
+        // A failure here costs the download buttons, not the result.
+        try {
+          const adapter = useCrawlStore.getState().adapter;
+          const saved = await adapter?.getReconciliation?.(jobId);
+          if (saved) setLists(saved);
+        } catch {
+          setLists(null);
+        }
       }
     } catch (cause) {
       setProblem(cause instanceof Error ? cause.message : String(cause));
@@ -217,16 +235,27 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
               }
             />
           )}
-          <GapReport summary={summary} />
+          <GapReport summary={summary} lists={lists} />
           {/* A plain anchor, not a fetch-and-blob. The endpoint already sets
               Content-Disposition, so the browser saves the file itself and the
               app never holds a second copy of a multi-megabyte export. */}
+          {/* The workbook first. A real cross-check runs to 17,640 rows, and in
+              one flat sheet the handful of pages the crawl actually missed sit
+              below sixteen thousand differences that need no action. The CSV
+              stays for anything that consumes it as a feed. */}
           <a
             className="jb-download"
+            href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.xlsx`}
+            download
+          >
+            Download the cross-check (Excel, one sheet per list)
+          </a>
+          <a
+            className="jb-download jb-download-muted"
             href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.csv`}
             download
           >
-            Download the cross-check as CSV
+            or as a single CSV
           </a>
         </>
       )}
@@ -235,7 +264,16 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
 }
 
 /** The two-way gap, once an export has been read. */
-function GapReport({ summary }: { summary: ReconciliationSummary }): JSX.Element {
+function GapReport({
+  summary,
+  lists,
+}: {
+  summary: ReconciliationSummary;
+  lists: SavedReconciliation | null;
+}): JSX.Element {
+  const site = hostSlug(summary.base_url);
+  /** `gep.com-missed-pages.csv` — named for the site and the figure. */
+  const name = (part: string) => `${site}-${part}.csv`;
   const rows = (
     map: Record<string, number>,
     labels: Record<string, string>,
@@ -252,10 +290,37 @@ function GapReport({ summary }: { summary: ReconciliationSummary }): JSX.Element
   return (
     <div className="jb-gap">
       <div className="jb-gap-heads">
-        <Stat label="Found by both" value={summary.in_both} />
-        <Stat label="Rows in export" value={summary.frog_rows} />
-        <Stat label="Pages we missed" value={summary.missed_pages} tone="bad" />
-        <Stat label="Sitemap orphans" value={summary.orphans} tone="warn" />
+        <Stat
+          label="Found by both"
+          value={summary.in_both}
+          urls={lists?.in_both}
+          filename={name("found-by-both")}
+          // Absent on every cross-check saved before the list was kept. Saying
+          // so beats an unexplained missing button on one tile of four.
+          unavailable="re-run the cross-check to list these"
+        />
+        <Stat
+          label="Rows in export"
+          value={summary.frog_rows}
+          // Deliberately never downloadable: this is the file the analyst
+          // uploaded. Storing 23,500 rows to hand back their own export would
+          // double the sidecar to reproduce something they already have.
+          unavailable="your own export"
+        />
+        <Stat
+          label="Pages we missed"
+          value={summary.missed_pages}
+          tone="bad"
+          urls={lists?.missed_pages}
+          filename={name("pages-we-missed")}
+        />
+        <Stat
+          label="Sitemap orphans"
+          value={summary.orphans}
+          tone="warn"
+          urls={lists?.orphans}
+          filename={name("sitemap-orphans")}
+        />
       </div>
 
       {summary.merged > 0 ? (
@@ -274,7 +339,13 @@ function GapReport({ summary }: { summary: ReconciliationSummary }): JSX.Element
         />
       )}
 
-      <h4 className="jb-gap-h">Screaming Frog found, we did not</h4>
+      {/* Each table's own rows, with the reason column that makes them
+          actionable. The whole-file download below carries both sides at once;
+          these two are for handing one direction to one person. */}
+      <h4 className="jb-gap-h">
+        Screaming Frog found, we did not
+        <GapDownload rows={lists?.frog_only} filename={name("screaming-frog-only")} />
+      </h4>
       <Table
         size="small"
         pagination={false}
@@ -292,7 +363,10 @@ function GapReport({ summary }: { summary: ReconciliationSummary }): JSX.Element
         ]}
       />
 
-      <h4 className="jb-gap-h">We found, Screaming Frog did not</h4>
+      <h4 className="jb-gap-h">
+        We found, Screaming Frog did not
+        <GapDownload rows={lists?.engine_only} filename={name("rankuno-only")} />
+      </h4>
       <Table
         size="small"
         pagination={false}
@@ -322,19 +396,79 @@ function GapReport({ summary }: { summary: ReconciliationSummary }): JSX.Element
   );
 }
 
+/**
+ * Download for one side of the gap, carrying its reason column.
+ *
+ * `MEANINGS` is written out rather than left as an enum, for the same reason
+ * the whole-file CSV does it: the person who acts on the row is usually not the
+ * person who ran the cross-check.
+ */
+function GapDownload({
+  rows,
+  filename,
+}: {
+  rows?: { url: string; reason: string }[] | undefined;
+  filename: string;
+}): JSX.Element | null {
+  if (!rows || rows.length === 0) return null;
+  const meanings: Record<string, string> = { ...FROG_REASONS, ...ENGINE_REASONS };
+  return (
+    <button
+      type="button"
+      className="jb-stat-dl jb-gap-dl"
+      title={`Download these ${rows.length.toLocaleString()} URLs with their reasons`}
+      onClick={() =>
+        downloadCsv(
+          filename,
+          toCsv(
+            ["url", "reason", "meaning"],
+            rows.map((row) => [row.url, row.reason, meanings[row.reason] ?? ""]),
+          ),
+        )
+      }
+    >
+      Download {rows.length.toLocaleString()}
+    </button>
+  );
+}
+
 function Stat({
   label,
   value,
   tone,
+  urls,
+  filename,
+  unavailable,
 }: {
   label: string;
   value: number;
   tone?: "bad" | "warn";
+  /** The addresses behind the figure, when they were recorded. */
+  urls?: readonly string[] | undefined;
+  filename?: string;
+  /** Why this figure has no list, when it has none. */
+  unavailable?: string;
 }): JSX.Element {
+  const has = urls !== undefined && urls.length > 0;
   return (
     <div className={`jb-stat${tone ? ` jb-stat-${tone}` : ""}`}>
       <span className="jb-stat-v">{value.toLocaleString()}</span>
       <span className="jb-stat-l">{label}</span>
+      {/* A figure with a list gets a button; one without says why rather than
+          showing a control that cannot work. A disabled button with no
+          explanation reads as a defect in the app. */}
+      {has ? (
+        <button
+          type="button"
+          className="jb-stat-dl"
+          title={`Download these ${urls.length.toLocaleString()} URLs`}
+          onClick={() => downloadCsv(filename ?? "urls.csv", toCsv(["url"], urls.map((u) => [u])))}
+        >
+          Download {urls.length.toLocaleString()}
+        </button>
+      ) : (
+        unavailable && <span className="jb-stat-why">{unavailable}</span>
+      )}
     </div>
   );
 }
