@@ -91,6 +91,7 @@ which, for an AI-assisted codebase, is every session.
 | [0058](0058-gsc-api-phase-6-tool-integration.md) | 2026-09-01 | GSC API integration Phase 6: Tool integration with enrichment | 1678 tests, 95.21% |
 | [0060](0060-gsc-api-phase-7-integration-tests.md) | 2026-09-01 | GSC API integration Phase 7: End-to-end integration tests | 1690 tests, 95.21% |
 | [0061](0061-gsc-api-phase-8-ui-integration.md) | 2026-09-02 | GSC API integration Phase 8: UI display & analyst insights | 1690 py + 143 ui |
+| [0062](0062-one-sheet-per-reason-everywhere.md) | 2026-09-02 | Gap and recommendation downloads split one sheet per reason, not one flat list | 1,697 py + 143 ui |
 | [0059](0059-a-banner-that-outlived-its-cause.md) | 2026-09-01 | The offline banner never retracted; a failed poll pinned it until reload | 140 ui |
 
 

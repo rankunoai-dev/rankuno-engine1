@@ -129,6 +129,23 @@ describe("per-figure downloads", () => {
     expect(await screen.findByText(/re-run the cross-check to list these/)).toBeInTheDocument();
   });
 
+  it("gives each gap a workbook split by reason, not a flat list", async () => {
+    /*
+     * The two gap tables hold several reasons each — SITEMAP_ORPHAN beside
+     * QUERY_VARIANT, REDIRECT beside MISSED_PAGE. A single sheet mixing them is
+     * what the reader has to sort out by hand, so these point at the workbook
+     * endpoint with the side they own rather than building a CSV here.
+     */
+    stubReconcile();
+    stubSaved(saved());
+    open();
+
+    const links = await screen.findAllByRole("link", { name: /^Download 1$/ });
+    const targets = links.map((link) => link.getAttribute("href") ?? "");
+    expect(targets.some((href) => href.includes("reconciliation.xlsx?side=frog"))).toBe(true);
+    expect(targets.some((href) => href.includes("reconciliation.xlsx?side=engine"))).toBe(true);
+  });
+
   it("never offers the export back as a download", async () => {
     // 23,500 rows the analyst uploaded themselves. Storing them to hand back
     // their own file would double the sidecar for nothing.

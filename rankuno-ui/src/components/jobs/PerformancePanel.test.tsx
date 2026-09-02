@@ -427,6 +427,29 @@ describe("PerformancePanel", () => {
     expect(await screen.findByText(/the visualizer.s tabs also split by/)).toBeInTheDocument();
   });
 
+  it("offers the whole report as a workbook split by kind", async () => {
+    /*
+     * The kinds are not one job — unlinked earners go to a content team, buried
+     * ones to whoever owns the menu — so a single sheet mixing them is a file
+     * every recipient has to filter before starting.
+     */
+    stubUpload();
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, exportFile(2048));
+
+    const link = await screen.findByRole("link", { name: /one sheet per kind/i });
+    expect(link.getAttribute("href")).toContain("opportunities.xlsx");
+  });
+
+  it("keeps the flat CSV for anything already pointed at it", async () => {
+    stubUpload();
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, exportFile(2048));
+
+    const link = await screen.findByRole("link", { name: /single CSV/i });
+    expect(link.getAttribute("href")).toContain("opportunities.csv");
+  });
+
   it("offers a download on the section itself, not only on the panel", async () => {
     stubUpload();
     const { baseElement } = open();
@@ -435,7 +458,8 @@ describe("PerformancePanel", () => {
     // Each section goes to a different owner: the internal-link findings are a
     // content job, the navigation-depth ones an information-architecture job.
     expect(await screen.findByRole("button", { name: /Download 1/ })).toBeInTheDocument();
-    expect(screen.getByText("Download CSV")).toBeInTheDocument();
+    // The whole-report download is still there beside them, now as a workbook.
+    expect(screen.getByRole("link", { name: /one sheet per kind/i })).toBeInTheDocument();
   });
 
   it("says the dropped findings are not in the section file either", async () => {

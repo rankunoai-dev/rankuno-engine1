@@ -1284,6 +1284,64 @@ class TestReconciliationDownload:
         assert [cell.value for cell in book["Orphans"][1]] == ["url"]
         assert book["Orphans"].max_column == 1
 
+    def test_one_side_of_the_gap_downloads_on_its_own(self, store):
+        """Each gap table is owned by a different person.
+
+        A page Screaming Frog reached and this crawl did not is missing from a
+        sitemap; a page only this crawl found has no internal link pointing at
+        it. The two call for opposite fixes, so each heading's download is that
+        half — still one sheet per reason, not a flat list.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            frog = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=frog")
+            engine = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=engine")
+
+        frog_book = load_workbook(io.BytesIO(frog.content))
+        engine_book = load_workbook(io.BytesIO(engine.content))
+        assert frog_book.sheetnames == ["Summary", "Missed pages"]
+        assert engine_book.sheetnames == ["Summary", "Orphans"]
+
+    def test_a_one_sided_workbook_is_named_for_the_half_it_holds(self, store):
+        """Two downloads from one cross-check must not collide in Downloads."""
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=engine")
+        assert "rankuno-only" in response.headers["content-disposition"]
+
+    def test_a_one_sided_workbook_omits_the_other_side_s_tally(self, store):
+        """Only the half that was asked for.
+
+        A workbook listing reasons whose sheets it does not contain sends the
+        reader looking for tabs that are not there.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=engine")
+        text = " ".join(
+            " ".join(str(cell) for cell in row if cell is not None)
+            for row in load_workbook(io.BytesIO(response.content))["Summary"].iter_rows(
+                values_only=True
+            )
+        )
+        assert "Why Screaming Frog saw a URL this crawl did not" not in text
+        assert "Why this crawl saw a URL Screaming Frog did not" in text
+
+    def test_an_unrecognised_side_is_refused_rather_than_ignored(self, store):
+        """A misspelled side is refused, not quietly widened.
+
+        Treating it as "both" hands someone twice the report they asked for, and
+        nothing on screen would say so.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = self._saved(store)
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=both")
+        assert response.status_code == 422
+
     def test_the_summary_is_a_contents_page(self, store):
         """Where each reason's meaning lives now that it is not on every row.
 

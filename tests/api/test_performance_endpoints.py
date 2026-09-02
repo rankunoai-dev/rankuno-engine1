@@ -13,6 +13,7 @@ import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from src.api import server as server_module
 from src.api.server import API_PREFIX, create_app
 from src.core.state_store import DiskJobStore, JobRecord
@@ -264,6 +265,71 @@ class TestDownload:
         text = response.text
         assert "orphan_with_traffic" in text
         assert "no internal link" in text
+
+    def test_the_workbook_gives_each_kind_its_own_sheet(self, client, crawl):
+        """The kinds are not one job.
+
+        Pages earning clicks with no internal link go to a content team, pages
+        buried in the navigation to whoever owns the menu. A single sheet mixing
+        them is a file every recipient has to filter before starting, which is
+        what the flat CSV made them do.
+        """
+        upload(client, crawl.id, PAGES_CSV)
+        response = client.get(f"{API_PREFIX}/jobs/{crawl.id}/opportunities.xlsx")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument"
+        )
+        book = load_workbook(io.BytesIO(response.content))
+        assert book.sheetnames[0] == "Summary"
+        # A sheet named for the finding, not for the enum.
+        assert "Earning, unlinked" in book.sheetnames
+
+    def test_a_kind_sheet_does_not_repeat_its_own_name_down_every_row(self, client, crawl):
+        """The kind is the sheet, so a column repeating it is noise.
+
+        The cross-check workbook removed the same redundancy for the same
+        reason.
+        """
+        upload(client, crawl.id, PAGES_CSV)
+        response = client.get(f"{API_PREFIX}/jobs/{crawl.id}/opportunities.xlsx")
+        book = load_workbook(io.BytesIO(response.content))
+        headers = [cell.value for cell in book["Earning, unlinked"][1]]
+        assert "kind" not in headers
+        assert headers[0] == "severity"
+
+    def test_the_skipped_kinds_reach_the_workbook_too(self, client, store):
+        """Absence of a finding is not absence of the problem.
+
+        The CSV had to put these in rows inside the findings list; the workbook
+        puts them on the contents page, where "not evaluated" is not sitting
+        among things that were.
+        """
+        record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+        pages = tuple(page(f"https://e.com/p{n}/", inbound=0) for n in range(4))
+        store.finish(
+            record.id,
+            PageClassificationOutput(
+                base_url="https://e.com/",
+                site_profile=SiteProfile(),
+                weight_profile=WeightProfileReport.for_site(SiteProfile()),
+                discovery=DiscoveryReport(base_url="https://e.com/"),
+                summary=CrawlSummary(pages_classified=4),
+                pages=pages,
+            ).model_dump(mode="json"),
+        )
+        upload(client, record.id, "Top pages,Clicks\nhttps://e.com/p0/,9\n")
+        response = client.get(f"{API_PREFIX}/jobs/{record.id}/opportunities.xlsx")
+        text = " ".join(
+            str(cell)
+            for row in load_workbook(io.BytesIO(response.content))["Summary"].iter_rows(
+                values_only=True
+            )
+            for cell in row
+            if cell is not None
+        )
+        assert "Not evaluated" in text
+        assert "inbound_links_unreliable" in text
 
     def test_skipped_kinds_ride_in_the_same_file(self, client, store):
         """Skipped kinds ride in the same file.

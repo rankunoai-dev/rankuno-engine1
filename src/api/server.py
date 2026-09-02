@@ -560,6 +560,23 @@ class PerformanceSummary(StrictModel):
     opportunities: OpportunityReport = OpportunityReport()
 
 
+OPPORTUNITY_SHEETS: Mapping[str, str] = MappingProxyType(
+    {
+        "orphan_with_traffic": "Earning, unlinked",
+        "buried_with_traffic": "Earning, buried",
+        "indexed_crawl_trap": "Indexed crawl traps",
+        "underperforming_sibling": "Off page one",
+        "indexed_subdomain": "Indexed subdomains",
+    }
+)
+"""Worksheet name per recommendation kind.
+
+Short enough to read on a tab strip, and each names the *finding* rather than
+the enum. Same constraint as `SHEET_TITLES`: `_workbook_response` truncates at
+31 characters rather than raising, so a long name would silently lose its end.
+"""
+
+
 SHEET_TITLES: Mapping[str, str] = MappingProxyType(
     {
         # The two findings.
@@ -1494,6 +1511,97 @@ def create_app(
         name = f"opportunities-{job_id[:8]}-{stamp or 'undated'}.csv"
         return _csv_response(buffer.getvalue(), name)
 
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/opportunities.xlsx")
+    def download_opportunities_workbook(job_id: str) -> Response:
+        """The recommendations as a workbook, one sheet per kind.
+
+        The same data as `opportunities.csv`, which stays for anything already
+        linking to it. The flat file mixes every kind into one sheet, and the
+        kinds are not one job: pages earning clicks with no internal link go to
+        a content team, pages buried in the navigation to whoever owns the menu,
+        and siblings ranking off page one to whoever owns internal linking.
+        Handing any one of them the combined file means they filter it first.
+
+        A **Summary** sheet leads, carrying the count per kind and the kinds that
+        were *not evaluated*. Those must travel with the file: a list of
+        recommendations handed over without them invites the reader to conclude
+        the site has no orphans, when the truth is that this crawl could not
+        tell.
+
+        Raises:
+            HTTPException: `404` if no export has been attached to this job.
+        """
+        saved = state.store.read_performance(job_id)
+        if saved is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} has no attached Search Console data",
+            )
+        summary = saved.get("summary")
+        summary = summary if isinstance(summary, Mapping) else {}
+        report = summary.get("opportunities")
+        report = report if isinstance(report, Mapping) else {}
+
+        by_kind: dict[str, list[list[object]]] = {}
+        rows = report.get("opportunities")
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, Mapping):
+                continue
+            section = row.get("section")
+            by_kind.setdefault(str(row.get("kind", "")), []).append(
+                [
+                    row.get("severity", ""),
+                    row.get("score", ""),
+                    row.get("url", ""),
+                    " > ".join(str(part) for part in section) if isinstance(section, list) else "",
+                    row.get("clicks", ""),
+                    row.get("impressions", ""),
+                    row.get("position", ""),
+                    row.get("reason", ""),
+                ]
+            )
+
+        # Largest first. Unlike the cross-check there is no kind that is "the
+        # finding" — every one of these is actionable — so size is the only
+        # ordering that says anything.
+        ordered = sorted(by_kind, key=lambda kind: -len(by_kind[kind]))
+
+        found = report.get("found")
+        found = found if isinstance(found, Mapping) else {}
+        contents: list[list[object]] = [
+            ["Site", summary.get("base_url", "")],
+            ["Search Console export", summary.get("source_name", "")],
+            ["Run at", str(saved.get("created_at", ""))[:19]],
+            [],
+            ["Sheet", "Recommendations", "Found before the scoring ceiling"],
+        ]
+        contents.extend(
+            [OPPORTUNITY_SHEETS.get(kind, kind), len(by_kind[kind]), found.get(kind, "")]
+            for kind in ordered
+        )
+
+        # Stated on the contents page rather than as rows inside a sheet, which
+        # is where the CSV had to put them. "Not evaluated" is not a finding and
+        # must not sit in a list of findings.
+        skipped = report.get("skipped")
+        skipped = skipped if isinstance(skipped, Mapping) else {}
+        if skipped:
+            contents.append([])
+            contents.append(["Not evaluated", "Why", ""])
+            contents.extend([kind, str(gap), ""] for kind, gap in skipped.items())
+
+        sheets: list[Sheet] = [("Summary", ["Measure", "Value", "Note"], contents)]
+        sheets.extend(
+            (
+                OPPORTUNITY_SHEETS.get(kind, kind),
+                ["severity", "score", "url", "section", "clicks", "impressions", "position", "why"],
+                by_kind[kind],
+            )
+            for kind in ordered
+        )
+        stamp = str(saved.get("created_at", ""))[:10]
+        return _workbook_response(sheets, f"recommendations-{job_id[:8]}-{stamp or 'undated'}.xlsx")
+
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/matched.csv")
     def download_matched(job_id: str) -> Response:
         """The pages the export did reach, with the crawl's columns beside them.
@@ -1637,7 +1745,7 @@ def create_app(
         return _csv_response(buffer.getvalue(), name)
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation.xlsx")
-    def download_reconciliation_workbook(job_id: str) -> Response:
+    def download_reconciliation_workbook(job_id: str, side: str = "") -> Response:
         """The cross-check as a workbook, one sheet per question.
 
         The same data as `reconciliation.csv`, which stays for anything already
@@ -1657,9 +1765,34 @@ def create_app(
         * **Screaming Frog only** / **Rankuno only** — every remaining
           difference with the reason it is not a defect.
 
+        Args:
+            job_id: The cross-checked job.
+            side: `frog` or `engine` to restrict the workbook to one direction
+                of the gap, or empty for both. The panel shows the two gaps as
+                separate tables owned by different people — a page Screaming
+                Frog reached and this crawl did not is missing from a sitemap,
+                while a page only this crawl found has no internal link — so
+                each table's download is that half, still split one sheet per
+                reason. An unrecognised value is refused rather than quietly
+                treated as "both", because a caller that misspells it would
+                otherwise hand someone twice the report they asked for.
+
         Raises:
-            HTTPException: `404` if this job has never been cross-checked.
+            HTTPException: `404` if this job has never been cross-checked,
+                `422` if `side` is not one of the accepted values.
         """
+        sides_wanted = {
+            "": (("frog_only", "Screaming Frog"), ("engine_only", "Rankuno")),
+            "frog": (("frog_only", "Screaming Frog"),),
+            "engine": (("engine_only", "Rankuno"),),
+        }.get(side)
+        if sides_wanted is None:
+            raise HTTPException(
+                # `_CONTENT`, not the `_ENTITY` spelling: Starlette deprecated
+                # the latter and emits a warning on every reference to it.
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"side must be 'frog', 'engine' or omitted, not {side!r}",
+            )
         saved = state.store.read_reconciliation(job_id)
         if saved is None:
             raise HTTPException(
@@ -1676,14 +1809,14 @@ def create_app(
         # `SITEMAP_ORPHAN` buckets rather than anything extra.
         buckets: dict[str, list[str]] = {}
         sides: dict[str, str] = {}
-        for key, side in (("frog_only", "Screaming Frog"), ("engine_only", "Rankuno")):
+        for key, owner in sides_wanted:
             found = saved.get(key)
             for row in found if isinstance(found, list) else []:
                 if not isinstance(row, Mapping):
                     continue
                 reason = str(row.get("reason", ""))
                 buckets.setdefault(reason, []).append(str(row.get("url", "")))
-                sides[reason] = side
+                sides[reason] = owner
 
         # The two findings first, then the rest largest first. On a real
         # cross-check `MEDIA_URL` is 16,162 of 16,337 rows, so by size alone the
@@ -1702,8 +1835,6 @@ def create_app(
             ["Pages this crawl missed (merged)", summary.get("missed_pages", "")],
             ["Orphans only this crawl found", summary.get("orphans", "")],
             ["URLs merged into a new job", summary.get("merged", "")],
-            [],
-            ["Why Screaming Frog saw a URL this crawl did not", "URLs", "Meaning"],
         ]
 
         def tally(key: str) -> list[list[object]]:
@@ -1713,10 +1844,17 @@ def create_app(
                 for reason, count in (found if isinstance(found, Mapping) else {}).items()
             ]
 
-        counts.extend(tally("frog_reasons"))
-        counts.append([])
-        counts.append(["Why this crawl saw a URL Screaming Frog did not", "URLs", "Meaning"])
-        counts.extend(tally("engine_reasons"))
+        # Only the half that was asked for. A workbook restricted to one
+        # direction listing the other's reason counts invites the reader to look
+        # for sheets it does not contain.
+        if side != "engine":
+            counts.append([])
+            counts.append(["Why Screaming Frog saw a URL this crawl did not", "URLs", "Meaning"])
+            counts.extend(tally("frog_reasons"))
+        if side != "frog":
+            counts.append([])
+            counts.append(["Why this crawl saw a URL Screaming Frog did not", "URLs", "Meaning"])
+            counts.extend(tally("engine_reasons"))
 
         # A contents page. With a dozen sheets the reader needs to know which
         # one to open, and this is also where each reason's meaning lives now
@@ -1743,7 +1881,10 @@ def create_app(
             for reason in ordered
         )
         stamp = str(saved.get("created_at", ""))[:10]
-        name = f"cross-check-{job_id[:8]}-{stamp or 'undated'}.xlsx"
+        # Named for the half it holds, so two downloads from one cross-check do
+        # not arrive as `cross-check (1).xlsx` and `cross-check (2).xlsx`.
+        half = {"frog": "-screaming-frog-only", "engine": "-rankuno-only"}.get(side, "")
+        name = f"cross-check-{job_id[:8]}{half}-{stamp or 'undated'}.xlsx"
         return _workbook_response(sheets, name)
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)

@@ -544,15 +544,27 @@ function Opportunities({
       <div className="perf-heading-row">
         <h4 className="perf-heading">Recommendations</h4>
         {report.opportunities.length > 0 && (
-          <a
-            /* A class this file owns. The shared `rk-btn` is scoped to
-               `.rk-dash`, and this renders in a modal portal outside it — so
-               borrowing it would give an unstyled link that `tsc` cannot see. */
-            className="perf-download"
-            href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/opportunities.csv`}
-          >
-            Download CSV
-          </a>
+          <span className="perf-heading-actions">
+            <a
+              /* A class this file owns. The shared `rk-btn` is scoped to
+                 `.rk-dash`, and this renders in a modal portal outside it — so
+                 borrowing it would give an unstyled link that `tsc` cannot see. */
+              className="perf-download"
+              href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/opportunities.xlsx`}
+              title="One sheet per recommendation kind, plus a contents page listing the kinds that were not evaluated."
+            >
+              Download Excel (one sheet per kind)
+            </a>
+            {/* Kept, and second. Anything already linking to the flat file
+                keeps working, and a single sheet is still what someone piping
+                this into another tool wants. */}
+            <a
+              className="perf-download-plain"
+              href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/opportunities.csv`}
+            >
+              or a single CSV
+            </a>
+          </span>
         )}
       </div>
 

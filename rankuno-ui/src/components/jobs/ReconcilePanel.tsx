@@ -235,7 +235,7 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
               }
             />
           )}
-          <GapReport summary={summary} lists={lists} />
+          <GapReport summary={summary} lists={lists} jobId={jobId} />
           {/* A plain anchor, not a fetch-and-blob. The endpoint already sets
               Content-Disposition, so the browser saves the file itself and the
               app never holds a second copy of a multi-megabyte export. */}
@@ -267,9 +267,11 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
 function GapReport({
   summary,
   lists,
+  jobId,
 }: {
   summary: ReconciliationSummary;
   lists: SavedReconciliation | null;
+  jobId: string;
 }): JSX.Element {
   const site = hostSlug(summary.base_url);
   /** `gep.com-missed-pages.csv` — named for the site and the figure. */
@@ -344,7 +346,7 @@ function GapReport({
           these two are for handing one direction to one person. */}
       <h4 className="jb-gap-h">
         Screaming Frog found, we did not
-        <GapDownload rows={lists?.frog_only} filename={name("screaming-frog-only")} />
+        <GapDownload rows={lists?.frog_only} jobId={jobId} side="frog" />
       </h4>
       <Table
         size="small"
@@ -365,7 +367,7 @@ function GapReport({
 
       <h4 className="jb-gap-h">
         We found, Screaming Frog did not
-        <GapDownload rows={lists?.engine_only} filename={name("rankuno-only")} />
+        <GapDownload rows={lists?.engine_only} jobId={jobId} side="engine" />
       </h4>
       <Table
         size="small"
@@ -405,30 +407,23 @@ function GapReport({
  */
 function GapDownload({
   rows,
-  filename,
+  jobId,
+  side,
 }: {
   rows?: { url: string; reason: string }[] | undefined;
-  filename: string;
+  jobId: string;
+  /** Which half of the gap this heading owns. */
+  side: "frog" | "engine";
 }): JSX.Element | null {
   if (!rows || rows.length === 0) return null;
-  const meanings: Record<string, string> = { ...FROG_REASONS, ...ENGINE_REASONS };
   return (
-    <button
-      type="button"
+    <a
       className="jb-stat-dl jb-gap-dl"
-      title={`Download these ${rows.length.toLocaleString()} URLs with their reasons`}
-      onClick={() =>
-        downloadCsv(
-          filename,
-          toCsv(
-            ["url", "reason", "meaning"],
-            rows.map((row) => [row.url, row.reason, meanings[row.reason] ?? ""]),
-          ),
-        )
-      }
+      href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.xlsx?side=${side}`}
+      title={`Download these ${rows.length.toLocaleString()} URLs as a workbook, one sheet per reason`}
     >
       Download {rows.length.toLocaleString()}
-    </button>
+    </a>
   );
 }
 
