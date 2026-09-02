@@ -21,6 +21,7 @@ interface Props {
 /** Form fields the operator controls. The rest of the payload uses defaults. */
 interface FormValues {
   base_url: string;
+  gsc_property_url: string | null;
   max_pages: number | null;
   max_depth: number | null;
   speed: "polite" | "standard" | "turbo";
@@ -56,16 +57,10 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
       ...rest,
       rate_limit_rps: preset.rate_limit_rps,
       concurrency: preset.concurrency,
-      // Empty means no ceiling — every reachable page, up to the engine's own
-      // 500,000 limit. `null` is what the API expects; `undefined` would fall
-      // back to the model default of 20,000 and quietly cap the crawl.
       max_pages: values.max_pages ?? null,
-      // An empty depth field means unlimited, not zero. AntD yields `null` for
-      // a cleared InputNumber, which is already the value the API expects.
       max_depth: values.max_depth ?? null,
-      // An empty field means "whatever browser mode implies"; the engine only
-      // substitutes its browser token while this holds the default.
       user_agent: values.user_agent?.trim() || DEFAULT_CRAWL_REQUEST.user_agent,
+      gsc_property_url: values.gsc_property_url?.trim() || null,
     };
 
     setSubmitting(true);
@@ -97,6 +92,7 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
         requiredMark={false}
         initialValues={{
           base_url: "",
+          gsc_property_url: null,
           max_pages: DEFAULT_CRAWL_REQUEST.max_pages,
           max_depth: null,
           speed: "polite",
@@ -132,6 +128,17 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           ]}
         >
           <Input placeholder="https://www.example.com/" autoFocus />
+        </Form.Item>
+
+        <Form.Item
+          name="gsc_property_url"
+          label="Google Search Console property (optional)"
+          extra="To enrich pages with GSC data (clicks, impressions, position, CTR), provide a property URL from your GSC account. Usually the domain like https://example.com. Requires OAuth credentials configured."
+          rules={[
+            { type: "url", message: "Must be a full URL, including https://" },
+          ]}
+        >
+          <Input placeholder="https://example.com (leave empty to skip GSC enrichment)" />
         </Form.Item>
 
         <Form.Item
