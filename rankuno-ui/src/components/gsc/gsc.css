@@ -1,0 +1,314 @@
+/** GSC Metrics Card and Components */
+
+.gsc-card {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+  background: #fafafa;
+}
+
+.gsc-title {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1890ff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.gsc-empty {
+  color: #8c8c8c;
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+/* Metrics grid */
+.gsc-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.gsc-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gsc-label {
+  font-size: 12px;
+  color: #8c8c8c;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.gsc-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f1f1f;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Color-coded position values */
+.gsc-value--pos-green {
+  color: #52c41a;
+}
+
+.gsc-value--pos-yellow {
+  color: #faad14;
+}
+
+.gsc-value--pos-orange {
+  color: #ff7a45;
+}
+
+.gsc-value--pos-red {
+  color: #ff4d4f;
+}
+
+.gsc-value--pos-gray {
+  color: #8c8c8c;
+}
+
+/* Color-coded CTR values */
+.gsc-value--ctr-green {
+  color: #52c41a;
+}
+
+.gsc-value--ctr-yellow {
+  color: #faad14;
+}
+
+.gsc-value--ctr-red {
+  color: #ff4d4f;
+}
+
+.gsc-value--ctr-gray {
+  color: #8c8c8c;
+}
+
+.gsc-hint {
+  font-size: 11px;
+  color: #8c8c8c;
+}
+
+/* Opportunity badge */
+.gsc-opportunity {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 3px;
+  font-size: 12px;
+  margin-bottom: 8px;
+  background: #f6f8fb;
+  border-left: 3px solid #1890ff;
+}
+
+.gsc-opp--high {
+  background: #fff1f0;
+  border-left-color: #ff4d4f;
+}
+
+.gsc-opp--medium {
+  background: #fffbe6;
+  border-left-color: #faad14;
+}
+
+.gsc-opp--low {
+  background: #f6f8fb;
+  border-left-color: #1890ff;
+}
+
+.gsc-opp-label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  min-width: 60px;
+}
+
+.gsc-opp-text {
+  color: #595959;
+}
+
+/* Alerts */
+.gsc-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 3px;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.gsc-alert--warning {
+  background: #fffbe6;
+  border-left: 3px solid #faad14;
+}
+
+.gsc-alert--info {
+  background: #e6f7ff;
+  border-left: 3px solid #1890ff;
+}
+
+/* Performance section (summary) */
+.gsc-summary {
+  margin: 24px 0;
+  padding: 16px;
+  background: #f0f5ff;
+  border: 1px solid #d6e4ff;
+  border-radius: 4px;
+}
+
+.gsc-summary-title {
+  margin: 0 0 16px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #0050b3;
+}
+
+.gsc-summary-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.gsc-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gsc-stat-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #1f1f1f;
+}
+
+.gsc-stat-label {
+  font-size: 12px;
+  color: #8c8c8c;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Coverage gauge */
+.gsc-coverage {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.gsc-coverage-bar {
+  flex: 1;
+  height: 8px;
+  background: #f0f0f0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.gsc-coverage-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #1890ff, #52c41a);
+  border-radius: 4px;
+}
+
+.gsc-coverage-text {
+  font-size: 13px;
+  color: #595959;
+  min-width: 60px;
+}
+
+/* Alerts section */
+.gsc-alerts {
+  margin: 16px 0;
+}
+
+.gsc-alert-box {
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  border-left: 3px solid;
+}
+
+.gsc-alert-box--critical {
+  background: #fff1f0;
+  border-left-color: #ff4d4f;
+  color: #ff4d4f;
+}
+
+.gsc-alert-box--warning {
+  background: #fffbe6;
+  border-left-color: #faad14;
+  color: #ad6800;
+}
+
+.gsc-alert-box--info {
+  background: #e6f7ff;
+  border-left-color: #1890ff;
+  color: #0050b3;
+}
+
+/* Opportunity list */
+.gsc-opportunities {
+  margin: 16px 0;
+}
+
+.gsc-opp-list-title {
+  margin: 12px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f1f1f;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.gsc-opp-item {
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  background: #fafafa;
+  border-left: 3px solid;
+  border-radius: 2px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.gsc-opp-item--high {
+  border-left-color: #ff4d4f;
+}
+
+.gsc-opp-item--medium {
+  border-left-color: #faad14;
+}
+
+.gsc-opp-item--low {
+  border-left-color: #1890ff;
+}
+
+.gsc-opp-item-url {
+  color: #1890ff;
+  word-break: break-all;
+}
+
+.gsc-opp-item-score {
+  font-weight: 600;
+  color: #595959;
+  min-width: 60px;
+  text-align: right;
+}
+
+@media (max-width: 768px) {
+  .gsc-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .gsc-summary-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

@@ -10,6 +10,7 @@ import {
   UNAVAILABLE_METHODS,
   type DashModel,
 } from "../../lib/dashboardModel";
+import { GscMetricsCard } from "../gsc/GscMetricsCard";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useDashboardStore } from "../../store/useDashboardStore";
 
@@ -176,6 +177,8 @@ export function NodeInspector({ model }: Props): JSX.Element {
           </div>
         )}
       </dl>
+
+      {profile && <GscMetricsCard page={profile} />}
 
       <div className="trace">
         <h5>Classifier cascade</h5>

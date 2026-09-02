@@ -1,5 +1,6 @@
 import type { PageClassificationOutput } from "../../types/schema";
 import { OTHERS_LANE, LEVEL_BADGE, type DashModel } from "../../lib/dashboardModel";
+import { GscPerformanceSection } from "../gsc/GscPerformanceSection";
 import "./report.css";
 
 /**
@@ -208,6 +209,14 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
           </tr>
         </tbody>
       </table>
+
+      <GscPerformanceSection
+        pages={
+          model.nodes
+            .filter((n) => n.profile)
+            .map((n) => n.profile!)
+        }
+      />
 
       <h2>Sections</h2>
       <p className="rep-note">

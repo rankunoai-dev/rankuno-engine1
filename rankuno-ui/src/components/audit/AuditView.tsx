@@ -143,15 +143,29 @@ export function AuditView(): JSX.Element {
 function exportFinding(finding: Finding, baseUrl: string): void {
   const rows: (string | number | null)[][] = finding.groups
     ? finding.groups.flatMap((group, index) =>
-        group.map((page) => [index + 1, page.url, page.primary_page_type, page.hierarchy_level]),
+        group.map((page) => [
+          index + 1,
+          page.url,
+          page.primary_page_type,
+          page.hierarchy_level,
+          page.gsc_clicks ?? null,
+          page.gsc_impressions ?? null,
+          page.gsc_avg_position ?? null,
+          page.gsc_ctr !== null ? (page.gsc_ctr * 100).toFixed(2) : null,
+        ]),
       )
     : (finding.pages ?? []).map((page) => [
         null,
         page.url,
         page.primary_page_type,
         page.hierarchy_level,
+        page.gsc_clicks ?? null,
+        page.gsc_impressions ?? null,
+        page.gsc_avg_position ?? null,
+        page.gsc_ctr !== null ? (page.gsc_ctr * 100).toFixed(2) : null,
       ]);
 
-  const csv = toCsv(["set", "url", "page_type", "hierarchy_level"], rows);
+  const headers = ["set", "url", "page_type", "hierarchy_level", "gsc_clicks", "gsc_impressions", "gsc_avg_position", "gsc_ctr_%"];
+  const csv = toCsv(headers, rows);
   downloadCsv(`${hostSlug(baseUrl)}-${finding.id.replace(/[^a-z0-9]+/gi, "-")}.csv`, csv);
 }

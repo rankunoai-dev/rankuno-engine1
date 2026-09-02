@@ -90,6 +90,7 @@ which, for an AI-assisted codebase, is every session.
 | [0057](0057-gsc-api-phase-5-metrics-aggregator.md) | 2026-09-01 | GSC API integration Phase 5: Metrics aggregation to crawled pages | 1671 tests, 95.21% |
 | [0058](0058-gsc-api-phase-6-tool-integration.md) | 2026-09-01 | GSC API integration Phase 6: Tool integration with enrichment | 1678 tests, 95.21% |
 | [0060](0060-gsc-api-phase-7-integration-tests.md) | 2026-09-01 | GSC API integration Phase 7: End-to-end integration tests | 1690 tests, 95.21% |
+| [0061](0061-gsc-api-phase-8-ui-integration.md) | 2026-09-02 | GSC API integration Phase 8: UI display & analyst insights | 1690 py + 143 ui |
 | [0059](0059-a-banner-that-outlived-its-cause.md) | 2026-09-01 | The offline banner never retracted; a failed poll pinned it until reload | 140 ui |
 
 
