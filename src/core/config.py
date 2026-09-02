@@ -77,7 +77,12 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     anthropic_api_key: SecretStr | None = None
 
-    # -- Google Search Console --------------------------------------------
+    # -- Google OAuth 2.0 (GSC, GA4, etc.) --------------------------------
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: SecretStr | None = None
+    google_oauth_refresh_token: SecretStr | None = None
+
+    # -- Google Search Console (Legacy: Service Account) ------------------
     google_search_console_client_email: str | None = None
     google_search_console_private_key: SecretStr | None = None
 

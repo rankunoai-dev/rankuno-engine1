@@ -116,6 +116,14 @@ export interface FullPageIntelligenceProfile {
   signals_evaluated: SignalScore[];
   final_confidence_score: number;
   consensus_method: ConsensusMethod;
+  /** Clicks from GSC */
+  gsc_clicks: number | null;
+  /** Impressions from GSC */
+  gsc_impressions: number | null;
+  /** Average position in search results */
+  gsc_avg_position: number | null;
+  /** Click-through rate from GSC */
+  gsc_ctr: number | null;
 }
 
 /** A content record retrieved from a CMS API. */
@@ -256,6 +264,8 @@ export interface PageClassificationInput {
   concurrency: number;
   use_async_crawl: boolean;
   dom_reserve_fraction: number;
+  /** Optional GSC property URL for metrics enrichment (Phase 6) */
+  gsc_property_url: string | null;
 }
 
 /** Everything one crawl job produced. */
