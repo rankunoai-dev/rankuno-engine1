@@ -92,6 +92,7 @@ which, for an AI-assisted codebase, is every session.
 | [0060](0060-gsc-api-phase-7-integration-tests.md) | 2026-09-01 | GSC API integration Phase 7: End-to-end integration tests | 1690 tests, 95.21% |
 | [0061](0061-gsc-api-phase-8-ui-integration.md) | 2026-09-02 | GSC API integration Phase 8: UI display & analyst insights | 1690 py + 143 ui |
 | [0062](0062-one-sheet-per-reason-everywhere.md) | 2026-09-02 | Gap and recommendation downloads split one sheet per reason, not one flat list | 1,697 py + 143 ui |
+| [0063](0063-oauth-token-manager-implementation.md) | 2026-09-02 | OAuth token manager implementation per ADR 0010 (user login, not service account) | 1700 py + 143 ui |
 | [0059](0059-a-banner-that-outlived-its-cause.md) | 2026-09-01 | The offline banner never retracted; a failed poll pinned it until reload | 140 ui |
 | [0054](0054-the-crawler-was-breaking-the-site.md) | 2026-09-02 | Adaptive in-flight backoff: the crawler was the reason the site returned 5xx | 1,702 py |
 
