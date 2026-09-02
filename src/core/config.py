@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=REPO_ROOT / ".env",
+        env_file=(REPO_ROOT / ".env", REPO_ROOT / ".env.local"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
