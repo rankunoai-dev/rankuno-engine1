@@ -22,10 +22,22 @@ matter more than the small amount of idle time at each barrier:
 * **Depth is correct by construction.** A page's recorded depth is the level it
   was fetched at, with no need to reconcile racing discoveries of the same URL.
 
-Politeness is *not* enforced here. `HttpFetcher` already applies a per-host
-token bucket honouring `Crawl-delay`, so raising `concurrency` cannot make the
-crawler rude to a single host — it makes it wait. The semaphore below bounds
-local resource use (sockets, memory), not remote impact.
+Politeness, and a claim this module used to make and had wrong
+---------------------------------------------------------------
+It said: *"raising `concurrency` cannot make the crawler rude to a single host —
+it makes it wait"*, on the grounds that `HttpFetcher` applies a per-host token
+bucket honouring `Crawl-delay`.
+
+That is false, and measurement disproved it. A token bucket bounds requests **per
+second**; it does not bound requests **in flight**. On an origin answering in 2.5
+seconds, twenty in flight means twenty of its workers are busy at once, whatever
+the arrival rate. rankuno.com answers 200 at five concurrent requests and starts
+returning 500 at ten; a crawl configured for twenty took 54 server errors in 93
+requests and retrieved 33 pages of an 81-page site.
+
+So `_LoadGovernor` now narrows the in-flight cap while an origin is returning
+5xx and widens it again slowly. The bucket still bounds rate; this bounds
+pressure, which is the thing that was never bounded.
 """
 
 from __future__ import annotations
@@ -42,6 +54,7 @@ from src.modules.seo.page_classifier.discovery import (
     MAX_CMS_PAGES,
     OUTCOME_NOT_HTML,
     OUTCOME_OK,
+    OUTCOME_SERVER_ERROR,
     OUTCOME_TRANSPORT,
     SHOPIFY_ENDPOINTS,
     WORDPRESS_ENDPOINTS,
@@ -67,6 +80,7 @@ from src.modules.seo.page_classifier.url_rules import is_faceted_filter, normali
 from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
 
 __all__ = [
+    "BACKOFF_RECOVERY_STREAK",
     "DEFAULT_CONCURRENCY",
     "MAX_CONCURRENCY",
     "adiscover_site",
@@ -118,10 +132,82 @@ class CrawlStalledError(RuntimeError):
         self.in_flight = in_flight
 
 
+BACKOFF_RECOVERY_STREAK = 8
+"""Clean completions before the governor widens the in-flight cap by one.
+
+Additive increase, multiplicative decrease — the same shape TCP uses, and for
+the same reason: back off fast when the other end is in trouble, return slowly
+so a recovering origin is not immediately knocked over again.
+"""
+
+
+class _LoadGovernor:
+    """An in-flight cap that shrinks when the origin starts returning 5xx.
+
+    The engine used a fixed `asyncio.Semaphore` for the whole crawl, so a host
+    that began failing was held at full concurrency until the crawl ended.
+    Measured on rankuno.com: it answers 200 at 5 concurrent requests and starts
+    returning 500 at 10, and a crawl configured for 20 took 54 server errors out
+    of 93 requests — fetching 33 pages of an 81-page site while, in all
+    likelihood, being the reason the site was failing.
+
+    That is a politeness defect before it is a data defect. Rate limiting bounds
+    requests *per second*; on an origin answering in 2.5 seconds it is the
+    number in flight that decides whether its worker pool is exhausted, and
+    nothing bounded that adaptively.
+
+    Failure is read from the graph's own outcome ledger rather than from task
+    return values, which cannot distinguish "500" from "200 but not HTML". The
+    attribution of one error to one completing task is approximate under
+    concurrency; a control loop does not need better than that.
+    """
+
+    def __init__(self, ceiling: int, graph: SiteGraph | None = None) -> None:
+        """Start wide open and narrow only if the origin complains."""
+        self._ceiling = max(1, ceiling)
+        self._limit = self._ceiling
+        self._in_flight = 0
+        self._clean = 0
+        self._graph = graph
+        self._seen = graph.fetch_outcomes[OUTCOME_SERVER_ERROR] if graph else 0
+        self._low_water = self._ceiling
+        self._condition = asyncio.Condition()
+
+    @property
+    def low_water(self) -> int:
+        """The narrowest the cap ever became. Equal to the ceiling if never."""
+        return self._low_water
+
+    async def acquire(self) -> None:
+        """Wait for a slot under the *current* cap, which may have shrunk."""
+        async with self._condition:
+            await self._condition.wait_for(lambda: self._in_flight < self._limit)
+            self._in_flight += 1
+
+    async def release(self) -> None:
+        """Give the slot back, and adjust the cap by what the origin just did."""
+        async with self._condition:
+            self._in_flight -= 1
+            if self._graph is not None:
+                errors = self._graph.fetch_outcomes[OUTCOME_SERVER_ERROR]
+                if errors > self._seen:
+                    self._seen = errors
+                    self._clean = 0
+                    self._limit = max(1, self._limit // 2)
+                    self._low_water = min(self._low_water, self._limit)
+                else:
+                    self._clean += 1
+                    if self._clean >= BACKOFF_RECOVERY_STREAK and self._limit < self._ceiling:
+                        self._limit += 1
+                        self._clean = 0
+            self._condition.notify_all()
+
+
 async def _gather_bounded(
     factories: Sequence[Callable[[], Awaitable[ResultT]]],
     concurrency: int,
     stall_timeout_s: float | None = None,
+    graph: SiteGraph | None = None,
 ) -> list[ResultT | None]:
     """Await every factory with at most `concurrency` in flight.
 
@@ -130,12 +216,17 @@ async def _gather_bounded(
 
     Args:
         factories: Un-started awaitables.
-        concurrency: Maximum in flight.
+        concurrency: Ceiling on requests in flight. The governor may hold the
+            crawl below it while the origin is returning 5xx.
         stall_timeout_s: Abandon the batch if **nothing at all** completes within
             this window. Not a per-request timeout — a slow batch that keeps
             finishing pages is healthy and must not be cut off. This fires only
             when every in-flight request is stuck, which is what a tarpit or a
             dead socket looks like from here.
+        graph: The crawl's graph, read for its server-error count so the
+            in-flight cap can be narrowed while the origin is failing. Omitted
+            by callers that fetch a handful of URLs and cannot overwhelm
+            anything.
 
     Returns:
         Results in input order, `None` for anything that failed or was
@@ -147,17 +238,19 @@ async def _gather_bounded(
     if not factories:
         return []
 
-    semaphore = asyncio.Semaphore(max(1, concurrency))
+    governor = _LoadGovernor(concurrency, graph)
 
     async def run(factory: Callable[[], Awaitable[ResultT]]) -> ResultT | None:
-        async with semaphore:
-            try:
-                return await factory()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - one bad page must not stop a crawl
-                _logger.debug("async_task_failed", extra={"error": str(exc)})
-                return None
+        await governor.acquire()
+        try:
+            return await factory()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad page must not stop a crawl
+            _logger.debug("async_task_failed", extra={"error": str(exc)})
+            return None
+        finally:
+            await governor.release()
 
     tasks = [asyncio.create_task(run(factory)) for factory in factories]
     if stall_timeout_s is None:
@@ -358,7 +451,9 @@ async def _asitemaps(
             break
 
         bodies = await _gather_bounded(
-            [_factory(_abody, graph, fetcher, url) for url in batch], concurrency
+            [_factory(_abody, graph, fetcher, url) for url in batch],
+            concurrency,
+            graph=graph,
         )
 
         next_round: list[str] = []
@@ -545,6 +640,7 @@ async def _acrawl(
                 [_factory(_ahtml, graph, fetcher, url, note) for url in crawlable],
                 concurrency,
                 stall_timeout_s=STALL_TIMEOUT_S,
+                graph=graph,
             )
         except CrawlStalledError as exc:
             # Ends the crawl, it does not fail it. Everything discovered so far

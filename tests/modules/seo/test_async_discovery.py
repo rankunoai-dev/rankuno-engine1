@@ -14,6 +14,7 @@ import httpx
 import pytest
 from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import HttpFetcher
+from src.modules.seo.page_classifier import async_discovery
 from src.modules.seo.page_classifier.async_discovery import (
     DEFAULT_CONCURRENCY,
     MAX_CONCURRENCY,
@@ -22,6 +23,8 @@ from src.modules.seo.page_classifier.async_discovery import (
     adiscover_site,
 )
 from src.modules.seo.page_classifier.discovery import (
+    OUTCOME_OK,
+    OUTCOME_SERVER_ERROR,
     DiscoveryReport,
     SiteGraph,
     discover_site,
@@ -564,3 +567,96 @@ class TestExcludeUrlsMatchesTheSerialPath:
     def test_the_match_is_normalised_not_literal(self, settings):
         _, report = run_async(settings, RESUME_SITE_ASYNC, exclude_urls=("https://e.com/a",))
         assert report.pages_fetched == 2
+
+
+class TestLoadGovernor:
+    """The in-flight cap that narrows while an origin is failing.
+
+    Measured on rankuno.com: 200 at five concurrent requests, 500 at ten. A
+    crawl configured for twenty took 54 server errors in 93 requests and
+    retrieved 33 pages of an 81-page site — the crawler was very likely the
+    reason the site was failing.
+    """
+
+    def test_it_halves_the_cap_on_a_server_error(self):
+        async def run() -> tuple[int, int]:
+            graph = SiteGraph("https://e.com")
+            governor = async_discovery._LoadGovernor(16, graph)
+            await governor.acquire()
+            graph.record_outcome(OUTCOME_SERVER_ERROR)
+            await governor.release()
+            first = governor.low_water
+            await governor.acquire()
+            graph.record_outcome(OUTCOME_SERVER_ERROR)
+            await governor.release()
+            return first, governor.low_water
+
+        first, second = asyncio.run(run())
+        assert first == 8
+        assert second == 4
+
+    def test_it_never_closes_completely(self):
+        """A cap of zero is a hung crawl, not a polite one."""
+
+        async def run() -> int:
+            graph = SiteGraph("https://e.com")
+            governor = async_discovery._LoadGovernor(4, graph)
+            for _ in range(10):
+                await governor.acquire()
+                graph.record_outcome(OUTCOME_SERVER_ERROR)
+                await governor.release()
+            return governor.low_water
+
+        assert asyncio.run(run()) == 1
+
+    def test_a_clean_crawl_is_never_narrowed(self):
+        """Nothing is paid by a site that answers."""
+
+        async def run() -> int:
+            graph = SiteGraph("https://e.com")
+            governor = async_discovery._LoadGovernor(12, graph)
+            for _ in range(40):
+                await governor.acquire()
+                graph.record_outcome(OUTCOME_OK)
+                await governor.release()
+            return governor.low_water
+
+        assert asyncio.run(run()) == 12
+
+    def test_it_widens_again_once_the_origin_recovers(self):
+        """Additive increase: back off fast, return slowly.
+
+        Returning to full concurrency the moment one request succeeds would
+        knock a recovering origin straight back over.
+        """
+
+        async def run() -> tuple[int, int]:
+            graph = SiteGraph("https://e.com")
+            governor = async_discovery._LoadGovernor(16, graph)
+            await governor.acquire()
+            graph.record_outcome(OUTCOME_SERVER_ERROR)
+            await governor.release()
+            narrowed = governor.low_water
+
+            for _ in range(async_discovery.BACKOFF_RECOVERY_STREAK):
+                await governor.acquire()
+                graph.record_outcome(OUTCOME_OK)
+                await governor.release()
+            # One step up, not a jump back to the ceiling.
+            return narrowed, governor._limit  # noqa: SLF001
+
+        narrowed, recovered = asyncio.run(run())
+        assert narrowed == 8
+        assert recovered == 9
+
+    def test_without_a_graph_it_is_a_plain_semaphore(self):
+        """Callers fetching a handful of URLs cannot overwhelm anything."""
+
+        async def run() -> int:
+            governor = async_discovery._LoadGovernor(5)
+            for _ in range(6):
+                await governor.acquire()
+                await governor.release()
+            return governor.low_water
+
+        assert asyncio.run(run()) == 5
