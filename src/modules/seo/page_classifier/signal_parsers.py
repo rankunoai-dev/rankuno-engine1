@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from enum import StrEnum
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -41,6 +42,7 @@ from src.modules.seo.page_classifier.schemas import (
 from src.modules.seo.page_classifier.url_rules import (
     is_malformed_url,
     normalize_path,
+    normalize_url,
     safe_split,
     strip_locale_prefix,
 )
@@ -48,9 +50,12 @@ from src.modules.seo.page_classifier.url_rules import (
 __all__ = [
     "L1_HUB_INBOUND_LINK_THRESHOLD",
     "CmsRecord",
+    "Indexability",
     "NavLink",
     "PageEvidence",
     "extract_canonical_url",
+    "extract_robots_directives",
+    "indexability_of",
     "SignalParser",
     "collect_structural_signals",
     "extract_nav_links",
@@ -601,3 +606,145 @@ def collect_structural_signals(evidence: PageEvidence) -> tuple[SignalScore, ...
     )
     scores = [score for parser in parsers if (score := parser(evidence)) is not None]
     return tuple(scores)
+
+
+class Indexability(StrEnum):
+    """Whether a page *permits* indexing, which is not whether Google indexed it.
+
+    The distinction is the entire point of this type and is easy to lose. This
+    engine can read what a page says about itself — a `robots` meta tag, an
+    `X-Robots-Tag` header, a canonical pointing elsewhere, the status it
+    returned. It cannot know what Google decided. Google ignores canonicals it
+    disagrees with, drops pages it is permitted to keep, and takes days to act
+    on a change.
+
+    So `INDEXABLE` means "nothing here forbids it", never "it is in the index",
+    and a report that conflates the two tells a client their page is live in
+    search on the strength of an HTML tag.
+
+    Upper-case, per the domain-taxonomy ruling in CLAUDE.md §7.
+    """
+
+    INDEXABLE = "INDEXABLE"
+    """Nothing on the page forbids indexing. Whether Google agrees is unknown."""
+
+    NOINDEX = "NOINDEX"
+    """A `robots` meta tag or `X-Robots-Tag` header says not to index it. The
+    one verdict here that is close to decisive — Google honours it."""
+
+    CANONICALISED_AWAY = "CANONICALISED_AWAY"
+    """The page names a different URL as canonical. A *request*, not a rule:
+    Google frequently indexes a page that canonicals elsewhere, so this is a
+    strong hint and nothing more."""
+
+    NOT_A_PAGE = "NOT_A_PAGE"
+    """It redirected, errored, or answered with something that is not HTML."""
+
+    UNKNOWN = "UNKNOWN"
+    """Never fetched, so nothing was read. Distinct from `INDEXABLE`: absence of
+    a prohibition is not the same as absence of a look."""
+
+
+_ROBOTS_META = re.compile(
+    r"<meta\b[^>]*\bname\s*=\s*[\"']?(?:robots|googlebot)[\"']?[^>]*>",
+    re.IGNORECASE,
+)
+_META_CONTENT = re.compile(r"\bcontent\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.IGNORECASE)
+
+_NOINDEX_DIRECTIVES = frozenset({"noindex", "none"})
+"""`none` is shorthand for `noindex, nofollow`, and a reader that only looks for
+the word "noindex" misses every page using it."""
+
+
+def extract_robots_directives(
+    html: str, headers: Mapping[str, str] | None = None
+) -> frozenset[str]:
+    """Every indexing directive the page states, from markup and headers.
+
+    Both sources are read because either alone is a blind spot. `X-Robots-Tag`
+    is how a `noindex` is applied to a PDF or set at the CDN, and it never
+    appears in the HTML; a meta tag never appears in the headers. A crawler that
+    checks one will confidently call the other indexable.
+
+    `googlebot` is treated as `robots`. A page addressing Googlebot specifically
+    is stating the rule that will actually apply to it, and ignoring the
+    narrower name to honour the broader one gets the answer backwards.
+
+    Args:
+        html: Response body. Only the head matters, but the whole body is
+            scanned because a malformed document can close `<head>` early.
+        headers: Response headers, keys lower-cased as `FetchResult` supplies
+            them.
+
+    Returns:
+        Lower-cased directives, e.g. `{"noindex", "nofollow"}`. Empty when the
+        page states none, which is the common case and means "index it".
+    """
+    found: set[str] = set()
+
+    for tag in _ROBOTS_META.findall(html or ""):
+        match = _META_CONTENT.search(tag)
+        if match is None:
+            continue
+        value = next(group for group in match.groups() if group is not None)
+        found.update(part.strip().lower() for part in value.split(",") if part.strip())
+
+    for name, value in (headers or {}).items():
+        # `x-robots-tag: googlebot: noindex` targets one agent; the directive is
+        # after the colon. A split on "," alone would keep "googlebot: noindex"
+        # as a single token and match nothing.
+        if name.lower() != "x-robots-tag":
+            continue
+        for part in value.split(","):
+            token = part.split(":")[-1].strip().lower()
+            if token:
+                found.add(token)
+
+    return frozenset(found)
+
+
+def indexability_of(
+    url: str,
+    *,
+    status_code: int | None,
+    directives: frozenset[str] = frozenset(),
+    canonical_url: str = "",
+    is_html: bool = True,
+) -> tuple[Indexability, str]:
+    """Judge what the page permits, and say why in words a client can read.
+
+    Order matters and is the argument of this function. A `noindex` on a page
+    that also 404s is not the reason it is missing, and reporting the tag would
+    send somebody to edit markup on a page that does not exist.
+
+    Args:
+        url: The address as crawled.
+        status_code: Final status, or `None` if it was never fetched.
+        directives: From `extract_robots_directives`.
+        canonical_url: What the page declared, if anything.
+        is_html: Whether the response was a page at all.
+
+    Returns:
+        The verdict and a one-line reason.
+    """
+    if status_code is None:
+        return Indexability.UNKNOWN, "This crawl never fetched the page, so nothing was read."
+    if status_code >= 400:
+        return (
+            Indexability.NOT_A_PAGE,
+            f"Answered {status_code}. A page that errors is not indexed.",
+        )
+    if 300 <= status_code < 400:
+        return Indexability.NOT_A_PAGE, f"Redirects ({status_code}). The destination is the page."
+    if not is_html:
+        return Indexability.NOT_A_PAGE, "Answered with something that is not an HTML page."
+    if directives & _NOINDEX_DIRECTIVES:
+        stated = ", ".join(sorted(directives & _NOINDEX_DIRECTIVES))
+        return Indexability.NOINDEX, f"The page says '{stated}'. Google honours this."
+    if canonical_url and normalize_url(canonical_url) != normalize_url(url):
+        return (
+            Indexability.CANONICALISED_AWAY,
+            f"Names {canonical_url} as its canonical, asking Google to index that instead. "
+            f"A request, not a rule — Google may index this page anyway.",
+        )
+    return Indexability.INDEXABLE, "Nothing on the page forbids indexing."

@@ -14,10 +14,13 @@ from src.modules.seo.page_classifier.schemas import (
 )
 from src.modules.seo.page_classifier.signal_parsers import (
     CmsRecord,
+    Indexability,
     NavLink,
     PageEvidence,
     collect_structural_signals,
     extract_nav_links,
+    extract_robots_directives,
+    indexability_of,
     parse_aria_nav_signal,
     parse_cms_endpoint_signal,
     parse_jsonld_signal,
@@ -329,3 +332,116 @@ class TestCollectStructuralSignals:
         """Layer 3 is an escalation, not a structural parser."""
         signals = collect_structural_signals(evidence(cms_record=CmsRecord(record_type="product")))
         assert all(s.source is not SignalSource.LLM_ZERO_SHOT for s in signals)
+
+
+class TestRobotsDirectives:
+    """What a page says about its own indexing.
+
+    Read from markup *and* headers because either alone is a blind spot: an
+    `X-Robots-Tag` is how a noindex is applied to a PDF or set at a CDN and
+    never appears in the HTML, and a meta tag never appears in the headers.
+    """
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            '<meta name="robots" content="noindex, nofollow">',
+            "<meta name='robots' content='noindex'>",
+            "<meta name=robots content=noindex>",
+            '<META NAME="ROBOTS" CONTENT="NOINDEX">',
+            '<meta charset="utf-8"><meta name="robots" content="noindex">',
+        ],
+    )
+    def test_every_shape_a_site_writes_it_in(self, html):
+        assert "noindex" in extract_robots_directives(html)
+
+    def test_googlebot_counts_as_robots(self):
+        """A page addressing Googlebot states the rule that will apply to it.
+
+        Honouring the broader name and ignoring the narrower one gets the answer
+        exactly backwards.
+        """
+        assert "noindex" in extract_robots_directives('<meta name="googlebot" content="noindex">')
+
+    def test_none_is_shorthand_for_noindex(self):
+        """A reader that greps for the word "noindex" misses every page using it."""
+        assert extract_robots_directives('<meta name="robots" content="none">') == frozenset(
+            {"none"}
+        )
+        verdict, _ = indexability_of(
+            "https://e.com/a/", status_code=200, directives=frozenset({"none"})
+        )
+        assert verdict is Indexability.NOINDEX
+
+    def test_the_header_is_read_too(self):
+        found = extract_robots_directives("", {"x-robots-tag": "noindex, nofollow"})
+        assert found == frozenset({"noindex", "nofollow"})
+
+    def test_an_agent_scoped_header_is_split_on_the_colon(self):
+        """`x-robots-tag: googlebot: noindex` puts the directive after a colon.
+
+        Splitting on commas alone keeps "googlebot: noindex" as one token and
+        matches nothing.
+        """
+        assert "noindex" in extract_robots_directives("", {"x-robots-tag": "googlebot: noindex"})
+
+    def test_a_page_stating_nothing_states_nothing(self):
+        assert extract_robots_directives("<html><body>hello</body></html>") == frozenset()
+
+
+class TestIndexability:
+    def test_a_clean_page_permits_indexing_and_claims_no_more(self):
+        """`INDEXABLE` means nothing forbids it, never that Google has it.
+
+        The engine reads what a page says about itself. Google ignores canonicals
+        it disagrees with and drops pages it is permitted to keep, so conflating
+        the two tells a client their page is live in search on the strength of an
+        HTML tag.
+        """
+        verdict, reason = indexability_of("https://e.com/a/", status_code=200)
+        assert verdict is Indexability.INDEXABLE
+        assert "forbids" in reason
+
+    def test_a_status_beats_a_tag(self):
+        """A noindex on a page that also 404s is not why it is missing.
+
+        Reporting the tag would send somebody to edit markup on a page that does
+        not exist.
+        """
+        verdict, reason = indexability_of(
+            "https://e.com/a/", status_code=404, directives=frozenset({"noindex"})
+        )
+        assert verdict is Indexability.NOT_A_PAGE
+        assert "404" in reason
+
+    def test_a_cross_canonical_is_a_request_not_a_rule(self):
+        verdict, reason = indexability_of(
+            "https://e.com/a/", status_code=200, canonical_url="https://e.com/b/"
+        )
+        assert verdict is Indexability.CANONICALISED_AWAY
+        assert "may index this page anyway" in reason
+
+    def test_a_self_canonical_is_not_canonicalised_away(self):
+        """The overwhelmingly common case: a page naming itself.
+
+        Comparing raw strings would flag every page whose canonical differs by a
+        trailing slash or a scheme.
+        """
+        verdict, _ = indexability_of(
+            "https://e.com/a/", status_code=200, canonical_url="http://www.e.com/a"
+        )
+        assert verdict is Indexability.INDEXABLE
+
+    def test_never_fetched_is_not_indexable(self):
+        """Absence of a prohibition is not absence of a look.
+
+        1,278 URLs in one gep.com crawl were never fetched. Calling them
+        indexable would invent a verdict from nothing.
+        """
+        verdict, reason = indexability_of("https://e.com/a/", status_code=None)
+        assert verdict is Indexability.UNKNOWN
+        assert "never fetched" in reason
+
+    def test_a_non_html_200_is_not_a_page(self):
+        verdict, _ = indexability_of("https://e.com/a.pdf", status_code=200, is_html=False)
+        assert verdict is Indexability.NOT_A_PAGE
