@@ -1,10 +1,19 @@
 import { Empty, Tag } from "antd";
 import { useMemo, useState } from "react";
-import { buildFindings, type Finding } from "../../lib/audit";
+import {
+  buildFindings,
+  finalUrlOf,
+  landsOnHomepage,
+  redirectHops,
+  type Finding,
+} from "../../lib/audit";
 import { downloadCsv, hostSlug, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import GscIntegratedReport from "../crawl-results/GscIntegratedReport";
+import type { FullPageIntelligenceProfile } from "../../types/schema";
 import { DuplicateTable } from "./DuplicateTable";
 import { OrphanTable } from "./OrphanTable";
+import { RedirectTable } from "./RedirectTable";
 import "./audit.css";
 
 const SEVERITY_COLOUR: Record<Finding["severity"], string> = {
@@ -106,6 +115,8 @@ export function AuditView(): JSX.Element {
                   is one they are entitled to disbelieve. */}
               {openId === finding.id && finding.groups ? (
                 <DuplicateTable groups={finding.groups} baseUrl={result.base_url} />
+              ) : openId === finding.id && finding.worklist === "redirects" && finding.pages ? (
+                <RedirectTable pages={finding.pages} baseUrl={result.base_url} />
               ) : openId === finding.id && finding.pages ? (
                 <OrphanTable pages={finding.pages} baseUrl={result.base_url} />
               ) : (
@@ -124,8 +135,42 @@ export function AuditView(): JSX.Element {
           ))}
         </div>
       )}
+
+      <div style={{ marginTop: "2rem" }}>
+        <GscIntegratedReport
+          pages={transformPages(result.pages)}
+          totalPages={result.pages.length}
+          baseUrl={result.base_url}
+        />
+      </div>
     </div>
   );
+}
+
+/**
+ * Transform API pages to component props format.
+ * Maps snake_case API fields to camelCase component props.
+ */
+function transformPages(
+  pages: FullPageIntelligenceProfile[],
+) {
+  return pages.map((page) => ({
+    url: page.url,
+    hierarchyLevel: page.hierarchy_level,
+    primaryPageType: page.primary_page_type,
+    gscMetrics: {
+      clicks: page.gsc_clicks ?? undefined,
+      impressions: page.gsc_impressions ?? undefined,
+      ctr: page.gsc_ctr ?? undefined,
+      avgPosition: page.gsc_avg_position ?? undefined,
+    },
+    navigationContext: {
+      discoveryMethod: page.navigation_discovery_method ?? undefined,
+      reachabilityTier: page.navigation_reachability_tier ?? undefined,
+      sourceAuthority: page.navigation_source_authority ?? undefined,
+      pathQuality: page.navigation_path_quality ?? undefined,
+    },
+  }));
 }
 
 /**
@@ -141,6 +186,25 @@ export function AuditView(): JSX.Element {
  * URL belongs to is the whole point of that finding and a flat list destroys it.
  */
 function exportFinding(finding: Finding, baseUrl: string): void {
+  // Redirects need their own columns, not the generic ones. Handing someone a
+  // list of redirecting URLs without the address each resolves to is a file they
+  // cannot act on — the destination *is* the finding.
+  if (finding.worklist === "redirects") {
+    const csv = toCsv(
+      ["url", "redirects_to", "hops", "lands_on_homepage", "page_type", "hierarchy_level"],
+      (finding.pages ?? []).map((page) => [
+        page.url,
+        finalUrlOf(page),
+        redirectHops(page),
+        landsOnHomepage(page) ? "yes" : "no",
+        page.primary_page_type,
+        page.hierarchy_level,
+      ]),
+    );
+    downloadCsv(`${hostSlug(baseUrl)}-sitemap-redirects.csv`, csv);
+    return;
+  }
+
   const rows: (string | number | null)[][] = finding.groups
     ? finding.groups.flatMap((group, index) =>
         group.map((page) => [

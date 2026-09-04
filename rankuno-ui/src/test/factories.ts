@@ -44,6 +44,14 @@ export function page(
     signals_evaluated: [],
     final_confidence_score: 0.9,
     consensus_method: "LAYER1_STRUCTURAL",
+    gsc_clicks: null,
+    gsc_impressions: null,
+    gsc_ctr: null,
+    gsc_avg_position: null,
+    navigation_discovery_method: null,
+    navigation_reachability_tier: null,
+    navigation_source_authority: null,
+    navigation_path_quality: null,
     ...overrides,
   };
 }

@@ -79,6 +79,43 @@ export type CmsFamily =
 
 export const CMS_FAMILY_VALUES: readonly CmsFamily[] = ["WORDPRESS", "SHOPIFY", "HEADLESS", "UNKNOWN"] as const;
 
+export type NavigationDiscoveryMethod =
+  | "PRIMARY_NAV"
+  | "SECONDARY_NAV"
+  | "BODY_LINK"
+  | "BREADCRUMB"
+  | "SITEMAP_ONLY"
+  | "ORPHANED";
+
+export const NAVIGATION_DISCOVERY_METHOD_VALUES: readonly NavigationDiscoveryMethod[] = ["PRIMARY_NAV", "SECONDARY_NAV", "BODY_LINK", "BREADCRUMB", "SITEMAP_ONLY", "ORPHANED"] as const;
+
+export type NavigationReachabilityTier =
+  | "TIER_0_HERO"
+  | "TIER_1_STANDARD"
+  | "TIER_2_DEEP"
+  | "TIER_3_METADATA"
+  | "TIER_4_ORPHANED";
+
+export const NAVIGATION_REACHABILITY_TIER_VALUES: readonly NavigationReachabilityTier[] = ["TIER_0_HERO", "TIER_1_STANDARD", "TIER_2_DEEP", "TIER_3_METADATA", "TIER_4_ORPHANED"] as const;
+
+export type NavigationSourceAuthority =
+  | "FROM_HOMEPAGE"
+  | "FROM_MAIN_HUB"
+  | "FROM_CONTENT"
+  | "FROM_FOOTER"
+  | "FROM_SIDEBAR"
+  | "NONE";
+
+export const NAVIGATION_SOURCE_AUTHORITY_VALUES: readonly NavigationSourceAuthority[] = ["FROM_HOMEPAGE", "FROM_MAIN_HUB", "FROM_CONTENT", "FROM_FOOTER", "FROM_SIDEBAR", "NONE"] as const;
+
+export type NavigationPathQuality =
+  | "LOGICAL_HIERARCHY"
+  | "LATERAL_LINKED"
+  | "DISCONNECTED"
+  | "UNKNOWN";
+
+export const NAVIGATION_PATH_QUALITY_VALUES: readonly NavigationPathQuality[] = ["LOGICAL_HIERARCHY", "LATERAL_LINKED", "DISCONNECTED", "UNKNOWN"] as const;
+
 // ----------------------------------------------------------- data contracts
 
 /** One signal's independent opinion about a page. */
@@ -124,6 +161,14 @@ export interface FullPageIntelligenceProfile {
   gsc_avg_position: number | null;
   /** Click-through rate from GSC */
   gsc_ctr: number | null;
+  /** WHERE was this page discovered (header, footer, body link, etc) */
+  navigation_discovery_method: NavigationDiscoveryMethod | null;
+  /** HOW MANY HOPS from homepage (TIER_0_HERO, TIER_1_STANDARD, etc) */
+  navigation_reachability_tier: NavigationReachabilityTier | null;
+  /** WHAT TYPE OF PAGE links to it (homepage, hub, content, footer, etc) */
+  navigation_source_authority: NavigationSourceAuthority | null;
+  /** DOES THE PATH MAKE SENSE (logical hierarchy, lateral, disconnected) */
+  navigation_path_quality: NavigationPathQuality | null;
 }
 
 /** A content record retrieved from a CMS API. */

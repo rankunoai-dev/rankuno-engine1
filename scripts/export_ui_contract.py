@@ -59,6 +59,10 @@ from src.modules.seo.page_classifier.schemas import (  # noqa: E402
     ConversionRole,
     FullPageIntelligenceProfile,
     HierarchyLevel,
+    NavigationDiscoveryMethod,
+    NavigationPathQuality,
+    NavigationReachabilityTier,
+    NavigationSourceAuthority,
     PrimaryPageType,
     SearchIntent,
     SignalScore,
@@ -92,6 +96,10 @@ ENUMS: tuple[EnumMeta, ...] = (
     SignalSource,
     ConsensusMethod,
     CmsFamily,
+    NavigationDiscoveryMethod,
+    NavigationReachabilityTier,
+    NavigationSourceAuthority,
+    NavigationPathQuality,
 )
 
 MODELS: tuple[type[BaseModel], ...] = (

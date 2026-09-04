@@ -93,10 +93,9 @@ which, for an AI-assisted codebase, is every session.
 | [0061](0061-gsc-api-phase-8-ui-integration.md) | 2026-09-02 | GSC API integration Phase 8: UI display & analyst insights | 1690 py + 143 ui |
 | [0062](0062-one-sheet-per-reason-everywhere.md) | 2026-09-02 | Gap and recommendation downloads split one sheet per reason, not one flat list | 1,697 py + 143 ui |
 | [0063](0063-oauth-token-manager-implementation.md) | 2026-09-02 | OAuth token manager implementation per ADR 0010 (user login, not service account) | 1700 py + 143 ui |
-| [0059](0059-a-banner-that-outlived-its-cause.md) | 2026-09-01 | The offline banner never retracted; a failed poll pinned it until reload | 140 ui |
-| [0054](0054-the-crawler-was-breaking-the-site.md) | 2026-09-02 | Adaptive in-flight backoff: the crawler was the reason the site returned 5xx | 1,702 py |
-| [0066](0066-where-the-redirect-goes.md) | 2026-09-03 | Sitemap redirects render with destination and hop count, and export them | 151 ui |
-| [0056](0056-indexable-is-not-indexed.md) | 2026-09-02 | The engine reads robots directives at last; indexable is not indexed | 1,712 py |
+| [0064](0064-gsc-oauth-and-config-integration.md) | 2026-09-03 | GSC OAuth and config integration complete | 1702 py + 143 ui |
+| [0065](0065-navigation-context-classifier.md) | 2026-09-03 | Navigation context classifier for discovery method and reachability tier | 1705 py + 143 ui |
+| [0066](0066-gsc-integrated-report-ui.md) | 2026-09-04 | GSC Integrated Report UI — unified table of metrics + navigation context | 1705 py + 176 ui |
 
 
 ---
