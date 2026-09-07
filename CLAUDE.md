@@ -228,3 +228,25 @@ Match the surrounding code. The existing `src/core/` modules set the standard:
 Google-style docstrings explaining *why*, not *what*; module docstrings stating the
 design stance; comments reserved for non-obvious decisions. Target < 400 lines per
 file. No `TODO` without an issue number. No commented-out code.
+
+---
+
+## 10. Informal commands go through the prompt generator
+
+The main chat session does not investigate or implement an informal request itself.
+An informal request is any plain-language instruction to change, fix, add, investigate,
+or improve something ("fix the redirect table", "why is the crawl slow"). The sequence,
+defined in full by the `/do` skill (`.claude/skills/do/SKILL.md`), is:
+
+1. `prompt-generator` agent turns the words into a scoped brief: target agent, what to
+   locate first (real paths), the only dependency chain to inspect, do-nots, acceptance
+   criteria, verification commands, and whether a HITL stop applies.
+2. The brief is shown to the user, then handed verbatim to the target agent
+   (`feature-builder`, `bug-fixer`, `ui-engineer`, `refactorer`, `api-data-engineer`,
+   `investigator`, `test-engineer`). `security-auditor` runs first when network,
+   secrets, or spend are involved.
+3. `docs-scribe` closes the cycle with the build-log entry.
+
+Roles and the routing table are in `docs/AGENT_ROSTER.md`; cross-agent discoveries use
+`docs/standards/AGENT_HANDOFF_PROTOCOL.md`. Questions, approvals, and replies to the
+assistant are answered directly and do not enter this sequence.

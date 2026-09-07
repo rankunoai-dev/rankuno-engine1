@@ -349,6 +349,7 @@ export const CRAWL_SPEEDS: readonly CrawlSpeed[] = [
  */
 export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   base_url: "",
+  gsc_property_url: null,
   // Empty for an operator-started crawl. Only a resume supplies these, and the
   // engine builds that request itself from the original job's checkpoint —
   // there is no UI control for it, and there should not be: a hand-typed seed

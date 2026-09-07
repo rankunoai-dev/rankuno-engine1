@@ -18,9 +18,9 @@
 
 **Result:**
 ```
-GOOGLE_OAUTH_CLIENT_ID="<redacted>"
+GOOGLE_OAUTH_CLIENT_ID="<redacted>.apps.googleusercontent.com"
 GOOGLE_OAUTH_CLIENT_SECRET="<redacted>"
-GOOGLE_OAUTH_REFRESH_TOKEN="1//0aQ..."  ← Saved in .env.local
+GOOGLE_OAUTH_REFRESH_TOKEN="<redacted>"  ← Saved in .env.local
 ```
 
 ### Phase B: Config Loading Fix ✅
@@ -33,10 +33,10 @@ GOOGLE_OAUTH_REFRESH_TOKEN="1//0aQ..."  ← Saved in .env.local
 **Fix applied:**
 ```python
 # BEFORE
-env_file=REPO_ROOT / ".env"
+env_file = REPO_ROOT / ".env"
 
-# AFTER  
-env_file=(REPO_ROOT / ".env", REPO_ROOT / ".env.local")
+# AFTER
+env_file = (REPO_ROOT / ".env", REPO_ROOT / ".env.local")
 ```
 
 **Result:** OAuth credentials now properly loaded on application startup

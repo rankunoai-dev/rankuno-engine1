@@ -96,6 +96,11 @@ which, for an AI-assisted codebase, is every session.
 | [0064](0064-gsc-oauth-and-config-integration.md) | 2026-09-03 | GSC OAuth and config integration complete | 1702 py + 143 ui |
 | [0065](0065-navigation-context-classifier.md) | 2026-09-03 | Navigation context classifier for discovery method and reachability tier | 1705 py + 143 ui |
 | [0066](0066-gsc-integrated-report-ui.md) | 2026-09-04 | GSC Integrated Report UI — unified table of metrics + navigation context | 1705 py + 176 ui |
+| [0067](0067-where-the-redirect-goes.md) | 2026-09-03 | Sitemap redirects render their destination and hop count, with a CSV | 1705 py + 151 ui |
+| [0068](0068-what-a-page-permits-and-what-google-did.md) | 2026-09-07 | Every URL labelled indexable / non-indexable, read against Search Console | 1705 py + 177 ui |
+| [0069](0069-cross-check-overlay-and-full-screen-tree.md) | 2026-09-07 | Tree marks and counts what Screaming Frog missed; full-screen tree with section totals and the OTHERS insight | 1705 py + 202 ui |
+| [0070](0070-collapse-where-the-tree-is.md) | 2026-09-07 | Expand/collapse moved into the tree's own controls, so full screen has them | 1705 py + 206 ui |
+| [0071](0071-clickable-page-links-in-tree.md) | 2026-09-07 | Page rows in the tree link to their URL in a new tab; row stops being a `<button>` | py gate not run + 211 ui |
 
 
 ---

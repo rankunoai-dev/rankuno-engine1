@@ -4,6 +4,7 @@ import type {
   CrawlJobSummary,
   PerformanceSummary,
   ReconciliationSummary,
+  SavedReconciliation,
   JobStatus,
 } from "../adapters/adapterInterface";
 import { HttpAdapter } from "../adapters/httpAdapter";
@@ -72,6 +73,17 @@ interface CrawlState {
   error: string | null;
 
   result: PageClassificationOutput | null;
+  /**
+   * The Screaming Frog cross-check saved against the active job, or `null`.
+   *
+   * Loaded with the result rather than on demand, because the tree marks every
+   * row the other crawler missed and a toggle that first has to fetch is a
+   * toggle that flickers. `null` means *no cross-check is stored for this job* —
+   * which is also true of the merged "(+N from Screaming Frog)" job, since the
+   * sidecar is written against the job that was reconciled, not the one it
+   * produced. Absence, never "nothing was missed".
+   */
+  reconciliation: SavedReconciliation | null;
   /** How the tree is grouped. Navigation mirrors the site's own header menu. */
   grouping: "navigation" | "path";
 
@@ -169,6 +181,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
   liveJobs: {},
 
   result: null,
+  reconciliation: null,
   grouping: "navigation",
 
   async init(adapter) {
@@ -195,6 +208,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       status: "running",
       error: null,
       result: null,
+      reconciliation: null,
     });
 
     try {
@@ -213,7 +227,12 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       });
     } catch (cause) {
       set({ status: "failed", error: describe(cause) });
+      return;
     }
+
+    // After the result, not alongside it: the tree is the page, and the
+    // cross-check decorates it. A slow sidecar read must not hold the tree.
+    await loadReconciliation(get, adapter, jobId);
   },
 
   async uploadGscExport(jobId, export_) {
@@ -245,6 +264,10 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       // returns. Refreshed here rather than by the caller, or a panel that
       // forgot would leave the merged crawl unselectable.
       await get().refreshJobs();
+      // The sidecar just written belongs to the job on screen whenever that is
+      // the one reconciled. Re-read it so the tree overlay reflects the upload
+      // without a reselect.
+      if (get().activeJobId === jobId) await loadReconciliation(get, adapter, jobId);
       return summary;
     } catch (cause) {
       set({ error: describe(cause) });
@@ -317,7 +340,13 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     const adapter = get().adapter;
     if (!(adapter instanceof HttpAdapter)) return;
 
-    set({ status: "running", error: null, result: null, activeJobId: jobId });
+    set({
+      status: "running",
+      error: null,
+      result: null,
+      reconciliation: null,
+      activeJobId: jobId,
+    });
     try {
       const result = await adapter.getCheckpoint(jobId);
       set({
@@ -389,6 +418,33 @@ function describe(cause: unknown): string {
 }
 
 type Getter = () => CrawlState;
+
+/**
+ * Read the cross-check saved against `jobId`, if the adapter can and one exists.
+ *
+ * Never raises and never touches `error`: the tree is already on screen, and a
+ * missing or unreadable sidecar is a reason for the overlay toggle to be
+ * disabled, not for a banner over a result that loaded fine.
+ *
+ * Guarded by job id before writing. The operator can select another job while
+ * this read is in flight, and a late arrival would then mark the wrong site's
+ * tree with the previous site's misses — every row index would point at an
+ * unrelated page.
+ */
+async function loadReconciliation(
+  get: Getter,
+  adapter: CrawlDataAdapter,
+  jobId: string,
+): Promise<void> {
+  if (!adapter.getReconciliation) return;
+  let reconciliation: SavedReconciliation | null;
+  try {
+    reconciliation = await adapter.getReconciliation(jobId);
+  } catch {
+    reconciliation = null;
+  }
+  if (get().activeJobId === jobId) useCrawlStore.setState({ reconciliation });
+}
 
 /**
  * Merge a patch into one live job without disturbing the others.

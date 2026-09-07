@@ -36,6 +36,12 @@ export function page(
     sub_topic: null,
     search_intent: "INFORMATIONAL",
     conversion_role: "NONE",
+    // `UNKNOWN`, not `INDEXABLE`. The default fixture describes a page nothing
+    // was read from, and a factory that hands every test a healthy verdict is a
+    // fixture healthier than production data — which tests nothing. A test that
+    // wants a verdict states it.
+    indexability: "UNKNOWN",
+    indexability_reason: "",
     is_cross_silo_link: false,
     inbound_internal_links_count: 0,
     outbound_internal_links_count: 0,

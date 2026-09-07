@@ -38,6 +38,11 @@ __all__ = [
     "DiscoverySource",
     "FullPageIntelligenceProfile",
     "HierarchyLevel",
+    "Indexability",
+    "NavigationDiscoveryMethod",
+    "NavigationPathQuality",
+    "NavigationReachabilityTier",
+    "NavigationSourceAuthority",
     "PrimaryPageType",
     "SearchIntent",
     "SignalScore",
@@ -136,6 +141,145 @@ class ConversionRole(StrEnum):
     BRAND_AWARENESS = "BRAND_AWARENESS"
     INFORMATIONAL_SUPPORT = "INFORMATIONAL_SUPPORT"
     NONE = "NONE"
+
+
+class NavigationDiscoveryMethod(StrEnum):
+    """WHERE a page was discovered during navigation detection.
+
+    Phase 8a enhancement: tracks the source of discovery to provide analyst
+    context about whether a page is in primary nav, secondary nav, body links,
+    or completely orphaned. See build-log 0065 for design rationale.
+    """
+
+    PRIMARY_NAV = "PRIMARY_NAV"
+    """Found via header menu or primary navigation structure."""
+
+    SECONDARY_NAV = "SECONDARY_NAV"
+    """Found via footer, sidebar, or secondary navigation."""
+
+    BODY_LINK = "BODY_LINK"
+    """Found via link within page content (not menu)."""
+
+    BREADCRUMB = "BREADCRUMB"
+    """Found via breadcrumb markup on the page itself."""
+
+    SITEMAP_ONLY = "SITEMAP_ONLY"
+    """Exists in XML sitemap but no actual links point to it."""
+
+    ORPHANED = "ORPHANED"
+    """No links or sitemap entry found. Technically unreachable."""
+
+
+class NavigationReachabilityTier(StrEnum):
+    """HOW MANY HOPS from homepage to reach a page.
+
+    Quantifies user effort and discoverability. Complements hierarchy_level
+    which measures structural position; reachability measures actual distance.
+    """
+
+    TIER_0_HERO = "TIER_0_HERO"
+    """Direct link from homepage hero, CTA, or main section. 1 click from home."""
+
+    TIER_1_STANDARD = "TIER_1_STANDARD"
+    """Standard navigation path. Reachable in 1-2 hops from homepage."""
+
+    TIER_2_DEEP = "TIER_2_DEEP"
+    """Deeper discovery required. Reachable in 3+ hops from homepage."""
+
+    TIER_3_METADATA = "TIER_3_METADATA"
+    """Only in sitemap/schema markup, no user-clickable path exists."""
+
+    TIER_4_ORPHANED = "TIER_4_ORPHANED"
+    """Completely unreachable. 0 links, 0 sitemap entries."""
+
+
+class NavigationSourceAuthority(StrEnum):
+    """WHAT TYPE OF PAGE links to this page.
+
+    Weights the importance of inbound links. A link from homepage carries
+    more weight than a link from a sidebar widget.
+    """
+
+    FROM_HOMEPAGE = "FROM_HOMEPAGE"
+    """Linked directly from L0 homepage."""
+
+    FROM_MAIN_HUB = "FROM_MAIN_HUB"
+    """Linked from major hub page (L1, primary section)."""
+
+    FROM_CONTENT = "FROM_CONTENT"
+    """Linked from content page (L2/L3, article body, etc)."""
+
+    FROM_FOOTER = "FROM_FOOTER"
+    """Only linked from footer/utility navigation."""
+
+    FROM_SIDEBAR = "FROM_SIDEBAR"
+    """Only linked from sidebar widget or secondary area."""
+
+    NONE = "NONE"
+    """No inbound links found."""
+
+
+class NavigationPathQuality(StrEnum):
+    """DOES THE NAVIGATION PATH MAKE LOGICAL SENSE.
+
+    Assesses coherence of the route from homepage to this page.
+    Useful for finding navigation holes or poorly organized sections.
+    """
+
+    LOGICAL_HIERARCHY = "LOGICAL_HIERARCHY"
+    """Path follows site structure cleanly (Home → L1 → L2 → L3)."""
+
+    LATERAL_LINKED = "LATERAL_LINKED"
+    """Linked from similar/related pages, good UX cohesion."""
+
+    DISCONNECTED = "DISCONNECTED"
+    """Has links but no logical path from homepage or sitemap."""
+
+    UNKNOWN = "UNKNOWN"
+    """Path quality could not be determined."""
+
+
+class Indexability(StrEnum):
+    """Whether a page *permits* indexing, which is not whether Google indexed it.
+
+    The distinction is the entire point of this type and is easy to lose. This
+    engine can read what a page says about itself — a `robots` meta tag, an
+    `X-Robots-Tag` header, a canonical pointing elsewhere, the status it
+    returned. It cannot know what Google decided. Google ignores canonicals it
+    disagrees with, drops pages it is permitted to keep, and takes days to act
+    on a change.
+
+    So `INDEXABLE` means "nothing here forbids it", never "it is in the index",
+    and a report that conflates the two tells a client their page is live in
+    search on the strength of an HTML tag. The Search Console side of that
+    question is answered separately and only ever in the affirmative: a URL with
+    impressions was indexed, and a URL without them is unexplained rather than
+    excluded.
+
+    Upper-case, per the domain-taxonomy ruling in CLAUDE.md §7. Defined here
+    rather than beside `indexability_of` in `signal_parsers` because
+    `FullPageIntelligenceProfile` carries it and `schemas` cannot import from a
+    module that imports `schemas`.
+    """
+
+    INDEXABLE = "INDEXABLE"
+    """Nothing on the page forbids indexing. Whether Google agrees is unknown."""
+
+    NOINDEX = "NOINDEX"
+    """A `robots` meta tag or `X-Robots-Tag` header says not to index it. The
+    one verdict here that is close to decisive — Google honours it."""
+
+    CANONICALISED_AWAY = "CANONICALISED_AWAY"
+    """The page names a different URL as canonical. A *request*, not a rule:
+    Google frequently indexes a page that canonicals elsewhere, so this is a
+    strong hint and nothing more."""
+
+    NOT_A_PAGE = "NOT_A_PAGE"
+    """It redirected, errored, or answered with something that is not HTML."""
+
+    UNKNOWN = "UNKNOWN"
+    """Never fetched, so nothing was read. Distinct from `INDEXABLE`: absence of
+    a prohibition is not the same as absence of a look."""
 
 
 class SignalSource(StrEnum):
@@ -386,6 +530,28 @@ class FullPageIntelligenceProfile(StrictModel):
     final_confidence_score: float = Field(ge=0.0, le=1.0)
     consensus_method: ConsensusMethod
 
+    indexability: Indexability = Indexability.UNKNOWN
+    """Whether the page *permits* indexing, read from the page itself.
+
+    Every URL carries a verdict, which is why `UNKNOWN` is a member: a sitemap
+    entry the crawl never requested has said nothing about itself, and calling
+    that `INDEXABLE` would invent a fact.
+
+    Read against the GSC fields below rather than instead of them. The pair
+    answers a question neither can alone — a `NOINDEX` page still drawing
+    impressions is a page about to disappear, and an `INDEXABLE` page drawing
+    none is the ordinary case of content nobody searches for. Absence of GSC
+    data is never evidence of exclusion: Search Console reports only URLs that
+    drew impressions in the requested window.
+
+    Defaults to `UNKNOWN` so every crawl stored before this was measured reads
+    as unmeasured rather than as a site with no indexing problems.
+    """
+
+    indexability_reason: str = Field(default="", max_length=400)
+    """One line saying why, in words a client can read. Empty on crawls that
+    predate the field, and on any page whose verdict is `UNKNOWN`."""
+
     # GSC enrichment (Phase 6: optional metrics from Google Search Console)
     gsc_clicks: int | None = Field(default=None, ge=0, description="Clicks from GSC")
     gsc_impressions: int | None = Field(default=None, ge=0, description="Impressions from GSC")
@@ -394,6 +560,22 @@ class FullPageIntelligenceProfile(StrictModel):
     )
     gsc_ctr: float | None = Field(
         default=None, ge=0.0, le=1.0, description="Click-through rate from GSC"
+    )
+
+    # Navigation Context (Phase 8a: provides analyst context about discoverability)
+    navigation_discovery_method: NavigationDiscoveryMethod | None = Field(
+        default=None, description="WHERE was this page discovered (header, footer, body link, etc)"
+    )
+    navigation_reachability_tier: NavigationReachabilityTier | None = Field(
+        default=None, description="HOW MANY HOPS from homepage (TIER_0_HERO, TIER_1_STANDARD, etc)"
+    )
+    navigation_source_authority: NavigationSourceAuthority | None = Field(
+        default=None,
+        description="WHAT TYPE OF PAGE links to it (homepage, hub, content, footer, etc)",
+    )
+    navigation_path_quality: NavigationPathQuality | None = Field(
+        default=None,
+        description="DOES THE PATH MAKE SENSE (logical hierarchy, lateral, disconnected)",
     )
 
     @model_validator(mode="after")

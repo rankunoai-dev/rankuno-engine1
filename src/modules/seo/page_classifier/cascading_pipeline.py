@@ -316,6 +316,8 @@ def classify_page(
         canonical_url=evidence.canonical_url or evidence.url,
         final_url=evidence.final_url,
         redirect_chain=evidence.redirect_chain,
+        indexability=evidence.indexability,
+        indexability_reason=evidence.indexability_reason,
         normalized_path=evidence.normalized_path,
         hierarchy_level=level,
         primary_page_type=page_type,

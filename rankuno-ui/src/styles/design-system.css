@@ -669,6 +669,18 @@
   font-weight: 500;
   font-size: 12px;
 }
+/* The label on a crawled page is a link to it. It reads as text until hovered
+   so 20,000 underlined rows do not turn the tree into a wall of blue; the
+   hover cue is the same colour the branch control uses. */
+.tlink {
+  color: inherit;
+  text-decoration: none;
+}
+.tlink:hover,
+.tlink:focus-visible {
+  color: var(--l1f);
+  text-decoration: underline;
+}
 
 /* Provenance. Outlined rather than filled, so it reads as a note about the row
    and never competes with the level chip, which is the row's primary identity.
@@ -985,6 +997,26 @@ svg.wires {
 /* Secondary line inside a value — the agreement note, the depth annotation.
    Present but not competing with the value it qualifies. */
 .kv .dim {
+  color: var(--dim);
+  font-weight: 400;
+}
+/* Indexing verdict. Scoped under `.kv` for the same reason every other control
+   in this file is scoped: `.rk-dash button` and its neighbours are specific
+   enough to outrank a bare class, which is how three rounds of buttons went
+   invisible. */
+.kv .ix {
+  font-weight: 600;
+}
+.kv .ix-indexable { color: var(--ok); }
+/* The two verdicts that cost traffic. Non-indexable is the decisive one —
+   Google honours a noindex — so it reads as an error, while a canonical is a
+   request Google may ignore and reads as a caution. */
+.kv .ix-noindex { color: var(--danger); }
+.kv .ix-canonicalised_away { color: var(--warn); }
+/* Not a finding, so not a colour. A page nobody measured and a URL that is not
+   a page are both facts, not problems. */
+.kv .ix-not_a_page,
+.kv .ix-unknown {
   color: var(--dim);
   font-weight: 400;
 }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { buildDashModel } from "../../lib/dashboardModel";
 import { useDashboardStore } from "../../store/useDashboardStore";
@@ -217,5 +217,146 @@ describe("whole-branch expand and collapse", () => {
     fireEvent.click(container.querySelector(".vrow .tw")!);
 
     expect(useDashboardStore.getState().flat.length).toBeLessThan(model.nodes.length);
+  });
+});
+
+describe("page links", () => {
+  /**
+   * `/docs/` and `/docs/guides/` are path segments the tree needed in order to
+   * hold the posts; no page was crawled there. Only the posts have somewhere
+   * to open.
+   */
+  function withPages() {
+    const pages = [page("https://e.com/docs/guides/a/"), page("https://e.com/docs/guides/b/")];
+    const model = buildDashModel(crawl({ pages }), "path");
+    useDashboardStore.getState().setModel(model);
+    useDashboardStore.getState().expandBranch(model.roots[0]!, model);
+    return model;
+  }
+
+  it("links a crawled page to its URL in a new tab", () => {
+    const model = withPages();
+    render(<VirtualizedTree model={model} />);
+
+    const link = screen.getByRole("link", { name: "a" });
+    expect(link).toHaveAttribute("href", "https://e.com/docs/guides/a/");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noreferrer noopener");
+  });
+
+  it("gives a path segment no link", () => {
+    /* `docs` is a directory the crawl never fetched; a dead link would be
+       worse than none. */
+    const model = withPages();
+    const { container } = render(<VirtualizedTree model={model} />);
+
+    const rows = [...container.querySelectorAll(".vrow")];
+    const docs = rows.find((row) => row.querySelector(".tlbl")?.textContent === "docs")!;
+    expect(docs).toBeDefined();
+    expect(docs.querySelector("a")).toBeNull();
+    expect(docs.querySelector(".tlbl")?.tagName).toBe("SPAN");
+  });
+
+  it("does not move the selection when the link is clicked", () => {
+    /* `setModel` seeds the focus on the first root, so "unchanged" is the
+       assertion, not "null". */
+    const model = withPages();
+    render(<VirtualizedTree model={model} />);
+    const before = useDashboardStore.getState().focus;
+    const pageIndex = model.nodes.findIndex((node) => node.label === "a");
+
+    fireEvent.click(screen.getByRole("link", { name: "a" }));
+
+    expect(useDashboardStore.getState().focus).toBe(before);
+    expect(useDashboardStore.getState().focus).not.toBe(pageIndex);
+  });
+
+  it("still selects on a click elsewhere in the row", () => {
+    /* The link must not have swallowed the row's own behaviour. */
+    const model = withPages();
+    render(<VirtualizedTree model={model} />);
+    const pageIndex = model.nodes.findIndex((node) => node.label === "a");
+
+    fireEvent.click(screen.getByRole("link", { name: "a" }).parentElement!);
+
+    expect(useDashboardStore.getState().focus).toBe(pageIndex);
+  });
+
+  it("selects on Enter from the keyboard now that the row is not a button", () => {
+    const model = withPages();
+    const { container } = render(<VirtualizedTree model={model} />);
+
+    fireEvent.keyDown(container.querySelector(".vrow")!, { key: "Enter" });
+
+    expect(useDashboardStore.getState().focus).toBe(model.roots[0]);
+  });
+});
+
+describe("reveal on selection", () => {
+  /**
+   * Reported from the app: with OTHERS selected — the last root, off-screen —
+   * opening any section threw the list to the bottom. The reveal effect ran on
+   * every re-flatten and "revealed" the unchanged selection each time.
+   *
+   * jsdom has no layout, so `clientHeight` is 0 and no row is ever "visible":
+   * the reveal always writes `scrollTop = position * ROW`. That is what makes
+   * the assertion sharp — a reveal that fires again after the toggle would move
+   * `scrollTop` to the selection's new, larger position.
+   *
+   * jsdom also discards writes to `scrollTop` — it is always 0 — which made the
+   * first version of these tests pass with the bug in place. The property is
+   * replaced on the instance so the value written is the value read back.
+   */
+  function scrollable(element: HTMLElement): HTMLElement {
+    let top = 0;
+    Object.defineProperty(element, "scrollTop", {
+      get: () => top,
+      set: (value: number) => {
+        top = value;
+      },
+    });
+    return element;
+  }
+
+  function wide() {
+    const pages = [
+      ...Array.from({ length: 30 }, (_, i) =>
+        page(`https://e.com/docs/p${i}/`, { breadcrumb_path: ["Docs"] }),
+      ),
+      page("https://e.com/loose/", { breadcrumb_path: ["OTHERS", "UNKNOWN"] }),
+    ];
+    const model = buildDashModel(crawl({ pages }), "navigation");
+    useDashboardStore.getState().setModel(model);
+    useDashboardStore.getState().collapseAll(model);
+    return model;
+  }
+
+  it("scrolls to a newly selected row", () => {
+    const model = wide();
+    const last = model.roots[model.roots.length - 1]!;
+    const { container } = render(<VirtualizedTree model={model} />);
+    const viewport = scrollable(container.querySelector(".vtree")!);
+
+    act(() => useDashboardStore.getState().setFocus(last, model));
+    const position = useDashboardStore.getState().flat.findIndex((row) => row.i === last);
+    expect(position).toBeGreaterThan(0);
+    expect(viewport.scrollTop).toBe(position * 30);
+  });
+
+  it("does not scroll back to the selection when a section is opened", () => {
+    const model = wide();
+    const last = model.roots[model.roots.length - 1]!;
+    const { container } = render(<VirtualizedTree model={model} />);
+    const viewport = scrollable(container.querySelector(".vtree")!);
+
+    act(() => useDashboardStore.getState().setFocus(last, model));
+    const before = viewport.scrollTop;
+    expect(before).toBeGreaterThan(0);
+
+    // Open the first root. Thirty rows now sit above the selection.
+    act(() => useDashboardStore.getState().toggleOpen(model.roots[0]!, model));
+    expect(useDashboardStore.getState().flat.length).toBeGreaterThan(model.roots.length);
+
+    expect(viewport.scrollTop).toBe(before);
   });
 });

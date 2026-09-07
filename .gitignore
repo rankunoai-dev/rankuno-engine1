@@ -76,8 +76,11 @@ reports/
 *-tree.html
 
 # Local agent tool permissions. Machine-specific: contains absolute paths to
-# one developer's home directory, so it is not shareable.
-.claude/
+# one developer's home directory, so it is not shareable. The agent, skill and
+# hook definitions under .claude/ ARE shared - they are part of the workflow.
+.claude/settings.json
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # A second, self-contained project tree that sits inside this working copy: it
 # has its own src/, tests/, pyproject.toml and .gitignore. It is not part of

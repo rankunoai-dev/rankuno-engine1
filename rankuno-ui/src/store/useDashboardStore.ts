@@ -6,6 +6,7 @@ import {
   type DashModel,
   type DashNode,
 } from "../lib/dashboardModel";
+import type { TreeOverlay } from "../lib/treeOverlay";
 
 /** One row of the flattened, filtered view-model the virtual list renders. */
 export interface FlatRow {
@@ -24,7 +25,32 @@ interface DashboardState {
   /** Rebuilt only when the model or a filter changes, never per scroll frame. */
   flat: FlatRow[];
 
+  /**
+   * Cross-check and Search Console figures for the current model, or `null`.
+   *
+   * Held here rather than derived in each component because `flatten` reads
+   * it: the "missed only" filter keeps a row when its subtree holds a page
+   * Screaming Frog missed, and that count lives on the overlay. Applied only
+   * when `overlay.model` is the model being flattened — a new crawl's model
+   * arrives before its overlay does, and an old overlay's indices would mark
+   * the wrong rows.
+   */
+  overlay: TreeOverlay | null;
+  /** Whether the cross-check marks and counts are drawn. */
+  crossCheckOn: boolean;
+  /** Show only rows with a Screaming Frog miss somewhere beneath them. */
+  missedOnly: boolean;
+  /** `engine_only` reasons excluded from the counts. Empty means all count. */
+  hiddenReasons: Set<string>;
+  /** The whole-screen tree is open. */
+  fullScreen: boolean;
+
   setModel: (model: DashModel) => void;
+  setOverlay: (overlay: TreeOverlay | null, model: DashModel) => void;
+  toggleCrossCheck: (model: DashModel) => void;
+  toggleMissedOnly: (model: DashModel) => void;
+  toggleReason: (reason: string) => void;
+  setFullScreen: (open: boolean) => void;
   toggleOpen: (index: number, model: DashModel) => void;
   setFocus: (index: number, model: DashModel) => void;
   toggleLane: (lane: number, model: DashModel) => void;
@@ -62,12 +88,23 @@ function passes(
   node: DashNode,
   laneFilter: Set<number>,
   bandFilter: Set<ConfidenceBand>,
+  missed: Int32Array | null,
 ): boolean {
   if (!laneFilter.has(node.lv)) return false;
+  // Subtree count, not the node's own mark: a section holding a missed page
+  // must stay visible or the page beneath it can never be reached.
+  if (missed && missed[node.i] === 0) return false;
   // A structural grouping node has no classification of its own. Hiding it
   // because it has no confidence score would hide the whole branch beneath it.
   if (!node.profile) return true;
   return bandFilter.has(confidenceBand(node.profile));
+}
+
+/** The miss mask to filter on, or `null` when nothing asks for one. */
+function missedMask(state: Pick<DashboardState, "overlay" | "crossCheckOn" | "missedOnly">, model: DashModel): Int32Array | null {
+  const { overlay, crossCheckOn, missedOnly } = state;
+  if (!crossCheckOn || !missedOnly || !overlay?.crossCheck) return null;
+  return overlay.model === model ? overlay.missedCnt : null;
 }
 
 function flatten(
@@ -75,6 +112,7 @@ function flatten(
   open: Set<number>,
   laneFilter: Set<number>,
   bandFilter: Set<ConfidenceBand>,
+  missed: Int32Array | null = null,
 ): FlatRow[] {
   const rows: FlatRow[] = [];
   // Explicit stack rather than recursion: 20,000 nodes can nest arbitrarily.
@@ -86,7 +124,7 @@ function flatten(
   while (stack.length > 0) {
     const row = stack.pop()!;
     const node = model.nodes[row.i]!;
-    if (!passes(node, laneFilter, bandFilter)) continue;
+    if (!passes(node, laneFilter, bandFilter, missed)) continue;
 
     rows.push(row);
     if (!open.has(row.i)) continue;
@@ -106,6 +144,54 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   bandFilter: new Set<ConfidenceBand>(["high", "review"]),
   childPage: {},
   flat: [],
+  overlay: null,
+  crossCheckOn: false,
+  missedOnly: false,
+  hiddenReasons: new Set<string>(),
+  fullScreen: false,
+
+  setOverlay(overlay, model) {
+    // Re-flattened only when the mask can change what is shown. The overlay
+    // arrives on every model rebuild, and most of those have the filter off.
+    const before = missedMask(get(), model);
+    const after = missedMask({ ...get(), overlay }, model);
+    if (before === after) {
+      set({ overlay });
+      return;
+    }
+    set({ overlay, flat: flatten(model, get().open, get().laneFilter, get().bandFilter, after) });
+  },
+
+  toggleCrossCheck(model) {
+    const crossCheckOn = !get().crossCheckOn;
+    const next = { ...get(), crossCheckOn };
+    set({
+      crossCheckOn,
+      flat: flatten(model, get().open, get().laneFilter, get().bandFilter, missedMask(next, model)),
+    });
+  },
+
+  toggleMissedOnly(model) {
+    const missedOnly = !get().missedOnly;
+    const next = { ...get(), missedOnly };
+    set({
+      missedOnly,
+      flat: flatten(model, get().open, get().laneFilter, get().bandFilter, missedMask(next, model)),
+    });
+  },
+
+  toggleReason(reason) {
+    // Only the set changes here. The overlay's counts depend on it, so the
+    // component that builds the overlay rebuilds, and `setOverlay` re-flattens.
+    const hiddenReasons = new Set(get().hiddenReasons);
+    if (hiddenReasons.has(reason)) hiddenReasons.delete(reason);
+    else hiddenReasons.add(reason);
+    set({ hiddenReasons });
+  },
+
+  setFullScreen(fullScreen) {
+    set({ fullScreen });
+  },
 
   setModel(model) {
     // Roots open, everything else collapsed. Expanding a 20,000-node tree by
@@ -114,13 +200,16 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     const open = new Set(model.roots);
     const bandFilter = new Set<ConfidenceBand>(["high", "review"]);
     const laneFilter = new Set(ALL_LANES);
+    // The toggles survive a job switch; the previous job's overlay does not
+    // apply to this model (its indices belong to another tree) and is ignored
+    // by `missedMask` until the new one arrives. Nothing to reset here.
     set({
       open,
       bandFilter,
       laneFilter,
       childPage: {},
       focus: model.roots[0] ?? null,
-      flat: flatten(model, open, laneFilter, bandFilter),
+      flat: flatten(model, open, laneFilter, bandFilter, missedMask(get(), model)),
     });
   },
 
@@ -128,7 +217,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     const open = new Set(get().open);
     if (open.has(index)) open.delete(index);
     else open.add(index);
-    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter, missedMask(get(), model)) });
   },
 
   setFocus(index, model) {
@@ -142,7 +231,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     set({
       focus: index,
       open,
-      flat: flatten(model, open, get().laneFilter, get().bandFilter),
+      flat: flatten(model, open, get().laneFilter, get().bandFilter, missedMask(get(), model)),
     });
   },
 
@@ -150,14 +239,14 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     const laneFilter = new Set(get().laneFilter);
     if (laneFilter.has(lane)) laneFilter.delete(lane);
     else laneFilter.add(lane);
-    set({ laneFilter, flat: flatten(model, get().open, laneFilter, get().bandFilter) });
+    set({ laneFilter, flat: flatten(model, get().open, laneFilter, get().bandFilter, missedMask(get(), model)) });
   },
 
   toggleBand(band, model) {
     const bandFilter = new Set(get().bandFilter);
     if (bandFilter.has(band)) bandFilter.delete(band);
     else bandFilter.add(band);
-    set({ bandFilter, flat: flatten(model, get().open, get().laneFilter, bandFilter) });
+    set({ bandFilter, flat: flatten(model, get().open, get().laneFilter, bandFilter, missedMask(get(), model)) });
   },
 
   nextChildPage(index, total) {
@@ -178,7 +267,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         stack.push({ i: kid, depth: row.depth + 1 });
       }
     }
-    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter, missedMask(get(), model)) });
   },
 
   collapseAll(model) {
@@ -196,7 +285,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     // closed tabs hides the site behind a click; collapsing is a thing the
     // analyst asks for.
     const open = new Set<number>();
-    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter, missedMask(get(), model)) });
   },
 
   expandBranch(index, model) {
@@ -205,12 +294,12 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     // difference between this and `expandAll`, which is a whole-tree command.
     const open = new Set(get().open);
     for (const node of subtree(model, index)) open.add(node);
-    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter, missedMask(get(), model)) });
   },
 
   collapseBranch(index, model) {
     const open = new Set(get().open);
     for (const node of subtree(model, index)) open.delete(node);
-    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter) });
+    set({ open, flat: flatten(model, open, get().laneFilter, get().bandFilter, missedMask(get(), model)) });
   },
 }));

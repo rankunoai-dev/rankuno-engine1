@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CrawlDataAdapter } from "../adapters/adapterInterface";
+import { crawl } from "../test/factories";
 import { useCrawlStore } from "./useCrawlStore";
 
 /**
@@ -84,5 +85,69 @@ describe("refreshJobs", () => {
     useCrawlStore.setState({ adapter: adapter(vi.fn().mockResolvedValue(jobs)) });
     await useCrawlStore.getState().refreshJobs();
     expect(useCrawlStore.getState().jobs).toEqual(jobs);
+  });
+});
+
+describe("selectJob and the cross-check", () => {
+  const result = crawl();
+
+  function withReconciliation(getReconciliation: unknown): CrawlDataAdapter {
+    return {
+      listJobs: vi.fn().mockResolvedValue([]),
+      getResult: vi.fn().mockResolvedValue(result),
+      getProgress: vi.fn(),
+      getReconciliation,
+    } as unknown as CrawlDataAdapter;
+  }
+
+  beforeEach(() => {
+    useCrawlStore.setState({ adapter: null, reconciliation: null, result: null, error: null });
+  });
+
+  it("loads the saved cross-check with the result", async () => {
+    const saved = { summary: { job_id: "a" }, engine_only: [] };
+    useCrawlStore.setState({ adapter: withReconciliation(vi.fn().mockResolvedValue(saved)) });
+    await useCrawlStore.getState().selectJob("a");
+    expect(useCrawlStore.getState().reconciliation).toBe(saved);
+  });
+
+  it("stores null, not an error, when there is none", async () => {
+    useCrawlStore.setState({ adapter: withReconciliation(vi.fn().mockResolvedValue(null)) });
+    await useCrawlStore.getState().selectJob("a");
+    expect(useCrawlStore.getState().reconciliation).toBeNull();
+    expect(useCrawlStore.getState().error).toBeNull();
+  });
+
+  it("keeps the tree when the sidecar read fails", async () => {
+    useCrawlStore.setState({
+      adapter: withReconciliation(vi.fn().mockRejectedValue(new Error("boom"))),
+    });
+    await useCrawlStore.getState().selectJob("a");
+    expect(useCrawlStore.getState().result).toBe(result);
+    expect(useCrawlStore.getState().error).toBeNull();
+  });
+
+  it("drops a cross-check that arrives after another job was selected", async () => {
+    /*
+     * The sidecar is per-index once it reaches the tree. A late arrival for job
+     * A applied to job B's model would mark unrelated rows.
+     */
+    let release: (value: unknown) => void = () => {};
+    const slow = new Promise((resolve) => {
+      release = resolve;
+    });
+    const getReconciliation = vi
+      .fn()
+      .mockImplementationOnce(() => slow)
+      .mockResolvedValueOnce(null);
+    useCrawlStore.setState({ adapter: withReconciliation(getReconciliation) });
+
+    const first = useCrawlStore.getState().selectJob("a");
+    await useCrawlStore.getState().selectJob("b");
+    release({ summary: { job_id: "a" }, engine_only: [] });
+    await first;
+
+    expect(useCrawlStore.getState().activeJobId).toBe("b");
+    expect(useCrawlStore.getState().reconciliation).toBeNull();
   });
 });

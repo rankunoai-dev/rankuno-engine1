@@ -1,4 +1,4 @@
-import { Alert, Button, Space } from "antd";
+import { Alert, Button } from "antd";
 import { useEffect, useMemo } from "react";
 import { buildDashModel, EMPTY_MODEL } from "../../lib/dashboardModel";
 import { ErrorBoundary } from "../ErrorBoundary";
@@ -40,8 +40,6 @@ export function DashboardShell(): JSX.Element {
 
   const loadCheckpoint = useCrawlStore((state) => state.loadCheckpoint);
   const setModel = useDashboardStore((state) => state.setModel);
-  const expandAll = useDashboardStore((state) => state.expandAll);
-  const collapseAll = useDashboardStore((state) => state.collapseAll);
   const [crawlOpen, setCrawlOpen] = useState(false);
   const [printedAt, setPrintedAt] = useState<Date | null>(null);
 
@@ -194,39 +192,11 @@ export function DashboardShell(): JSX.Element {
                     </div>
                     <TeleportSearch model={model} />
                     <LevelFilterRow model={model} />
-                    {/* `All` and `Collapse` were the labels here and read as
-                        filters beside the L1/L2 depth buttons rather than as the
-                        whole-tree commands they are. Named for what they do. */}
-                    <Space size={4} style={{ padding: "0 10px 8px" }}>
-                      <Button
-                        size="small"
-                        title="Open the first level only"
-                        onClick={() => expandAll(model, 1)}
-                      >
-                        L1
-                      </Button>
-                      <Button
-                        size="small"
-                        title="Open the first two levels"
-                        onClick={() => expandAll(model, 2)}
-                      >
-                        L2
-                      </Button>
-                      <Button
-                        size="small"
-                        title={`Open every section, to the bottom — ${model.nodes.length.toLocaleString()} nodes`}
-                        onClick={() => expandAll(model, 99)}
-                      >
-                        Expand all
-                      </Button>
-                      <Button
-                        size="small"
-                        title="Close every section back to the top level"
-                        onClick={() => collapseAll(model)}
-                      >
-                        Collapse all
-                      </Button>
-                    </Space>
+                    {/* The depth commands moved into `TreeControls`, which sits
+                        inside the tree itself and renders in the full-screen
+                        view too — that view had no way to collapse anything.
+                        Kept in one place rather than copied, so the two cannot
+                        drift. */}
                     <VirtualizedTree model={model} />
                   </section>
 

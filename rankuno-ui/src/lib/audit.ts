@@ -3,6 +3,7 @@ import type {
   FullPageIntelligenceProfile,
   PageClassificationOutput,
 } from "../types/schema";
+import { hasGscData, indexConflictOf } from "./indexing";
 
 /**
  * Site defects worth reporting to a client, derived from a finished crawl.
@@ -54,6 +55,16 @@ export interface Finding {
    * pairing that carries the finding.
    */
   groups?: FullPageIntelligenceProfile[][];
+  /**
+   * Which worklist renders this finding's pages, when the default will not do.
+   *
+   * `pages` alone cannot say what the columns should be. An orphan set is read
+   * by *how it was discovered*; a redirect set is read by *where it goes*, and
+   * showing the second through the first hides the destination — the one column
+   * that finding exists to deliver. Absent means the orphan worklist, which is
+   * what every page-shaped finding wanted until redirects arrived.
+   */
+  worklist?: "redirects";
 }
 
 /**
@@ -381,8 +392,33 @@ function isPaginated(url: string): boolean {
  * is "nobody looked" — and a finding that conflates them accuses a site of a
  * defect on the strength of a missing column.
  */
-function finalUrlOf(page: FullPageIntelligenceProfile): string {
+export function finalUrlOf(page: FullPageIntelligenceProfile): string {
   return (page as { final_url?: string }).final_url ?? "";
+}
+
+/**
+ * How many hops a page took to resolve.
+ *
+ * Read defensively for the same reason as `finalUrlOf`: a crawl stored before
+ * the chain was recorded has no field, and `0` there would claim the page
+ * resolved directly when nobody looked.
+ *
+ * A single 301 gives one hop. Anything above one is worth seeing on its own —
+ * each extra hop is a round trip a crawler pays on every visit, and Google
+ * stops following at five.
+ */
+export function redirectHops(page: FullPageIntelligenceProfile): number {
+  const chain = (page as { redirect_chain?: readonly string[] }).redirect_chain;
+  return Array.isArray(chain) ? chain.length : 0;
+}
+
+/** Whether a redirect lands on the site root — read as gone, not moved. */
+export function landsOnHomepage(page: FullPageIntelligenceProfile): boolean {
+  try {
+    return new URL(finalUrlOf(page)).pathname.replace(/\/$/, "") === "";
+  } catch {
+    return false;
+  }
 }
 
 /** `/a/b/` and `/a/b` are the same destination; a scheme hop is not a move. */
@@ -435,13 +471,7 @@ function sitemapRedirectFindings(
   // A redirect to the homepage is a different and worse defect: the page is
   // gone and the site is pointing search engines at something unrelated, which
   // Google treats as a soft 404 rather than as a move.
-  const toHome = moved.filter((page) => {
-    try {
-      return new URL(finalUrlOf(page)).pathname.replace(/\/$/, "") === "";
-    } catch {
-      return false;
-    }
-  });
+  const toHome = moved.filter(landsOnHomepage);
 
   return [
     {
@@ -471,6 +501,8 @@ function sitemapRedirectFindings(
       severity: "medium",
       examples: moved.slice(0, 5).map((page) => `${page.url}  →  ${finalUrlOf(page)}`),
       pages: moved,
+      // Read by where it goes, not by how it was found. See `Finding.worklist`.
+      worklist: "redirects",
     },
   ];
 }
@@ -481,6 +513,103 @@ function sitemapRedirectFindings(
  * Ordered by what an analyst can act on rather than by count. An orphan set is
  * a smaller number than an unclassified set and a far better recommendation.
  */
+/**
+ * Pages where what the site permits and what Google did disagree.
+ *
+ * The one finding that needs both halves of the indexing picture, and the
+ * reason they are kept as two fields rather than merged into one label. Each
+ * case below is a page **Google has confirmed it indexed** — it drew
+ * impressions — that the site is nonetheless telling it to drop.
+ *
+ * The reverse direction is deliberately not a finding. A page that permits
+ * indexing and drew no impressions is the ordinary case of content nobody
+ * searches for, and Search Console omits any URL without impressions in the
+ * requested window, so that set is mostly pages that are perfectly fine. Only
+ * the confirmed-and-contradicted direction carries evidence on both sides.
+ */
+function indexConflictFindings(pages: FullPageIntelligenceProfile[]): Finding[] {
+  const gscAvailable = hasGscData(pages);
+  if (!gscAvailable) return [];
+
+  const findings: Finding[] = [];
+  const conflicted = new Map<string, FullPageIntelligenceProfile[]>();
+  for (const page of pages) {
+    const conflict = indexConflictOf(page, gscAvailable);
+    if (conflict === null) continue;
+    const bucket = conflicted.get(conflict) ?? [];
+    bucket.push(page);
+    conflicted.set(conflict, bucket);
+  }
+
+  const byImpressions = (a: FullPageIntelligenceProfile, b: FullPageIntelligenceProfile): number =>
+    (b.gsc_impressions ?? 0) - (a.gsc_impressions ?? 0);
+
+  const blocked = (conflicted.get("BLOCKED_BUT_EARNING") ?? []).sort(byImpressions);
+  if (blocked.length > 0) {
+    const impressions = blocked.reduce((sum, page) => sum + (page.gsc_impressions ?? 0), 0);
+    findings.push({
+      id: "noindex-earning",
+      title: `${plural(blocked.length, "page")} blocked from indexing but still earning`,
+      count: blocked.length,
+      detail:
+        `These carry a noindex directive and drew ${impressions.toLocaleString()} ` +
+        "impressions in the Search Console data loaded here. Google honours a " +
+        "noindex, so this is traffic on its way out rather than traffic at risk — " +
+        "the tag was most likely added after the data was collected, or applied to " +
+        "a template wider than intended.",
+      action:
+        "Check each against the template that renders it. If the noindex was " +
+        "deliberate, the impressions tell you what you are giving up; if it was " +
+        "not, removing it is a one-line fix on a page already proven to rank.",
+      severity: "high",
+      examples: blocked.slice(0, 5).map((page) => page.url),
+      pages: blocked,
+    });
+  }
+
+  const overruled = (conflicted.get("CANONICAL_OVERRULED") ?? []).sort(byImpressions);
+  if (overruled.length > 0) {
+    findings.push({
+      id: "canonical-overruled",
+      title: `${plural(overruled.length, "page")} indexed despite naming another canonical`,
+      count: overruled.length,
+      detail:
+        "Each names a different URL as canonical, and Google indexed it anyway — a " +
+        "canonical is a request, not an instruction. Two URLs are competing for the " +
+        "same query and the site has already said which one it does not want.",
+      action:
+        "Either make the canonical true by redirecting, or drop it and let the page " +
+        "stand on its own. A canonical Google ignores is doing nothing except " +
+        "hiding the duplication from your own reports.",
+      severity: "medium",
+      examples: overruled.slice(0, 5).map((page) => page.url),
+      pages: overruled,
+    });
+  }
+
+  const dead = (conflicted.get("DEAD_BUT_EARNING") ?? []).sort(byImpressions);
+  if (dead.length > 0) {
+    findings.push({
+      id: "dead-earning",
+      title: `${plural(dead.length, "URL")} that no longer serves a page is still drawing impressions`,
+      count: dead.length,
+      detail:
+        "These errored, redirected, or answered with something other than an HTML " +
+        "page when crawled, yet Search Console still reports impressions for them. " +
+        "Google is ranking an address that no longer exists as a page.",
+      action:
+        "Confirm the status by hand — a crawl sees one moment, and a 5xx during the " +
+        "crawl is a different problem from a 404. Where the move was intended, point " +
+        "the redirect at the closest equivalent page rather than the homepage.",
+      severity: "high",
+      examples: dead.slice(0, 5).map((page) => page.url),
+      pages: dead,
+    });
+  }
+
+  return findings;
+}
+
 export function buildFindings(result: PageClassificationOutput): Finding[] {
   const pages = result.pages;
   if (pages.length === 0) return [];
@@ -512,6 +641,7 @@ export function buildFindings(result: PageClassificationOutput): Finding[] {
     });
   }
 
+  findings.push(...indexConflictFindings(pages));
   findings.push(...sitemapRedirectFindings(pages));
   findings.push(...duplicateFindings(pages));
   findings.push(...siloFindings(pages, labels));

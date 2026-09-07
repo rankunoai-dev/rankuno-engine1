@@ -53,11 +53,13 @@ from src.modules.seo.page_classifier.discovery_parsers import (
     wordpress_total_pages,
 )
 from src.modules.seo.page_classifier.relative_loops import LoopWatcher
-from src.modules.seo.page_classifier.schemas import DiscoverySource
+from src.modules.seo.page_classifier.schemas import DiscoverySource, Indexability
 from src.modules.seo.page_classifier.signal_parsers import (
     CmsRecord,
     PageEvidence,
     extract_canonical_url,
+    extract_robots_directives,
+    indexability_of,
 )
 from src.modules.seo.page_classifier.url_rules import (
     is_crawlable_url,
@@ -206,6 +208,10 @@ class DiscoveredNode(StrictModel):
         redirect_chain: Hops traversed to get there, in order.
         canonical_url: The `<link rel="canonical">` the page declares, `""` if
             it declares none or was never fetched.
+        indexability: Whether the page permits indexing, judged at fetch time.
+            `UNKNOWN` until a fetch is recorded, which is the honest reading for
+            a sitemap entry nothing ever requested.
+        indexability_reason: One line saying why, for a client to read.
     """
 
     url: str = Field(min_length=1)
@@ -219,6 +225,8 @@ class DiscoveredNode(StrictModel):
     final_url: str = ""
     redirect_chain: tuple[str, ...] = ()
     canonical_url: str = ""
+    indexability: Indexability = Indexability.UNKNOWN
+    indexability_reason: str = ""
 
     @property
     def is_orphan(self) -> bool:
@@ -585,6 +593,17 @@ class SiteGraph:
         then discarded one line later, and every redirect hop was re-validated
         against the SSRF policy on the way — the chain cannot name a private
         address.
+
+        Called for **every** completed fetch, including errors and non-HTML
+        responses. That is load-bearing rather than tidy: this is the only place
+        that ever sees a status code, and if the failures were filtered out
+        first then a 404 would be indistinguishable from a URL nobody requested.
+        Both would report `UNKNOWN`, which reads as "we did not look" about a
+        page the crawl looked at and found dead.
+
+        The verdict is computed here and the raw inputs are dropped. Holding the
+        headers of 20,000 pages to re-derive one enum later is memory this crawl
+        does not have to spend — a crawl already keeps its whole graph in RAM.
         """
         node = self._nodes.get(normalize_url(url))
         if node is None:
@@ -593,6 +612,14 @@ class SiteGraph:
         node.redirect_chain = result.redirect_chain
         if result.is_html and result.body:
             node.canonical_url = extract_canonical_url(result.body, result.final_url or url)
+        node.indexability, node.indexability_reason = indexability_of(
+            url,
+            status_code=result.status_code,
+            directives=extract_robots_directives(result.body, result.headers),
+            canonical_url=node.canonical_url,
+            is_html=result.is_html,
+            redirected_to=result.final_url,
+        )
 
     def store_html(self, url: str, html: str) -> None:
         """Retain a page's HTML for later evidence assembly."""
@@ -676,6 +703,8 @@ class SiteGraph:
                     final_url=node.final_url,
                     redirect_chain=node.redirect_chain,
                     canonical_url=node.canonical_url,
+                    indexability=node.indexability,
+                    indexability_reason=node.indexability_reason,
                 )
             )
         return tuple(evidence)
@@ -1098,15 +1127,17 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
         graph.fetch_failures += 1
         graph.record_outcome(OUTCOME_TRANSPORT)
         return None
+    # Recorded before any bail, because this is where the fetcher's own answer
+    # is still in scope. One line further on it is a bare string and the
+    # redirect chain is gone, which is exactly how it came to be discarded in
+    # the first place — and a 404 recorded nowhere is a page the report cannot
+    # tell apart from one never requested.
+    graph.record_fetch(url, result)
     if not result.ok:
         graph.record_outcome(outcome_for(result.status_code))
         if is_refusal(result.status_code):
             graph.fetch_failures += 1
         return None
-    # Recorded here because this is where the fetcher's own answer is still in
-    # scope. One line further on it is a bare string and the redirect chain is
-    # gone, which is exactly how it came to be discarded in the first place.
-    graph.record_fetch(url, result)
     if not result.is_html:
         graph.record_outcome(OUTCOME_NOT_HTML)
         return None

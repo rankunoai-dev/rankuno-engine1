@@ -5,6 +5,53 @@ import type { TreeNode } from "./tree";
 export const OTHERS_LABEL = "OTHERS";
 
 /**
+ * The OTHERS bucket for pages with no folder at all — `/cookie-policy`,
+ * `/privacy-statement`, a locale's own homepage.
+ *
+ * Explicit rather than "everything else": a URL at the site root has no
+ * folder to be grouped by, and leaving those loose beside the folder groups
+ * would make OTHERS read as one flat list again for exactly the pages an
+ * analyst most needs to see together. On gep.com there are 80 of them
+ * carrying 4,096 clicks.
+ */
+export const FLAT_URLS_LABEL = "FLAT_URLS";
+
+/**
+ * Where a page no navigation places sits under OTHERS: its URL folders.
+ *
+ * The engine groups OTHERS by page type — `OTHERS > UNKNOWN` held 1,603 of
+ * gep.com's 1,781 unplaced pages, which says nothing about where they are.
+ * The folders do: `mind/blog/tag` is 770 tag-archive pages,
+ * `prod/s3fs-public/files/newsroom/docs` is 206 uploaded documents, and
+ * `podcasts` is 155 episodes. Each is a silo the site publishes without
+ * linking to it from navigation, and that is the finding OTHERS exists to
+ * surface.
+ *
+ * The locale prefix is dropped because the locale is already the root the
+ * page is filed under. The last segment is the page itself, not a folder.
+ * Segments are decoded for the label only.
+ */
+export function othersTrail(url: string): string[] {
+  let segments: string[];
+  try {
+    segments = new URL(url).pathname.split("/").filter(Boolean);
+  } catch {
+    return [OTHERS_LABEL, FLAT_URLS_LABEL];
+  }
+  if (segments.length > 0 && localeOf(url) !== null) segments = segments.slice(1);
+  const folders = segments.slice(0, -1).map(decodeSegment);
+  return folders.length > 0 ? [OTHERS_LABEL, ...folders] : [OTHERS_LABEL, FLAT_URLS_LABEL];
+}
+
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+/**
  * Locale codes recognised in a leading path segment.
  *
  * Mirrors `_ISO_639_1` in `url_rules.py`, including its two deliberate
@@ -106,13 +153,13 @@ export function buildNavTree(
   const index = new Map<string, TreeNode>();
 
   for (const profile of profiles) {
-    // A page the engine could not place carries no breadcrumb. It still has to
-    // appear somewhere — dropping it would make the tree disagree with the page
-    // count shown in the header.
-    const base =
-      profile.breadcrumb_path.length > 0
-        ? profile.breadcrumb_path
-        : [OTHERS_LABEL];
+    // A page the engine could not place carries an OTHERS trail — or, on a
+    // crawl older than the field, none at all. Either way it still has to
+    // appear somewhere, and *where* is decided here by its URL folders rather
+    // than by the page type the engine wrote after OTHERS: see `othersTrail`.
+    const unplaced =
+      profile.breadcrumb_path.length === 0 || profile.breadcrumb_path[0] === OTHERS_LABEL;
+    const base = unplaced ? othersTrail(profile.url) : profile.breadcrumb_path;
 
     // A localised page is rooted under its locale. Without this the French and
     // German sections of a site are not represented at all: their pages sit
@@ -215,6 +262,10 @@ function sortAndCount(root: TreeNode): void {
 function compareNodes(a: TreeNode, b: TreeNode): number {
   if (a.segment === OTHERS_LABEL) return 1;
   if (b.segment === OTHERS_LABEL) return -1;
+  // The residue of the residue: pinned below the folder groups the same way
+  // OTHERS is pinned below the sections.
+  if (a.segment === FLAT_URLS_LABEL) return 1;
+  if (b.segment === FLAT_URLS_LABEL) return -1;
   // Sections (which have children) before individual pages, then alphabetical.
   const aSection = a.children.length > 0 ? 0 : 1;
   const bSection = b.children.length > 0 ? 0 : 1;

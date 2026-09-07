@@ -10,6 +10,12 @@ import {
   UNAVAILABLE_METHODS,
   type DashModel,
 } from "../../lib/dashboardModel";
+import {
+  INDEXABILITY_LABEL,
+  indexabilityOf,
+  indexabilityReasonOf,
+} from "../../lib/indexing";
+import { REASON_MEANINGS, reasonLabel } from "../../lib/treeOverlay";
 import { GscMetricsCard } from "../gsc/GscMetricsCard";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useDashboardStore } from "../../store/useDashboardStore";
@@ -31,6 +37,10 @@ interface Props {
 export function NodeInspector({ model }: Props): JSX.Element {
   const focus = useDashboardStore((state) => state.focus);
   const node = focus === null ? null : model.nodes[focus];
+  // Read regardless of the tree's toggle: the drawer answers "why is it
+  // here?", and whether the other crawler saw it is part of that answer.
+  const stored = useDashboardStore((state) => state.overlay);
+  const overlay = stored && stored.model === model ? stored : null;
   // Whether the tree on screen came from a menu. When it did not, the lane
   // numbers are URL-path depth and must not be described as menu positions.
   const navGrouped = useCrawlStore(
@@ -136,6 +146,43 @@ export function NodeInspector({ model }: Props): JSX.Element {
             {node.kids.length.toLocaleString()} children · {node.cnt.toLocaleString()} pages
           </dd>
         </div>
+        {/* Only when a cross-check is saved. "Found by both" on a job that
+            was never cross-checked would be a claim about a comparison that
+            did not happen. */}
+        {overlay?.crossCheck && (
+          <div>
+            <dt>Screaming Frog</dt>
+            <dd>
+              {overlay.mark[node.i] === "missed" && (
+                <>
+                  <span className="xmark xmark-missed">SF missed</span>
+                  <div className="dim reason">
+                    {REASON_MEANINGS[overlay.reason[node.i] ?? ""] ??
+                      `Reason recorded: ${reasonLabel(overlay.reason[node.i] ?? "unknown")}.`}
+                  </div>
+                </>
+              )}
+              {overlay.mark[node.i] === "added" && (
+                <>
+                  <span className="xmark xmark-added">from SF</span>
+                  <div className="dim reason">
+                    Screaming Frog found this page and Rankuno's crawl did not. It was merged
+                    in from the export, so its classification rests on the URL alone.
+                  </div>
+                </>
+              )}
+              {overlay.mark[node.i] === "none" &&
+                (profile ? (
+                  <span className="dim">Found by both crawlers.</span>
+                ) : (
+                  <span className="dim">
+                    {(overlay.missedCnt[node.i] ?? 0).toLocaleString()} pages beneath this
+                    section were not found by Screaming Frog.
+                  </span>
+                ))}
+            </dd>
+          </div>
+        )}
 
         {profile ? (
           <>
@@ -143,6 +190,26 @@ export function NodeInspector({ model }: Props): JSX.Element {
               <dt>Page type</dt>
               <dd>
                 {profile.primary_page_type} · {profile.hierarchy_level}
+              </dd>
+            </div>
+            <div>
+              <dt>Indexing</dt>
+              <dd>
+                <span className={`ix ix-${indexabilityOf(profile).toLowerCase()}`}>
+                  {INDEXABILITY_LABEL[indexabilityOf(profile)]}
+                </span>
+                {/* The reason is the actionable half. "Non-indexable" sends an
+                    analyst looking; "the page says 'noindex'" tells them what
+                    to edit. */}
+                {indexabilityReasonOf(profile) && (
+                  <div className="dim">{indexabilityReasonOf(profile)}</div>
+                )}
+                {indexabilityOf(profile) === "UNKNOWN" && !indexabilityReasonOf(profile) && (
+                  <div className="dim">
+                    This crawl was run before the engine read indexing directives. Re-crawl to
+                    see what this page permits.
+                  </div>
+                )}
               </dd>
             </div>
             <div>

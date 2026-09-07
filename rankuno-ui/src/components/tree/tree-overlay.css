@@ -1,0 +1,332 @@
+/* Cross-check overlay, section cards, OTHERS insight and the full-screen tree.
+   Kept beside the components rather than in design-system.css: everything
+   here is one feature, and it reads the design system's tokens rather than
+   adding to them. */
+
+/* ===== controls ===== */
+.xctl {
+  padding: 0 10px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.xctl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+.xtoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--dim);
+  cursor: pointer;
+  user-select: none;
+}
+/* Whole-tree depth commands.
+ *
+ * Selectors are `.xctl .xbtn` — (0,2,0) — deliberately. The global reset
+ * `.rk-dash button` is (0,1,1) and strips background, border and colour from
+ * any button styled on a single class, which is how the audit's controls
+ * rendered as bare grey words and were reported invisible three times. A
+ * single-class rule here would fail the same way, and only inside the inline
+ * visualizer: the full-screen tree portals outside `.rk-dash`, so the two views
+ * would disagree and the bug would look intermittent.
+ */
+.xctl .xdepth {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  /* A rule rather than a gap. These act on the tree; everything to the right
+     acts on the comparison overlay, and without a divider the row reads as one
+     undifferentiated bank of controls — the "cumbersome" complaint. */
+  padding-right: 8px;
+  margin-right: 2px;
+  border-right: 1px solid var(--line);
+}
+.xctl .xbtn {
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--dim);
+  cursor: pointer;
+}
+.xctl .xbtn:hover {
+  color: var(--ink);
+  border-color: var(--faint);
+}
+.xtoggle.on { color: var(--ink); }
+.xtoggle.off { color: var(--faint); cursor: not-allowed; }
+.xtoggle input { margin: 0; }
+.fchip.fx.on { background: var(--l0bg); color: var(--l0); }
+.fchip.fx.on i { background: var(--l0f); }
+/* `.xctl .xfull`, not `.xfull`: this button sits inside `.rk-dash`, where the
+   (0,1,1) reset outranks a single class. `.xclose` lives in the portal outside
+   it and needs no such guard. */
+.xctl .xfull,
+.xclose {
+  margin-left: auto;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--dim);
+}
+.xctl .xfull:hover,
+.xclose:hover { color: var(--ink); border-color: var(--faint); }
+.xnote {
+  font-size: 11px;
+  color: var(--faint);
+  line-height: 1.4;
+  padding: 2px 0 4px;
+  max-width: 70ch;
+}
+
+/* ===== row marks ===== */
+.vrow.xmissed { background: var(--l0band); }
+.vrow.xmissed:hover,
+.vrow.xmissed.sel { background: var(--l0bg); }
+.vrow.xadded { background: var(--l2band); }
+.xmark {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex: none;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+.xmark-missed { color: var(--l0); }
+.xmark-added { color: var(--l2); }
+.tmiss {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--l0);
+  flex: none;
+}
+.tadded {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--l2);
+  flex: none;
+}
+.tgsc {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--dim);
+  flex: none;
+  margin-left: 8px;
+}
+
+/* ===== full screen ===== */
+.xfs {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  font-family: var(--sans);
+  color: var(--ink);
+}
+.xfs-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.xfs-head h2 { margin: 0; font-size: 15px; }
+.xfs-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr);
+  gap: 12px;
+  padding: 12px 16px;
+}
+.xfs-left,
+.xfs-right {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.xfs-right { overflow-y: auto; }
+.xfs-tree {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.xfs-tree .xctl { padding-top: 6px; }
+
+/* ===== section cards ===== */
+.xcards {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  max-height: 42%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.xcards-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.xcards-head h3,
+.xothers h3 { margin: 0; font-size: 12.5px; }
+.xsort {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--faint);
+}
+.xcards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.xcard {
+  text-align: left;
+  border: 1px solid var(--line2);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.xcard:hover { border-color: var(--faint); }
+.xcard-title {
+  font-weight: 600;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.xcard-pages { color: var(--dim); }
+.xcard-miss { color: var(--faint); }
+.xcard-miss.has { color: var(--l0); }
+.xcard-reasons,
+.xcard-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--dim);
+}
+.xcard-added { color: var(--l2); }
+.xcard-gsc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+/* ===== OTHERS ===== */
+.xothers {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+}
+.xothers h4 {
+  margin: 12px 0 6px;
+  font-size: 12px;
+}
+.xothers-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 6px 0 8px;
+}
+.xothers .warn { color: var(--warn); }
+.xothers-roots {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin: 0 0 8px;
+  font-size: 11px;
+}
+.xroot {
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  cursor: pointer;
+  color: var(--ink);
+}
+.xroot:hover { border-color: var(--faint); }
+.xtable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.xtable th,
+.xtable td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.xtable th {
+  color: var(--faint);
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.xtable .num {
+  text-align: right;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+.xlink {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--blue);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.xlink:hover { text-decoration: underline; }
+.xlocale {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--faint);
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  padding: 0 4px;
+}
+.dim { color: var(--faint); }

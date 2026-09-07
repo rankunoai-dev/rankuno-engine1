@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
-from enum import StrEnum
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -35,6 +34,7 @@ from src.core.schemas import StrictModel
 from src.modules.seo.page_classifier.schemas import (
     DiscoverySource,
     HierarchyLevel,
+    Indexability,
     PrimaryPageType,
     SignalScore,
     SignalSource,
@@ -257,12 +257,21 @@ class PageEvidence(StrictModel):
         canonical_url: The `<link rel="canonical">` the page declares, or `""`.
             What the site claims, which is not necessarily what a search engine
             honours.
+        indexability: What the fetch established about whether the page permits
+            indexing. Computed at fetch time rather than here because the status
+            and the response headers are in scope there and nowhere else — the
+            `X-Robots-Tag` that carries a `noindex` on a PDF exists only in the
+            headers, and they are discarded one line after the fetch returns.
+            `UNKNOWN` for anything never fetched.
+        indexability_reason: One line saying why, for a client to read.
     """
 
     url: str = Field(min_length=1)
     final_url: str = ""
     redirect_chain: tuple[str, ...] = ()
     canonical_url: str = ""
+    indexability: Indexability = Indexability.UNKNOWN
+    indexability_reason: str = ""
     normalized_path: str = Field(min_length=1)
     html: str | None = None
     nav_links: tuple[NavLink, ...] = ()
@@ -608,43 +617,6 @@ def collect_structural_signals(evidence: PageEvidence) -> tuple[SignalScore, ...
     return tuple(scores)
 
 
-class Indexability(StrEnum):
-    """Whether a page *permits* indexing, which is not whether Google indexed it.
-
-    The distinction is the entire point of this type and is easy to lose. This
-    engine can read what a page says about itself — a `robots` meta tag, an
-    `X-Robots-Tag` header, a canonical pointing elsewhere, the status it
-    returned. It cannot know what Google decided. Google ignores canonicals it
-    disagrees with, drops pages it is permitted to keep, and takes days to act
-    on a change.
-
-    So `INDEXABLE` means "nothing here forbids it", never "it is in the index",
-    and a report that conflates the two tells a client their page is live in
-    search on the strength of an HTML tag.
-
-    Upper-case, per the domain-taxonomy ruling in CLAUDE.md §7.
-    """
-
-    INDEXABLE = "INDEXABLE"
-    """Nothing on the page forbids indexing. Whether Google agrees is unknown."""
-
-    NOINDEX = "NOINDEX"
-    """A `robots` meta tag or `X-Robots-Tag` header says not to index it. The
-    one verdict here that is close to decisive — Google honours it."""
-
-    CANONICALISED_AWAY = "CANONICALISED_AWAY"
-    """The page names a different URL as canonical. A *request*, not a rule:
-    Google frequently indexes a page that canonicals elsewhere, so this is a
-    strong hint and nothing more."""
-
-    NOT_A_PAGE = "NOT_A_PAGE"
-    """It redirected, errored, or answered with something that is not HTML."""
-
-    UNKNOWN = "UNKNOWN"
-    """Never fetched, so nothing was read. Distinct from `INDEXABLE`: absence of
-    a prohibition is not the same as absence of a look."""
-
-
 _ROBOTS_META = re.compile(
     r"<meta\b[^>]*\bname\s*=\s*[\"']?(?:robots|googlebot)[\"']?[^>]*>",
     re.IGNORECASE,
@@ -710,6 +682,7 @@ def indexability_of(
     directives: frozenset[str] = frozenset(),
     canonical_url: str = "",
     is_html: bool = True,
+    redirected_to: str = "",
 ) -> tuple[Indexability, str]:
     """Judge what the page permits, and say why in words a client can read.
 
@@ -723,6 +696,11 @@ def indexability_of(
         directives: From `extract_robots_directives`.
         canonical_url: What the page declared, if anything.
         is_html: Whether the response was a page at all.
+        redirected_to: Where the request finally landed, when it moved. The
+            fetcher follows redirects itself, so `status_code` is the
+            *destination's* — a moved URL reports 200 and would otherwise be
+            judged on markup belonging to a different page. Checking the
+            destination is the only way this function can see the move at all.
 
     Returns:
         The verdict and a one-line reason.
@@ -733,6 +711,11 @@ def indexability_of(
         return (
             Indexability.NOT_A_PAGE,
             f"Answered {status_code}. A page that errors is not indexed.",
+        )
+    if redirected_to and normalize_url(redirected_to) != normalize_url(url):
+        return (
+            Indexability.NOT_A_PAGE,
+            f"Redirects to {redirected_to}. That destination is the page, not this address.",
         )
     if 300 <= status_code < 400:
         return Indexability.NOT_A_PAGE, f"Redirects ({status_code}). The destination is the page."

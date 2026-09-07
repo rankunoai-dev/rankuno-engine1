@@ -422,6 +422,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             pages = self._classify_all(evidence, site_profile, payload)
             navigation, nav_coverage, pages = self._apply_navigation(graph, payload.base_url, pages)
             pages = self._enrich_with_gsc(pages, payload)
+            pages = self._enrich_with_navigation_context(pages)
         finally:
             if owns_fetcher:
                 fetcher.close()
@@ -548,6 +549,54 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 "gsc_enrichment_failed",
                 extra={"error": str(exc)},
             )
+            return pages
+
+    def _enrich_with_navigation_context(
+        self,
+        pages: tuple[FullPageIntelligenceProfile, ...],
+    ) -> tuple[FullPageIntelligenceProfile, ...]:
+        """Enrich pages with navigation context dimensions (Phase 8a).
+
+        Adds human-readable context about page discoverability:
+        - WHERE it was discovered (primary nav, footer, orphaned, etc)
+        - HOW MANY HOPS from homepage
+        - WHAT TYPE OF PAGE links to it
+        - WHETHER THE ROUTE MAKES LOGICAL SENSE
+
+        Non-blocking: runs after classification, always succeeds (returns pages
+        unchanged on any error). See build-log 0065 for design rationale.
+
+        Args:
+            pages: Classified and navigation-placed pages.
+
+        Returns:
+            Same pages with 4 new optional context fields populated.
+        """
+        from src.modules.seo.page_classifier.navigation_context import NavigationContextClassifier
+
+        try:
+            classifier = NavigationContextClassifier()
+            enriched = []
+
+            for page in pages:
+                enriched_page = classifier.enrich(page)
+                enriched.append(enriched_page)
+
+            _logger.info(
+                "navigation_context_enrichment_complete",
+                extra={
+                    "pages_enriched": len(enriched),
+                },
+            )
+
+            return tuple(enriched)
+
+        except Exception as exc:  # noqa: BLE001 - context enrichment must not fail crawl
+            _logger.warning(
+                "navigation_context_enrichment_failed",
+                extra={"error": str(exc)},
+            )
+            # Return pages unchanged on error (graceful degradation)
             return pages
 
     # -- internals ---------------------------------------------------------

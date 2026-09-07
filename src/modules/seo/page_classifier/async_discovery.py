@@ -318,6 +318,13 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
         graph.fetch_failures += 1
         graph.record_outcome(OUTCOME_TRANSPORT)
         return None
+    # Both crawl paths must record the same facts. Behavioural equivalence
+    # between them is this module's central claim, and a redirect chain present
+    # on one path and missing on the other would break it silently — which is
+    # what was happening: this call sat below both bails while the serial path
+    # made it above one of them, so errors and non-HTML answers were recorded
+    # there and dropped here.
+    graph.record_fetch(url, result)
     if not result.ok:
         graph.record_outcome(outcome_for(result.status_code))
         if is_refusal(result.status_code):
@@ -329,10 +336,6 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
         graph.record_outcome(OUTCOME_NOT_HTML)
         return None
     graph.record_outcome(OUTCOME_OK)
-    # Both crawl paths must record the same facts. Behavioural equivalence
-    # between them is this module's central claim, and a redirect chain present
-    # on one path and missing on the other would break it silently.
-    graph.record_fetch(url, result)
     return url, result.body
 
 

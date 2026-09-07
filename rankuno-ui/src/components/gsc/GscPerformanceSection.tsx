@@ -3,7 +3,6 @@ import {
   GscMetricsFormatter,
   calculateSiteMetrics,
   findTopOpportunities,
-  calculateOpportunityScore,
 } from "../../lib/gscMetrics";
 import "./gsc.css";
 

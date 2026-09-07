@@ -79,6 +79,15 @@ export type CmsFamily =
 
 export const CMS_FAMILY_VALUES: readonly CmsFamily[] = ["WORDPRESS", "SHOPIFY", "HEADLESS", "UNKNOWN"] as const;
 
+export type Indexability =
+  | "INDEXABLE"
+  | "NOINDEX"
+  | "CANONICALISED_AWAY"
+  | "NOT_A_PAGE"
+  | "UNKNOWN";
+
+export const INDEXABILITY_VALUES: readonly Indexability[] = ["INDEXABLE", "NOINDEX", "CANONICALISED_AWAY", "NOT_A_PAGE", "UNKNOWN"] as const;
+
 export type NavigationDiscoveryMethod =
   | "PRIMARY_NAV"
   | "SECONDARY_NAV"
@@ -153,6 +162,8 @@ export interface FullPageIntelligenceProfile {
   signals_evaluated: SignalScore[];
   final_confidence_score: number;
   consensus_method: ConsensusMethod;
+  indexability: Indexability;
+  indexability_reason: string;
   /** Clicks from GSC */
   gsc_clicks: number | null;
   /** Impressions from GSC */
@@ -199,6 +210,8 @@ export interface DiscoveredNode {
   final_url: string;
   redirect_chain: string[];
   canonical_url: string;
+  indexability: Indexability;
+  indexability_reason: string;
 }
 
 /** Summary of one discovery pass. */

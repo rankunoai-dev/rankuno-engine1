@@ -5,7 +5,12 @@ import {
   type DashModel,
   type DashNode,
 } from "../../lib/dashboardModel";
+import { reasonLabel } from "../../lib/treeOverlay";
 import { useDashboardStore } from "../../store/useDashboardStore";
+import { FullScreenTree } from "./FullScreenTree";
+import { TreeControls } from "./TreeControls";
+import { useActiveOverlay, useTreeOverlay } from "./useTreeOverlay";
+import "./tree-overlay.css";
 
 /** Row height in pixels. Fixed, which is what makes the window arithmetic O(1). */
 const ROW = 30;
@@ -20,6 +25,30 @@ interface Props {
 }
 
 /**
+ * The directory tree card's contents: cross-check controls, the windowed list,
+ * and the full-screen view it can open.
+ *
+ * The overlay is built here, once, and published to the store — this is the
+ * one component always mounted while a tree is on screen.
+ */
+export function VirtualizedTree({ model }: Props): JSX.Element {
+  const overlay = useTreeOverlay(model);
+  return (
+    <>
+      <TreeControls model={model} overlay={overlay} />
+      <TreeList model={model} />
+      <FullScreenTree model={model} overlay={overlay} />
+    </>
+  );
+}
+
+interface ListProps {
+  model: DashModel;
+  /** Room for Search Console figures on the row. Only the full-screen view has it. */
+  wide?: boolean;
+}
+
+/**
  * The directory tree, windowed to roughly 25 rows in the DOM.
  *
  * Only rows intersecting the viewport are mounted; the rest exist solely as
@@ -31,7 +60,7 @@ interface Props {
  * The flattened view-model lives in the store and is rebuilt only when the tree
  * or a filter changes. Rebuilding it per scroll frame would defeat the point.
  */
-export function VirtualizedTree({ model }: Props): JSX.Element {
+export function TreeList({ model, wide = false }: ListProps): JSX.Element {
   const flat = useDashboardStore((state) => state.flat);
   const open = useDashboardStore((state) => state.open);
   const focus = useDashboardStore((state) => state.focus);
@@ -39,6 +68,11 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
   const setFocus = useDashboardStore((state) => state.setFocus);
   const expandBranch = useDashboardStore((state) => state.expandBranch);
   const collapseBranch = useDashboardStore((state) => state.collapseBranch);
+  const active = useActiveOverlay(model);
+  // Search Console figures need the overlay for the arrays but not the
+  // toggle: they are facts about the crawl, not about the cross-check.
+  const overlay = useDashboardStore((state) => state.overlay);
+  const gsc = wide && overlay && overlay.model === model && overlay.gsc ? overlay : null;
 
   const viewport = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState({ start: 0, end: 40 });
@@ -61,11 +95,20 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
   // Scroll the focused row into view when selection arrives from elsewhere —
   // teleport search, a graph node, a breadcrumb. Without this, selecting a node
   // 12,000 rows down highlights a row nobody can see.
+  //
+  // Only when the *selection* moves. This used to run on every `flat` change
+  // too, and opening any section re-flattens the tree — so with OTHERS
+  // selected (the last root, off-screen) every twisty click "revealed" it and
+  // threw the list to the bottom. `flat` is still read, because the row's
+  // position is only known from it; the ref is what stops a re-flatten from
+  // counting as a new selection.
+  const revealed = useRef<number | null>(null);
   useEffect(() => {
     const element = viewport.current;
-    if (!element || focus === null) return;
+    if (!element || focus === null || revealed.current === focus) return;
     const position = flat.findIndex((row) => row.i === focus);
     if (position < 0) return;
+    revealed.current = focus;
 
     const top = position * ROW;
     const visible = top >= element.scrollTop && top + ROW <= element.scrollTop + element.clientHeight;
@@ -89,13 +132,30 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
     if (!node) continue;
 
     const hasChildren = node.kids.length > 0;
+    const mark = active?.crossCheck ? active.mark[node.i] ?? "none" : "none";
+    const missed = active?.crossCheck ? active.missedCnt[node.i] ?? 0 : 0;
+    const added = active?.crossCheck ? active.addedCnt[node.i] ?? 0 : 0;
+    const reason = active ? active.reason[node.i] : null;
     rows.push(
-      <button
+      /* A `div` with the button role rather than a `<button>`: the label on a
+         page row is a real `<a href>`, and an anchor inside a button is invalid
+         HTML that browsers repair by splitting the button in two. Enter and
+         Space are wired by hand to keep what the element gave for free. */
+      <div
         key={node.i}
-        type="button"
-        className={`vrow${focus === node.i ? " sel" : ""}`}
+        role="button"
+        tabIndex={0}
+        className={`vrow${focus === node.i ? " sel" : ""}${mark === "none" ? "" : ` x${mark}`}`}
         style={{ top: position * ROW, paddingLeft: 10 + row.depth * 16 }}
         onClick={() => setFocus(node.i, model)}
+        onKeyDown={(event) => {
+          // Only when the row itself has focus. The same keys on the link
+          // inside are the link's own activation and must reach it untouched.
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          setFocus(node.i, model);
+        }}
       >
         <span
           className={`tw${open.has(node.i) ? " open" : ""}`}
@@ -119,7 +179,42 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
           {hasChildren ? "▶" : ""}
         </span>
         <LevelChip node={node} />
-        <span className="tlbl">{node.label}</span>
+        {/* A crawled page links to itself; a path segment has no page to open.
+            The click stops here so opening the page does not also move the
+            selection — reading a page and pointing at a row are different
+            intentions, the same split the twisty makes. */}
+        {node.profile ? (
+          <a
+            className="tlbl tlink"
+            href={node.profile.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            title={`Open ${node.profile.url} in a new tab`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {node.label}
+          </a>
+        ) : (
+          <span className="tlbl">{node.label}</span>
+        )}
+        {/* On the page's own row. A section row carries the count instead —
+            a badge on every row of a 784-page miss would say nothing. */}
+        {mark === "missed" && !hasChildren && (
+          <span
+            className="xmark xmark-missed"
+            title={`Rankuno found this page; Screaming Frog did not. Reason: ${reasonLabel(reason ?? "unknown")}`}
+          >
+            SF missed
+          </span>
+        )}
+        {mark === "added" && !hasChildren && (
+          <span
+            className="xmark xmark-added"
+            title="Screaming Frog found this page; Rankuno's crawl did not. Merged in from the export."
+          >
+            from SF
+          </span>
+        )}
         {/* Only on section headers. On a leaf the badge would repeat on every
             row and stop carrying information; the drawer states it per page. */}
         {hasChildren && model.hasProvenance && (
@@ -131,9 +226,9 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
           </span>
         )}
         {/* Whole-branch control, revealed on hover so it costs no width until
-            wanted. A `span` rather than a `button` because the row itself is a
-            button and nesting one inside another is invalid — the same reason
-            the twisty above is a span. */}
+            wanted. A `span` rather than a `button` because the row carries the
+            button role and a control nested inside a button is invalid — the
+            same reason the twisty above is a span. */}
         {hasChildren && (
           <span
             className="tbranch"
@@ -152,7 +247,32 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
           </span>
         )}
         {hasChildren && <span className="tcnt">{node.cnt.toLocaleString()}</span>}
-      </button>,
+        {/* Subtree figures, beside the subtree page count they qualify. */}
+        {hasChildren && missed > 0 && (
+          <span
+            className="tmiss"
+            title={`${missed.toLocaleString()} of ${node.cnt.toLocaleString()} pages in this section and below were not found by Screaming Frog`}
+          >
+            · {missed.toLocaleString()} missed
+          </span>
+        )}
+        {hasChildren && added > 0 && (
+          <span
+            className="tadded"
+            title={`${added.toLocaleString()} pages in this section and below were merged in from the Screaming Frog export`}
+          >
+            · {added.toLocaleString()} from SF
+          </span>
+        )}
+        {gsc && (gsc.gscPages[node.i] ?? 0) > 0 && (
+          <span
+            className="tgsc"
+            title={`${(gsc.clicks[node.i] ?? 0).toLocaleString()} clicks · ${(gsc.impressions[node.i] ?? 0).toLocaleString()} impressions${hasChildren ? " in this section and below" : ""}`}
+          >
+            {(gsc.clicks[node.i] ?? 0).toLocaleString()} clicks
+          </span>
+        )}
+      </div>,
     );
   }
 
@@ -165,6 +285,19 @@ export function VirtualizedTree({ model }: Props): JSX.Element {
       </div>
       <div className="treefoot">
         <span>{flat.length.toLocaleString()} rows in view-model</span>
+        {active?.integrity && (
+          /* pages − missed − added against the sidecar's own in_both. A
+             mismatch means the two files disagree, and that is worth a mark
+             in the footer rather than a silently wrong count. */
+          <span
+            title={`Pages on screen minus those marked, against the cross-check's own "found by both" count (${active.integrity.expected.toLocaleString()})${active.unmatched > 0 ? `. ${active.unmatched.toLocaleString()} missed URLs matched no page.` : ""}`}
+          >
+            cross-check{" "}
+            {active.integrity.actual === active.integrity.expected && active.unmatched === 0
+              ? "✓"
+              : `✗ ${active.integrity.actual.toLocaleString()} ≠ ${active.integrity.expected.toLocaleString()}`}
+          </span>
+        )}
         <span>
           DOM rows: <b>{rows.length}</b> / {model.nodes.length.toLocaleString()}
         </span>
