@@ -112,11 +112,15 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `page_classifier/signal_parsers.py` — 5 structural consensus signals | ✅ Implemented & tested |
 | `page_classifier/cascading_pipeline.py` — Layer 0–3 cascade & consensus | ✅ Implemented & tested |
 | `page_classifier/weights.py` — weight profiles & site-profile seam | ✅ Seam live; adaptive selection off pending corpus |
+| `modules/seo/contracts/` — `AuditDataset` contract + 110-row issue catalogue ([ADR 0011](docs/adr/0011-deliverables-boundary-and-screaming-frog-input.md)) | ✅ Models, catalogue and the `UrlNormalizer` seam (Phase 0 P0-1/P0-2/P0-3). Four invariants; `AuditSource` is a `StrEnum` |
+| `modules/seo/deliverables/` — Screaming Frog export → `AuditDataset` (`screaming_frog_adapter.py`, `_bundle.py`) | ✅ Implemented & tested (P0-3/P0-5, [build-log 0074](docs/build-log/0074-absent-is-not-empty.md)). `links` is never filled; engine adapter (P0-4), import-boundary test (P0-6) and RAE diff script (P0-7) not started |
+| `core/logger.py` — structured `extra=` fields on log records | ✅ Fixed in [build-log 0078](docs/build-log/0078-the-fields-that-never-left-the-call-site.md): `get_logger` returns a merging adapter, caller keys win (6 tests). Was dropped on Python 3.11 from the first commit; found in cycle 0074 |
 | Layer 2 local ML classifier | ❌ Protocol only; needs local GPU ([ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
 | Layer 3 `LlmPageClassifier` implementation | ❌ Protocol only; needs a live credential |
 | Golden corpus coverage | ⚠️ 13 labels, 1 of 6 archetypes — **not yet enough to validate any accuracy claim**. 141 draft rows await review in [drafts/](tests/fixtures/corpus/drafts/README.md) |
 | CMS pagination | ✅ Multi-page retrieval via `Link` cursor, `X-WP-TotalPages` and `?page=N`. Effect on live confidence **not yet measured** — see [build-log 0011 §5](docs/build-log/0011-cms-pagination.md) |
-| `core/circuit_breaker.py`, `core/state_store.py` | ❌ Not started |
+| `core/circuit_breaker.py` | ❌ Not started |
+| `core/state_store.py` — durable job records | ✅ Implemented & tested (`DiskJobStore`; see [CLAUDE.md](CLAUDE.md) §8 "Closed since the audit") |
 | Idempotency keys; distributed rate limit & spend ceiling | ❌ Not started |
 | `Dockerfile` / Railway deployment | ❌ Not started (deferred — see [ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
 
@@ -142,13 +146,13 @@ crawl path imports it, and no workflow requires an export.
 
 ```powershell
 # Report the gap, change nothing (the default)
-.\.venv\Scripts\python.exe scriptseconcile_screaming_frog.py <job-id> internal_html.csv
+.\.venv\Scripts\python.exe scripts\reconcile_screaming_frog.py <job-id> internal_html.csv
 
 # Fold the pages Screaming Frog found and the engine missed into the tree
-.\.venv\Scripts\python.exe scriptseconcile_screaming_frog.py <job-id> internal_html.csv --merge --out merged.json
+.\.venv\Scripts\python.exe scripts\reconcile_screaming_frog.py <job-id> internal_html.csv --merge --out merged.json
 ```
 
-The same thing over HTTP, posting the CSV as the raw body — not
+The same thing over HTTP, posting the file (`.csv` or `.xlsx`) as the raw body — not
 `multipart/form-data`, which would need a dependency this project does not have:
 
 ```
@@ -162,13 +166,28 @@ fixes:
 | :--- | :--- | :--- |
 | Screaming Frog found it, the engine did not | Linked but in no sitemap, usually deep | Add it to a sitemap |
 | The engine found it, Screaming Frog did not | Published with no internal link — a sitemap orphan | Add internal links |
+| The engine found it, and it is a file | A PDF, deck, spreadsheet or other document. Screaming Frog lists these on its own tab, not under HTML | Nothing; a difference, not a finding |
+
+The downloadable workbook is one sheet per reason: `Summary`, `Missed pages`,
+`Orphans`, then `PDF files`, `Presentations`, `Spreadsheets`, `Other files`,
+then every other reason by size. Splitting the files out took infosys.com's
+Orphans sheet from 8,123 rows to 630
+([build-log 0076](docs/build-log/0076-a-pdf-is-not-an-orphan.md)).
 
 Only the first direction is merged, and only its `MISSED_PAGE` rows: redirect
 sources, off-site URLs, media and 4xx are differences the engine holds on
 purpose, not gaps. Merged pages are classified from the URL alone — an export
 carries no HTML — so they keep a low confidence score, which is how you tell
 them from crawled pages. A merge always writes a **new** job; the original is
-never modified. CSV only; `.xlsx` is not supported ([build-log 0028](docs/build-log/0028-screaming-frog-merge-and-optional-reconcile.md)).
+never modified. Both `.csv` and `.xlsx` exports are read; the format is detected from
+the content, not the extension ([build-log 0031](docs/build-log/0031-native-xlsx-excel-reconciliation-support.md)).
+
+A plain one-column list of URLs — a masterfile tab headed `HTML Pages`, or a
+headerless dump — is also accepted, but only as a set comparison. It carries no
+status, indexability or content type, so a URL it holds that the crawl lacks is
+reported as `UNKNOWN`, never as a missed page, and nothing from a list is ever
+merged; the report declares `source_format=BARE_URL_LIST`. Anything else without
+an `Address` column is still refused ([build-log 0072](docs/build-log/0072-a-list-is-not-an-export.md)).
 
 ### The local API and the React UI
 
@@ -185,6 +204,35 @@ fixture data is indistinguishable from crawl output otherwise.
 Job records persist under `.jobs/`, so crawls survive a restart. A crawl
 interrupted mid-run is marked `failed` rather than resumed: there is no
 within-crawl checkpointing, so the work genuinely is lost.
+
+### Search Console accounts (optional)
+
+A crawl can read Google Search Console for its property through the connector
+in `src/integrations/gsc_client.py` (read-only scope, [ADR 0010](docs/adr/0010-gsc-api-security-and-safety-controls.md)).
+Credentials live only in `.env.local`, which is gitignored; the API never
+reads, writes or echoes them ([ADR 0012](docs/adr/0012-gsc-account-profiles.md)).
+
+```dotenv
+# The default account, used when a crawl names no profile
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=
+GOOGLE_OAUTH_REFRESH_TOKEN=
+
+# One named profile per authorised Google account. Only REFRESH_TOKEN is
+# required; CLIENT_ID / CLIENT_SECRET are inherited from GOOGLE_OAUTH_* unless set.
+GSC_ACCOUNTS__ACME__REFRESH_TOKEN=
+```
+
+Profile names are lowercase, `[a-z0-9_-]`, up to 64 characters. A crawl selects
+one with `gsc_account` on the request (the crawl modal offers a picker when the
+engine lists at least one); `null` means the default account. An unknown name is
+refused at admission with 400 and no job is created — there is no fallback to
+the default. The full key set is in [.env.example](.env.example).
+
+```
+GET  /api/v1/gsc/accounts        -> {"accounts": ["acme", ...]}   names only, never credentials
+POST /api/v1/jobs                {"base_url": ..., "gsc_property": ..., "gsc_account": "acme"}
+```
 
 > **Validated against a live site.**
 > [build-log/0007](docs/build-log/0007-first-live-run.md) records the first real

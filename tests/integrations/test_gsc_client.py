@@ -306,3 +306,81 @@ class TestFetchAnalytics:
                 # Should return empty response, not raise
                 assert isinstance(response, GscAnalyticsResponse)
                 assert len(response.rows) == 0
+
+
+class TestNamedAccountSelection:
+    """The client hands the profile name to the token manager and nothing else."""
+
+    def test_init_forwards_account_to_token_manager(self, mock_settings, mock_token_manager):
+        with patch(
+            "src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager
+        ) as tm_class:
+            GscApiClient(settings=mock_settings, account="acme")
+        tm_class.assert_called_once_with(settings=mock_settings, account="acme")
+
+    def test_init_default_account_is_none(self, mock_settings, mock_token_manager):
+        with patch(
+            "src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager
+        ) as tm_class:
+            GscApiClient(settings=mock_settings)
+        tm_class.assert_called_once_with(settings=mock_settings, account=None)
+
+
+class TestAuthenticationIsNotRetried:
+    """Regression for audit finding F2.
+
+    `GscAuthenticationError` subclasses `IntegrationError`, which the retry
+    policy treats as transient. With the refresh inside `call()`, a revoked
+    refresh token POSTed `invalid_grant` once per attempt.
+    """
+
+    @pytest.fixture
+    def real_settings(self):
+        from pydantic import SecretStr
+        from src.core.config import Settings
+
+        return Settings(
+            _env_file=None,
+            google_oauth_client_id="cid",
+            google_oauth_client_secret=SecretStr("sec"),
+            google_oauth_refresh_token=SecretStr("revoked"),
+        )
+
+    @staticmethod
+    def _invalid_grant() -> Exception:
+        import requests
+
+        response = Mock()
+        response.status_code = 400
+        response.json.return_value = {"error": "invalid_grant"}
+        return requests.HTTPError(response=response)
+
+    def test_fetch_analytics_posts_token_endpoint_once(self, real_settings):
+        from src.core.errors import GscAuthenticationError
+
+        with (
+            patch("src.integrations.gsc_token_manager.requests.post") as mock_post,
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_post.return_value.raise_for_status.side_effect = self._invalid_grant()
+            client = GscApiClient(settings=real_settings)
+            with pytest.raises(GscAuthenticationError, match="invalid_grant"):
+                client.fetch_analytics("https://example.com", "2026-08-01", "2026-08-31")
+
+        assert mock_post.call_count == 1
+        mock_build.assert_not_called()
+
+    def test_list_properties_posts_token_endpoint_once(self, real_settings):
+        from src.core.errors import GscAuthenticationError
+
+        with (
+            patch("src.integrations.gsc_token_manager.requests.post") as mock_post,
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_post.return_value.raise_for_status.side_effect = self._invalid_grant()
+            client = GscApiClient(settings=real_settings)
+            with pytest.raises(GscAuthenticationError, match="invalid_grant"):
+                client.list_accessible_properties()
+
+        assert mock_post.call_count == 1
+        mock_build.assert_not_called()

@@ -17,7 +17,7 @@ import json
 import logging
 import sys
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, MutableMapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -154,6 +154,23 @@ def setup_logging(*, force: bool = False) -> None:
     _configured = True
 
 
+class _MergingAdapter(logging.LoggerAdapter[logging.Logger]):
+    """`LoggerAdapter` that merges caller `extra=` with the adapter's own.
+
+    The stock adapter on Python < 3.13 *replaces* the caller's `extra` with
+    `self.extra`, which silently discards every structured field passed at the
+    call site. `merge_extra=True` fixes this upstream but only exists on 3.13+,
+    so the merge is done here to keep the 3.11 floor.
+    """
+
+    def process(
+        self, msg: Any, kwargs: MutableMapping[str, Any]
+    ) -> tuple[Any, MutableMapping[str, Any]]:
+        """Merge adapter and caller extras. Caller keys win: the call site is more specific."""
+        kwargs["extra"] = {**(self.extra or {}), **(kwargs.get("extra") or {})}
+        return msg, kwargs
+
+
 def get_logger(name: str) -> logging.LoggerAdapter[logging.Logger]:
     """Return a namespaced logger, configuring logging on first use.
 
@@ -164,4 +181,4 @@ def get_logger(name: str) -> logging.LoggerAdapter[logging.Logger]:
         A logger under the `rankuno.` namespace.
     """
     setup_logging()
-    return logging.LoggerAdapter(logging.getLogger(f"rankuno.{name}"), {})
+    return _MergingAdapter(logging.getLogger(f"rankuno.{name}"), {})

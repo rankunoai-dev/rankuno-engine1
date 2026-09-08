@@ -40,27 +40,34 @@ class GscApiClient(BaseAPIClient):
 
     Design:
     - All requests go through BaseAPIClient.call() which enforces rate limiting
-    - Token refresh is handled by GscTokenManager; tokens are kept fresh before each call
+    - Token refresh is handled by GscTokenManager and happens *before* `call()`,
+      never inside it. `GscAuthenticationError` is an `IntegrationError`, which
+      the retry policy treats as transient, so a refresh inside the loop turned
+      one revoked token into four `invalid_grant` POSTs.
     - Errors are mapped to specific exception types for upstream handling
-    - Graceful degradation: property/fetch errors return empty data, not exceptions
+    - Graceful degradation: property/fetch errors return empty data, not
+      exceptions. Authentication errors are the exception to that: an empty
+      result on a revoked token would read as "no search data" rather than
+      "re-authorise this account", so they propagate.
     """
 
     service_name = "google.search_console"
     rate_limit_key = "gsc_quota"
     requests_per_minute = 60  # 2x headroom per property (120 QPM per property, 1200 total)
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, *, account: str | None = None) -> None:
         """Initialize GSC API client.
 
         Args:
             settings: Configuration override, primarily for tests.
+            account: Named GSC profile. `None` is the single-account default.
 
         Raises:
-            ConfigurationError: If GSC credentials are missing.
+            ConfigurationError: If the profile is unknown or credentials are missing.
         """
         super().__init__(settings=settings)
 
-        self._token_manager = GscTokenManager(settings=self._settings)
+        self._token_manager = GscTokenManager(settings=self._settings, account=account)
 
         # Validate authentication immediately
         self.authenticate()
@@ -86,18 +93,19 @@ class GscApiClient(BaseAPIClient):
             extra={"account": self._token_manager.get_account_email()},
         )
 
-    def _get_service(self) -> Any:
-        """Get or create the GSC API service.
+    def _get_service(self, token: str) -> Any:
+        """Build the GSC API service around an already-refreshed access token.
 
-        Builds the Google API discovery service using credentials from the token manager.
-        Service is created fresh each call to ensure token is always current.
+        Takes the token as an argument rather than fetching it so the refresh
+        stays outside `call()`'s retry loop. Service is created fresh each call
+        so a token refreshed between calls is always the one used.
+
+        Args:
+            token: Bearer token from `GscTokenManager.get_or_refresh_token()`.
 
         Returns:
             Google Webmasters (Search Console) API service object.
         """
-        # Don't cache service; build fresh each time to ensure token is current
-        token = self._token_manager.get_or_refresh_token()
-
         # Build credentials that wrap our token
         from google.oauth2.credentials import Credentials as OAuth2Credentials
 
@@ -123,12 +131,13 @@ class GscApiClient(BaseAPIClient):
             List of GscProperty objects (URL and type).
 
         Raises:
-            GscAuthenticationError: If token is invalid (401).
-            GscAuthorizationError: If user lacks access (403).
+            GscAuthenticationError: If the refresh token is revoked or invalid.
+                Raised once; never retried.
         """
+        token = self._token_manager.get_or_refresh_token()
 
         def attempt() -> list[GscProperty]:
-            service = self._get_service()
+            service = self._get_service(token)
             request = service.sites().list()
             response = request.execute()
 
@@ -174,15 +183,14 @@ class GscApiClient(BaseAPIClient):
             GscAnalyticsResponse with page metrics, or empty response on error.
 
         Raises:
-            GscPropertyNotFoundError: If property doesn't exist (404)
-            GscAuthorizationError: If user lacks access (403)
-            GscQuotaExceededError: If rate limited (429)
-            GscApiDeprecatedError: If endpoint is deprecated (410, 501)
+            GscAuthenticationError: If the refresh token is revoked or invalid.
+                Raised once, before any analytics request; never retried.
         """
+        token = self._token_manager.get_or_refresh_token()
 
         def attempt() -> GscAnalyticsResponse:
             try:
-                service = self._get_service()
+                service = self._get_service(token)
 
                 # Ensure property URL ends with / for API call
                 api_property_url = (

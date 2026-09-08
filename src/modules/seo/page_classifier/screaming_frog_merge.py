@@ -37,9 +37,10 @@ from src.modules.seo.page_classifier.schemas import (
     PrimaryPageType,
 )
 from src.modules.seo.page_classifier.screaming_frog_reconciler import (
+    ExportFormat,
     ReconciliationReport,
     ScreamingFrogRow,
-    load_screaming_frog_export,
+    load_cross_check_input,
     normalise,
     reconcile,
 )
@@ -146,17 +147,35 @@ def merge_reconciled_urls(output: PageClassificationOutput, export: bytes | str)
     does; one that nothing places lands in `OTHERS`, which is the correct and
     visible outcome rather than a hidden one.
 
+    A bare URL list never merges. It carries no status, indexability or content
+    type, so a URL it holds alone is `UNKNOWN` rather than a missed page, and
+    the report is returned with the input untouched — the same no-op contract
+    as an export that finds no gap. The guard is explicit rather than left to
+    `missed_pages` being empty, because that emptiness is a property of the
+    reason rules and this module must not depend on it silently.
+
     Args:
         output: The crawl to merge into. Not modified.
         export: An `Internal → HTML` export — raw `.xlsx`/`.csv` bytes from an
-            upload, or CSV text already decoded. The format is detected from the
-            content, so a renamed file still reads correctly.
+            upload, or CSV text already decoded — or a one-column URL list.
+            The format is detected from the content, so a renamed file still
+            reads correctly.
 
     Returns:
         The merged result, the reconciliation report, and the number added.
     """
-    rows = load_screaming_frog_export(export)
-    report = reconcile(output.base_url, tuple(page.url for page in output.pages), rows)
+    loaded = load_cross_check_input(export)
+    rows = loaded.rows
+    report = reconcile(
+        output.base_url,
+        tuple(page.url for page in output.pages),
+        rows,
+        source_format=loaded.source_format,
+    )
+
+    if loaded.source_format is ExportFormat.BARE_URL_LIST:
+        _logger.info("frog_merge_bare_list", extra={"base_url": output.base_url})
+        return MergeOutcome(output, report, 0)
 
     missed = report.missed_pages
     if not missed:

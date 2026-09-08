@@ -96,3 +96,7 @@ reports/
 # gate fails on code from another project. mypy is unaffected: it is scoped to
 # `src`.
 project-standards/
+
+# Evaluation copy of the RAE project: 9 GB, nested .git, 49 client crawls, and a
+# live .env. Read for its catalogue and filenames only; never committed.
+RAE - Copy/

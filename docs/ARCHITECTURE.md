@@ -45,10 +45,19 @@ src/
 │   └── server.py                # nothing below imports from it. Implements no
 │                                # safety control of its own — all inherited from
 │                                # BaseTool.run(). Binds 127.0.0.1.
+│                                # GET /api/v1/gsc/accounts lists profile names;
+│                                # admission refuses an unknown gsc_account (400)
 ├── integrations/                # External API wrappers
 │   ├── base_client.py           # Quota, retry, credential handling for all connectors
 │   ├── http_fetcher.py          # The ONLY outbound web fetcher. Enforces SSRF,
 │   │                            # robots, per-host throttling. Sync + async.
+│   ├── gsc_client.py            # Search Console API (read-only scope, ADR 0010).
+│   │                            # Takes `account=` to pick a named profile (ADR 0012)
+│   ├── gsc_token_manager.py     # OAuth refresh per profile; identity logged as
+│   │                            # oauth2://profile/<name>. Refresh is outside the
+│   │                            # retry loop so a revoked token fails once
+│   ├── gsc_property_validator.py# Property URL validation before any query
+│   ├── gsc_schemas.py           # GscOAuthToken (SecretStr), metrics rows, errors
 │   └── llm_client.py            # Provider-agnostic LLM interface + spend metering
 └── modules/                     # Domain engines
     ├── seo/
@@ -61,12 +70,32 @@ src/
     │       ├── discovery_parsers.py  # Sitemap XML, DOM links, CMS payloads
     │       ├── tree_visualizer.py    # Standalone interactive HTML site tree
     │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
-    │       │                         # crawl job, RiskClass.READ (ADR 0003)
+    │       │                         # crawl job, RiskClass.READ (ADR 0003).
+    │       │                         # Input carries gsc_account: the named
+    │       │                         # Search Console profile, or None (ADR 0012)
     │       ├── nav_tree_parser.py    # Header menu -> tree (footer excluded)
     │       ├── logical_hierarchy.py  # Maps URLs to menu sections; OTHERS bucket
     │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       └── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
+    │   ├── contracts/           # Seam between the crawler and client
+    │   │   │                    # deliverables (ADR 0011). Imports core only;
+    │   │   │                    # never page_classifier or deliverables
+    │   │   ├── issue_ids.py          # IssueCategory, Severity, Priority, IssueId
+    │   │   ├── catalogue.py          # IssueSpec + ISSUE_CATALOGUE (110 rows),
+    │   │   │                         # RAE_LABELS for the differential check
+    │   │   ├── url_normalizer.py     # UrlNormalizer Protocol: the key function
+    │   │   │                         # every adapter is handed, never imports
+    │   │   └── audit.py              # AuditDataset / AuditPage / AuditLink /
+    │   │                             # Coverage / AuditSource; four invariants
+    │   ├── deliverables/        # Producers of AuditDataset (ADR 0011). Imports
+    │   │   │                    # contracts and core only; an ast test pins that
+    │   │   │                    # it never imports page_classifier
+    │   │   ├── _bundle.py            # Guarded directory-or-zip access: traversal,
+    │   │   │                         # symlink, zip-bomb, nested-archive refusal
+    │   │   └── screaming_frog_adapter.py  # SF CSV export -> AuditDataset.
+    │   │                             # Absent file = NOT_MEASURED, header-only =
+    │   │                             # MEASURED; links never retained (D4)
     │   └── performance/         # GSC + GA4 joined onto a crawl. Pure domain:
     │       │                    # no I/O, no settings. Ingestion belongs in
     │       │                    # integrations/, persistence in the job store.
@@ -93,8 +122,9 @@ src/
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
-| `integrations/google_search_console.py`, `google_analytics.py` | No connector exists. Search Console data arrives only by **manual upload** (`POST /jobs/{id}/performance/gsc`); nothing fetches it. GA4 has no ingestion at all — see build-log 0042 |
+| `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
+| `page_classifier/audit_export.py` (P0-4), `tests/modules/seo/test_import_boundary.py` (P0-6), `scripts/diff_against_rae.py` (P0-7), `deliverables/rulebook.py` (Phase 1) | Remaining Phase 0 items of [DELIVERABLES_IMPLEMENTATION_PLAN.md](DELIVERABLES_IMPLEMENTATION_PLAN.md). P0-3/P0-5 (`deliverables/screaming_frog_adapter.py`, `_bundle.py`, the synthetic SF fixture) **are implemented** as of [build-log 0077](build-log/0077-screaming-frog-adapter-and-zip-guards.md). The engine adapter does not exist, so only a Screaming Frog export produces an `AuditDataset`; the boundary test covering `contracts/` and `page_classifier` directions is not written (this cycle's ast test covers `deliverables -> page_classifier` only) |
 
 > Two rows were removed from this table in cycle 0039 because they were false.
 > Crawl checkpointing **exists** (`CrawlCheckpointer`, cycle 0019) and
@@ -151,6 +181,10 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0005](adr/0005-llm-provider-strategy-and-cost-metering.md) | Provider-agnostic `LLMClient`; per-call spend metering |
 | [0006](adr/0006-weight-profile-seam-and-runtime-site-detection.md) | Signal weights vary by runtime-detected site profile, behind a seam |
 | [0007](adr/0007-dom-discovery-budget-reserve.md) | Reserve part of the crawl budget for DOM-only discoveries |
+| [0008](adr/0008-local-api-layer-and-job-store.md) | Local HTTP API as the outermost layer; durable job store |
+| [0010](adr/0010-gsc-api-security-and-safety-controls.md) | Search Console API security and safety controls |
+| [0011](adr/0011-deliverables-boundary-and-screaming-frog-input.md) | `AuditDataset` contract as the seam to deliverables; Screaming Frog is an input format, never a driven dependency |
+| [0012](adr/0012-gsc-account-profiles.md) | Named Search Console profiles as `GSC_ACCOUNTS__<name>__*` env keys; a crawl selects one by name; the API publishes names only, never credentials; unknown name is refused, never defaulted |
 
 ---
 

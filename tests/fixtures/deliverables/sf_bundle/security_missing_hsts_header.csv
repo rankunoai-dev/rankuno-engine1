@@ -1,0 +1,2 @@
+﻿"Address","Content Type","Status Code","Status","HTTP Version","Indexability","Indexability Status","Canonical Link Element 1","Meta Robots 1","X-Robots-Tag 1"
+"https://example.com/","text/html; charset=utf-8","200","OK","HTTP/1.1","Indexable","","https://example.com/","index, follow",""

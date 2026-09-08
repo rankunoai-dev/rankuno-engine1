@@ -1,0 +1,3 @@
+﻿"Type","Source","Destination","Size (Bytes)","Alt Text","Anchor","Status Code","Status","Follow","Target","Rel","Path Type","Link Path","Link Position","Link Origin"
+"Hyperlink","https://example.com/","https://example.com/old-page/","","","Read more, here","404","Not Found","true","","","Absolute","/html/body/a","Content","HTML"
+"Hyperlink","https://example.com/blog/post-1/","https://example.com/old-page/","","","Read more, here","404","Not Found","true","","","Absolute","/html/body/a","Content","HTML"

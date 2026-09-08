@@ -269,6 +269,18 @@ export class HttpAdapter implements CrawlDataAdapter {
     }
   }
 
+  /**
+   * Profile names the engine will accept in `gsc_account`, sorted.
+   *
+   * Not cached: a profile is added by editing `.env.local` and restarting the
+   * engine, and a picker holding yesterday's list would offer a name the
+   * engine now refuses.
+   */
+  async listGscAccounts(): Promise<string[]> {
+    const view = await this.request<{ accounts: string[] }>("/gsc/accounts");
+    return view.accounts;
+  }
+
   async startJob(request: PageClassificationInput): Promise<string> {
     const accepted = await this.request<{ id: string }>("/jobs", {
       method: "POST",

@@ -16,7 +16,7 @@ Integrated GSC metrics aggregation into the crawl tool. Tool now accepts optiona
 
 ## Files Changed
 
-### 1. [src/modules/seo/page_classifier/schemas.py](src/modules/seo/page_classifier/schemas.py) (EXTENDED)
+### 1. [src/modules/seo/page_classifier/schemas.py](../../src/modules/seo/page_classifier/schemas.py) (EXTENDED)
 Added four optional fields to `FullPageIntelligenceProfile`:
 - `gsc_clicks: int | None` — Clicks from GSC
 - `gsc_impressions: int | None` — Impressions from GSC
@@ -25,7 +25,7 @@ Added four optional fields to `FullPageIntelligenceProfile`:
 
 All default to `None` (populated only when enrichment succeeds).
 
-### 2. [src/modules/seo/page_classifier/tool.py](src/modules/seo/page_classifier/tool.py) (EXTENDED)
+### 2. [src/modules/seo/page_classifier/tool.py](../../src/modules/seo/page_classifier/tool.py) (EXTENDED)
 **Changes**:
 - Added `gsc_property_url: str | None` parameter to `PageClassificationInput`
 - Added `_enrich_with_gsc()` method to orchestrate enrichment
@@ -49,14 +49,14 @@ def _enrich_with_gsc(
 5. Populate `gsc_*` fields on enriched pages
 6. Return enriched pages or original pages if any error occurs
 
-### 3. [rankuno-ui/src/types/schema.ts](rankuno-ui/src/types/schema.ts) (REGENERATED)
+### 3. [rankuno-ui/src/types/schema.ts](../../rankuno-ui/src/types/schema.ts) (REGENERATED)
 UI type contract regenerated to include new `gsc_*` fields. Generated via `scripts/export_ui_contract.py`.
 
 ---
 
 ## Tests Created
 
-### [tests/modules/seo/page_classifier/test_tool_gsc_integration.py](tests/modules/seo/page_classifier/test_tool_gsc_integration.py) (NEW)
+### [tests/modules/seo/page_classifier/test_tool_gsc_integration.py](../../tests/modules/seo/page_classifier/test_tool_gsc_integration.py) (NEW)
 **7 test cases** across 4 test classes:
 
 **Success Path** (2 tests):

@@ -392,7 +392,9 @@ def main() -> int:
 
     for path, content in outputs:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        # `newline` pinned: on Windows `write_text` would emit CRLF, and the
+        # repository mandates LF for this file (`.gitattributes`).
+        path.write_text(content, encoding="utf-8", newline="\n")
         print(f"wrote {path.relative_to(REPO_ROOT)}  ({len(content.splitlines())} lines)")
     return 0
 

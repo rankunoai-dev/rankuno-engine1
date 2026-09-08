@@ -87,6 +87,40 @@ Three findings the view surfaces without anyone asking:
    numbers are true; the chip is what lets the analyst choose which question
    they are asking.
 
+## 4b. OTHERS regrouped by URL folder, with FLAT_URLS
+
+Requested on seeing the panel: *"I don't want the explicitly defined
+category; club the URLs on the basis of folder structure, and an explicit
+FLAT_URLS category under OTHERS for URLs with no folder."*
+
+Measured first, on the same job's 1,781 OTHERS pages: **80 flat** (`/cookie-
+policy`, `/privacy-statement`, `/grid`, the four locale homepages — 4,096
+clicks between them), the rest in **59 folders up to five deep** —
+`mind/blog/tag` 770, `prod/s3fs-public/files/newsroom/docs` 206, `podcasts`
+155, `bulletins` 145, `partners` 59, `company` 55. `OTHERS > UNKNOWN 1,603`
+hid all of that.
+
+Done in the UI (`navTree.othersTrail`), not the engine. `logical_hierarchy.py`
+still writes `nav_path = (OTHERS, page_type)`; the tree replaces that trail
+with the URL's folders — locale prefix dropped because the locale is already
+the root, last segment dropped because it is the page — or with `FLAT_URLS`
+when nothing is left. Every one of the 155 stored jobs regroups without a
+re-crawl, and the page type stays on each row's chip and in the inspector.
+`FLAT_URLS` sorts last under OTHERS, as OTHERS sorts last among sections.
+
+The OTHERS panel's bucket is now read by walking up from the page to the child
+of OTHERS on screen, not from the engine's trail — the two no longer agree,
+and the panel must describe the tree beside it.
+
+Live, after the change: `mind` 772 pages, 342 SF-missed, **0 clicks** on
+7,163 impressions (a tag-archive silo); `/strategy/` 59 unplaced pages with
+440 clicks while the `Strategy` menu section holds 3.
+
+**Correction to the record**: this section and its tests were written on
+2026-09-07, lost twice to the parallel session's `git stash` / history
+rewrite (`30f9284` → `e71e506`), and re-applied on 2026-09-08. The source
+change (`navTree.ts`) survived in `e71e506`; the tests and this text did not.
+
 ## 5. Bugs found and fixed
 
 - **Ancestors vanish under a leaf filter.** The first shape of "missed only"

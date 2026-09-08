@@ -192,6 +192,7 @@ resolutions. **Follow the "Ruling" column, not the source documents.**
 These were gaps and are now implemented and tested — do not re-report them:
 
 - `src/core/url_safety.py` — SSRF guard (52 tests).
+- `src/core/logger.py` — `get_logger` dropped every caller `extra=` field on Python 3.11 (stock `LoggerAdapter.process` replaced it); now merged, caller keys win (6 tests).
 - `src/core/robots.py` — robots.txt + crawl-delay, RFC 9309 specificity (43 tests).
 - `AsyncTokenBucket` / `AsyncRateLimiterRegistry` for in-crawl politeness.
 - `src/integrations/base_client.py` — was 0% coverage, now exercised at 89%.

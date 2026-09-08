@@ -20,6 +20,7 @@ from src.modules.seo.page_classifier.schemas import (
     SignalSource,
 )
 from src.modules.seo.page_classifier.screaming_frog_merge import merge_reconciled_urls
+from src.modules.seo.page_classifier.screaming_frog_reconciler import ExportFormat
 from src.modules.seo.page_classifier.tool import CrawlSummary, PageClassificationOutput
 from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
 
@@ -192,3 +193,47 @@ class TestTotalsStayCoherent:
         # `/a/` and `/b/` are in the crawl and absent from the export.
         assert report.engine_urls == 2
         assert len(report.engine_only) == 2
+
+
+class TestABareListNeverMerges:
+    """A one-column URL list has no evidence that any URL is a live page.
+
+    It is accepted for the set comparison, and only for that. Merging from it
+    would place pages in the tree on the strength of a spreadsheet cell.
+    """
+
+    LIST = "HTML Pages\nhttps://www.e.com/a/\nhttps://www.e.com/c/\nhttps://www.e.com/d/\n"
+
+    def test_nothing_merges_and_the_input_is_returned_unchanged(self, crawl):
+        outcome = merge_reconciled_urls(crawl, self.LIST)
+        assert outcome.merged == 0
+        assert outcome.output is crawl
+
+    def test_the_report_declares_the_format_and_holds_only_unknowns(self, crawl):
+        outcome = merge_reconciled_urls(crawl, self.LIST)
+        report = outcome.report
+        assert report.source_format is ExportFormat.BARE_URL_LIST
+        assert report.in_both == 1
+        assert report.frog_reasons == {"UNKNOWN": 2}
+        assert report.missed_pages == ()
+
+    def test_a_workbook_list_behaves_the_same(self, crawl):
+        import io as _io
+
+        import openpyxl
+
+        book = openpyxl.Workbook()
+        sheet = book.active
+        for line in ("HTML Pages", "https://www.e.com/c/"):
+            sheet.append([line])
+        buffer = _io.BytesIO()
+        book.save(buffer)
+        outcome = merge_reconciled_urls(crawl, buffer.getvalue())
+        assert outcome.merged == 0
+        assert outcome.report.source_format is ExportFormat.BARE_URL_LIST
+
+    def test_a_real_export_still_merges(self, crawl):
+        """The new path must not have widened the no-merge rule."""
+        outcome = merge_reconciled_urls(crawl, csv_of(live("https://www.e.com/c/")))
+        assert outcome.merged == 1
+        assert outcome.report.source_format is ExportFormat.INTERNAL_HTML

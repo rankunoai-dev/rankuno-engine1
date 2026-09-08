@@ -324,6 +324,8 @@ export interface PageClassificationInput {
   dom_reserve_fraction: number;
   /** Optional GSC property URL for metrics enrichment (Phase 6) */
   gsc_property_url: string | null;
+  /** Named GSC account profile from GSC_ACCOUNTS__<name>__* in .env.local; None uses the default credentials */
+  gsc_account: string | null;
 }
 
 /** Everything one crawl job produced. */

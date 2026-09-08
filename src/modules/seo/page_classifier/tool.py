@@ -239,6 +239,23 @@ class PageClassificationInput(StrictModel):
     )
     """If provided, fetch GSC metrics and enrich pages with clicks, impressions, position, CTR."""
 
+    gsc_account: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9_-]+$",
+        description=(
+            "Named GSC account profile from GSC_ACCOUNTS__<name>__* in .env.local; "
+            "None uses the default credentials"
+        ),
+    )
+    """Which authorised Google account reads Search Console for this crawl.
+
+    A name, never a credential: the request is persisted under `.jobs/` and
+    replayed by retry, so anything secret here would be written to disk. An
+    unknown name is refused, not defaulted — querying the wrong client's
+    property is worse than no enrichment."""
+
 
 class CrawlSummary(StrictModel):
     """Aggregate outcome of one crawl.
@@ -492,7 +509,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             return pages
 
         try:
-            client = GscApiClient()
+            client = GscApiClient(account=payload.gsc_account)
             response = client.fetch_analytics(
                 property_url=payload.gsc_property_url,
                 start_date="2026-01-01",
@@ -537,6 +554,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             _logger.info(
                 "gsc_enrichment_complete",
                 extra={
+                    "account": payload.gsc_account,
                     "matched": len([p for p in enriched_pages if p.gsc_clicks is not None]),
                     "unmatched_gsc": len(result.unmatched_gsc_urls),
                 },
@@ -547,7 +565,10 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         except Exception as exc:  # noqa: BLE001 - GSC failure must not fail the crawl
             _logger.warning(
                 "gsc_enrichment_failed",
-                extra={"error": str(exc)},
+                # The account name and the error class only. A token-endpoint
+                # failure already redacts its body, and a transport error's
+                # text can quote the request that carried the refresh token.
+                extra={"account": payload.gsc_account, "error": type(exc).__name__},
             )
             return pages
 

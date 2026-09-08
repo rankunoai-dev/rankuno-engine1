@@ -16,7 +16,7 @@ Integrated GSC metrics into the UI for analyst consumption. Created reusable com
 
 ## Files Created
 
-### 1. [rankuno-ui/src/lib/gscMetrics.ts](rankuno-ui/src/lib/gscMetrics.ts) (NEW)
+### 1. [rankuno-ui/src/lib/gscMetrics.ts](../../rankuno-ui/src/lib/gscMetrics.ts) (NEW)
 **Utilities for GSC data display and analysis**:
 
 **GscMetricsFormatter**:
@@ -43,7 +43,7 @@ Integrated GSC metrics into the UI for analyst consumption. Created reusable com
 - Filters out "no opportunity" entries
 - Ready for summary display
 
-### 2. [rankuno-ui/src/components/gsc/GscMetricsCard.tsx](rankuno-ui/src/components/gsc/GscMetricsCard.tsx) (NEW)
+### 2. [rankuno-ui/src/components/gsc/GscMetricsCard.tsx](../../rankuno-ui/src/components/gsc/GscMetricsCard.tsx) (NEW)
 **Page-level GSC metrics display**:
 
 **What it shows**:
@@ -64,7 +64,7 @@ Integrated GSC metrics into the UI for analyst consumption. Created reusable com
 - 2-column grid for 4 metrics
 - Hints explain what each color means
 
-### 3. [rankuno-ui/src/components/gsc/GscPerformanceSection.tsx](rankuno-ui/src/components/gsc/GscPerformanceSection.tsx) (NEW)
+### 3. [rankuno-ui/src/components/gsc/GscPerformanceSection.tsx](../../rankuno-ui/src/components/gsc/GscPerformanceSection.tsx) (NEW)
 **Crawl summary GSC metrics**:
 
 **What it shows**:
@@ -83,7 +83,7 @@ Integrated GSC metrics into the UI for analyst consumption. Created reusable com
 - Alert system flags issues
 - Opportunity list shows paths + score
 
-### 4. [rankuno-ui/src/components/gsc/gsc.css](rankuno-ui/src/components/gsc/gsc.css) (NEW)
+### 4. [rankuno-ui/src/components/gsc/gsc.css](../../rankuno-ui/src/components/gsc/gsc.css) (NEW)
 **Styling for GSC components**:
 - Color-coded values (green/yellow/orange/red)
 - Alert boxes (critical/warning/info)
@@ -96,19 +96,19 @@ Integrated GSC metrics into the UI for analyst consumption. Created reusable com
 
 ## Files Modified
 
-### 1. [rankuno-ui/src/components/inspector/NodeInspector.tsx](rankuno-ui/src/components/inspector/NodeInspector.tsx)
+### 1. [rankuno-ui/src/components/inspector/NodeInspector.tsx](../../rankuno-ui/src/components/inspector/NodeInspector.tsx)
 **Added**:
 - Import `GscMetricsCard`
 - Render `<GscMetricsCard page={profile} />` after classification fields
 - Shows GSC signals when profile exists
 
-### 2. [rankuno-ui/src/components/report/CrawlReport.tsx](rankuno-ui/src/components/report/CrawlReport.tsx)
+### 2. [rankuno-ui/src/components/report/CrawlReport.tsx](../../rankuno-ui/src/components/report/CrawlReport.tsx)
 **Added**:
 - Import `GscPerformanceSection`
 - Extract pages: `model.nodes.filter(n => n.profile).map(n => n.profile!)`
 - Render section after KPI table, before "Sections" heading
 
-### 3. [rankuno-ui/src/components/audit/AuditView.tsx](rankuno-ui/src/components/audit/AuditView.tsx)
+### 3. [rankuno-ui/src/components/audit/AuditView.tsx](../../rankuno-ui/src/components/audit/AuditView.tsx)
 **Modified exportFinding()**:
 - Add GSC columns: `gsc_clicks`, `gsc_impressions`, `gsc_avg_position`, `gsc_ctr_%`
 - Convert CTR to percentage (×100)

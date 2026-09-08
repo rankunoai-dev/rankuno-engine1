@@ -51,6 +51,7 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from pydantic import Field, ValidationError
 
+from src.core.config import get_settings
 from src.core.errors import UnsafeUrlError
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
@@ -342,6 +343,15 @@ GAP_MEANINGS: Mapping[str, str] = MappingProxyType(
         "REPEATED_SUFFIX_TRAP": "One page at many fabricated addresses, from a relative href.",
         "MALFORMED_MARKUP": "Built from broken HTML on the site. Never a URL.",
         "QUERY_VARIANT": "The same path with a query string the other crawler collapsed.",
+        "PDF_FILE": (
+            "A PDF this crawl found in the sitemap or by link. "
+            "Screaming Frog lists documents separately."
+        ),
+        "PRESENTATION_FILE": (
+            "A PowerPoint or similar deck. Screaming Frog lists documents separately."
+        ),
+        "SPREADSHEET_FILE": "An Excel or CSV file. Screaming Frog lists documents separately.",
+        "OTHER_FILE": "A Word document, archive, media or other non-HTML file.",
     }
 )
 """Plain-language gloss for each gap reason, for the downloadable report.
@@ -582,6 +592,11 @@ SHEET_TITLES: Mapping[str, str] = MappingProxyType(
         # The two findings.
         "MISSED_PAGE": "Missed pages",
         "SITEMAP_ORPHAN": "Orphans",
+        # Files this engine crawls and Screaming Frog's HTML tab does not list.
+        "PDF_FILE": "PDF files",
+        "PRESENTATION_FILE": "Presentations",
+        "SPREADSHEET_FILE": "Spreadsheets",
+        "OTHER_FILE": "Other files",
         # Everything else is a difference with an explanation.
         "CLIENT_ERROR": "4xx and 5xx",
         "REDIRECT": "Redirect sources",
@@ -644,6 +659,18 @@ class ReconciliationSummary(StrictModel):
 
     engine_reasons: Mapping[str, int] = Field(default_factory=dict)
     """Why each engine-only URL is absent from the export, by reason."""
+
+
+class GscAccountsView(StrictModel):
+    """Which Search Console profiles a crawl may name.
+
+    Names only. The profile behind a name holds a refresh token, and this is
+    the one endpoint that reads the profile table, so the shape is fixed to a
+    list of strings rather than a serialised `Settings` sub-tree that a later
+    field could quietly widen.
+    """
+
+    accounts: list[str]
 
 
 class JobAccepted(StrictModel):
@@ -821,9 +848,16 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         # A job left RUNNING by a killed process has no worker any more. Nothing
         # would ever move it, and a polling UI would wait forever.
-        orphans = resolved_store.recover_orphans()
-        if orphans:
-            _logger.warning("recovered_orphaned_jobs", extra={"count": len(orphans)})
+        # Recover orphans asynchronously so startup does not block on large job stores.
+        def _recover_in_bg() -> None:
+            try:
+                orphans = resolved_store.recover_orphans()
+                if orphans:
+                    _logger.warning("recovered_orphaned_jobs", extra={"count": len(orphans)})
+            except Exception as e:
+                _logger.error("orphan_recovery_failed", extra={"error": str(e)})
+
+        threading.Thread(target=_recover_in_bg, daemon=True).start()
         yield
 
     app = FastAPI(
@@ -857,6 +891,11 @@ def create_app(
             max_concurrent_jobs=state.max_concurrent_jobs,
         )
 
+    @app.get(f"{API_PREFIX}/gsc/accounts", response_model=GscAccountsView)
+    def list_gsc_accounts() -> GscAccountsView:
+        """Profile names a crawl may select, sorted. Empty when none are configured."""
+        return GscAccountsView(accounts=sorted(get_settings().gsc_account_names()))
+
     @app.post(
         f"{API_PREFIX}/jobs", response_model=JobAccepted, status_code=status.HTTP_202_ACCEPTED
     )
@@ -866,8 +905,9 @@ def create_app(
         `202`, never `200`: nothing has been crawled when this returns.
 
         Raises:
-            HTTPException: `400` if the URL fails SSRF validation, `429` if no
-                concurrency slot is free.
+            HTTPException: `400` if the URL fails SSRF validation or the named
+                GSC account is not configured, `429` if no concurrency slot is
+                free.
         """
         return _start(payload, payload.base_url)
 
@@ -955,6 +995,23 @@ def create_app(
         except UnsafeUrlError as exc:
             _logger.warning("job_rejected_unsafe_url", extra={"url": payload.base_url})
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        # The same argument applies to the Search Console profile. A retry or
+        # resume replays a stored name, and a profile can be removed from
+        # `.env.local` between runs. Refused here rather than left for the
+        # enrichment step, which degrades gracefully and would report the
+        # missing account as "no search data" — and never defaulted, because
+        # reading the wrong client's property is worse than a failed crawl.
+        if payload.gsc_account is not None:
+            known = get_settings().gsc_account_names()
+            if payload.gsc_account not in known:
+                _logger.warning(
+                    "job_rejected_unknown_gsc_account", extra={"account": payload.gsc_account}
+                )
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail=f"unknown GSC account '{payload.gsc_account}'",
+                )
 
         # Capacity is claimed *before* the record exists. The other order
         # persisted a job for every refusal and immediately marked it failed, so
@@ -1822,7 +1879,14 @@ def create_app(
         # cross-check `MEDIA_URL` is 16,162 of 16,337 rows, so by size alone the
         # 15 pages the crawl missed would sit at the far end of the workbook.
         def rank(reason: str) -> tuple[int, int]:
-            lead = {"MISSED_PAGE": 0, "SITEMAP_ORPHAN": 1}.get(reason, 2)
+            lead = {
+                "MISSED_PAGE": 0,
+                "SITEMAP_ORPHAN": 1,
+                "PDF_FILE": 2,
+                "PRESENTATION_FILE": 3,
+                "SPREADSHEET_FILE": 4,
+                "OTHER_FILE": 5,
+            }.get(reason, 6)
             return (lead, -len(buckets[reason]))
 
         ordered = sorted(buckets, key=rank)

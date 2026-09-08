@@ -33,11 +33,28 @@ const FROG_REASONS: Record<string, string> = {
   MEDIA_URL: "Images, scripts, stylesheets — refused by design",
   SPIDER_TRAP: "Relative-href crawl loops — refused by design",
   NON_INDEXABLE: "Live but canonicalised elsewhere or noindex",
+  UNKNOWN: "In the URL list, not in the crawl — a bare list carries no status, so nothing more can be said",
 };
+
+/**
+ * Whether the cross-check was run against a bare URL list rather than an export.
+ *
+ * The engine's reconciler records this on its report, but the API summary does
+ * not forward it yet, so the `UNKNOWN` reason — which only a bare list
+ * produces — is the fallback signal. Both are checked so the panel is right
+ * today and stays right when the field arrives.
+ */
+function isBareList(summary: ReconciliationSummary): boolean {
+  return summary.source_format === "BARE_URL_LIST" || "UNKNOWN" in summary.frog_reasons;
+}
 
 const ENGINE_REASONS: Record<string, string> = {
   SITEMAP_ORPHAN: "Published, and no internal link reaches them — the finding",
   QUERY_VARIANT: "Same path with a query string Screaming Frog collapsed",
+  PDF_FILE: "PDFs. Screaming Frog lists documents on its own tab, not under HTML",
+  PRESENTATION_FILE: "Slide decks (.ppt, .pptx). Listed separately by Screaming Frog",
+  SPREADSHEET_FILE: "Workbooks and CSVs. Listed separately by Screaming Frog",
+  OTHER_FILE: "Other files (Word, archives, media). Not HTML pages",
   REPEATED_SUFFIX_TRAP: "Fabricated by a relative-href loop — our defect",
   MALFORMED_MARKUP: "Built from broken HTML on the site — not URLs at all",
 };
@@ -194,6 +211,12 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
             here. Nothing is uploaded anywhere: the file is read in your browser
             and posted to the local engine on this machine.
           </p>
+          <p className="jb-dim">
+            A plain <b>list of URLs</b> — one column, with or without a heading
+            such as <i>HTML Pages</i> — is also accepted. It is compared as a set
+            only: a bare list carries no status, indexability or content type,
+            so nothing in it can be called a missed page and nothing is merged.
+          </p>
           <Upload.Dragger
             accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             maxCount={1}
@@ -274,6 +297,7 @@ function GapReport({
   jobId: string;
 }): JSX.Element {
   const site = hostSlug(summary.base_url);
+  const bareList = isBareList(summary);
   /** `gep.com-missed-pages.csv` — named for the site and the figure. */
   const name = (part: string) => `${site}-${part}.csv`;
   const rows = (
@@ -325,6 +349,19 @@ function GapReport({
         />
       </div>
 
+      {bareList && (
+        /* Said before the counts, because on a bare list "Pages we missed: 0"
+           is true and misleading — the file had no evidence to find a miss
+           with, which is not the same as there being none. */
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Compared against a bare URL list, not a Screaming Frog export."
+          description="The list carries no status, indexability or content type. URLs it holds that the crawl does not are marked UNKNOWN rather than missed, and nothing was merged."
+        />
+      )}
+
       {summary.merged > 0 ? (
         <Alert
           type="success"
@@ -337,7 +374,11 @@ function GapReport({
           type="info"
           showIcon
           message="Nothing to merge — no new job was created."
-          description="Every live, in-scope page in the export was already in the crawl."
+          description={
+            bareList
+              ? "A bare list is never merged: it gives no evidence that a URL is a live page."
+              : "Every live, in-scope page in the export was already in the crawl."
+          }
         />
       )}
 

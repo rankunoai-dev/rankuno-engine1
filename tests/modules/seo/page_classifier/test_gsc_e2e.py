@@ -464,3 +464,50 @@ class TestGscE2eDataIntegrity:
 
         # Second page (test) unmatched
         assert enriched[1].gsc_clicks is None
+
+
+class TestGscAccountSelection:
+    """The crawl's named profile reaches the client; nothing else decides it."""
+
+    @staticmethod
+    def _empty_response() -> GscAnalyticsResponse:
+        return GscAnalyticsResponse(
+            property_url="https://example.com",
+            start_date="2026-01-01",
+            end_date="2026-12-31",
+            rows=[],
+        )
+
+    def test_enrichment_passes_account_to_client(self, tool, minimal_crawl):
+        """`gsc_account="acme"` constructs the client for that profile."""
+        payload = PageClassificationInput(
+            base_url="https://example.com",
+            gsc_property_url="https://example.com",
+            gsc_account="acme",
+        )
+        with patch("src.modules.seo.page_classifier.tool.GscApiClient") as mock_client:
+            mock_client.return_value.fetch_analytics.return_value = self._empty_response()
+            tool._enrich_with_gsc(tuple(minimal_crawl), payload)
+
+        mock_client.assert_called_once_with(account="acme")
+
+    def test_enrichment_default_account_is_none(self, tool, minimal_crawl):
+        """No profile named means the flat default credentials, explicitly."""
+        payload = PageClassificationInput(
+            base_url="https://example.com",
+            gsc_property_url="https://example.com",
+        )
+        assert payload.gsc_account is None
+        with patch("src.modules.seo.page_classifier.tool.GscApiClient") as mock_client:
+            mock_client.return_value.fetch_analytics.return_value = self._empty_response()
+            tool._enrich_with_gsc(tuple(minimal_crawl), payload)
+
+        mock_client.assert_called_once_with(account=None)
+
+    @pytest.mark.parametrize("bad", ["Acme", "a b", "x" * 65, ""])
+    def test_account_name_shape_is_enforced_at_the_boundary(self, bad: str):
+        """Names the settings validator would reject never reach the engine."""
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            PageClassificationInput(base_url="https://example.com", gsc_account=bad)

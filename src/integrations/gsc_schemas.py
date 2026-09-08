@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 
 from src.core.schemas import StrictModel
 
@@ -116,8 +116,14 @@ class GscAnalyticsResponse(StrictModel):
 class GscOAuthToken(StrictModel):
     """OAuth 2.0 token state for GSC API access."""
 
-    access_token: str = Field(..., description="Access token (bearer token for API calls)")
-    refresh_token: str | None = Field(
+    access_token: SecretStr = Field(
+        ...,
+        description=(
+            "Access token (bearer token for API calls). SecretStr so a state dump "
+            "written to a log masks it."
+        ),
+    )
+    refresh_token: SecretStr | None = Field(
         default=None,
         description="Refresh token (used to acquire new access token when expired)",
     )

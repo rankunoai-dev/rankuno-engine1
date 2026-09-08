@@ -262,6 +262,35 @@ describe("ReconcilePanel", () => {
     expect(screen.getByText(/no internal link reaches them/)).toBeInTheDocument();
   });
 
+  it("offers a bare URL list as an input and states its limitation", () => {
+    stubReconcile();
+    open();
+    expect(screen.getByText(/list of URLs/)).toBeInTheDocument();
+    expect(screen.getByText(/nothing is merged/)).toBeInTheDocument();
+  });
+
+  it("says the comparison was against a bare list, not an export", async () => {
+    /*
+     * On a bare list "Pages we missed: 0" is true and misleading: the file had
+     * no status to find a miss with. Only a bare list produces `UNKNOWN`, so
+     * its presence is enough to say so even before the API forwards the
+     * reconciler's format marker.
+     */
+    stubReconcile({
+      ...SUMMARY,
+      merged: 0,
+      missed_pages: 0,
+      job_id: "job-1",
+      frog_reasons: { UNKNOWN: 30 },
+    });
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, csvFile(1024, "HTML Pages\nhttps://e.com/a/"));
+
+    expect(await screen.findByText(/Compared against a bare URL list/)).toBeInTheDocument();
+    expect(screen.getByText(/A bare list is never merged/)).toBeInTheDocument();
+    expect(screen.getByText(/a bare list carries no status/)).toBeInTheDocument();
+  });
+
   it("says so when there is nothing to merge, instead of implying a new job", async () => {
     stubReconcile({ ...SUMMARY, merged: 0, missed_pages: 0, job_id: "job-1" });
     const { baseElement } = open();
@@ -277,6 +306,21 @@ describe("ReconcilePanel", () => {
     dropFile(baseElement as HTMLElement, csvFile(1024));
 
     expect(await screen.findByText(/Open merged tree/)).toBeInTheDocument();
+  });
+
+  it("explains a document reason instead of leaving the meaning blank", async () => {
+    /*
+     * On infosys.com 7,356 of 8,383 engine-only URLs became `PDF_FILE`. A row
+     * showing that count beside "—" would be the largest line in the table with
+     * no explanation.
+     */
+    stubReconcile({ ...SUMMARY, engine_reasons: { SITEMAP_ORPHAN: 340, PDF_FILE: 7356 } });
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, csvFile(1024));
+
+    expect(await screen.findByText(/merged into the tree/)).toBeInTheDocument();
+    expect(screen.getByText("PDF_FILE")).toBeInTheDocument();
+    expect(screen.getByText(/lists documents on its own tab/)).toBeInTheDocument();
   });
 
   it("reports a failed reconciliation instead of hanging on the spinner", async () => {

@@ -38,6 +38,15 @@ Screaming Frog exports both `.csv` and `.xlsx`. Only CSV is read here, because
 `openpyxl` is not a declared dependency of this project — it is present in one
 developer's environment through an unrelated package, and building on that would
 fail a clean checkout with an ImportError instead of a message.
+
+A bare URL list is a second, weaker input
+-----------------------------------------
+A one-column list of URLs — a client masterfile tab headed `HTML Pages`, or a
+headerless dump — is accepted through `load_cross_check_input` as a declared
+`ExportFormat.BARE_URL_LIST`. The set comparison runs unchanged, but the file
+carries no status, indexability or content type, so every URL it holds alone
+is `FrogGapReason.UNKNOWN` rather than a missed page, and nothing from it is
+ever merged. A list proves a URL was written down, not that it is a page.
 """
 
 from __future__ import annotations
@@ -53,6 +62,7 @@ from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.modules.seo.page_classifier.bare_url_list import bare_url_list
 from src.modules.seo.page_classifier.url_rules import (
     NON_PAGE_SUFFIXES,
     is_spider_trap,
@@ -61,13 +71,17 @@ from src.modules.seo.page_classifier.url_rules import (
 
 __all__ = [
     "MIN_TAIL_REPEATS",
+    "CrossCheckInput",
     "EngineGapReason",
+    "ExportFormat",
     "FrogGapReason",
+    "NotAnExportError",
     "ReconciliationReport",
     "ScreamingFrogRow",
     "UrlGap",
     "MissedPageCheck",
     "MissedPageStatus",
+    "load_cross_check_input",
     "load_screaming_frog_csv",
     "load_screaming_frog_export",
     "normalise",
@@ -100,6 +114,36 @@ highradius.com publishes an unclosed anchor that the resolver turned into the
 address `…/highradius-launches-livecube/<a href=`. 91 URLs on one crawl.
 """
 
+_PDF_SUFFIXES = (".pdf",)
+"""The one format big enough to own a sheet: 7,610 of infosys.com's 8,383
+engine-only URLs were PDFs, and every one sat in the Orphans sheet."""
+
+_PRESENTATION_SUFFIXES = (".ppt", ".pptx", ".pptm", ".pps", ".ppsx", ".odp", ".key")
+
+_SPREADSHEET_SUFFIXES = (".xls", ".xlsx", ".xlsm", ".csv", ".ods")
+
+_OTHER_FILE_SUFFIXES = NON_PAGE_SUFFIXES + (
+    ".doc",
+    ".docx",
+    ".docm",
+    ".rtf",
+    ".odt",
+    ".txt",
+    ".epub",
+    # Legacy streaming media, still linked from infosys.com's 2001-2004
+    # investor archive. Not in `NON_PAGE_SUFFIXES`, so discovery kept them.
+    ".asx",
+    ".asf",
+    ".rm",
+)
+"""Everything else that is a file rather than a page.
+
+An explicit allowlist, not "any dotted final segment": `.html`, `.aspx` and
+`.htm` are pages, and infosys.com publishes e-mail addresses as path segments
+(`…/techcompass/name@infosys.com`) that a suffix-agnostic rule would file as
+`.com` documents. Unlisted suffixes fall through to the page rules.
+"""
+
 
 class FrogGapReason(StrEnum):
     """Why Screaming Frog holds a URL this engine does not."""
@@ -127,6 +171,37 @@ class FrogGapReason(StrEnum):
     """Live, indexable, in scope — and never found. The only reason here that
     describes a defect rather than a difference."""
 
+    UNKNOWN = "UNKNOWN"
+    """The input was a bare URL list, which carries no status, indexability or
+    content type. Nothing can be said about the URL beyond its absence from the
+    crawl — it is not a missed page, and must not be read as one."""
+
+
+class ExportFormat(StrEnum):
+    """What kind of file the cross-check was run against.
+
+    Recorded on the report rather than inferred from the reasons, because a
+    bare list whose every URL the crawl already holds produces no `UNKNOWN`
+    row at all — and the reader would otherwise take a set comparison with no
+    status evidence for a full export that found nothing.
+    """
+
+    INTERNAL_HTML = "INTERNAL_HTML"
+    """A Screaming Frog `Internal → HTML` export, with per-URL status."""
+
+    BARE_URL_LIST = "BARE_URL_LIST"
+    """One column of URLs and nothing else. Set comparison only; no merge."""
+
+
+class NotAnExportError(ValueError):
+    """The file parsed, but has no `Address` column.
+
+    A subclass rather than a bare `ValueError` so `load_cross_check_input` can
+    tell "wrong export tab" — where a bare list is worth trying — from "not a
+    CSV at all" or "not a workbook", where it is not. The message is unchanged;
+    only the type is narrower.
+    """
+
 
 class EngineGapReason(StrEnum):
     """Why this engine holds a URL Screaming Frog does not."""
@@ -144,6 +219,19 @@ class EngineGapReason(StrEnum):
     SITEMAP_ORPHAN = "SITEMAP_ORPHAN"
     """A real published page with no internal link pointing at it. A
     link-following crawler cannot see these; this is the finding."""
+
+    PDF_FILE = "PDF_FILE"
+    """A PDF. Screaming Frog lists documents under its own tab, so a set
+    comparison against the HTML export always shows them as engine-only."""
+
+    PRESENTATION_FILE = "PRESENTATION_FILE"
+    """A slide deck: `.ppt`, `.pptx` and their relatives."""
+
+    SPREADSHEET_FILE = "SPREADSHEET_FILE"
+    """A workbook or CSV."""
+
+    OTHER_FILE = "OTHER_FILE"
+    """Any other non-HTML file: Word documents, archives, media."""
 
 
 class ScreamingFrogRow(StrictModel):
@@ -196,6 +284,10 @@ class ReconciliationReport(StrictModel):
         frog_reasons: Counts per `FrogGapReason`, summing to `len(frog_only)`.
         engine_reasons: Counts per `EngineGapReason`, summing to
             `len(engine_only)`.
+        source_format: What the other side of the comparison was. A bare list
+            makes `frog_only` a list of unknowns and `missed_pages` empty by
+            construction, and the summary must say so rather than let a zero
+            read as "nothing missed".
     """
 
     base_url: str = Field(min_length=1)
@@ -208,6 +300,7 @@ class ReconciliationReport(StrictModel):
     engine_only: tuple[UrlGap, ...] = ()
     frog_reasons: dict[str, int] = Field(default_factory=dict)
     engine_reasons: dict[str, int] = Field(default_factory=dict)
+    source_format: ExportFormat = ExportFormat.INTERNAL_HTML
 
     @property
     def missed_pages(self) -> tuple[str, ...]:
@@ -273,7 +366,7 @@ def load_screaming_frog_csv(text: str) -> tuple[ScreamingFrogRow, ...]:
     except csv.Error as exc:  # pragma: no cover - defensive, same cause as below
         raise ValueError(_NOT_A_CSV) from exc
     if "Address" not in headers:
-        raise ValueError(
+        raise NotAnExportError(
             "this file has no 'Address' column, so it is not a Screaming Frog "
             "Internal → HTML export. Export that tab as CSV and try again."
         )
@@ -397,7 +490,7 @@ def _rows_from_xlsx(body: bytes) -> tuple[ScreamingFrogRow, ...]:
 
         index = {name: header.index(name) for name in _COLUMNS if name in header}
         if "Address" not in index:
-            raise ValueError(
+            raise NotAnExportError(
                 "this sheet has no 'Address' column, so it is not a Screaming Frog "
                 "Internal → HTML export."
             )
@@ -462,6 +555,50 @@ def load_screaming_frog_export(body: bytes | str) -> tuple[ScreamingFrogRow, ...
     return load_screaming_frog_csv(body.decode("utf-8-sig", errors="replace"))
 
 
+class CrossCheckInput(StrictModel):
+    """What a cross-check upload turned out to be, and the rows it holds.
+
+    Attributes:
+        rows: One row per URL. From a bare list every field but `address` is
+            its default, which is the honest encoding of "the file did not say".
+        source_format: Which of the two accepted shapes the file had. Carried
+            to `reconcile` so the reasons and the merge gate can honour it.
+    """
+
+    rows: tuple[ScreamingFrogRow, ...] = ()
+    source_format: ExportFormat = ExportFormat.INTERNAL_HTML
+
+
+def load_cross_check_input(body: bytes | str) -> CrossCheckInput:
+    """Read an `Internal → HTML` export, or failing that a bare URL list.
+
+    The export is tried first and its refusal is kept for everything that is
+    neither: a two-column sheet, a Search Console `Top pages` export, a file
+    that is not a CSV at all. The bare-list reader is consulted only after the
+    specific "no `Address` column" refusal, because that is the one case where
+    the file may still be a usable list rather than the wrong export tab.
+
+    Args:
+        body: Raw bytes from an upload, or CSV text already decoded.
+
+    Returns:
+        The rows and which format they came from.
+
+    Raises:
+        ValueError: With the export loader's own message, when the file is
+            neither an export nor a bare list.
+    """
+    try:
+        return CrossCheckInput(rows=load_screaming_frog_export(body))
+    except NotAnExportError:
+        urls = bare_url_list(body)
+        if urls is None:
+            raise
+    rows = tuple(ScreamingFrogRow(address=url) for url in urls)
+    _logger.info("bare_url_list_loaded", extra={"rows": len(rows)})
+    return CrossCheckInput(rows=rows, source_format=ExportFormat.BARE_URL_LIST)
+
+
 def _frog_reason(row: ScreamingFrogRow, base_host: str) -> FrogGapReason:
     """Explain one Screaming Frog URL this engine lacks.
 
@@ -508,7 +645,13 @@ def _engine_reason(url: str, loops: set[str]) -> EngineGapReason:
 
     Malformed markup is tested first: a broken address can also carry a query
     string or a repeating tail, and "this is not a URL" explains it better than
-    either.
+    either. A repeating tail is tested before the file suffix because a
+    fabricated address is not a file whatever it ends in. The file suffix is
+    tested before the query string because `report.pdf?page=2` is a PDF that
+    happens to carry a parameter, not an HTML page whose pagination Screaming
+    Frog collapsed; the file type is the fact an analyst acts on. Only the
+    path is judged, lowercased, so `REPORT.PDF` and `deck.pptx#slide=3` land
+    where their lowercase, fragment-free spellings do.
     """
     if any(marker in url for marker in _MALFORMED_MARKERS):
         return EngineGapReason.MALFORMED_MARKUP
@@ -516,6 +659,15 @@ def _engine_reason(url: str, loops: set[str]) -> EngineGapReason:
     segments = [s for s in parts.path.split("/") if s]
     if len(segments) >= _TAIL_SEGMENTS and "/".join(segments[-_TAIL_SEGMENTS:]) in loops:
         return EngineGapReason.REPEATED_SUFFIX_TRAP
+    path = parts.path.lower()
+    if path.endswith(_PDF_SUFFIXES):
+        return EngineGapReason.PDF_FILE
+    if path.endswith(_PRESENTATION_SUFFIXES):
+        return EngineGapReason.PRESENTATION_FILE
+    if path.endswith(_SPREADSHEET_SUFFIXES):
+        return EngineGapReason.SPREADSHEET_FILE
+    if path.endswith(_OTHER_FILE_SUFFIXES):
+        return EngineGapReason.OTHER_FILE
     if parts.query:
         return EngineGapReason.QUERY_VARIANT
     return EngineGapReason.SITEMAP_ORPHAN
@@ -525,13 +677,18 @@ def reconcile(
     base_url: str,
     engine_urls: tuple[str, ...],
     frog_rows: tuple[ScreamingFrogRow, ...],
+    source_format: ExportFormat = ExportFormat.INTERNAL_HTML,
 ) -> ReconciliationReport:
-    """Compare a crawl result against a Screaming Frog export.
+    """Compare a crawl result against a Screaming Frog export or a URL list.
 
     Args:
         base_url: The crawl root. Its host decides what counts as in scope.
         engine_urls: Every URL in the crawl result.
         frog_rows: Rows from `load_screaming_frog_csv`.
+        source_format: What the rows came from. For a bare list every URL the
+            crawl lacks is `UNKNOWN`: the file has no status to judge it on,
+            and a rule that still called it a missed page would be inventing
+            evidence.
 
     Returns:
         The full reconciliation, every disagreement carrying exactly one reason
@@ -545,10 +702,13 @@ def reconcile(
     frog_only_keys = frog_by_key.keys() - engine_by_key.keys()
     engine_only_keys = engine_by_key.keys() - frog_by_key.keys()
 
+    bare = source_format is ExportFormat.BARE_URL_LIST
     frog_only = tuple(
         UrlGap(
             url=frog_by_key[key].address,
-            reason=_frog_reason(frog_by_key[key], base_host).value,
+            reason=(
+                FrogGapReason.UNKNOWN if bare else _frog_reason(frog_by_key[key], base_host)
+            ).value,
         )
         for key in sorted(frog_only_keys)
     )
@@ -575,11 +735,13 @@ def reconcile(
         engine_only=engine_only,
         frog_reasons=dict(Counter(gap.reason for gap in frog_only)),
         engine_reasons=dict(Counter(gap.reason for gap in engine_only)),
+        source_format=source_format,
     )
     _logger.info(
         "reconciled",
         extra={
             "base_url": base_url,
+            "source_format": source_format.value,
             "in_both": report.in_both,
             "missed": len(report.missed_pages),
             "orphans": len(report.orphans),

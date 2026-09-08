@@ -5,10 +5,11 @@ import {
   InputNumber,
   Modal,
   Segmented,
+  Select,
   Switch,
   Typography,
 } from "antd";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CRAWL_SPEEDS, DEFAULT_CRAWL_REQUEST } from "../../adapters/adapterInterface";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import type { PageClassificationInput } from "../../types/schema";
@@ -22,6 +23,10 @@ interface Props {
 interface FormValues {
   base_url: string;
   gsc_property_url: string | null;
+  /** A profile name, or `""` for the default — antd's Select shows `null` as
+   *  "nothing chosen", so the default option needs a real value. Mapped to
+   *  `null` on submit. */
+  gsc_account: string;
   max_pages: number | null;
   max_depth: number | null;
   speed: "polite" | "standard" | "turbo";
@@ -42,10 +47,42 @@ interface FormValues {
 export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
   const [form] = Form.useForm<FormValues>();
   const startCrawl = useCrawlStore((state) => state.startCrawl);
+  const adapter = useCrawlStore((state) => state.adapter);
   const [submitting, setSubmitting] = useState(false);
   const [ignoreRobots, setIgnoreRobots] = useState(false);
   const [browserMode, setBrowserMode] = useState(false);
   const [speed, setSpeed] = useState<"polite" | "standard" | "turbo">("polite");
+  const [accounts, setAccounts] = useState<string[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+
+  // Fetched on every open, not once: a profile is added by editing
+  // `.env.local` and restarting the engine, and the modal outlives both. If
+  // the list cannot be fetched there is no picker and the default account
+  // applies — an older engine without the endpoint must still be crawlable.
+  useEffect(() => {
+    if (!open) return;
+    const list = adapter?.listGscAccounts;
+    if (!list) {
+      setAccounts([]);
+      return;
+    }
+    let cancelled = false;
+    setAccountsLoading(true);
+    list
+      .call(adapter)
+      .then((names) => {
+        if (!cancelled) setAccounts(names);
+      })
+      .catch(() => {
+        if (!cancelled) setAccounts([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAccountsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, adapter]);
 
   async function submit(): Promise<void> {
     const values = await form.validateFields();
@@ -61,6 +98,9 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
       max_depth: values.max_depth ?? null,
       user_agent: values.user_agent?.trim() || DEFAULT_CRAWL_REQUEST.user_agent,
       gsc_property_url: values.gsc_property_url?.trim() || null,
+      // `""` is the default option, and an absent field (no picker rendered)
+      // is `undefined`; both mean the engine's default credentials.
+      gsc_account: values.gsc_account || null,
     };
 
     setSubmitting(true);
@@ -93,6 +133,7 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
         initialValues={{
           base_url: "",
           gsc_property_url: null,
+          gsc_account: "",
           max_pages: DEFAULT_CRAWL_REQUEST.max_pages,
           max_depth: null,
           speed: "polite",
@@ -140,6 +181,26 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
         >
           <Input placeholder="https://example.com (leave empty to skip GSC enrichment)" />
         </Form.Item>
+
+        {accounts.length > 0 && (
+          <Form.Item
+            name="gsc_account"
+            label="Search Console account"
+            extra="Which authorised Google account reads the property above. Only matters when a property URL is given."
+          >
+            <Select
+              disabled={accountsLoading}
+              loading={accountsLoading}
+              // jsdom reports zero heights, which starves the virtual list;
+              // a handful of profile names does not need one anyway.
+              virtual={false}
+              options={[
+                { value: "", label: "Default (.env.local)" },
+                ...accounts.map((name) => ({ value: name, label: name })),
+              ]}
+            />
+          </Form.Item>
+        )}
 
         <Form.Item
           name="max_pages"

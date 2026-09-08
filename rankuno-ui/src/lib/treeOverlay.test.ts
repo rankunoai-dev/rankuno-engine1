@@ -105,7 +105,10 @@ describe("buildTreeOverlay", () => {
     expect(overlay.others.clicks).toBe(1723);
     expect(overlay.others.topPages[0]?.url).toBe("https://e.com/es-es/");
     expect(overlay.others.topPages[0]?.locale).toBe("es-es");
-    expect(overlay.others.buckets.map((b) => b.label)).toEqual(["HOMEPAGE", "UNKNOWN"]);
+    // Buckets are URL folders now, and both fixture pages are flat: `/loose/`
+    // has no folder, and `/es-es/` has none once its locale prefix is dropped.
+    expect(overlay.others.buckets.map((b) => b.label)).toEqual(["FLAT_URLS"]);
+    expect(overlay.others.buckets[0]?.clicks).toBe(1723);
     // The split the tree row cannot show: the panel's total against each
     // root's own OTHERS. Most clicked first, so `es-es` precedes the site's.
     expect(overlay.others.byRoot.map((r) => [r.label, r.pages, r.clicks])).toEqual([

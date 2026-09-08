@@ -12,6 +12,7 @@ Rules enforced here:
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -21,10 +22,66 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.errors import ConfigurationError
+from src.core.schemas import StrictModel
 
-__all__ = ["Environment", "Settings", "get_settings", "reset_settings_cache"]
+__all__ = [
+    "GSC_ACCOUNT_NAME_PATTERN",
+    "Environment",
+    "GscAccountProfile",
+    "ResolvedGscCredentials",
+    "Settings",
+    "get_settings",
+    "reset_settings_cache",
+]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+GSC_ACCOUNT_NAME_PATTERN = r"^[a-z0-9_-]{1,64}$"
+"""What a GSC profile name may look like.
+
+Lowercase because pydantic-settings lowercases nested env keys when
+`case_sensitive=False`, so `GSC_ACCOUNTS__Acme__...` arrives as `acme` and a
+request naming `Acme` must resolve to the same profile. No delimiter characters,
+so a name can never be mistaken for part of the `__` nesting syntax.
+"""
+
+_GSC_ACCOUNT_NAME_RE = re.compile(GSC_ACCOUNT_NAME_PATTERN)
+
+
+class GscAccountProfile(StrictModel):
+    """One Google account authorised to read Search Console.
+
+    The primary case is one OAuth app authorised by several Google accounts,
+    which yields one refresh token per account and a shared client id/secret.
+    `client_id` and `client_secret` exist for the minority case where a client
+    insists on their own OAuth app; when unset the profile inherits the shared
+    `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`.
+
+    Declared in `.env.local` as nested keys, parsed by pydantic-settings:
+
+        GSC_ACCOUNTS__ACME__REFRESH_TOKEN=...
+        GSC_ACCOUNTS__ACME__CLIENT_ID=...        # optional override
+        GSC_ACCOUNTS__ACME__CLIENT_SECRET=...    # optional override
+    """
+
+    refresh_token: SecretStr
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+
+
+class ResolvedGscCredentials(StrictModel):
+    """The complete triple a token manager needs, after inheritance is applied.
+
+    Attributes:
+        account: The profile name, or `None` for the flat default credentials.
+            Carried so audit logs can identify the account without ever
+            touching the client id.
+    """
+
+    account: str | None
+    client_id: str
+    client_secret: SecretStr
+    refresh_token: SecretStr
 
 
 class Environment(StrEnum):
@@ -46,6 +103,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # Lets `GSC_ACCOUNTS__<name>__REFRESH_TOKEN` populate `gsc_accounts`.
+        # Only keys whose prefix matches a field are split, so a `__` inside a
+        # token *value* — refresh tokens contain them — is untouched.
+        env_nested_delimiter="__",
     )
 
     # -- Application -------------------------------------------------------
@@ -82,6 +143,16 @@ class Settings(BaseSettings):
     google_oauth_client_secret: SecretStr | None = None
     google_oauth_refresh_token: SecretStr | None = None
 
+    # -- Google Search Console named account profiles ----------------------
+    gsc_accounts: dict[str, GscAccountProfile] = Field(
+        default_factory=dict,
+        description=(
+            "Named Search Console accounts, one refresh token each. A crawl "
+            "selects one by name; none selected means the flat GOOGLE_OAUTH_* "
+            "credentials above."
+        ),
+    )
+
     # -- Google Search Console (Legacy: Service Account) ------------------
     google_search_console_client_email: str | None = None
     google_search_console_private_key: SecretStr | None = None
@@ -108,11 +179,89 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return normalised
 
+    @field_validator("gsc_accounts")
+    @classmethod
+    def _validate_gsc_account_names(
+        cls, value: dict[str, GscAccountProfile]
+    ) -> dict[str, GscAccountProfile]:
+        """Refuse a profile name the request schema could never select."""
+        for name in value:
+            if not _GSC_ACCOUNT_NAME_RE.fullmatch(name):
+                msg = (
+                    f"GSC account name '{name}' is invalid: names must match "
+                    f"{GSC_ACCOUNT_NAME_PATTERN} (lowercase letters, digits, '_' and '-')."
+                )
+                raise ValueError(msg)
+        return value
+
     def model_post_init(self, _context: Any, /) -> None:
         """Refuse unsafe production configurations at boot rather than at call time."""
         if self.environment is Environment.PRODUCTION and not self.guardrails_enabled:
             msg = "GUARDRAILS_ENABLED=false is not permitted in production."
             raise ConfigurationError(msg)
+
+    def gsc_account_names(self) -> tuple[str, ...]:
+        """Configured profile names, sorted. Safe to publish: names, never secrets."""
+        return tuple(sorted(self.gsc_accounts))
+
+    def resolve_gsc_account(self, name: str | None) -> ResolvedGscCredentials:
+        """Produce the credential triple for a profile, or for the default.
+
+        Deliberately the only place the inheritance rule lives, so the token
+        manager and any future Google connector agree on what "default" means.
+
+        Args:
+            name: A profile name, or `None` for the flat `GOOGLE_OAUTH_*` triple.
+
+        Returns:
+            Complete credentials with the account name attached.
+
+        Raises:
+            ConfigurationError: If the profile does not exist — no fallback to
+                the default, because silently querying the wrong client's
+                Search Console is worse than a failed crawl — or if whatever
+                is selected is incomplete.
+        """
+        if name is None:
+            if (
+                not self.google_oauth_client_id
+                or self.google_oauth_client_secret is None
+                or self.google_oauth_refresh_token is None
+            ):
+                msg = (
+                    "GSC OAuth credentials not configured. Set GOOGLE_OAUTH_CLIENT_ID, "
+                    "GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REFRESH_TOKEN in .env.local"
+                )
+                raise ConfigurationError(msg)
+            return ResolvedGscCredentials(
+                account=None,
+                client_id=self.google_oauth_client_id,
+                client_secret=self.google_oauth_client_secret,
+                refresh_token=self.google_oauth_refresh_token,
+            )
+
+        key = name.lower()
+        profile = self.gsc_accounts.get(key)
+        if profile is None:
+            known = ", ".join(self.gsc_account_names()) or "none configured"
+            msg = f"Unknown GSC account '{name}'. Configured accounts: {known}."
+            raise ConfigurationError(msg)
+
+        client_id = profile.client_id or self.google_oauth_client_id
+        client_secret = profile.client_secret or self.google_oauth_client_secret
+        if not client_id or client_secret is None:
+            msg = (
+                f"GSC account '{key}' has no OAuth client. Set GOOGLE_OAUTH_CLIENT_ID and "
+                f"GOOGLE_OAUTH_CLIENT_SECRET (shared), or GSC_ACCOUNTS__{key.upper()}__CLIENT_ID "
+                f"and GSC_ACCOUNTS__{key.upper()}__CLIENT_SECRET for this account."
+            )
+            raise ConfigurationError(msg)
+        return ResolvedGscCredentials(
+            account=key,
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=profile.refresh_token,
+        )
 
     def require(self, field_name: str) -> str:
         """Return a required credential, or fail loudly with an actionable message.

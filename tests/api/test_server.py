@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from src.api import server as server_module
-from src.api.server import API_PREFIX, create_app
+from src.api.server import API_PREFIX, GAP_MEANINGS, SHEET_TITLES, create_app
 from src.core.state_store import MAX_HOMEPAGE_BYTES, DiskJobStore, JobRecord, JobStatus
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
@@ -33,6 +33,7 @@ from src.modules.seo.page_classifier.schemas import (
     SignalScore,
     SignalSource,
 )
+from src.modules.seo.page_classifier.screaming_frog_reconciler import EngineGapReason
 from src.modules.seo.page_classifier.tool import (
     CrawlSummary,
     PageClassificationOutput,
@@ -1378,6 +1379,63 @@ class TestReconciliationDownload:
         assert all(sheet.freeze_panes == "A2" for sheet in book.worksheets)
         # And a URL column wide enough to read a URL in.
         assert book["Orphans"].column_dimensions["A"].width == 60
+
+    def test_file_sheets_follow_orphans_in_a_fixed_order(self, store):
+        """Documents sit together, right after the two findings.
+
+        Ordered by size alone the 70 presentations and 41 spreadsheets on
+        infosys.com would interleave with 254 loop URLs; pinned, a reader who
+        opens the workbook finds every file tab in one place — and the Orphans
+        sheet no longer holds the PDFs.
+        """
+        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+        store.write_reconciliation(
+            record.id,
+            {
+                "summary": {"base_url": "https://e.com/"},
+                "created_at": "2026-09-08T09:00:00+00:00",
+                "frog_only": [],
+                "engine_only": [
+                    {"url": "https://e.com/q?p=1", "reason": "QUERY_VARIANT"},
+                    {"url": "https://e.com/q?p=2", "reason": "QUERY_VARIANT"},
+                    {"url": "https://e.com/q?p=3", "reason": "QUERY_VARIANT"},
+                    {"url": "https://e.com/other.docx", "reason": "OTHER_FILE"},
+                    {"url": "https://e.com/book.xlsx", "reason": "SPREADSHEET_FILE"},
+                    {"url": "https://e.com/deck.pptx", "reason": "PRESENTATION_FILE"},
+                    {"url": "https://e.com/report.pdf", "reason": "PDF_FILE"},
+                    {"url": "https://e.com/orphan", "reason": "SITEMAP_ORPHAN"},
+                ],
+            },
+        )
+        with TestClient(app) as client:
+            response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
+        book = load_workbook(io.BytesIO(response.content))
+        assert book.sheetnames == [
+            "Summary",
+            "Orphans",
+            "PDF files",
+            "Presentations",
+            "Spreadsheets",
+            "Other files",
+            "Query variants",
+        ]
+        assert [cell.value for cell in book["PDF files"][2]] == ["https://e.com/report.pdf"]
+        assert [cell.value for cell in book["Orphans"][2]] == ["https://e.com/orphan"]
+        assert book["Orphans"].max_row == 2
+
+    def test_every_gap_reason_has_a_sheet_title_and_a_meaning(self):
+        """The maps live here and the enums live in the reconciler.
+
+        `SHEET_TITLES.get(reason, reason)` keeps the workbook working when they
+        drift, but a tab called `PRESENTATION_FILE` with an empty meaning is
+        exactly the spreadsheet these maps exist to prevent. The engine side
+        only: `FrogGapReason.UNKNOWN` already has no entry, and closing that
+        belongs to the bare-list cycle, not this one.
+        """
+        for reason in EngineGapReason:
+            assert reason.value in SHEET_TITLES, reason
+            assert reason.value in GAP_MEANINGS, reason
 
     def test_the_workbook_needs_a_saved_cross_check(self, store):
         app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))

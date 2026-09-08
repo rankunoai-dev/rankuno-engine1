@@ -141,6 +141,12 @@ export const REASON_MEANINGS: Record<string, string> = {
     "record of having found them.",
   MALFORMED_MARKUP:
     "Linked from markup Screaming Frog could not parse. Rankuno's parser is more tolerant.",
+  PDF_FILE:
+    "A PDF. Screaming Frog files documents under its own tab, so they never appear in the " +
+    "HTML export this cross-check reads.",
+  PRESENTATION_FILE: "A slide deck (.ppt, .pptx). Listed separately by Screaming Frog.",
+  SPREADSHEET_FILE: "A workbook or CSV. Listed separately by Screaming Frog.",
+  OTHER_FILE: "A Word document, archive or media file, not an HTML page.",
 };
 
 /** Plain-language names, for chips. Falls back to the raw token. */

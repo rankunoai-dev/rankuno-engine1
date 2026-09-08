@@ -85,6 +85,13 @@ export interface ReconciliationSummary {
   merged: number;
   frog_reasons: Record<string, number>;
   engine_reasons: Record<string, number>;
+  /**
+   * `"INTERNAL_HTML"` for a real export, `"BARE_URL_LIST"` for a one-column
+   * list of URLs. Optional because the engine's summary does not forward the
+   * reconciler's marker yet; the panel also infers a bare list from an
+   * `UNKNOWN` reason, which only that format produces.
+   */
+  source_format?: string;
 }
 
 /**
@@ -298,6 +305,16 @@ export interface CrawlDataAdapter {
    * poll `getProgress` until the status is terminal.
    */
   startJob?(request: PageClassificationInput): Promise<string>;
+
+  /**
+   * Names of the Search Console profiles a crawl may select.
+   *
+   * Names only — the engine never publishes what is behind one. Optional for
+   * the same reason as `startJob`: fixtures have no accounts, and an empty
+   * list from a live engine means the operator configured none, in which case
+   * the modal shows no picker and the default credentials apply.
+   */
+  listGscAccounts?(): Promise<string[]>;
 }
 
 /**
@@ -350,6 +367,9 @@ export const CRAWL_SPEEDS: readonly CrawlSpeed[] = [
 export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   base_url: "",
   gsc_property_url: null,
+  // `null` is the flat default credentials, not "no account". A name here
+  // must be one the engine lists, or the crawl is refused at admission.
+  gsc_account: null,
   // Empty for an operator-started crawl. Only a resume supplies these, and the
   // engine builds that request itself from the original job's checkpoint —
   // there is no UI control for it, and there should not be: a hand-typed seed

@@ -101,6 +101,13 @@ which, for an AI-assisted codebase, is every session.
 | [0069](0069-cross-check-overlay-and-full-screen-tree.md) | 2026-09-07 | Tree marks and counts what Screaming Frog missed; full-screen tree with section totals and the OTHERS insight | 1705 py + 202 ui |
 | [0070](0070-collapse-where-the-tree-is.md) | 2026-09-07 | Expand/collapse moved into the tree's own controls, so full screen has them | 1705 py + 206 ui |
 | [0071](0071-clickable-page-links-in-tree.md) | 2026-09-07 | Page rows in the tree link to their URL in a new tab; row stops being a `<button>` | py gate not run + 211 ui |
+| [0072](0072-a-list-is-not-an-export.md) | 2026-09-08 | A bare URL list cross-checks as a set: every gap `UNKNOWN`, never merged, format declared | 1,813 py + 226 ui |
+| [0073](0073-not-measured-is-a-value.md) | 2026-09-08 | `AuditDataset` contract and the 110-row issue catalogue as typed data (ADR 0011, P0-1/P0-2); D1 applied per field; two rows unresolved by D1 flagged | 1,813 py + 226 ui (see §1.4) |
+| [0074](0074-absent-is-not-empty.md) | 2026-09-08 | Screaming Frog export → `AuditDataset` (P0-3/P0-5): absent file is `NOT_MEASURED`, header-only is `MEASURED`; links never retained; `extra=` log fields found to be dropped | 1,964 py + 232 ui |
+| [0075](0075-which-search-console-account.md) | 2026-09-08 | Named Search Console account profiles selected per crawl; names-only API; admission refuses an unknown profile (ADR 0012) | 93.86% cov; 1,964 py (scribe run, §1.3) + 232 ui |
+| [0076](0076-a-pdf-is-not-an-orphan.md) | 2026-09-08 | Engine-only PDFs, decks, spreadsheets and other files get their own reason and sheet; infosys orphans 8,123 to 630 | 1,964 py + 232 ui |
+| [0077](0077-screaming-frog-adapter-and-zip-guards.md) | 2026-09-08 | Screaming Frog adapter & streaming zip guards (P0-3/P0-5); 1,000 member cap, 2 GB file / 8 GB bundle limits; `links = ()` with note | 1,964 py + 232 ui |
+| [0078](0078-the-fields-that-never-left-the-call-site.md) | 2026-09-08 | `get_logger` dropped every caller `extra=` field since the first commit; merging adapter, caller keys win | **RED**: 3 failed / 1,967 py (failures in another session's `test_server.py`, §1.2) + 232 ui; 93.81% |
 
 
 ---

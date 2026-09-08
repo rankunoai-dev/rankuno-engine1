@@ -16,7 +16,7 @@ Comprehensive end-to-end integration tests for all 7 phases of GSC API integrati
 
 ## Files Created
 
-### [tests/modules/seo/page_classifier/test_gsc_e2e.py](tests/modules/seo/page_classifier/test_gsc_e2e.py) (NEW)
+### [tests/modules/seo/page_classifier/test_gsc_e2e.py](../../tests/modules/seo/page_classifier/test_gsc_e2e.py) (NEW)
 **12 comprehensive e2e tests** covering:
 
 **Success Paths** (3 tests):

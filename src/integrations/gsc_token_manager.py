@@ -5,16 +5,22 @@ flow. Implements proactive refresh to prevent mid-crawl expiration (ADR 0010).
 
 All tokens are stored in .env.local and kept in memory only — never persisted
 to disk beyond the session.
+
+Deviation from rule 5 (accepted, recorded in the security audit): the refresh
+POST goes to a fixed Google URL with `requests` directly rather than through a
+`BaseAPIClient`. Routing it through one would put the refresh inside the retry
+loop, and a revoked token must fail once, not four times.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 import requests
 
 from src.core.config import Settings, get_settings
-from src.core.errors import ConfigurationError, GscAuthenticationError
+from src.core.errors import GscAuthenticationError
 from src.core.logger import get_logger
 from src.integrations.gsc_schemas import GscOAuthToken
 
@@ -26,6 +32,11 @@ _logger = get_logger("integrations.gsc_token_manager")
 GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"  # noqa: S105
 GSC_READONLY_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly"
 
+# The `error` field of an OAuth 2.0 token response is a fixed code such as
+# `invalid_grant` (RFC 6749 §5.2). Anything that does not look like one is not
+# repeated, so a response body can never travel into a log or an error message.
+_OAUTH_ERROR_CODE_RE = re.compile(r"^[a-z_]{1,40}$")
+
 
 class GscTokenManager:
     """Manages OAuth 2.0 token lifecycle for GSC API access.
@@ -35,7 +46,8 @@ class GscTokenManager:
     that tokens have the required read-only scope.
 
     Design:
-    - Tokens loaded fresh per crawl from settings (.env.local)
+    - Credentials resolved per crawl from settings (.env.local), by profile name
+      or the flat default (`Settings.resolve_gsc_account`)
     - Proactive refresh: if `expires_at - now < 5 minutes`, refresh immediately
     - Refresh failures raise GscAuthenticationError (non-retryable; halts crawl)
     - All tokens kept in memory only; never persisted beyond the session
@@ -43,36 +55,33 @@ class GscTokenManager:
 
     REFRESH_WINDOW_SECONDS = 300  # 5 minutes before expiry
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, *, account: str | None = None) -> None:
         """Initialize token manager from OAuth 2.0 credentials.
-
-        Loads OAuth client ID, secret, and refresh token from settings.
 
         Args:
             settings: Configuration override (primarily for tests).
+            account: Named GSC profile to use. `None` keeps the single-account
+                default, so callers that predate profiles are unchanged.
 
         Raises:
-            ConfigurationError: If OAuth credentials are missing.
+            ConfigurationError: If the profile is unknown or its credentials
+                are incomplete. Unknown never falls back to the default.
         """
         self._settings = settings or get_settings()
         self._access_token: str | None = None
         self._token_expiry: datetime | None = None
 
-        # Load OAuth credentials
-        self._client_id = self._settings.google_oauth_client_id
-        self._client_secret = self._settings.google_oauth_client_secret
-        self._refresh_token = self._settings.google_oauth_refresh_token
+        creds = self._settings.resolve_gsc_account(account)
+        self._account = creds.account
+        self._client_id = creds.client_id
+        self._client_secret = creds.client_secret
+        self._refresh_token = creds.refresh_token
 
-        if not self._client_id or not self._client_secret or not self._refresh_token:
-            msg = (
-                "GSC OAuth credentials not configured. Set GOOGLE_OAUTH_CLIENT_ID, "
-                "GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REFRESH_TOKEN in .env"
-            )
-            raise ConfigurationError(msg)
-
+        # A named account is identified by its name alone. The client id prefix
+        # is only logged for the legacy default, where the name does not exist.
         _logger.debug(
             "gsc_token_manager_initialized",
-            extra={"client_id": self._client_id[:20] + "..."},
+            extra={"account": self._account or f"default:{self._client_id[:20]}..."},
         )
 
     def get_or_refresh_token(self) -> str:
@@ -93,11 +102,6 @@ class GscTokenManager:
             if time_to_expiry.total_seconds() > self.REFRESH_WINDOW_SECONDS:
                 return self._access_token
 
-        # Token is missing, expired, or expiring soon — refresh it
-        if not self._client_secret or not self._refresh_token:
-            msg = "GSC OAuth credentials not initialized"
-            raise RuntimeError(msg)
-
         try:
             response = requests.post(
                 GOOGLE_TOKEN_URI,
@@ -110,8 +114,13 @@ class GscTokenManager:
                 timeout=10,
             )
             response.raise_for_status()
+        except requests.HTTPError as exc:
+            msg = f"Token refresh failed ({self._describe_http_failure(exc)})"
+            raise GscAuthenticationError(msg) from exc
         except Exception as exc:
-            msg = f"Token refresh failed: {exc}"
+            # Only the exception class: a transport error's text can quote the
+            # request, and the request carries the refresh token.
+            msg = f"Token refresh failed: {type(exc).__name__}"
             raise GscAuthenticationError(msg) from exc
 
         try:
@@ -119,35 +128,59 @@ class GscTokenManager:
             data: dict[str, str | int] = response_data
             self._access_token = str(data.get("access_token", ""))
             expires_in: int = int(data.get("expires_in", 3600))  # Default 1 hour
-
-            if not self._access_token:
-                msg = "Token refresh succeeded but no access token was returned"
-                raise GscAuthenticationError(msg)
-
-            self._token_expiry = datetime.now(UTC) + timedelta(seconds=expires_in)
-
-            _logger.debug(
-                "gsc_token_refreshed",
-                extra={
-                    "expires_in": expires_in,
-                    "expires_at": self._token_expiry.isoformat(),
-                },
-            )
-
-            return self._access_token
         except Exception as exc:
-            msg = f"Failed to parse token response: {exc}"
+            msg = f"Failed to parse token response: {type(exc).__name__}"
             raise GscAuthenticationError(msg) from exc
 
-    def get_account_email(self) -> str:
-        """Get the authenticated account identifier.
+        if not self._access_token:
+            msg = "Token refresh succeeded but no access token was returned"
+            raise GscAuthenticationError(msg)
 
-        For OAuth 2.0 user accounts, returns the client ID since we don't have
-        access to the user's email from the token alone.
+        self._token_expiry = datetime.now(UTC) + timedelta(seconds=expires_in)
+
+        _logger.debug(
+            "gsc_token_refreshed",
+            extra={
+                "account": self._account,
+                "expires_in": expires_in,
+                "expires_at": self._token_expiry.isoformat(),
+            },
+        )
+
+        return self._access_token
+
+    @staticmethod
+    def _describe_http_failure(exc: requests.HTTPError) -> str:
+        """Status code plus the OAuth error code, and nothing else from the body.
+
+        `invalid_grant` is the one an operator needs — it means the refresh
+        token was revoked and the profile must be re-authorised — and it is a
+        fixed vocabulary word, not user data.
+        """
+        response = exc.response
+        status = response.status_code if response is not None else "no response"
+        code: object = None
+        if response is not None:
+            try:
+                body = response.json()
+                code = body.get("error") if isinstance(body, dict) else None
+            except Exception:  # noqa: BLE001 - a body that is not JSON is simply not described
+                code = None
+        if isinstance(code, str) and _OAUTH_ERROR_CODE_RE.fullmatch(code):
+            return f"HTTP {status}, {code}"
+        return f"HTTP {status}"
+
+    def get_account_email(self) -> str:
+        """Get the authenticated account identifier for audit logs.
+
+        A named profile is identified by its name. The legacy default has no
+        name, so it is identified by the client id as it always was.
 
         Returns:
-            Client ID (OAuth) or service account email (service account).
+            `oauth2://profile/<name>` for a named account, else `oauth2://<client_id>`.
         """
+        if self._account is not None:
+            return f"oauth2://profile/{self._account}"
         return f"oauth2://{self._client_id}"
 
     def validate_scopes(self) -> None:
