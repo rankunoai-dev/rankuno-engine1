@@ -257,3 +257,34 @@ class TestJobRecordContract:
                     "surprise": 1,
                 }
             )
+
+
+class TestFacetTracking:
+    def test_job_defaults_to_page_classifier_facet(self, store):
+        """New jobs without explicit facet default to page_classifier."""
+        record = store.create(TOOL, REQUEST)
+        assert record.facet_id == "seo.page_classifier"
+
+    def test_job_stores_explicit_facet_id(self, store):
+        """Facet can be specified at creation."""
+        record = store.create(TOOL, REQUEST, facet_id="seo.health_engine")
+        assert record.facet_id == "seo.health_engine"
+
+    def test_facet_id_persists_across_store_reload(self, tmp_path):
+        """Facet is persisted and survives a new store instance."""
+        first = DiskJobStore(tmp_path)
+        job_id = first.create(TOOL, REQUEST, facet_id="seo.theme_classification").id
+
+        restarted = DiskJobStore(tmp_path)
+        record = restarted.get(job_id)
+        assert record.facet_id == "seo.theme_classification"
+
+    def test_facet_id_included_in_list(self, store):
+        """list_jobs() includes facet_id for all jobs."""
+        store.create(TOOL, REQUEST, facet_id="seo.page_classifier")
+        store.create(TOOL, REQUEST, facet_id="seo.health_engine")
+
+        jobs = store.list_jobs()
+        assert len(jobs) == 2
+        facets = {job.facet_id for job in jobs}
+        assert facets == {"seo.page_classifier", "seo.health_engine"}

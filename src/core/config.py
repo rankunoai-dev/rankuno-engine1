@@ -132,6 +132,16 @@ class Settings(BaseSettings):
     default_requests_per_minute: int = Field(default=60, gt=0)
     default_max_retries: int = Field(default=3, ge=0, le=10)
     default_timeout_s: float = Field(default=30.0, gt=0.0)
+    max_concurrent_crawls: int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description=(
+            "Crawl jobs the API runs at once before returning 429. Each crawl "
+            "holds its whole graph in RAM, so this is the memory bound; raise "
+            "only with the RAM to match."
+        ),
+    )
 
     # -- LLM providers -----------------------------------------------------
     gemini_api_key: SecretStr | None = None

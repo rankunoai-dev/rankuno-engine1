@@ -17,9 +17,9 @@ class _Out(BaseModel):
     pass
 
 
-def _make_tool(name: str, risk: RiskClass) -> type[BaseTool]:
+def _make_tool(name: str, risk: RiskClass, facet_id: str | None = None) -> type[BaseTool]:
     class _Tool(BaseTool[_In, _Out]):
-        metadata = ToolMetadata(name=name, summary="x", risk_class=risk)
+        metadata = ToolMetadata(name=name, summary="x", risk_class=risk, facet_id=facet_id)
         input_model = _In
         output_model = _Out
 
@@ -75,3 +75,60 @@ def test_clear_empties_the_registry():
     reg.register(_make_tool("seo.audit", RiskClass.READ))
     reg.clear()
     assert reg.names() == []
+
+
+def test_get_by_facet_returns_matching_tools():
+    """get_by_facet() returns all tools with matching facet_id."""
+    reg = ToolRegistry()
+    tool_a = _make_tool("seo.classifier", RiskClass.READ, facet_id="seo.page_classifier")
+    tool_b = _make_tool("seo.health", RiskClass.READ, facet_id="seo.health_engine")
+    tool_c = _make_tool("seo.theme", RiskClass.READ, facet_id="seo.page_classifier")
+
+    reg.register(tool_a)
+    reg.register(tool_b)
+    reg.register(tool_c)
+
+    classifier_tools = reg.get_by_facet("seo.page_classifier")
+    assert len(classifier_tools) == 2
+    assert tool_a in classifier_tools
+    assert tool_c in classifier_tools
+
+    health_tools = reg.get_by_facet("seo.health_engine")
+    assert len(health_tools) == 1
+    assert tool_b in health_tools
+
+    unknown_tools = reg.get_by_facet("seo.unknown")
+    assert len(unknown_tools) == 0
+
+
+def test_get_by_facet_returns_sorted_list():
+    """get_by_facet() returns tools sorted by name."""
+    reg = ToolRegistry()
+    reg.register(_make_tool("z.tool", RiskClass.READ, facet_id="seo"))
+    reg.register(_make_tool("a.tool", RiskClass.READ, facet_id="seo"))
+    reg.register(_make_tool("m.tool", RiskClass.READ, facet_id="seo"))
+
+    tools = reg.get_by_facet("seo")
+    names = [cls.metadata.name for cls in tools]
+    assert names == ["a.tool", "m.tool", "z.tool"]
+
+
+def test_facets_returns_unique_facet_ids():
+    """facets() returns all unique facet_ids across registered tools."""
+    reg = ToolRegistry()
+    reg.register(_make_tool("tool1", RiskClass.READ, facet_id="seo.page_classifier"))
+    reg.register(_make_tool("tool2", RiskClass.READ, facet_id="seo.page_classifier"))
+    reg.register(_make_tool("tool3", RiskClass.READ, facet_id="seo.health_engine"))
+    reg.register(_make_tool("tool4", RiskClass.READ, facet_id=None))  # No facet
+
+    facets = reg.facets()
+    assert facets == {"seo.page_classifier", "seo.health_engine"}
+
+
+def test_facets_returns_empty_set_when_no_facets():
+    """facets() returns empty set if no tools declare a facet."""
+    reg = ToolRegistry()
+    reg.register(_make_tool("tool1", RiskClass.READ, facet_id=None))
+    reg.register(_make_tool("tool2", RiskClass.READ, facet_id=None))
+
+    assert reg.facets() == set()

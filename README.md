@@ -207,6 +207,11 @@ Job records persist under `.jobs/`, so crawls survive a restart. A crawl
 interrupted mid-run is marked `failed` rather than resumed: there is no
 within-crawl checkpointing, so the work genuinely is lost.
 
+The server runs at most 5 crawls at once by default and answers `429` beyond
+that; `MAX_CONCURRENT_CRAWLS` (1–10) sets the cap. It bounds memory, not CPU:
+each in-flight crawl holds its whole graph in RAM, so raise it only on a host
+with the RAM to match.
+
 ### Search Console accounts (optional)
 
 A crawl can read Google Search Console for its property through the connector

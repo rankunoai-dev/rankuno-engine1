@@ -168,6 +168,9 @@ class JobRecord(StrictModel):
             client-supplied id is a path-traversal parameter.
         tool_name: Which tool this job runs, e.g. `seo.page_classifier`.
         label: Human-facing description, shown in a job list.
+        facet_id: Which facet this job executes under (e.g., `seo.page_classifier`).
+            Defaults to `seo.page_classifier` for backward compatibility with old jobs.
+            Used to enforce per-facet concurrency, rate limiting, and cost budgets.
         request: The tool's input payload, serialised. Opaque here; the API
             layer validates it back into a typed model.
         status: Current lifecycle state.
@@ -187,6 +190,7 @@ class JobRecord(StrictModel):
     id: str = Field(min_length=1)
     tool_name: str = Field(min_length=1)
     label: str = ""
+    facet_id: str = Field(default="seo.page_classifier", min_length=1)
     request: Mapping[str, object] = Field(default_factory=dict)
     status: JobStatus = JobStatus.QUEUED
     created_at: datetime
@@ -213,7 +217,13 @@ class JobStore(Protocol):
     not for several (see `DiskJobStore`).
     """
 
-    def create(self, tool_name: str, request: Mapping[str, object], label: str = "") -> JobRecord:
+    def create(
+        self,
+        tool_name: str,
+        request: Mapping[str, object],
+        label: str = "",
+        facet_id: str = "seo.page_classifier",
+    ) -> JobRecord:
         """Persist a new job in `QUEUED` and return it."""
         ...
 
@@ -361,7 +371,13 @@ class DiskJobStore:
     def _write(self, record: JobRecord) -> None:
         _atomic_write(self._record_path(record.id), record.model_dump_json())
 
-    def create(self, tool_name: str, request: Mapping[str, object], label: str = "") -> JobRecord:
+    def create(
+        self,
+        tool_name: str,
+        request: Mapping[str, object],
+        label: str = "",
+        facet_id: str = "seo.page_classifier",
+    ) -> JobRecord:
         """Persist a new job in `QUEUED`.
 
         The id is generated here rather than accepted from the caller. Every id
@@ -372,6 +388,8 @@ class DiskJobStore:
             tool_name: Which tool the job runs.
             request: The tool's serialised input payload.
             label: Human-facing description for a job list.
+            facet_id: Which facet this job belongs to. Defaults to
+                `seo.page_classifier` for backward compatibility.
 
         Returns:
             The persisted record.
@@ -381,6 +399,7 @@ class DiskJobStore:
             id=uuid.uuid4().hex,
             tool_name=tool_name,
             label=label,
+            facet_id=facet_id,
             request=dict(request),
             status=JobStatus.QUEUED,
             created_at=moment,
@@ -388,7 +407,10 @@ class DiskJobStore:
         )
         with self._lock:
             self._write(record)
-        _logger.info("job_created", extra={"job_id": record.id, "tool": tool_name})
+        _logger.info(
+            "job_created",
+            extra={"job_id": record.id, "tool": tool_name, "facet": facet_id},
+        )
         return record
 
     def get(self, job_id: str) -> JobRecord:

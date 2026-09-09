@@ -45,7 +45,7 @@ from pathlib import Path
 from types import MappingProxyType
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
@@ -53,6 +53,7 @@ from pydantic import Field, ValidationError
 
 from src.core.config import get_settings
 from src.core.errors import UnsafeUrlError
+from src.core.facet_router import FacetRouter
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.core.state_store import (
@@ -120,13 +121,19 @@ Separate on purpose: the engine's classification can improve without the request
 and response shapes changing, and a client pins to the shapes.
 """
 
-DEFAULT_MAX_CONCURRENT_JOBS = 3
-"""Simultaneous crawls this process will run.
+DEFAULT_MAX_CONCURRENT_JOBS = 5
+"""Simultaneous crawls this process will run when nothing else says otherwise.
 
 Not about local CPU — the fetcher's token bucket already bounds politeness per
 host. It bounds *memory*: each in-flight crawl holds its whole graph, including
-page HTML, until it finishes. Three 20k-page crawls at once is already several
+page HTML, until it finishes. Five 20k-page crawls at once is already several
 gigabytes.
+
+The value in force comes from `Settings.max_concurrent_crawls`
+(`MAX_CONCURRENT_CRAWLS`), which shares this default; `create_app()` reads it
+when the caller passes nothing, so a host with more or less RAM sets the cap
+through the environment. This constant remains the schema default for
+`HealthView` and the documented fallback, not a second source of truth.
 """
 
 DEFAULT_ALLOWED_ORIGINS = (
@@ -701,15 +708,24 @@ class ApiState:
             store: Job persistence.
             url_policy: SSRF policy used at admission and by the crawl.
             max_concurrent_jobs: Simultaneous crawls before requests are refused.
+                (Deprecated in Phase 1: per-facet limits now apply instead.)
         """
         self.store = store
         self.url_policy = url_policy
         self.max_concurrent_jobs = max_concurrent_jobs
+        self.facet_router = FacetRouter(max_concurrent=max_concurrent_jobs)
         self._active: set[str] = set()
+        self._facet_active: dict[str, set[str]] = {}  # facet_id -> active job ids
         self._lock = threading.Lock()
         # Strong references to in-flight tasks. `asyncio` only holds weak ones,
         # so without this the garbage collector may cancel a running crawl.
         self._tasks: set[asyncio.Task[None]] = set()
+        # Set once startup's background orphan recovery has run. Recovery is
+        # fire-and-forget so a large job store cannot delay startup, but a test
+        # (or anything else that must not race it — e.g. marking a job RUNNING
+        # right after boot) needs a way to know it is done rather than racing a
+        # bare thread. `threading.Event` costs nothing while unused.
+        self.recovery_done = threading.Event()
 
     @property
     def active_count(self) -> int:
@@ -717,22 +733,46 @@ class ApiState:
         with self._lock:
             return len(self._active)
 
-    def try_reserve(self, job_id: str) -> bool:
-        """Claim a concurrency slot, or report that none is free.
+    def try_reserve(self, job_id: str, facet_id: str = TOOL_NAME) -> bool:
+        """Claim a concurrency slot for a facet, or report that none is free.
 
-        Checked and claimed under one lock. Testing capacity and then reserving
-        in two steps would let two simultaneous requests both pass the check.
+        Phase 1 enforces per-facet limits. Checked and claimed under one lock
+        so two simultaneous requests cannot both pass the capacity check.
+
+        Args:
+            job_id: The job being admitted.
+            facet_id: The facet it belongs to.
+
+        Returns:
+            True if reserved successfully. False if facet is at capacity.
         """
         with self._lock:
             if len(self._active) >= self.max_concurrent_jobs:
                 return False
+
+            if facet_id not in self._facet_active:
+                self._facet_active[facet_id] = set()
+
+            facet_config = self.facet_router.get_facet_config(facet_id)
+            active = self._facet_active[facet_id]
+            if len(active) >= facet_config.max_concurrent:
+                return False
+
+            active.add(job_id)
             self._active.add(job_id)
             return True
 
-    def release(self, job_id: str) -> None:
-        """Give a concurrency slot back."""
+    def release(self, job_id: str, facet_id: str | None = None) -> None:
+        """Give a concurrency slot back.
+
+        Args:
+            job_id: The job being released.
+            facet_id: The facet it belongs to (optional, found from store if None).
+        """
         with self._lock:
             self._active.discard(job_id)
+            if facet_id is not None and facet_id in self._facet_active:
+                self._facet_active[facet_id].discard(job_id)
 
     def rekey(self, provisional: str, job_id: str) -> None:
         """Move a reservation from a provisional id onto the real one.
@@ -802,12 +842,21 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
         store.mark_failed(job_id, f"{type(exc).__name__}: {exc}")
 
 
-async def _dispatch(state: ApiState, job_id: str, payload: PageClassificationInput) -> None:
-    """Run a job on a worker thread and always release its slot."""
+async def _dispatch(
+    state: ApiState, job_id: str, payload: PageClassificationInput, facet_id: str
+) -> None:
+    """Run a job on a worker thread and always release its slot.
+
+    Args:
+        state: Shared application state.
+        job_id: The job to run.
+        payload: The tool's input.
+        facet_id: The facet this job belongs to (for per-facet concurrency release).
+    """
     try:
         await asyncio.to_thread(_run_job, state, job_id, payload)
     finally:
-        state.release(job_id)
+        state.release(job_id, facet_id)
 
 
 def create_app(
@@ -815,7 +864,7 @@ def create_app(
     url_policy: UrlSafetyPolicy | None = None,
     *,
     jobs_root: Path | str | None = None,
-    max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
+    max_concurrent_jobs: int | None = None,
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS,
 ) -> FastAPI:
     """Build the application.
@@ -829,7 +878,10 @@ def create_app(
         store: Job persistence. Defaults to a `DiskJobStore` under `jobs_root`.
         url_policy: SSRF policy applied at admission and inherited by the crawl.
         jobs_root: Directory for the default store. Defaults to `.jobs/`.
-        max_concurrent_jobs: Simultaneous crawls before `429`.
+        max_concurrent_jobs: Simultaneous crawls before `429`. `None` means
+            `Settings.max_concurrent_crawls` (`MAX_CONCURRENT_CRAWLS`); an
+            explicit value always wins over the environment so a test can pin
+            the cap without touching settings.
         allowed_origins: Exact CORS origins. Never a wildcard.
 
     Returns:
@@ -841,7 +893,11 @@ def create_app(
     state = ApiState(
         store=resolved_store,
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
-        max_concurrent_jobs=max_concurrent_jobs,
+        max_concurrent_jobs=(
+            max_concurrent_jobs
+            if max_concurrent_jobs is not None
+            else get_settings().max_concurrent_crawls
+        ),
     )
 
     @asynccontextmanager
@@ -856,6 +912,11 @@ def create_app(
                     _logger.warning("recovered_orphaned_jobs", extra={"count": len(orphans)})
             except Exception as e:
                 _logger.error("orphan_recovery_failed", extra={"error": str(e)})
+            finally:
+                # Signalled even on failure: "recovery is done" and "recovery
+                # succeeded" are different claims, and a waiter only needs the
+                # former to know it is now safe to touch job state.
+                state.recovery_done.set()
 
         threading.Thread(target=_recover_in_bg, daemon=True).start()
         yield
@@ -899,17 +960,26 @@ def create_app(
     @app.post(
         f"{API_PREFIX}/jobs", response_model=JobAccepted, status_code=status.HTTP_202_ACCEPTED
     )
-    async def create_job(payload: PageClassificationInput) -> JobAccepted:
+    async def create_job(
+        payload: PageClassificationInput,
+        facet_id: str = Query(default="seo.page_classifier"),
+        x_org_id: str | None = Header(default=None),
+    ) -> JobAccepted:
         """Accept a crawl and return an id to poll.
 
         `202`, never `200`: nothing has been crawled when this returns.
 
+        Args:
+            payload: The crawl configuration.
+            facet_id: Which facet to run under (query parameter). Defaults to
+                page_classifier. Must be a facet the org has access to.
+            x_org_id: Organization id header (X-Org-Id). `None` for default org.
+
         Raises:
-            HTTPException: `400` if the URL fails SSRF validation or the named
-                GSC account is not configured, `429` if no concurrency slot is
-                free.
+            HTTPException: `400` on URL/GSC/facet issues, `403` if org lacks
+                facet access, `429` if facet is at concurrency capacity.
         """
-        return _start(payload, payload.base_url)
+        return _start(payload, payload.base_url, facet_id=facet_id, org_id=x_org_id)
 
     @app.get(f"{API_PREFIX}/jobs", response_model=list[JobRecord])
     def list_jobs() -> list[JobRecord]:
@@ -980,7 +1050,12 @@ def create_app(
             )
         return _checkpoint_as_output(checkpoint).model_dump(mode="json")
 
-    def _start(payload: PageClassificationInput, label: str) -> JobAccepted:
+    def _start(
+        payload: PageClassificationInput,
+        label: str,
+        facet_id: str = "seo.page_classifier",
+        org_id: str | None = None,
+    ) -> JobAccepted:
         """Admit a crawl, reserve a slot, and dispatch it.
 
         Shared by every endpoint that starts work so admission cannot drift
@@ -989,7 +1064,33 @@ def create_app(
         payload, and a stored payload is not automatically still safe: DNS moves,
         and a host that resolved publicly last week may resolve to a private
         address today.
+
+        Args:
+            payload: The tool's input.
+            label: Human-readable job description.
+            facet_id: Which facet to run under. Defaults to page_classifier.
+            org_id: Organization id (for access control). None for default org.
+
+        Raises:
+            HTTPException: `400` on SSRF/GSC account issues, `403` on facet access
+                denial, `400` on unknown facet, `429` on concurrency saturation.
         """
+        # Validate facet exists and org has access
+        try:
+            state.facet_router.validate_org_access(org_id, facet_id)
+        except KeyError as exc:
+            _logger.warning("job_rejected_unknown_facet", extra={"facet": facet_id})
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except PermissionError as exc:
+            detail = (
+                f"organization '{org_id or 'default'}' does not have access to facet '{facet_id}'"
+            )
+            _logger.warning(
+                "job_rejected_facet_access",
+                extra={"org": org_id, "facet": facet_id},
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail) from exc
+
         try:
             state.url_policy.validate(payload.base_url)
         except UnsafeUrlError as exc:
@@ -1023,20 +1124,31 @@ def create_app(
         # record exists, because `try_reserve` needs something to hold and the
         # id is the store's to mint.
         pending = f"pending:{uuid4().hex}"
-        if not state.try_reserve(pending):
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"at most {state.max_concurrent_jobs} crawls may run at once",
+        if not state.try_reserve(pending, facet_id):
+            facet_cfg = state.facet_router.get_facet_config(facet_id)
+            detail = (
+                f"facet '{facet_id}' is at capacity ({facet_cfg.max_concurrent} concurrent); "
+                f"please retry in a moment"
             )
+            _logger.warning(
+                "job_rejected_facet_saturation",
+                extra={"facet": facet_id, "max_concurrent": facet_cfg.max_concurrent},
+            )
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
         try:
-            record = state.store.create(TOOL_NAME, payload.model_dump(mode="json"), label=label)
+            record = state.store.create(
+                TOOL_NAME,
+                payload.model_dump(mode="json"),
+                label=label,
+                facet_id=facet_id,
+            )
         except Exception:
             # The store failed, so there is no job and nothing will ever release
             # this slot. Leaking it would cost a permanent slot per failure.
-            state.release(pending)
+            state.release(pending, facet_id)
             raise
         state.rekey(pending, record.id)
-        state.track(asyncio.create_task(_dispatch(state, record.id, payload)))
+        state.track(asyncio.create_task(_dispatch(state, record.id, payload, facet_id)))
         return JobAccepted(id=record.id, status=record.status.value, label=record.label)
 
     def _stored_payload(job_id: str) -> PageClassificationInput:
@@ -1090,8 +1202,18 @@ def create_app(
                 cannot be replayed, `400` if the URL no longer passes SSRF
                 validation, `429` if no concurrency slot is free.
         """
+        try:
+            original_record = state.store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+
         payload = _stored_payload(job_id)
-        return _start(payload, f"{payload.base_url} (retry)")
+        # Retry under the same facet as the original job
+        return _start(
+            payload,
+            f"{payload.base_url} (retry)",
+            facet_id=original_record.facet_id,
+        )
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/reparse", response_model=JobRecord)
     async def reparse_job(job_id: str) -> JobRecord:
@@ -2084,9 +2206,19 @@ def create_app(
         resumed = payload.model_copy(update={"seed_urls": remaining, "exclude_urls": already})
         _logger.info(
             "job_resumed",
-            extra={"source": job_id, "seeds": len(remaining), "excluded": len(already)},
+            extra={
+                "source": job_id,
+                "seeds": len(remaining),
+                "excluded": len(already),
+                "facet": record.facet_id,
+            },
         )
-        return _start(resumed, f"{payload.base_url} (resumed +{len(remaining):,})")
+        # Resume under the same facet as the original job
+        return _start(
+            resumed,
+            f"{payload.base_url} (resumed +{len(remaining):,})",
+            facet_id=record.facet_id,
+        )
 
     return app
 

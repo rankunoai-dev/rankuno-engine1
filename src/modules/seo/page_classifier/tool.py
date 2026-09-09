@@ -330,6 +330,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         version="0.1.0",
         summary="Crawl a site and classify every page by hierarchy, type and intent.",
         risk_class=RiskClass.READ,
+        facet_id="seo.page_classifier",
         rate_limit_key="web.crawl",
         # Must stay 0.0 — see the module docstring. Layer 3 spend is capped per
         # job and metered per call, not estimated here.

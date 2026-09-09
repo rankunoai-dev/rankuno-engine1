@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from src.api import server as server_module
 from src.api.server import API_PREFIX, GAP_MEANINGS, SHEET_TITLES, create_app
+from src.core.config import Settings
 from src.core.state_store import MAX_HOMEPAGE_BYTES, DiskJobStore, JobRecord, JobStatus
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
@@ -184,10 +185,12 @@ class TestConcurrencyCap:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
-            max_concurrent_jobs=1,
         )
         state = app.state.api
-        assert state.try_reserve("occupier") is True
+        # Try to occupy page_classifier's slots (limit is 3 in Phase 1)
+        assert state.try_reserve("occupier", "seo.page_classifier") is True
+        assert state.try_reserve("occupier2", "seo.page_classifier") is True
+        assert state.try_reserve("occupier3", "seo.page_classifier") is True
 
         with TestClient(app) as client:
             response = post_job(client)
@@ -210,55 +213,108 @@ class TestConcurrencyCap:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
-            max_concurrent_jobs=1,
         )
-        app.state.api.try_reserve("occupier")
+        state = app.state.api
+        state.try_reserve("occupier1", "seo.page_classifier")
+        state.try_reserve("occupier2", "seo.page_classifier")
+        state.try_reserve("occupier3", "seo.page_classifier")
+
         with TestClient(app) as client:
             assert post_job(client).status_code == 429
 
         assert store.list_jobs() == []
 
-    def test_a_refusal_does_not_consume_a_slot(self, store):
-        """The provisional reservation must be given back, not leaked.
-
-        Capacity is now claimed before the record exists, so a refused request
-        holds a slot for the duration of the check. Leaking one would cost a
-        permanent slot per refused click — the exact failure this whole change
-        is about.
-        """
+    def test_releasing_a_reservation_decrements_active_count(self, store):
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
-            max_concurrent_jobs=1,
         )
         state = app.state.api
-        state.try_reserve("occupier")
-        with TestClient(app) as client:
-            for _ in range(5):
-                assert post_job(client).status_code == 429
+        state.try_reserve("occupier1", "seo.page_classifier")
+        state.try_reserve("occupier2", "seo.page_classifier")
+        state.try_reserve("occupier3", "seo.page_classifier")
 
-        state.release("occupier")
+        with TestClient(app) as client:
+            assert post_job(client).status_code == 429
+
+        state.release("occupier1", "seo.page_classifier")
+        state.release("occupier2", "seo.page_classifier")
+        state.release("occupier3", "seo.page_classifier")
         assert state.active_count == 0
 
     def test_reserving_is_atomic(self, store):
         """Check-then-reserve in two steps would let both callers through."""
-        app = create_app(store=store, max_concurrent_jobs=2)
+        app = create_app(store=store)
         state = app.state.api
-        assert [state.try_reserve(f"j{index}") for index in range(3)] == [True, True, False]
+        # Page classifier has 3 slots, so all 3 should succeed
+        assert state.try_reserve("j0", "seo.page_classifier") is True
+        assert state.try_reserve("j1", "seo.page_classifier") is True
+        assert state.try_reserve("j2", "seo.page_classifier") is True
+        assert state.try_reserve("j3", "seo.page_classifier") is False
 
     def test_releasing_frees_a_slot(self, store):
-        app = create_app(store=store, max_concurrent_jobs=1)
+        app = create_app(store=store)
         state = app.state.api
-        state.try_reserve("a")
-        assert state.try_reserve("b") is False
-        state.release("a")
-        assert state.try_reserve("b") is True
+        # Fill all 3 page_classifier slots
+        state.try_reserve("a", "seo.page_classifier")
+        state.try_reserve("b", "seo.page_classifier")
+        state.try_reserve("c", "seo.page_classifier")
+        assert state.try_reserve("d", "seo.page_classifier") is False
+        state.release("a", "seo.page_classifier")
+        assert state.try_reserve("d", "seo.page_classifier") is True
 
     def test_releasing_an_unknown_job_is_harmless(self, store):
         """`_dispatch` releases in a `finally`; a double release must not raise."""
         state = create_app(store=store).state.api
-        state.release("never-reserved")
+        state.release("never-reserved", "seo.page_classifier")
         assert state.active_count == 0
+
+
+class TestConcurrencyCapFromSettings:
+    """The cap is configuration, so a cloud host can size it to its RAM.
+
+    `get_settings` is patched on the server module rather than the process
+    environment: the real singleton is cached and reads `.env.local`, so a
+    developer's own override would otherwise leak into these assertions.
+    """
+
+    @staticmethod
+    def _use_settings(monkeypatch, **overrides: object) -> None:
+        settings = Settings(_env_file=None, **overrides)
+        monkeypatch.setattr(server_module, "get_settings", lambda: settings)
+
+    def test_default_cap_is_five(self, store, monkeypatch):
+        self._use_settings(monkeypatch)
+        app = create_app(store=store)
+        assert app.state.api.max_concurrent_jobs == 5
+        assert server_module.DEFAULT_MAX_CONCURRENT_JOBS == 5
+
+    def test_settings_value_is_the_cap_and_the_429_reports_it(self, store, monkeypatch):
+        self._use_settings(monkeypatch, max_concurrent_crawls=2)
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        )
+        state = app.state.api
+        assert state.try_reserve("first") is True
+        assert state.try_reserve("second") is True
+
+        with TestClient(app) as client:
+            response = post_job(client)
+            health = client.get(f"{API_PREFIX}/health").json()
+
+        assert response.status_code == 429
+        assert "2" in response.json()["detail"]
+        assert health["max_concurrent_jobs"] == 2
+
+    def test_explicit_kwarg_wins_over_settings(self, store, monkeypatch):
+        """A test pinning the cap must not depend on what the environment says."""
+        self._use_settings(monkeypatch, max_concurrent_crawls=8)
+        app = create_app(store=store, max_concurrent_jobs=1)
+        state = app.state.api
+        assert state.max_concurrent_jobs == 1
+        assert state.try_reserve("a") is True
+        assert state.try_reserve("b") is False
 
 
 class TestJobLifecycle:
@@ -370,8 +426,13 @@ class TestStartupRecovery:
         job_id = store.create("seo.page_classifier", {"base_url": SAFE_URL}).id
         store.mark_running(job_id)
 
-        with TestClient(create_app(store=store)):
-            pass
+        app = create_app(store=store)
+        with TestClient(app):
+            # Recovery runs on a fire-and-forget daemon thread so startup does
+            # not block on a large job store; entering the client context only
+            # runs the lifespan up to its `yield`, not the thread. Wait for the
+            # event it sets rather than racing it — see server.py's `ApiState`.
+            assert app.state.api.recovery_done.wait(timeout=5), "recovery did not finish in time"
 
         assert store.get(job_id).status is JobStatus.FAILED
 
@@ -868,7 +929,13 @@ class TestCancel:
         # jobs — anything left RUNNING by a dead process is failed on boot — so
         # a job put in that state beforehand is already terminal by the time the
         # request arrives, and the cancel would 409 for the wrong reason.
+        #
+        # Recovery itself runs on a background thread and is still in flight
+        # when the `with` block below starts, so `mark_running` has to wait for
+        # it to finish first — otherwise it can race the recovery thread's scan
+        # and get failed out from under the test as a false orphan.
         with TestClient(app) as client:
+            assert state.recovery_done.wait(timeout=5), "recovery did not finish in time"
             store.mark_running(record.id)
             state.try_reserve(record.id)
             response = client.post(f"{API_PREFIX}/jobs/{record.id}/cancel")
@@ -889,6 +956,10 @@ class TestCancel:
         record = store.create("tool", {"base_url": "https://e.com/"}, label="stuck")
 
         with TestClient(app) as client:
+            # Same race as test_cancelling_frees_the_slot: wait for the
+            # background orphan recovery to finish before marking the job
+            # RUNNING, or recovery may fail it out from under the test.
+            assert app.state.api.recovery_done.wait(timeout=5), "recovery did not finish in time"
             store.mark_running(record.id)
             client.post(f"{API_PREFIX}/jobs/{record.id}/cancel")
 
@@ -1457,3 +1528,245 @@ class TestReconciliationDownload:
             assert (
                 client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").status_code == 404
             )
+
+
+class TestFacetRouting:
+    """Facet selection and routing in job creation."""
+
+    def test_request_without_facet_defaults_to_page_classifier(self, client, stub_tool):
+        """Backward compatibility: no facet param → page_classifier."""
+        stub_tool.result = StubResult(ok=True, data={})
+        response = post_job(client)
+        assert response.status_code == 202
+        job_id = response.json()["id"]
+
+        # Verify facet was stored
+        record = client.app.state.api.store.get(job_id)
+        assert record.facet_id == "seo.page_classifier"
+
+    def test_request_with_explicit_facet_is_stored(self, client, stub_tool):
+        """Explicit facet_id param is persisted on the job."""
+        stub_tool.result = StubResult(ok=True, data={})
+        response = client.post(
+            f"{API_PREFIX}/jobs",
+            json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+            params={"facet_id": "seo.health_engine"},
+        )
+        assert response.status_code == 202
+        job_id = response.json()["id"]
+
+        record = client.app.state.api.store.get(job_id)
+        assert record.facet_id == "seo.health_engine"
+
+    def test_unknown_facet_is_rejected_400(self, client, stub_tool):
+        """Unknown facet returns 400, not 429."""
+        stub_tool.result = StubResult(ok=False, error="test")
+        response = client.post(
+            f"{API_PREFIX}/jobs",
+            json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+            params={"facet_id": "seo.unknown_facet"},
+        )
+        assert response.status_code == 400
+        assert "Unknown facet" in response.json()["detail"]
+        assert client.app.state.api.store.list_jobs() == []
+
+
+class TestFacetAccessControl:
+    """Org-based access control to facets."""
+
+    def test_org_without_facet_access_is_rejected_403(self, client, stub_tool, monkeypatch):
+        """Org not permitted to use facet gets 403 Forbidden."""
+        stub_tool.result = StubResult(ok=False, error="test")
+
+        # Mock facet router to deny org1 access to health_engine
+        original_validate = client.app.state.api.facet_router.validate_org_access
+
+        def mock_validate(org_id: str | None, facet_id: str) -> None:
+            if org_id == "team-a" and facet_id == "seo.health_engine":
+                raise PermissionError(
+                    "organization 'team-a' does not have access to facet 'seo.health_engine'"
+                )
+            original_validate(org_id, facet_id)
+
+        monkeypatch.setattr(
+            client.app.state.api.facet_router,
+            "validate_org_access",
+            mock_validate,
+        )
+
+        response = client.post(
+            f"{API_PREFIX}/jobs",
+            json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+            params={"facet_id": "seo.health_engine"},
+            headers={"X-Org-Id": "team-a"},
+        )
+        assert response.status_code == 403
+        assert "does not have access" in response.json()["detail"]
+        # No job should have been created
+        assert client.app.state.api.store.list_jobs() == []
+
+    def test_default_org_has_access_to_all_facets(self, client, stub_tool):
+        """Request with no X-Org-Id header uses default org (has all facets)."""
+        stub_tool.result = StubResult(ok=True, data={})
+
+        # Try all facets without org header
+        for facet in ["seo.page_classifier", "seo.health_engine", "seo.theme_classification"]:
+            response = client.post(
+                f"{API_PREFIX}/jobs",
+                json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+                params={"facet_id": facet},
+            )
+            assert response.status_code == 202, f"facet {facet} should be allowed"
+
+
+class TestPerFacetConcurrency:
+    """Per-facet concurrency limits are enforced and isolated."""
+
+    def test_page_classifier_has_its_own_concurrency_cap(self, store, stub_tool):
+        """Each facet gets independent concurrency slot management."""
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        )
+        state = app.state.api
+
+        # Occupy page_classifier's cap by manually reserving slots
+        # Phase 1 hardcodes page_classifier limit to 3
+        assert state.try_reserve("job1", "seo.page_classifier") is True
+        assert state.try_reserve("job2", "seo.page_classifier") is True
+        assert state.try_reserve("job3", "seo.page_classifier") is True
+
+        # Next job on page_classifier should be refused
+        stub_tool.result = StubResult(ok=False, error="test")
+        with TestClient(app) as client:
+            response = client.post(
+                f"{API_PREFIX}/jobs",
+                json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+                params={"facet_id": "seo.page_classifier"},
+            )
+        assert response.status_code == 429
+        assert "seo.page_classifier" in response.json()["detail"]
+
+    def test_different_facets_do_not_interfere(self, store, stub_tool):
+        """health_engine accepts jobs even when page_classifier is saturated."""
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        )
+        state = app.state.api
+
+        # Fill page_classifier (3 slots)
+        state.try_reserve("job1", "seo.page_classifier")
+        state.try_reserve("job2", "seo.page_classifier")
+        state.try_reserve("job3", "seo.page_classifier")
+
+        # page_classifier is full, but health_engine (2-slot limit) should accept
+        stub_tool.result = StubResult(ok=True, data={})
+        with TestClient(app) as client:
+            response = client.post(
+                f"{API_PREFIX}/jobs",
+                json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+                params={"facet_id": "seo.health_engine"},
+            )
+        assert response.status_code == 202, (
+            "health_engine should accept despite page_classifier full"
+        )
+
+    def test_saturation_message_names_the_facet(self, store, stub_tool):
+        """429 response includes facet name so operator knows which facet saturated."""
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        )
+        state = app.state.api
+
+        # Saturate theme_classification (2-slot limit)
+        state.try_reserve("job1", "seo.theme_classification")
+        state.try_reserve("job2", "seo.theme_classification")
+
+        stub_tool.result = StubResult(ok=False, error="test")
+        with TestClient(app) as client:
+            response = client.post(
+                f"{API_PREFIX}/jobs",
+                json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+                params={"facet_id": "seo.theme_classification"},
+            )
+        assert response.status_code == 429
+        detail = response.json()["detail"]
+        assert "seo.theme_classification" in detail
+        assert "capacity" in detail
+
+
+class TestBackwardCompatibility:
+    """Existing API contracts remain unchanged."""
+
+    def test_old_job_lists_still_include_facet_id(self, store):
+        """Old jobs persisted with facet_id=None now show page_classifier."""
+        # Create a job without specifying facet (will default)
+        job = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+        assert job.facet_id == "seo.page_classifier"
+
+        # Verify it appears in list with the default facet
+        jobs = store.list_jobs()
+        assert len(jobs) == 1
+        assert jobs[0].facet_id == "seo.page_classifier"
+
+    def test_retry_reuses_original_facet(self, store, stub_tool):
+        """Retry endpoint uses the same facet as the original job."""
+        stub_tool.result = StubResult(ok=True, data={})
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        )
+
+        # Create original job on health_engine
+        original = store.create(
+            server_module.TOOL_NAME,
+            {"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+            facet_id="seo.health_engine",
+        )
+        store.finish(original.id, {"base_url": SAFE_URL})
+
+        # Retry should run under same facet
+        with TestClient(app) as client:
+            response = client.post(f"{API_PREFIX}/jobs/{original.id}/retry")
+        assert response.status_code == 202
+
+        # Verify retried job uses same facet
+        jobs = store.list_jobs()
+        retried = [j for j in jobs if j.id != original.id][0]
+        assert retried.facet_id == "seo.health_engine"
+
+    def test_resume_reuses_original_facet(self, store, stub_tool):
+        """Resume endpoint uses the same facet as the original job."""
+        stub_tool.result = StubResult(ok=True, data={})
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        )
+
+        # Create original job on theme_classification
+        original = store.create(
+            server_module.TOOL_NAME,
+            {"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+            facet_id="seo.theme_classification",
+        )
+        store.finish(original.id, {"base_url": SAFE_URL})
+        store.write_checkpoint(
+            original.id,
+            {
+                "base_url": SAFE_URL,
+                "urls": [SAFE_URL, "https://e.com/a", "https://e.com/b"],
+                "unfetched": ["https://e.com/a", "https://e.com/b"],
+            },
+        )
+
+        # Resume should run under same facet
+        with TestClient(app) as client:
+            response = client.post(f"{API_PREFIX}/jobs/{original.id}/resume")
+        assert response.status_code == 202
+
+        # Verify resumed job uses same facet
+        jobs = store.list_jobs()
+        resumed = [j for j in jobs if j.id != original.id][0]
+        assert resumed.facet_id == "seo.theme_classification"

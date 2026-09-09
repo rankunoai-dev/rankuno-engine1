@@ -44,7 +44,9 @@ src/
 ├── api/                         # Local HTTP API (ADR 0008). Outermost layer;
 │   └── server.py                # nothing below imports from it. Implements no
 │                                # safety control of its own — all inherited from
-│                                # BaseTool.run(). Binds 127.0.0.1.
+│                                # BaseTool.run(). Binds 127.0.0.1. Runs at most
+│                                # MAX_CONCURRENT_CRAWLS jobs (default 5) — the
+│                                # RAM bound; the rest get 429
 │                                # GET /api/v1/gsc/accounts lists profile names;
 │                                # admission refuses an unknown gsc_account (400)
 ├── integrations/                # External API wrappers

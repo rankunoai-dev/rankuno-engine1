@@ -72,6 +72,28 @@ def test_get_settings_is_cached():
     assert get_settings() is get_settings()
 
 
+# -- Crawl concurrency cap ------------------------------------------------------
+
+
+def test_max_concurrent_crawls_defaults_to_five(tmp_path):
+    settings = Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl")
+    assert settings.max_concurrent_crawls == 5
+
+
+def test_max_concurrent_crawls_reads_environment(monkeypatch, tmp_path):
+    """Railway sets the cap through the environment, so the env name is the contract."""
+    monkeypatch.setenv("MAX_CONCURRENT_CRAWLS", "2")
+    settings = Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl")
+    assert settings.max_concurrent_crawls == 2
+
+
+@pytest.mark.parametrize("value", [0, 11])
+def test_max_concurrent_crawls_out_of_range_rejected(value, tmp_path):
+    """Zero would refuse every crawl; above ten is more RAM than any target host has."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl", max_concurrent_crawls=value)
+
+
 # -- Named GSC account profiles ------------------------------------------------
 
 

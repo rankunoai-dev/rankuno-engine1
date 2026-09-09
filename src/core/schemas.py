@@ -90,6 +90,13 @@ class ToolMetadata(StrictModel):
     risk_class: RiskClass
     owner: str = Field(default="ai-automation", min_length=1)
 
+    facet_id: str | None = Field(
+        default=None,
+        description="Facet this tool belongs to (e.g., 'seo.page_classifier'). "
+        "Tools in the same facet share concurrency caps, rate limits, and cost budgets. "
+        "Optional; shared tools (read-only) may leave this None.",
+    )
+
     rate_limit_key: str | None = Field(
         default=None,
         description="Shared bucket name. Tools hitting the same upstream quota "

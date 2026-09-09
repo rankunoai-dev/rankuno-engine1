@@ -94,6 +94,30 @@ class ToolRegistry:
             items = [m for m in items if m.risk_class is risk_class]
         return sorted(items, key=lambda m: m.name)
 
+    def get_by_facet(self, facet_id: str) -> list[type[BaseTool[Any, Any]]]:
+        """Return all tools belonging to a facet.
+
+        Args:
+            facet_id: The facet identifier to filter by (e.g., 'seo.page_classifier').
+
+        Returns:
+            List of tool classes with matching facet_id, sorted by name.
+        """
+        matching = [cls for cls in self._tools.values() if cls.metadata.facet_id == facet_id]
+        return sorted(matching, key=lambda cls: cls.metadata.name)
+
+    def facets(self) -> set[str]:
+        """Return all unique facet identifiers across registered tools.
+
+        Returns:
+            Set of facet_ids. May be empty if no tools declare a facet.
+        """
+        facets_set = set()
+        for cls in self._tools.values():
+            if cls.metadata.facet_id is not None:
+                facets_set.add(cls.metadata.facet_id)
+        return facets_set
+
     def clear(self) -> None:
         """Empty the registry. Tests only."""
         self._tools.clear()
