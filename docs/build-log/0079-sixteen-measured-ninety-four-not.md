@@ -234,7 +234,7 @@ The P0-3 one-direction test `test_adapter_modules_never_import_page_classifier` 
 Plan §4 P0-4 said the adapter fills "Canonicals/Canonicalised + Missing". It cannot. `cascading_pipeline.py:316`:
 
 ```python
-canonical_url=evidence.canonical_url or evidence.url,
+canonical_url = evidence.canonical_url or evidence.url
 ```
 
 The profile's `canonical_url` is the page's own declaration *when it makes one* and the page URL otherwise. A profile whose `canonical_url == url` is therefore either self-canonical or has no canonical at all, and nothing on the profile says which. Measuring `CANONICALS_MISSING` from that field would flag every self-canonical page (the common, correct case) as missing — a false finding on most of a healthy site. Options considered: (a) flag `canonical_url == url` — rejected for the above; (b) add a declared-vs-fallback bit to `PageEvidence` and the profile — rejected for this cycle because it changes the canonical Phase 1 contract (ADR 0002) and plan §2 forbids touching the profile; (c) `NOT_MEASURED` with the reason in `notes` — chosen. ADR 0011 decision 5 says exactly this: not measured is a value, and it renders as "not measured by this crawl", never as zero. Handoff §8.1.
@@ -244,7 +244,7 @@ The profile's `canonical_url` is the page's own declaration *when it makes one* 
 Status codes do not survive onto the profile. The one trace is the prose `signal_parsers.indexability_of` writes at line 713:
 
 ```python
-f"Answered {status_code}. A page that errors is not indexed.",
+f"Answered {status_code}. A page that errors is not indexed."
 ```
 
 Option A (chosen): `STATUS_RE = ^Answered (\d{3})\.` over `indexability_reason`, only when `indexability is NOT_A_PAGE`, and a test — `test_status_regex_is_bound_to_indexability_of` — that calls `indexability_of` directly for five statuses and asserts the regex reads each one back. A rewording of the reason string fails that test, not silently empties two issue sets. Option B (a `status_code` field on the profile) is the right long-term shape and is handed off (§8.2); it was not done here for the same ADR 0002 reason as D-A. The regex is anchored so `Answered with something that is not an HTML page.` (a PDF) does not match; the test includes that case.

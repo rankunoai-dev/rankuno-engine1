@@ -109,6 +109,7 @@ which, for an AI-assisted codebase, is every session.
 | [0077](0077-screaming-frog-adapter-and-zip-guards.md) | 2026-09-08 | Screaming Frog adapter & streaming zip guards (P0-3/P0-5); 1,000 member cap, 2 GB file / 8 GB bundle limits; `links = ()` with note | 1,964 py + 232 ui |
 | [0078](0078-the-fields-that-never-left-the-call-site.md) | 2026-09-08 | `get_logger` dropped every caller `extra=` field since the first commit; merging adapter, caller keys win | **RED**: 3 failed / 1,967 py (failures in another session's `test_server.py`, §1.2) + 232 ui; 93.81% |
 | [0079](0079-sixteen-measured-ninety-four-not.md) | 2026-09-08 | Engine adapter (P0-4): profiles → `AuditDataset`, 16 measured / 94 `NOT_MEASURED`, `CANONICALS_MISSING` unmeasurable (D-A); import-boundary test (P0-6) in all directions | **RED**: 1 failed / 2,012 py (one of the 0078 §1.2 `test_server.py` set, §1.3) + 232 ui; 93.91% |
+| [0080](0080-recovery-had-no-way-to-say-it-was-done.md) | 2026-09-09 | Orphan-recovery race fixed: `ApiState.recovery_done` (`threading.Event`) makes startup recovery's completion observable instead of racing it; closes the 0078/0079 `test_server.py` handoff | **GREEN**: 2,020 py + 232 ui; 93.92% |
 
 
 ---
