@@ -188,6 +188,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- Deliverables workbook (Phase 2a/2b, ADR 0011) ----------------------
+    deliverables_output_dir: Path = Field(
+        default=REPO_ROOT / "deliverables" / "output",
+        description=(
+            "Where build_workbook() writes client workbooks. A local path; "
+            "the upload endpoint that moves a workbook off this workstation "
+            "is a separate, deferred cycle (plan §2)."
+        ),
+    )
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:

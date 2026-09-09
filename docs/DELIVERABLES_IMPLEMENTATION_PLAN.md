@@ -222,3 +222,31 @@ on P1-1 → P1-4 and `docs-scribe` on P1-5.
 
 Phase 2 (workbook engine, first four masterfiles, scoring, upload endpoint) gets its own
 plan and its own Step 3 stop.
+
+---
+
+## 10. Phase 2a/2b — scoring engine and client workbook
+
+**Status**: 2a and 2b done, build-log 0084. This section is that Step 3 stop for the
+scoring and workbook work; the upload endpoint is explicitly **not** covered here
+(see the row below) and needs its own future Step 3 + Step 5 cycle.
+
+Origin: ADR 0011 decision D2 — per-category penalty totals, no single site score.
+Themes (Phase 1, rulebook) ride along into the workbook's `Pages` sheet but do not
+enter the penalty math; scoring is category-only.
+
+| ID | Item | Files | Acceptance | Done |
+| :- | :--- | :--- | :--- | :--- |
+| P2-a | Scoring engine | `deliverables/scoring.py` | `score_dataset(dataset, *, weights=None) -> ScoringResult` produces one `IssuePenalty` per `ISSUE_CATALOGUE` row (110), including `NOT_MEASURED` rows at zero penalty, so no row is silently dropped. One `CategoryPenalty` per `IssueCategory`. No field on any model aggregates across categories into a single number (D2), enforced by a structural test. Severity weights read through `get_severity_weights()`, a swappable seam mirroring `weights.get_weight_profile()` (ADR 0006), not a constant read inline. | **Done**, build-log 0084 |
+| P2-b | Workbook generator | `deliverables/workbook.py` | `build_workbook(dataset, scoring, *, output_dir=None) -> Path` writes four sheets (`Overview`, `Issues`, `Pages`, `Notes`) with `Workbook(write_only=True)`. `MAX_PAGES_PER_WORKBOOK = 500_000` (ADR 0001 ceiling): a dataset over the cap raises `WorkbookBuildError` rather than truncating rows. Every text cell across all four sheets is routed through `_safe_cell()`, which neutralises a leading formula-trigger character (`= + - @`, tab, CR) before openpyxl can classify the cell as a live formula (`data_type == "f"`) — a workbook-wide test asserts zero cells anywhere carry that data type. `Settings.deliverables_output_dir` is the default write location when the caller passes no `output_dir`. | **Done**, build-log 0084 |
+| — | Upload endpoint | none — not designed | Parked. This is not a P2-c row: it is intentionally unscheduled here, not silently forgotten. Moving a client workbook off this workstation adds a network/access surface the engine does not otherwise have, so it gets its own future cycle with its own Step 3 (architecture, HITL) **and** its own Step 5 audit, with `security-auditor` running as the **pre-step**, per ADR 0011 §3's governance stance and the Step 5 answer already on record in §6 above ("Re-run in Phase 2 when an upload endpoint exists"). | **Not started** |
+
+Verification for P2-a/P2-b (Step 7, this section only — see build-log 0084 §1 for why
+the whole-repo gate could not be read as a single pass/fail this cycle):
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\modules\seo\deliverables\test_scoring.py tests\modules\seo\deliverables\test_workbook.py -v
+.venv\Scripts\python.exe -m ruff format --check src\modules\seo\deliverables\scoring.py src\modules\seo\deliverables\workbook.py
+.venv\Scripts\python.exe -m ruff check src\modules\seo\deliverables\scoring.py src\modules\seo\deliverables\workbook.py
+.venv\Scripts\python.exe -m mypy --strict src\modules\seo\deliverables\scoring.py src\modules\seo\deliverables\workbook.py
+```
