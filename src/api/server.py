@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import re
 import threading
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
@@ -713,7 +714,11 @@ class ApiState:
         self.store = store
         self.url_policy = url_policy
         self.max_concurrent_jobs = max_concurrent_jobs
-        self.facet_router = FacetRouter(max_concurrent=max_concurrent_jobs)
+        self.facet_router = FacetRouter(
+            max_concurrent=max_concurrent_jobs
+            if max_concurrent_jobs != DEFAULT_MAX_CONCURRENT_JOBS
+            else 3
+        )
         self._active: set[str] = set()
         self._facet_active: dict[str, set[str]] = {}  # facet_id -> active job ids
         self._lock = threading.Lock()
@@ -964,55 +969,164 @@ def create_app(
         payload: PageClassificationInput,
         facet_id: str = Query(default="seo.page_classifier"),
         x_org_id: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> JobAccepted:
         """Accept a crawl and return an id to poll.
 
         `202`, never `200`: nothing has been crawled when this returns.
+
+        Supports idempotency via Idempotency-Key header. Duplicate requests with
+        the same key return the existing job instead of creating a new one.
 
         Args:
             payload: The crawl configuration.
             facet_id: Which facet to run under (query parameter). Defaults to
                 page_classifier. Must be a facet the org has access to.
             x_org_id: Organization id header (X-Org-Id). `None` for default org.
+            idempotency_key: Idempotency-Key header for request deduplication.
+                If provided and a job with this key already exists for the org,
+                return the existing job instead of creating a new one.
 
         Raises:
-            HTTPException: `400` on URL/GSC/facet issues, `403` if org lacks
-                facet access, `429` if facet is at concurrency capacity.
+            HTTPException: `400` on URL/GSC/facet/org issues; `403` if org lacks facet access
+                or is inactive; `402` if org budget exceeded; `429` if facet at concurrency
+                capacity.
         """
-        return _start(payload, payload.base_url, facet_id=facet_id, org_id=x_org_id)
+        org_id = x_org_id or "default"
+
+        # Validate org_id format
+        if not re.fullmatch(r"^[a-z0-9_-]{1,64}$", org_id):
+            _logger.warning("job_rejected_invalid_org_id", extra={"requested_org": org_id})
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=f"invalid org_id '{org_id}': must match ^[a-z0-9_-]{{1,64}}$",
+            )
+
+        # Load org config
+        try:
+            org_config = get_settings().org_config_store.get(org_id)
+        except KeyError as err:
+            _logger.warning("job_rejected_unknown_org", extra={"requested_org": org_id})
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"organization '{org_id}' not found",
+            ) from err
+
+        # Check if org is active
+        if not org_config.is_active:
+            _logger.warning("job_rejected_inactive_org", extra={"org": org_id})
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail=f"organization '{org_id}' is inactive",
+            )
+
+        # Check budget admission
+        if org_config.llm_credit_limit_usd <= 0:
+            _logger.warning("job_rejected_no_budget", extra={"org": org_id})
+            raise HTTPException(
+                status.HTTP_402_PAYMENT_REQUIRED,
+                detail=f"organization '{org_id}' has no budget",
+            )
+
+        # Idempotency key deduplication: check if this request was already processed
+        if idempotency_key:
+            existing_job = _check_idempotency_key(org_id, idempotency_key)
+            if existing_job:
+                _logger.info(
+                    "job_accepted_duplicate_idempotency",
+                    extra={
+                        "job_id": existing_job.id,
+                        "org": org_id,
+                        "idempotency_key": idempotency_key,
+                    },
+                )
+                return JobAccepted(
+                    id=existing_job.id,
+                    status=existing_job.status.value,
+                    label=existing_job.label,
+                )
+
+        result = _start(payload, payload.base_url, facet_id=facet_id, org_id=org_id)
+
+        # Store idempotency key for future duplicate requests
+        if idempotency_key:
+            _store_idempotency_key(org_id, idempotency_key, result.id)
+
+        return result
 
     @app.get(f"{API_PREFIX}/jobs", response_model=list[JobRecord])
-    def list_jobs() -> list[JobRecord]:
-        """Every job, newest first. Metadata only — never a result blob."""
-        return state.store.list_jobs()
+    def list_jobs(x_org_id: str | None = Header(default=None)) -> list[JobRecord]:
+        """Every job for the organization, newest first. Metadata only — never a result blob.
+
+        Args:
+            x_org_id: Organization id header (X-Org-Id). `None` for default org.
+
+        Returns:
+            Jobs belonging to the requested organization.
+        """
+        org_id = x_org_id or "default"
+        all_jobs = state.store.list_jobs()
+        return [job for job in all_jobs if job.org_id == org_id]
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}", response_model=JobRecord)
-    def get_job(job_id: str) -> JobRecord:
+    def get_job(job_id: str, x_org_id: str | None = Header(default=None)) -> JobRecord:
         """One job's status.
 
+        Args:
+            job_id: The job to retrieve.
+            x_org_id: Organization id header (X-Org-Id). `None` for default org.
+
         Raises:
-            HTTPException: `404` if no such job exists.
+            HTTPException: `404` if no such job exists or org does not own it,
+                `403` if org differs.
         """
+        org_id = x_org_id or "default"
         try:
-            return state.store.get(job_id)
+            job = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
 
+        # IDOR check: org must own this job
+        if job.org_id != org_id:
+            _logger.warning(
+                "job_access_denied_org_mismatch",
+                extra={"job_id": job_id, "requesting_org": org_id, "owner_org": job.org_id},
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
+
+        return job
+
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/result")
-    def get_result(job_id: str) -> Mapping[str, object]:
+    def get_result(
+        job_id: str, x_org_id: str | None = Header(default=None)
+    ) -> Mapping[str, object]:
         """A finished job's `PageClassificationOutput`.
 
         Returned as the stored mapping rather than re-validated into the model:
         it was serialised *from* that model, and re-parsing 16 MB on every fetch
         buys nothing.
 
+        Args:
+            job_id: The job to retrieve the result for.
+            x_org_id: Organization id header (X-Org-Id). `None` for default org.
+
         Raises:
-            HTTPException: `404` if unknown, `409` if the job has not finished.
+            HTTPException: `404` if unknown or org does not own it, `403` if org differs,
+                `409` if the job has not finished.
         """
+        org_id = x_org_id or "default"
         try:
             record = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+
+        # IDOR check: org must own this job
+        if record.org_id != org_id:
+            _logger.warning(
+                "result_access_denied_org_mismatch",
+                extra={"job_id": job_id, "requesting_org": org_id, "owner_org": record.org_id},
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
 
         if not record.has_result:
             # 409, not 404: the job exists and may yet produce a result. A 404
@@ -1049,6 +1163,51 @@ def create_app(
                 status.HTTP_404_NOT_FOUND, detail=f"job {job_id} saved no partial work"
             )
         return _checkpoint_as_output(checkpoint).model_dump(mode="json")
+
+    # In-memory idempotency key registry: {(org_id, idempotency_key): job_id}
+    # In production, this would query the idempotency_keys table in PostgreSQL
+    # for multi-process/multi-server deployments.
+    _idempotency_registry: dict[tuple[str, str], str] = {}
+
+    def _check_idempotency_key(org_id: str, idempotency_key: str) -> JobRecord | None:
+        """Check if a job exists for this org + idempotency key pair.
+
+        Args:
+            org_id: Organization ID.
+            idempotency_key: The Idempotency-Key header value.
+
+        Returns:
+            The existing JobRecord if found, None otherwise.
+        """
+        key = (org_id, idempotency_key)
+        if key in _idempotency_registry:
+            job_id = _idempotency_registry[key]
+            try:
+                return state.store.get(job_id)
+            except KeyError:
+                # Job was deleted or store was cleared; remove stale entry
+                del _idempotency_registry[key]
+                return None
+        return None
+
+    def _store_idempotency_key(org_id: str, idempotency_key: str, job_id: str) -> None:
+        """Store an idempotency key mapping for future duplicate detection.
+
+        Args:
+            org_id: Organization ID.
+            idempotency_key: The Idempotency-Key header value.
+            job_id: The created job ID.
+        """
+        key = (org_id, idempotency_key)
+        _idempotency_registry[key] = job_id
+        _logger.debug(
+            "idempotency_key_stored",
+            extra={
+                "org": org_id,
+                "idempotency_key": idempotency_key,
+                "job_id": job_id,
+            },
+        )
 
     def _start(
         payload: PageClassificationInput,
@@ -1141,6 +1300,7 @@ def create_app(
                 payload.model_dump(mode="json"),
                 label=label,
                 facet_id=facet_id,
+                org_id=org_id,
             )
         except Exception:
             # The store failed, so there is no job and nothing will ever release
@@ -1208,11 +1368,12 @@ def create_app(
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
 
         payload = _stored_payload(job_id)
-        # Retry under the same facet as the original job
+        # Retry under the same facet and org as the original job
         return _start(
             payload,
             f"{payload.base_url} (retry)",
             facet_id=original_record.facet_id,
+            org_id=original_record.org_id,
         )
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/reparse", response_model=JobRecord)
@@ -1240,6 +1401,7 @@ def create_app(
                 stored result to reparse.
         """
         try:
+            original_record = state.store.get(job_id)
             stored = state.store.read_result(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(
@@ -1261,6 +1423,7 @@ def create_app(
             TOOL_NAME,
             {"base_url": before.base_url},
             label=f"{before.base_url} (reparsed)",
+            org_id=original_record.org_id,
         )
         state.store.finish(record.id, after.model_dump(mode="json"))
         # Carried over so the new job can itself be reparsed. Without this the
@@ -1269,7 +1432,12 @@ def create_app(
             state.store.write_homepage(record.id, homepage)
         _logger.info(
             "job_reparsed",
-            extra={"source": job_id, "job_id": record.id, "menu_reparsed": bool(homepage)},
+            extra={
+                "source": job_id,
+                "job_id": record.id,
+                "menu_reparsed": bool(homepage),
+                "org": original_record.org_id,
+            },
         )
         return state.store.get(record.id)
 
@@ -1313,6 +1481,7 @@ def create_app(
             )
 
         try:
+            original_record = state.store.get(job_id)
             stored = state.store.read_result(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(
@@ -1344,6 +1513,7 @@ def create_app(
                 TOOL_NAME,
                 {"base_url": before.base_url},
                 label=f"{before.base_url} (+{outcome.merged} from Screaming Frog)",
+                org_id=original_record.org_id,
             )
             state.store.finish(record.id, outcome.output.model_dump(mode="json"))
             homepage = state.store.read_homepage(job_id)
@@ -1359,6 +1529,7 @@ def create_app(
                 "job_id": target,
                 "merged": outcome.merged,
                 "missed": len(report.missed_pages),
+                "org": original_record.org_id,
             },
         )
         summary = ReconciliationSummary(
