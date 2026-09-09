@@ -148,16 +148,13 @@ class PostgresJobStore(JobStore):
                 with conn, conn.cursor() as cur:
                     # Lock org budget row (SELECT FOR UPDATE)
                     cur.execute(
-                        "SELECT llm_credit_limit_usd FROM org_configs "
-                        "WHERE org_id = %s FOR UPDATE",
+                        "SELECT llm_credit_limit_usd FROM org_configs WHERE org_id = %s FOR UPDATE",
                         (org_id,),
                     )
                     budget_row = cur.fetchone()
 
                     if not budget_row or budget_row[0] <= 0:
-                        raise ValueError(
-                            f"Organization {org_id} has no budget or does not exist"
-                        )
+                        raise ValueError(f"Organization {org_id} has no budget or does not exist")
 
                     # Create job
                     cur.execute(
@@ -239,7 +236,6 @@ class PostgresJobStore(JobStore):
             return self.fallback_store.get(job_id)
 
         try:
-
             conn = self._get_connection()
             try:
                 with conn.cursor() as cur:
@@ -291,7 +287,6 @@ class PostgresJobStore(JobStore):
             return self.fallback_store.list_jobs()
 
         try:
-
             conn = self._get_connection()
             try:
                 with conn.cursor() as cur:

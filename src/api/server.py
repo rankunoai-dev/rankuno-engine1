@@ -368,7 +368,9 @@ GAP_MEANINGS: Mapping[str, str] = MappingProxyType(
         ),
         "DAM_FORMS_OTHER": "AEM DAM asset path ending in .html, outside the investor archive.",
         "CMS_INTERNAL_LEAK": "A leaked AEM author/publish path instead of the site's vanity URL.",
-        "CORRUPTED_URL": "Not a well-formed address: encoded whitespace, a doubled extension, or similar.",
+        "CORRUPTED_URL": (
+            "Not a well-formed address: encoded whitespace, a doubled extension, or similar."
+        ),
     }
 )
 """Plain-language gloss for each gap reason, for the downloadable report.
@@ -1760,6 +1762,18 @@ def create_app(
                 "source": export.source_name,
             },
         )
+        # Built before the sidecar write so both the write and the
+        # defaulter-revalidation call below see the same rows without
+        # recomputing them.
+        unmatched_rows_payload = [
+            {
+                "url": row.url,
+                "clicks": row.clicks,
+                "impressions": row.impressions,
+                "reason": reason,
+            }
+            for row, reason in _unmatched_rows(metrics)
+        ]
         state.store.write_performance(
             job_id,
             {
@@ -1773,17 +1787,21 @@ def create_app(
                 # Every unresolved row, not just the grouping. "585 rows reached
                 # no page" is the headline and the 585 addresses are what an
                 # analyst checks it against.
-                "unmatched_rows": [
-                    {
-                        "url": row.url,
-                        "clicks": row.clicks,
-                        "impressions": row.impressions,
-                        "reason": reason,
-                    }
-                    for row, reason in _unmatched_rows(metrics)
-                ],
+                "unmatched_rows": unmatched_rows_payload,
             },
         )
+
+        # A defaulter row names a URL a bare-list cross-check could only guess
+        # about from its shape. GSC evidence — real impressions or clicks — is
+        # independent of that guess, so every time GSC data lands on a job the
+        # saved cross-check (if any) gets a chance to say "this one might be
+        # real after all" instead of that guess sitting unrevisited forever.
+        reconciliation = state.store.read_reconciliation(job_id)
+        if reconciliation is not None:
+            updated = revalidate_defaulters(reconciliation, unmatched_rows_payload)
+            if updated is not None:
+                state.store.write_reconciliation(job_id, updated)
+
         return summary
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/performance")
