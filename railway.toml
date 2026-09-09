@@ -1,0 +1,51 @@
+# Railway deployment configuration for Rankuno AI Engine
+# See https://docs.railway.app/
+
+[build]
+builder = "dockerfile"
+dockerfile = "Dockerfile"
+
+[deploy]
+startCommand = "sh -c 'alembic upgrade head && uvicorn src.api.server:app --host 0.0.0.0 --port 8000 & celery -A src.core.celery_config.app worker --loglevel=info'"
+numReplicas = 1
+
+[env]
+ENVIRONMENT = "production"
+LOG_LEVEL = "INFO"
+LOG_FORMAT = "json"
+
+# PostgreSQL connection (Railway provides automatic $DATABASE_URL)
+# POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DATABASE, POSTGRES_USER, POSTGRES_PASSWORD
+# are automatically parsed from DATABASE_URL in production
+
+# Redis connection (Railway provides automatic $REDIS_URL)
+REDIS_HOST = "${{ REDIS_HOST }}"
+REDIS_PORT = "${{ REDIS_PORT }}"
+REDIS_PASSWORD = "${{ REDIS_PASSWORD }}"
+
+# LLM Provider (pick one)
+# ANTHROPIC_API_KEY = "${{ ANTHROPIC_API_KEY }}"
+
+# Google OAuth
+# GOOGLE_OAUTH_CLIENT_ID = "${{ GOOGLE_OAUTH_CLIENT_ID }}"
+# GOOGLE_OAUTH_CLIENT_SECRET = "${{ GOOGLE_OAUTH_CLIENT_SECRET }}"
+# GOOGLE_OAUTH_REFRESH_TOKEN = "${{ GOOGLE_OAUTH_REFRESH_TOKEN }}"
+
+# Rate limiting and budgets
+DEFAULT_REQUESTS_PER_MINUTE = "60"
+MAX_SESSION_SPEND_USD = "50.0"
+
+# Guardrails (enforced in production)
+GUARDRAILS_ENABLED = "true"
+REQUIRE_APPROVAL_FOR_WRITES = "true"
+REQUIRE_APPROVAL_FOR_SPEND = "true"
+
+[services]
+
+[services.postgres]
+type = "postgres"
+version = "16"
+
+[services.redis]
+type = "redis"
+version = "7"
