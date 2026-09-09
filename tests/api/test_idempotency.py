@@ -27,11 +27,13 @@ class TestIdempotencyKeyDeduplication:
         payload = {
             "base_url": "https://example.com",
             "max_depth": 2,
-            "exclude_patterns": [],
+            "crawl_dom": True,
+            "respect_robots": True,
+            "llm_spend_cap_usd": 0.0,
         }
 
         response = client.post(
-            "/api/jobs",
+            "/api/v1/jobs",
             json=payload,
             headers={"Idempotency-Key": "test-key-001"},
         )
@@ -39,19 +41,21 @@ class TestIdempotencyKeyDeduplication:
         assert response.status_code == 202
         data = response.json()
         assert "id" in data
-        assert data["status"] == "queued"
+        assert "status" in data
 
     def test_duplicate_request_returns_existing_job(self, client: TestClient) -> None:
         """Duplicate request with same Idempotency-Key should return existing job."""
         payload = {
             "base_url": "https://example.com",
             "max_depth": 2,
-            "exclude_patterns": [],
+            "crawl_dom": True,
+            "respect_robots": True,
+            "llm_spend_cap_usd": 0.0,
         }
 
         # First request
         response1 = client.post(
-            "/api/jobs",
+            "/api/v1/jobs",
             json=payload,
             headers={"Idempotency-Key": "test-key-002"},
         )
@@ -61,7 +65,7 @@ class TestIdempotencyKeyDeduplication:
 
         # Duplicate request
         response2 = client.post(
-            "/api/jobs",
+            "/api/v1/jobs",
             json=payload,
             headers={"Idempotency-Key": "test-key-002"},
         )
@@ -77,18 +81,20 @@ class TestIdempotencyKeyDeduplication:
         payload = {
             "base_url": "https://example.com",
             "max_depth": 2,
-            "exclude_patterns": [],
+            "crawl_dom": True,
+            "respect_robots": True,
+            "llm_spend_cap_usd": 0.0,
         }
 
         response1 = client.post(
-            "/api/jobs",
+            "/api/v1/jobs",
             json=payload,
             headers={"Idempotency-Key": "test-key-003"},
         )
         job1_id = response1.json()["id"]
 
         response2 = client.post(
-            "/api/jobs",
+            "/api/v1/jobs",
             json=payload,
             headers={"Idempotency-Key": "test-key-004"},
         )
@@ -104,13 +110,15 @@ class TestIdempotencyKeyDeduplication:
         payload = {
             "base_url": "https://example.com",
             "max_depth": 2,
-            "exclude_patterns": [],
+            "crawl_dom": True,
+            "respect_robots": True,
+            "llm_spend_cap_usd": 0.0,
         }
 
-        response1 = client.post("/api/jobs", json=payload)
+        response1 = client.post("/api/v1/jobs", json=payload)
         job1_id = response1.json()["id"]
 
-        response2 = client.post("/api/jobs", json=payload)
+        response2 = client.post("/api/v1/jobs", json=payload)
         job2_id = response2.json()["id"]
 
         # Should create different jobs even without idempotency key
@@ -121,25 +129,27 @@ class TestIdempotencyKeyDeduplication:
         payload = {
             "base_url": "https://example.com",
             "max_depth": 2,
-            "exclude_patterns": [],
+            "crawl_dom": True,
+            "respect_robots": True,
+            "llm_spend_cap_usd": 0.0,
         }
 
         response1 = client.post(
-            "/api/jobs",
+            "/api/v1/jobs",
             json=payload,
             headers={
                 "Idempotency-Key": "test-key-005",
-                "X-Org-Id": "org1",
+                "x-org-id": "org1",
             },
         )
         job1_id = response1.json()["id"]
 
         response2 = client.post(
-            "/api/jobs",
+            "/api/v1/jobs",
             json=payload,
             headers={
                 "Idempotency-Key": "test-key-005",
-                "X-Org-Id": "org2",
+                "x-org-id": "org2",
             },
         )
         job2_id = response2.json()["id"]

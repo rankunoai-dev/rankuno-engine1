@@ -83,16 +83,18 @@ def test_callback_provider_requires_callable():
         CallbackApprovalProvider("not callable")
 
 
-def test_config_can_relax_write_policy_to_review_only(tmp_path):
-    settings = Settings(
-        _env_file=None,
-        audit_log_path=tmp_path / "audit.jsonl",
-        require_approval_for_writes=False,
-    )
-    engine = GuardrailEngine(settings=settings)
-    assert engine.policy_for(RiskClass.WRITE) is ApprovalMode.OPERATOR_REVIEW
-    # Spend policy is independent and stays locked down.
-    assert engine.policy_for(RiskClass.FINANCIAL) is ApprovalMode.MANDATORY_HITL
+def test_production_rejects_relaxed_write_policy(tmp_path):
+    """Production refuses to start with require_approval_for_writes=False."""
+    from src.core.errors import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(
+            _env_file=None,
+            audit_log_path=tmp_path / "audit.jsonl",
+            environment=Environment.PRODUCTION,
+            require_approval_for_writes=False,
+        )
+    assert "REQUIRE_APPROVAL_FOR_WRITES=false" in str(exc_info.value)
 
 
 def test_disabling_guardrails_allows_everything_in_development(tmp_path):
