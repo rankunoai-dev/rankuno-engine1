@@ -1185,6 +1185,26 @@ def create_app(
     # for multi-process/multi-server deployments.
     _idempotency_registry: dict[tuple[str, str], str] = {}
 
+    def _queue_job_to_celery(job_id: str) -> None:
+        """Queue a job to Celery for background execution.
+
+        Args:
+            job_id: Job ID to queue.
+        """
+        try:
+            from src.workers.job_executor import execute_crawl
+
+            execute_crawl.apply_async(args=[job_id], queue="crawl")
+            _logger.info(
+                "job_queued_to_celery",
+                extra={"job_id": job_id, "queue": "crawl"},
+            )
+        except Exception as err:
+            _logger.error(
+                "job_queue_to_celery_failed",
+                extra={"job_id": job_id, "error": str(err)},
+            )
+
     def _check_idempotency_key(org_id: str, idempotency_key: str) -> JobRecord | None:
         """Check if a job exists for this org + idempotency key pair.
 
@@ -1325,6 +1345,10 @@ def create_app(
             raise
         state.rekey(pending, record.id)
         state.track(asyncio.create_task(_dispatch(state, record.id, payload, facet_id)))
+
+        # Dispatch to Celery worker queue for background execution
+        _queue_job_to_celery(record.id)
+
         return JobAccepted(id=record.id, status=record.status.value, label=record.label)
 
     def _stored_payload(job_id: str) -> PageClassificationInput:

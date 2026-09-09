@@ -903,3 +903,21 @@ class DiskOrgConfigStore:
             "org_config_deleted",
             extra={"org": org_id},
         )
+
+
+def get_job_store() -> JobStore:
+    """Get the configured job store instance.
+
+    Returns the appropriate job store based on configuration:
+    - PostgresJobStore if PostgreSQL is configured and circuit is closed
+    - DiskJobStore as fallback
+
+    Returns:
+        The configured JobStore instance.
+    """
+    # Deferred: full implementation requires PostgreSQL client
+    # For now, return DiskJobStore
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    return DiskJobStore(repo_root / ".jobs")

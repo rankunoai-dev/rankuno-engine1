@@ -34,7 +34,6 @@ def execute_crawl(self, job_id: str) -> dict:
         JobNotFoundError: If job not found in store.
     """
     from src.core.state_store import JobStore, get_job_store
-    from src.modules.seo.page_classifier.tool import page_classifier_execute
 
     job_store: JobStore = get_job_store()
 
@@ -60,7 +59,7 @@ def execute_crawl(self, job_id: str) -> dict:
 
         return {"job_id": job_id, "status": "succeeded"}
 
-    except JobNotFoundError as err:
+    except JobNotFoundError:
         _logger.error("job_execution_not_found", extra={"job_id": job_id})
         raise
 

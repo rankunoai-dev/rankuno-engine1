@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from src.core.celery_config import (
     _build_broker_url,
     _build_result_backend_url,
@@ -113,7 +111,7 @@ class TestBrokerUrlBuilding:
         settings = {"host": "localhost", "port": 6379, "db": 0}
         url = _build_result_backend_url(settings)
         # Should use DB 1 for results
-        assert "redis://localhost:6379/1" == url
+        assert url == "redis://localhost:6379/1"
 
     def test_build_result_backend_with_password(self) -> None:
         """Should pass password to result backend."""

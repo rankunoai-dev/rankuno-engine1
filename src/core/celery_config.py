@@ -7,7 +7,6 @@ and TLS encryption for production deployments.
 from __future__ import annotations
 
 from celery import Celery
-from celery.schedules import schedule
 
 from src.core.config import get_settings
 from src.core.logger import get_logger
