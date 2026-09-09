@@ -11,22 +11,16 @@ Tests resilience against infrastructure failures and edge cases:
 
 from __future__ import annotations
 
-import asyncio
-import json
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.circuit_breaker import CircuitBreaker, CircuitBreakerState
 from src.core.postgres_config import reset_postgres_settings_cache
-from src.core.redis_config import reset_redis_settings_cache
 
 
 def test_1_postgresql_down_circuit_activation() -> None:
@@ -44,8 +38,8 @@ def test_1_postgresql_down_circuit_activation() -> None:
 
     # Simulate 5 failures
     for i in range(5):
-        breaker.record_failure(RuntimeError(f"PostgreSQL connection failed (attempt {i+1})"))
-        print(f"  Failure {i+1}: recorded, state={breaker.state()}")
+        breaker.record_failure(RuntimeError(f"PostgreSQL connection failed (attempt {i + 1})"))
+        print(f"  Failure {i + 1}: recorded, state={breaker.state()}")
 
     # Verify circuit is open
     assert breaker.is_open(), "Circuit should be open after 5 failures"
@@ -105,8 +99,7 @@ def test_3_load_test_budget_enforcement() -> None:
     print("\n[TEST 3] Load test: 100 concurrent crawls × 5 orgs → budgets honored")
 
     orgs = {
-        f"org-{i}": {"budget": 100.0, "jobs_submitted": 0, "cost_charged": 0.0}
-        for i in range(1, 6)
+        f"org-{i}": {"budget": 100.0, "jobs_submitted": 0, "cost_charged": 0.0} for i in range(1, 6)
     }
 
     job_cost = 0.5  # Per spec, each job costs $0.50

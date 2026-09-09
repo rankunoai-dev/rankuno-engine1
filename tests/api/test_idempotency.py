@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-from src.api.server import make_app
+from src.api.server import create_app
 from src.core.state_store import DiskJobStore
 
 
 @pytest.fixture
 def client() -> TestClient:
     """Create a test client for the API."""
-    app = make_app(DiskJobStore(".jobs"))
+    app = create_app(DiskJobStore(".jobs"))
     return TestClient(app)
 
 
