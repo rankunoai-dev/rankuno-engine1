@@ -112,6 +112,7 @@ which, for an AI-assisted codebase, is every session.
 | [0080](0080-recovery-had-no-way-to-say-it-was-done.md) | 2026-09-09 | Orphan-recovery race fixed: `ApiState.recovery_done` (`threading.Event`) makes startup recovery's completion observable instead of racing it; closes the 0078/0079 `test_server.py` handoff | **GREEN**: 2,020 py + 232 ui; 93.92% |
 | [0081](0081-an-oracle-for-membership-only.md) | 2026-09-09 | RAE differential check (P0-7): `scripts/diff_against_rae.py` reimplements `load_url_set`'s column/size rules independently, reuses the real SF adapter, filters the four documented differences; `Settings.rae_archive_dir` opt-in; Phase 0 (P0-1–P0-8) now fully done | **GREEN**: 2,033 py + 232 ui; 93.92% |
 | [0082](0082-phase-1-tool-registry-facet-router.md) | 2026-09-09 | Phase 1 Tool Registry & Facet Router: per-facet concurrency isolation, FacetRouter dispatch, stubs for Health Engine and Theme Classification | **RED**: 6 failed / 2,093 passed, 232 ui; 93.50% |
+| [0083](0083-a-rulebook-that-never-says-low.md) | 2026-09-09 | Rulebook engine (P1-1–P1-4): order-independent classify(), N/A never Low, missing rulebook fails loud unless `lenient=True` | rulebook.py: 50 tests, 100% cov, green in isolation; whole-repo **RED** carried from 0082 (6 pre-existing `test_server.py` failures, unrelated) — 2,096 passed, 232 ui; 93.56% |
 
 
 ---

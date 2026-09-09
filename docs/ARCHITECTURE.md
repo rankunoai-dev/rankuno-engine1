@@ -102,9 +102,16 @@ src/
     │   │   │                    # pins that it never imports page_classifier
     │   │   ├── _bundle.py            # Guarded directory-or-zip access: traversal,
     │   │   │                         # symlink, zip-bomb, nested-archive refusal
-    │   │   └── screaming_frog_adapter.py  # SF CSV export -> AuditDataset.
-    │   │                             # Absent file = NOT_MEASURED, header-only =
-    │   │                             # MEASURED; links never retained (D4)
+    │   │   ├── screaming_frog_adapter.py  # SF CSV export -> AuditDataset.
+    │   │   │                         # Absent file = NOT_MEASURED, header-only =
+    │   │   │                         # MEASURED; links never retained (D4)
+    │   │   └── rulebook.py           # Client URL-pattern rulebook -> theme_1/
+    │   │                             # theme_2/language/business_priority on
+    │   │                             # AuditPage. classify() order-independent
+    │   │                             # (EXACT wins, then longest pattern);
+    │   │                             # missing file raises unless lenient=True;
+    │   │                             # no match/no fallback -> Others/N/A, never
+    │   │                             # Low (build-log 0083)
     │   └── performance/         # GSC + GA4 joined onto a crawl. Pure domain:
     │       │                    # no I/O, no settings. Ingestion belongs in
     │       │                    # integrations/, persistence in the job store.
@@ -133,7 +140,7 @@ src/
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
-| `deliverables/rulebook.py` (Phase 1) | Last remaining item of [DELIVERABLES_IMPLEMENTATION_PLAN.md](DELIVERABLES_IMPLEMENTATION_PLAN.md). Phase 0 (P0-1 through P0-8) is now fully implemented: P0-1/P0-2 (contract + catalogue) as of [build-log 0073](build-log/0073-not-measured-is-a-value.md); P0-3/P0-5 (`deliverables/screaming_frog_adapter.py`, `_bundle.py`, the synthetic SF fixture) as of [build-log 0074](build-log/0074-absent-is-not-empty.md) and [0077](build-log/0077-screaming-frog-adapter-and-zip-guards.md); P0-4 (`page_classifier/audit_export.py`) and P0-6 (`tests/modules/seo/test_import_boundary.py`, all three packages, both directions) as of [build-log 0079](build-log/0079-sixteen-measured-ninety-four-not.md); P0-7 (`scripts/diff_against_rae.py`, opt-in) as of [build-log 0081](build-log/0081-an-oracle-for-membership-only.md). Both adapters produce an `AuditDataset`; nothing consumes one yet — no endpoint, workbook or UI until Phase 2 |
+| Deliverables Phase 2 (workbook generation, scoring, upload endpoint) | [DELIVERABLES_IMPLEMENTATION_PLAN.md](DELIVERABLES_IMPLEMENTATION_PLAN.md) Phase 0 (P0-1 through P0-8) and Phase 1 (P1-1 through P1-4, `deliverables/rulebook.py`) are both now implemented: Phase 0 as of [build-log 0073](build-log/0073-not-measured-is-a-value.md), [0074](build-log/0074-absent-is-not-empty.md), [0077](build-log/0077-screaming-frog-adapter-and-zip-guards.md), [0079](build-log/0079-sixteen-measured-ninety-four-not.md), [0081](build-log/0081-an-oracle-for-membership-only.md); Phase 1 as of [build-log 0083](build-log/0083-a-rulebook-that-never-says-low.md). Two adapters and a rulebook classifier now produce or enrich an `AuditDataset`; nothing consumes one yet — no endpoint, workbook or UI until Phase 2, which gets its own plan and Step 3 stop |
 
 > Two rows were removed from this table in cycle 0039 because they were false.
 > Crawl checkpointing **exists** (`CrawlCheckpointer`, cycle 0019) and

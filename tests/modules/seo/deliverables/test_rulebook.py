@@ -188,6 +188,17 @@ class TestFromXlsxMalformedAlwaysRaises:
         with pytest.raises(RulebookError, match="row 2"):
             Rulebook.from_xlsx(path)
 
+    def test_recognised_rule_type_with_empty_pattern(self, tmp_path: Path) -> None:
+        path = write_rulebook_xlsx(tmp_path / "r.xlsx", rows=(("", "Contains", "X", "", "", ""),))
+        with pytest.raises(RulebookError, match="empty pattern"):
+            Rulebook.from_xlsx(path)
+
+    def test_not_a_readable_workbook(self, tmp_path: Path) -> None:
+        path = tmp_path / "r.xlsx"
+        path.write_bytes(b"this is not a zip or a workbook")
+        with pytest.raises(RulebookError, match="not a readable workbook"):
+            Rulebook.from_xlsx(path)
+
 
 class TestFromXlsxHeaderDetection:
     @pytest.mark.parametrize("header_row", [1, 2, 3, 4, 5])
@@ -272,6 +283,13 @@ class TestFromXlsxFallbackDetection:
 
 
 class TestClassifyPrecedence:
+    def test_ends_with_match(self) -> None:
+        rulebook = Rulebook(
+            rules=(Rule(rule_type=RuleType.ENDS_WITH, pattern=".PDF", theme_1="Downloads"),)
+        )
+        assert rulebook.classify("https://example.com/reports/q3.pdf").theme_1 == "Downloads"
+        assert rulebook.classify("https://example.com/reports/q3.docx").theme_1 == OTHERS_THEME
+
     def test_exact_wins_over_a_longer_non_exact_pattern(self) -> None:
         rulebook = Rulebook(
             rules=(
