@@ -119,6 +119,8 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `modules/seo/deliverables/scoring.py` — per-category penalty totals over `AuditDataset` (ADR 0011 D2) | ✅ Implemented & tested (P2-a, [build-log 0084](docs/build-log/0084-a-workbook-behind-every-category-total.md)). `score_dataset()` produces one `IssuePenalty` per catalogue row (all 110, `NOT_MEASURED` included at zero) and one `CategoryPenalty` per category; no field anywhere aggregates into a single site score. `get_severity_weights()` is a swappable seam, same shape as `weights.get_weight_profile()` (ADR 0006) |
 | `modules/seo/deliverables/workbook.py` — four-sheet client workbook (Overview/Issues/Pages/Notes) | ✅ Implemented & tested (P2-b, [build-log 0084](docs/build-log/0084-a-workbook-behind-every-category-total.md)). `build_workbook(dataset, scoring, *, output_dir=None)`; `write_only` openpyxl mode; `MAX_PAGES_PER_WORKBOOK = 500_000` raises `WorkbookBuildError` instead of truncating. Every text cell across all four sheets passes through `_safe_cell()`, which neutralises openpyxl's leading-character formula classification (`= + - @`, tab, CR) — a workbook-wide test asserts zero cells anywhere have `data_type == "f"`. Writes to `Settings.deliverables_output_dir` by default. The upload endpoint that would move a workbook off this workstation is a separate, deferred cycle with its own Step 3 + Step 5, `security-auditor` as pre-step |
 | `scripts/diff_against_rae.py` — opt-in differential check, our SF adapter vs an independent reimplementation of RAE's `load_url_set` semantics (ADR 0011) | ✅ Implemented & tested (P0-7, [build-log 0081](docs/build-log/0081-an-oracle-for-membership-only.md)). Reads `Settings.rae_archive_dir`; skips cleanly (exit 0) when unset. Not part of `verify.ps1` — the 49-crawl archive lives outside the repo and is run manually by an operator who has it |
+| `modules/seo/deliverables/pipeline.py` — `run_deliverable_pipeline()`, the one call every entry point uses: theme (optional) → score → workbook | ✅ Implemented & tested ([build-log 0085](docs/build-log/0085-a-cli-for-a-pipeline-that-already-existed.md)). Never loads a source itself — see `scripts/build_deliverable.py` below |
+| `scripts/build_deliverable.py` — operator CLI chaining a source loader into `run_deliverable_pipeline()`; `sf-bundle` and `engine-crawl` subcommands | ✅ Implemented & tested ([build-log 0085](docs/build-log/0085-a-cli-for-a-pipeline-that-already-existed.md)). Loading dispatch lives in the script, not `pipeline.py`, so `deliverables/` never imports `page_classifier` (ADR 0011 d.1) — same pattern as `reconcile_screaming_frog.py` and `diff_against_rae.py`. No HTTP endpoint yet (deferred, separate cycle) |
 | `core/logger.py` — structured `extra=` fields on log records | ✅ Fixed in [build-log 0078](docs/build-log/0078-the-fields-that-never-left-the-call-site.md): `get_logger` returns a merging adapter, caller keys win (6 tests). Was dropped on Python 3.11 from the first commit; found in cycle 0074 |
 | Layer 2 local ML classifier | ❌ Protocol only; needs local GPU ([ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
 | Layer 3 `LlmPageClassifier` implementation | ❌ Protocol only; needs a live credential |
@@ -193,6 +195,30 @@ status, indexability or content type, so a URL it holds that the crawl lacks is
 reported as `UNKNOWN`, never as a missed page, and nothing from a list is ever
 merged; the report declares `source_format=BARE_URL_LIST`. Anything else without
 an `Address` column is still refused ([build-log 0072](docs/build-log/0072-a-list-is-not-an-export.md)).
+
+### Building a client deliverable workbook
+
+Chains an already-shipped source loader into the scoring/theming/workbook
+pipeline that Phase 0/1/2a/2b built but nothing previously called end to end
+([build-log 0085](docs/build-log/0085-a-cli-for-a-pipeline-that-already-existed.md)):
+
+```powershell
+# From a Screaming Frog export (directory or zip)
+.\.venv\Scripts\python.exe scripts\build_deliverable.py sf-bundle <bundle_path> [--rulebook path.xlsx]
+
+# From a stored engine crawl (job id, or a path to a .result.json)
+.\.venv\Scripts\python.exe scripts\build_deliverable.py engine-crawl <job-id-or-result.json> [--rulebook path.xlsx]
+```
+
+Omitting `--rulebook` skips theming entirely — no error, nothing to report. A
+`--rulebook` path that does not exist is a hard `RulebookMissingError` unless
+`--lenient-rulebook` is passed explicitly. `pipeline.py` never loads a source
+itself: the two loaders (Screaming Frog bundle vs. engine crawl) are not
+symmetric enough to hide behind one injected callable without `deliverables/`
+importing `page_classifier` (ADR 0011 d.1), so loading dispatch stays in this
+script — the one layer allowed to import both packages, the same pattern as
+`reconcile_screaming_frog.py` and `diff_against_rae.py`. There is no HTTP
+endpoint yet; that is a separate, deferred cycle with its own Step 3 + Step 5.
 
 ### The local API and the React UI
 

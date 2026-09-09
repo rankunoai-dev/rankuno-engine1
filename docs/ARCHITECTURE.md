@@ -97,9 +97,11 @@ src/
     │   │   │                         # every adapter is handed, never imports
     │   │   └── audit.py              # AuditDataset / AuditPage / AuditLink /
     │   │                             # Coverage / AuditSource; four invariants
-    │   ├── deliverables/        # Producers of AuditDataset (ADR 0011). Imports
-    │   │   │                    # contracts and core only; test_import_boundary.py
-    │   │   │                    # pins that it never imports page_classifier
+    │   ├── deliverables/        # Producers of AuditDataset (ADR 0011) and the
+    │   │   │                    # pipeline that turns one into a workbook.
+    │   │   │                    # Imports contracts and core only;
+    │   │   │                    # test_import_boundary.py pins that it never
+    │   │   │                    # imports page_classifier
     │   │   ├── _bundle.py            # Guarded directory-or-zip access: traversal,
     │   │   │                         # symlink, zip-bomb, nested-archive refusal
     │   │   ├── screaming_frog_adapter.py  # SF CSV export -> AuditDataset.
@@ -118,14 +120,21 @@ src/
     │   │   │                         # row is represented even NOT_MEASURED.
     │   │   │                         # get_severity_weights() is the calibration
     │   │   │                         # seam (build-log 0084)
-    │   │   └── workbook.py           # AuditDataset + ScoringResult -> 4-sheet
-    │   │                             # .xlsx (Overview/Issues/Pages/Notes),
-    │   │                             # write_only openpyxl, MAX_PAGES_PER_WORKBOOK
-    │   │                             # = 500_000 raises WorkbookBuildError instead
-    │   │                             # of truncating. Every text cell routed
-    │   │                             # through _safe_cell() so no client-supplied
-    │   │                             # string can become a live formula
-    │   │                             # (build-log 0084). Upload endpoint deferred
+    │   │   ├── workbook.py           # AuditDataset + ScoringResult -> 4-sheet
+    │   │   │                         # .xlsx (Overview/Issues/Pages/Notes),
+    │   │   │                         # write_only openpyxl, MAX_PAGES_PER_WORKBOOK
+    │   │   │                         # = 500_000 raises WorkbookBuildError instead
+    │   │   │                         # of truncating. Every text cell routed
+    │   │   │                         # through _safe_cell() so no client-supplied
+    │   │   │                         # string can become a live formula
+    │   │   │                         # (build-log 0084). Upload endpoint deferred
+    │   │   └── pipeline.py           # run_deliverable_pipeline(): theme
+    │   │                             # (optional) -> score -> workbook. Takes
+    │   │                             # an already-built AuditDataset and never
+    │   │                             # loads one itself; loading dispatch lives
+    │   │                             # in scripts/build_deliverable.py, the one
+    │   │                             # layer allowed to import both contracts
+    │   │                             # sides (ADR 0011 d.1, build-log 0085)
     │   └── performance/         # GSC + GA4 joined onto a crawl. Pure domain:
     │       │                    # no I/O, no settings. Ingestion belongs in
     │       │                    # integrations/, persistence in the job store.
@@ -154,7 +163,7 @@ src/
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
-| Deliverables Phase 2 upload endpoint | [DELIVERABLES_IMPLEMENTATION_PLAN.md](DELIVERABLES_IMPLEMENTATION_PLAN.md) §10. Phase 0 (P0-1 through P0-8), Phase 1 (P1-1 through P1-4, `deliverables/rulebook.py`) and Phase 2a/2b (`deliverables/scoring.py`, `deliverables/workbook.py`) are all now implemented: Phase 0 as of [build-log 0073](build-log/0073-not-measured-is-a-value.md), [0074](build-log/0074-absent-is-not-empty.md), [0077](build-log/0077-screaming-frog-adapter-and-zip-guards.md), [0079](build-log/0079-sixteen-measured-ninety-four-not.md), [0081](build-log/0081-an-oracle-for-membership-only.md); Phase 1 as of [build-log 0083](build-log/0083-a-rulebook-that-never-says-low.md); Phase 2a/2b as of [build-log 0084](build-log/0084-a-workbook-behind-every-category-total.md). A workbook can now be built end-to-end from a dataset, but nothing calls `build_workbook()` yet — no endpoint, CLI or UI wiring, and no code moves the written file off this workstation. That upload endpoint is parked for its own future plan section with its own Step 3 + Step 5 (`security-auditor` as pre-step), not scheduled as a P2-c row |
+| Deliverables Phase 2 upload endpoint | [DELIVERABLES_IMPLEMENTATION_PLAN.md](DELIVERABLES_IMPLEMENTATION_PLAN.md) §10. Phase 0 (P0-1 through P0-8), Phase 1 (P1-1 through P1-4, `deliverables/rulebook.py`) and Phase 2a/2b (`deliverables/scoring.py`, `deliverables/workbook.py`) are all now implemented: Phase 0 as of [build-log 0073](build-log/0073-not-measured-is-a-value.md), [0074](build-log/0074-absent-is-not-empty.md), [0077](build-log/0077-screaming-frog-adapter-and-zip-guards.md), [0079](build-log/0079-sixteen-measured-ninety-four-not.md), [0081](build-log/0081-an-oracle-for-membership-only.md); Phase 1 as of [build-log 0083](build-log/0083-a-rulebook-that-never-says-low.md); Phase 2a/2b as of [build-log 0084](build-log/0084-a-workbook-behind-every-category-total.md). `deliverables/pipeline.py` and `scripts/build_deliverable.py` (cycle [0085](build-log/0085-a-cli-for-a-pipeline-that-already-existed.md)) now chain a source loader into scoring/theming/workbook end to end from the command line — `build_workbook()` is no longer uncalled. What remains is the HTTP endpoint that would move a written workbook off this workstation; that is parked for its own future plan section with its own Step 3 + Step 5 (`security-auditor` as pre-step), not scheduled as a P2-c row |
 
 > Two rows were removed from this table in cycle 0039 because they were false.
 > Crawl checkpointing **exists** (`CrawlCheckpointer`, cycle 0019) and
