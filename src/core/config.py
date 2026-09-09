@@ -168,6 +168,16 @@ class Settings(BaseSettings):
     ahrefs_api_key: SecretStr | None = None
     semrush_api_key: SecretStr | None = None
 
+    # -- Deliverables differential check (opt-in, ADR 0011) -----------------
+    rae_archive_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Directory of RAE crawl-report folders, read only by "
+            "scripts/diff_against_rae.py as an issue-membership oracle. A "
+            "path, not a credential; unset skips the check cleanly."
+        ),
+    )
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:

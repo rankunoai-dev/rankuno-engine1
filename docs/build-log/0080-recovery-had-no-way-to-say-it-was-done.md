@@ -36,6 +36,7 @@ def _recover_in_bg() -> None:
     except Exception as e:
         _logger.error("orphan_recovery_failed", extra={"error": str(e)})
 
+
 threading.Thread(target=_recover_in_bg, daemon=True).start()
 yield
 ```
@@ -126,6 +127,7 @@ def _recover_in_bg() -> None:
         _logger.error("orphan_recovery_failed", extra={"error": str(e)})
     finally:
         state.recovery_done.set()
+
 
 threading.Thread(target=_recover_in_bg, daemon=True).start()
 yield
