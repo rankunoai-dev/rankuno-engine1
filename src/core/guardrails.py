@@ -141,15 +141,27 @@ class GuardrailEngine:
     def policy_for(self, risk_class: RiskClass) -> ApprovalMode:
         """Return the effective approval mode for a risk class.
 
-        Applies the base matrix, then the configuration overrides that let an
-        operator *tighten* — never loosen — the defaults.
+        In production, always returns the base policy with no overrides allowed.
+        In development, configuration overrides can only *tighten* policy, never
+        loosen it (CLAUDE.md §7 ruling 10).
+
+        Args:
+            risk_class: The RiskClass to determine approval mode for.
+
+        Returns:
+            The ApprovalMode for this risk class.
         """
         mode = _BASE_POLICY[risk_class]
 
-        if risk_class is RiskClass.WRITE and not self._settings.require_approval_for_writes:
-            mode = ApprovalMode.OPERATOR_REVIEW
-        if risk_class is RiskClass.FINANCIAL and not self._settings.require_approval_for_spend:
-            mode = ApprovalMode.OPERATOR_REVIEW
+        # In production, never apply overrides; config validation has already
+        # enforced that require_approval_for_writes and require_approval_for_spend
+        # are both True
+        if self._settings.environment is Environment.PRODUCTION:
+            return mode
+
+        # In development, overrides are permitted but can only tighten, never loosen
+        # (currently development doesn't loosen policy, so this is a no-op safeguard)
+        # Policies are immutable by design — once set, they can only be made stricter
 
         return mode
 

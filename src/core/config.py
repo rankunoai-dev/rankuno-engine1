@@ -272,9 +272,23 @@ class Settings(BaseSettings):
 
     def model_post_init(self, _context: Any, /) -> None:
         """Refuse unsafe production configurations at boot rather than at call time."""
-        if self.environment is Environment.PRODUCTION and not self.guardrails_enabled:
-            msg = "GUARDRAILS_ENABLED=false is not permitted in production."
-            raise ConfigurationError(msg)
+        if self.environment is Environment.PRODUCTION:
+            if not self.guardrails_enabled:
+                msg = "GUARDRAILS_ENABLED=false is not permitted in production."
+                raise ConfigurationError(msg)
+            # Enforce that policy overrides cannot loosen WRITE and FINANCIAL approvals
+            if not self.require_approval_for_writes:
+                msg = (
+                    "REQUIRE_APPROVAL_FOR_WRITES=false is not permitted in production. "
+                    "Policy overrides cannot loosen WRITE guardrails (CLAUDE.md §7 ruling 10)."
+                )
+                raise ConfigurationError(msg)
+            if not self.require_approval_for_spend:
+                msg = (
+                    "REQUIRE_APPROVAL_FOR_SPEND=false is not permitted in production. "
+                    "Policy overrides cannot loosen FINANCIAL guardrails (CLAUDE.md §7 ruling 10)."
+                )
+                raise ConfigurationError(msg)
         self._org_config_store: OrgConfigStore | None = None
 
     def gsc_account_names(self) -> tuple[str, ...]:
