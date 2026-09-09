@@ -16,13 +16,16 @@ import re
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.errors import ConfigurationError
 from src.core.schemas import StrictModel
+
+if TYPE_CHECKING:
+    from src.core.state_store import OrgConfigStore
 
 __all__ = [
     "GSC_ACCOUNT_NAME_PATTERN",
@@ -198,6 +201,49 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- PostgreSQL database (Phase 2a) ----------------------------------------
+    postgres_host: str = Field(
+        default="localhost",
+        description="PostgreSQL server hostname or IP address.",
+    )
+    postgres_port: int = Field(
+        default=5432,
+        ge=1,
+        le=65535,
+        description="PostgreSQL server port.",
+    )
+    postgres_database: str = Field(
+        default="rankuno",
+        description="PostgreSQL database name.",
+    )
+    postgres_user: str = Field(
+        default="rankuno",
+        description="PostgreSQL user name.",
+    )
+    postgres_password: SecretStr | None = Field(
+        default=None,
+        description="PostgreSQL user password (held as SecretStr).",
+    )
+    postgres_credentials_cache_ttl_s: int = Field(
+        default=300,
+        ge=60,
+        le=3600,
+        description=(
+            "Time in seconds to cache PostgreSQL credentials before re-reading "
+            "from environment. Used for periodic connection pool rebuild and "
+            "secret rotation testing."
+        ),
+    )
+
+    # -- Multi-tenant organization configs -----------------------------------
+    org_config_path: Path = Field(
+        default=REPO_ROOT / ".jobs",
+        description=(
+            "Directory to hold organization configuration files. Created if absent. "
+            "Initialized at startup with a default org if none exists."
+        ),
+    )
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
@@ -229,6 +275,7 @@ class Settings(BaseSettings):
         if self.environment is Environment.PRODUCTION and not self.guardrails_enabled:
             msg = "GUARDRAILS_ENABLED=false is not permitted in production."
             raise ConfigurationError(msg)
+        self._org_config_store: OrgConfigStore | None = None
 
     def gsc_account_names(self) -> tuple[str, ...]:
         """Configured profile names, sorted. Safe to publish: names, never secrets."""
@@ -292,6 +339,19 @@ class Settings(BaseSettings):
             client_secret=client_secret,
             refresh_token=profile.refresh_token,
         )
+
+    @property
+    def org_config_store(self) -> OrgConfigStore:
+        """Get the organization configuration store, creating it on first access.
+
+        Returns:
+            The `OrgConfigStore` for this deployment.
+        """
+        if self._org_config_store is None:
+            from src.core.state_store import DiskOrgConfigStore
+
+            self._org_config_store = DiskOrgConfigStore(self.org_config_path)
+        return self._org_config_store
 
     def require(self, field_name: str) -> str:
         """Return a required credential, or fail loudly with an actionable message.
