@@ -96,8 +96,8 @@ class TestInitialSchemaMigration:
             content = f.read()
 
         assert "ForeignKeyConstraint" in content
-        assert 'org_configs.org_id' in content
-        assert 'jobs.id' in content
+        assert "org_configs.org_id" in content
+        assert "jobs.id" in content
 
     def test_migration_has_constraints(self) -> None:
         """Migration should define check constraints."""

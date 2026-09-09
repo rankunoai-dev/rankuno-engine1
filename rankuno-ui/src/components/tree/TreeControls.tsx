@@ -1,6 +1,7 @@
 import { ApartmentOutlined } from "@ant-design/icons";
 import type { DashModel } from "../../lib/dashboardModel";
 import { REASON_MEANINGS, reasonLabel, type TreeOverlay } from "../../lib/treeOverlay";
+import { useCrawlStore } from "../../store/useCrawlStore";
 import { useDashboardStore } from "../../store/useDashboardStore";
 
 interface Props {
@@ -33,6 +34,9 @@ export function TreeControls({ model, overlay, fullScreen = false }: Props): JSX
   const toggleMissedOnly = useDashboardStore((state) => state.toggleMissedOnly);
   const toggleReason = useDashboardStore((state) => state.toggleReason);
   const setFullScreen = useDashboardStore((state) => state.setFullScreen);
+  const reconciliation = useCrawlStore((state) => state.reconciliation);
+  const includeDefaulters = useCrawlStore((state) => state.includeDefaulters);
+  const toggleIncludeDefaulters = useCrawlStore((state) => state.toggleIncludeDefaulters);
 
   const reasons = Object.entries(overlay.reasons).sort((a, b) => b[1] - a[1]);
   const on = crossCheckOn && overlay.crossCheck;
@@ -94,6 +98,25 @@ export function TreeControls({ model, overlay, fullScreen = false }: Props): JSX
             onChange={() => toggleCrossCheck(model)}
           />
           <span>Cross-check</span>
+        </label>
+        <label
+          className={`xtoggle${includeDefaulters ? " on" : ""}${reconciliation ? "" : " off"}`}
+          title={
+            reconciliation
+              ? "Show the 'Defaulter / Quarantine' section: bare-list URLs this engine never " +
+                "crawled, sorted into structurally-junk patterns (AEM asset paths, leaked " +
+                "author paths, malformed addresses). Off by default so a normal tree view is " +
+                "never diluted with them."
+              : "No cross-check is loaded for this job, so there is nothing to quarantine."
+          }
+        >
+          <input
+            type="checkbox"
+            checked={includeDefaulters}
+            disabled={!reconciliation}
+            onChange={() => toggleIncludeDefaulters()}
+          />
+          <span>Include Defaulters</span>
         </label>
         {on && (
           <button

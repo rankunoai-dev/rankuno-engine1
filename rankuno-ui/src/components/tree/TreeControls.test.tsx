@@ -56,7 +56,7 @@ beforeEach(() => {
     fullScreen: false,
     hiddenReasons: new Set<string>(),
   });
-  useCrawlStore.setState({ reconciliation: null, result: null });
+  useCrawlStore.setState({ reconciliation: null, result: null, includeDefaulters: false });
 });
 
 describe("cross-check toggle", () => {
@@ -183,5 +183,38 @@ describe("getting back to the main tree", () => {
     render(<VirtualizedTree model={model} />);
     expect(screen.queryByRole("button", { name: /Main tree view/ })).toBeNull();
     expect(screen.getByText("⛶ Full screen")).toBeInTheDocument();
+  });
+});
+
+describe("Include Defaulters toggle", () => {
+  it("is disabled, with the reason, when no cross-check is saved", () => {
+    const model = tree();
+    render(<VirtualizedTree model={model} />);
+    const toggle = screen.getByLabelText("Include Defaulters") as HTMLInputElement;
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.checked).toBe(false);
+    expect(toggle.closest("label")?.title).toMatch(/No cross-check is loaded/);
+  });
+
+  it("is off by default even once a cross-check is loaded", () => {
+    const model = tree();
+    useCrawlStore.setState({ reconciliation: reconciliation() });
+    render(<VirtualizedTree model={model} />);
+    const toggle = screen.getByLabelText("Include Defaulters") as HTMLInputElement;
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.checked).toBe(false);
+  });
+
+  it("flips the store flag on click, independent of the cross-check toggle", () => {
+    const model = tree();
+    useCrawlStore.setState({ reconciliation: reconciliation() });
+    render(<VirtualizedTree model={model} />);
+
+    fireEvent.click(screen.getByLabelText("Include Defaulters"));
+    expect(useCrawlStore.getState().includeDefaulters).toBe(true);
+    expect(useDashboardStore.getState().crossCheckOn).toBe(false);
+
+    fireEvent.click(screen.getByLabelText("Include Defaulters"));
+    expect(useCrawlStore.getState().includeDefaulters).toBe(false);
   });
 });

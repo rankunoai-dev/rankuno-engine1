@@ -260,6 +260,12 @@ export function buildTreeOverlay(
 
   // Nodes by URL. Several nodes can share one URL — a section page and a
   // duplicate profile — and each of them should carry the mark.
+  //
+  // `!node.profile` already excludes `kind: "defaulter"` nodes — they are
+  // built with `profile: null` by construction — and that exclusion is
+  // deliberate, not incidental: a defaulter's URL was never crawled, so it
+  // can never collide with a `missed`/`added` cross-check mark, which this
+  // map exists to attach.
   const byUrl = new Map<string, number[]>();
   for (const node of model.nodes) {
     if (!node.profile) continue;
@@ -478,6 +484,10 @@ function summariseOthers(
 
   for (const node of model.nodes) {
     rootOf[node.i] = node.p === null ? node.i : rootOf[node.p]!;
+    // `kind: "defaulter"` nodes sit in `DEFAULTER_LANE`, never `OTHERS_LANE`,
+    // and carry no profile either — doubly excluded, deliberately: a
+    // quarantined URL is not an OTHERS page and must never appear in this
+    // bucket's counts or its Search-Console-backed page list.
     if (node.lv !== OTHERS_LANE || !node.profile) continue;
     const profile = node.profile;
     // The bucket is the node directly beneath OTHERS in the tree on screen —
@@ -544,7 +554,7 @@ function summariseOthers(
   candidates.sort((a, b) => b.clicks - a.clicks);
 
   return {
-    applicable: model.laneCounts[OTHERS_LANE] > 0,
+    applicable: (model.laneCounts[OTHERS_LANE] ?? 0) > 0,
     pages,
     missed,
     clicks,

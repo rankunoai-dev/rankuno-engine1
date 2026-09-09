@@ -80,6 +80,9 @@ from src.modules.seo.page_classifier.schemas import (
 from src.modules.seo.page_classifier.screaming_frog_merge import (
     merge_reconciled_urls,
 )
+from src.modules.seo.page_classifier.screaming_frog_reconciler import (
+    revalidate_defaulters,
+)
 from src.modules.seo.page_classifier.tool import (
     CrawlSummary,
     PageClassificationInput,
@@ -360,6 +363,12 @@ GAP_MEANINGS: Mapping[str, str] = MappingProxyType(
         ),
         "SPREADSHEET_FILE": "An Excel or CSV file. Screaming Frog lists documents separately.",
         "OTHER_FILE": "A Word document, archive, media or other non-HTML file.",
+        "DAM_HTML_ARCHIVE": (
+            "AEM investor-archive asset path ending in .html. A document store, not a page."
+        ),
+        "DAM_FORMS_OTHER": "AEM DAM asset path ending in .html, outside the investor archive.",
+        "CMS_INTERNAL_LEAK": "A leaked AEM author/publish path instead of the site's vanity URL.",
+        "CORRUPTED_URL": "Not a well-formed address: encoded whitespace, a doubled extension, or similar.",
     }
 )
 """Plain-language gloss for each gap reason, for the downloadable report.
@@ -615,6 +624,11 @@ SHEET_TITLES: Mapping[str, str] = MappingProxyType(
         "QUERY_VARIANT": "Query variants",
         "REPEATED_SUFFIX_TRAP": "Loop URLs",
         "MALFORMED_MARKUP": "Malformed markup",
+        # Defaulters: bare-list UNKNOWN rows further classified by URL shape.
+        "DAM_HTML_ARCHIVE": "Defaulters – DAM archive",
+        "DAM_FORMS_OTHER": "Defaulters – DAM forms/other",
+        "CMS_INTERNAL_LEAK": "Defaulters – CMS leaks",
+        "CORRUPTED_URL": "Defaulters – Malformed",
     }
 )
 """Worksheet name per gap reason.
@@ -2165,8 +2179,13 @@ def create_app(
                 if not isinstance(row, Mapping):
                     continue
                 reason = str(row.get("reason", ""))
-                buckets.setdefault(reason, []).append(str(row.get("url", "")))
-                sides[reason] = owner
+                # A bare-list UNKNOWN row carries a further guess at what its URL
+                # shape is — a DAM archive path, a leaked CMS path, a malformed
+                # address — and that guess, not the bare "UNKNOWN" reason, is what
+                # the workbook should group and label it by.
+                bucket_key = str(row.get("defaulter_category") or reason)
+                buckets.setdefault(bucket_key, []).append(str(row.get("url", "")))
+                sides[bucket_key] = owner
 
         # The two findings first, then the rest largest first. On a real
         # cross-check `MEDIA_URL` is 16,162 of 16,337 rows, so by size alone the
@@ -2179,7 +2198,11 @@ def create_app(
                 "PRESENTATION_FILE": 3,
                 "SPREADSHEET_FILE": 4,
                 "OTHER_FILE": 5,
-            }.get(reason, 6)
+                "DAM_HTML_ARCHIVE": 6,
+                "DAM_FORMS_OTHER": 7,
+                "CMS_INTERNAL_LEAK": 8,
+                "CORRUPTED_URL": 9,
+            }.get(reason, 10)
             return (lead, -len(buckets[reason]))
 
         ordered = sorted(buckets, key=rank)

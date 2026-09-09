@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 __all__ = [
     "ApprovalMode",
     "ExecutionStatus",
+    "OrgConfig",
     "RiskClass",
     "StrictModel",
     "ToolMetadata",
@@ -151,3 +152,25 @@ class ToolResult(StrictModel, Generic[PayloadT]):
     def ok(self) -> bool:
         """True only when the tool ran to completion successfully."""
         return self.status is ExecutionStatus.SUCCESS
+
+
+class OrgConfig(StrictModel):
+    """Configuration for one organization in a multi-tenant deployment.
+
+    Attributes:
+        org_id: Organization identifier. Must match ^[a-z0-9_-]{1,64}$.
+        display_name: Human-readable name for the organization.
+        allowed_facets: Set of facet_ids this org can access. Empty set means all
+            facets are allowed (Phase 1 behavior). Phase 2 will enforce restrictions.
+        max_concurrent_crawls: Maximum concurrent crawls for this organization.
+        llm_credit_limit_usd: Maximum cumulative spend on LLM inference for this org.
+            Must be > 0 for the org to start jobs. Set to 0 to disable the org.
+        is_active: Whether this organization can create new jobs.
+    """
+
+    org_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_-]+$")
+    display_name: str = Field(min_length=1, max_length=200)
+    allowed_facets: frozenset[str] = Field(default_factory=frozenset)
+    max_concurrent_crawls: int = Field(default=3, ge=1, le=50)
+    llm_credit_limit_usd: float = Field(default=100.0, ge=0.0)
+    is_active: bool = True

@@ -53,8 +53,10 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import UTC, datetime
 from enum import StrEnum
 from urllib.parse import urlsplit, urlunsplit
 
@@ -72,6 +74,8 @@ from src.modules.seo.page_classifier.url_rules import (
 __all__ = [
     "MIN_TAIL_REPEATS",
     "CrossCheckInput",
+    "DefaulterCategory",
+    "DefaulterValidation",
     "EngineGapReason",
     "ExportFormat",
     "FrogGapReason",
@@ -86,6 +90,7 @@ __all__ = [
     "load_screaming_frog_export",
     "normalise",
     "reconcile",
+    "revalidate_defaulters",
     "verify_missed_pages",
 ]
 
@@ -234,6 +239,40 @@ class EngineGapReason(StrEnum):
     """Any other non-HTML file: Word documents, archives, media."""
 
 
+class DefaulterCategory(StrEnum):
+    """Why a bare-list `UNKNOWN` row looks structurally junk rather than a page.
+
+    A bare URL list carries no status, so `FrogGapReason.UNKNOWN` cannot say
+    whether a row is a live page this engine missed or an address that was
+    never a page at all. This is the second, narrower question asked only of
+    that bucket: does the URL's own shape give it away as an AEM asset path, a
+    leaked author path, or a malformed address? A member here is a positive
+    claim; its absence (`None` on `UrlGap.defaulter_category`) is not a claim
+    that a URL is real, only that it did not match one of these patterns — see
+    `UrlGap.defaulter_category` for the residual it is left in.
+    """
+
+    DAM_HTML_ARCHIVE = "DAM_HTML_ARCHIVE"
+    """An AEM DAM asset path (`/content/dam/.../investors/...`) ending in
+    `.html`. infosys.com's investor-relations archive is filed here; it is a
+    document store, not a navigable page."""
+
+    DAM_FORMS_OTHER = "DAM_FORMS_OTHER"
+    """The same DAM asset path shape, ending in `.html`, but outside the
+    investors subtree: thumbnails, form fragments and other CMS-managed HTML
+    that was never meant to be a page in its own right."""
+
+    CMS_INTERNAL_LEAK = "CMS_INTERNAL_LEAK"
+    """An AEM author/publish repository path (`/content/<site>/<lang>/...`)
+    leaked into a public list instead of the vanity URL it publishes under."""
+
+    CORRUPTED_URL = "CORRUPTED_URL"
+    """Not a well-formed address at all: percent-encoded whitespace or quotes,
+    a doubled extension, a doubled path separator, an embedded second URL, or
+    literal whitespace in the path. Whatever produced the list built this
+    entry wrong."""
+
+
 class ScreamingFrogRow(StrictModel):
     """One row of a Screaming Frog `internal_html` export.
 
@@ -251,6 +290,32 @@ class ScreamingFrogRow(StrictModel):
     unique_inlinks: int = Field(default=0, ge=0)
 
 
+class DefaulterValidation(StrictModel):
+    """A Search Console second look at a bare-list defaulter row.
+
+    Absent (`None` on `UrlGap.validation`) means never checked — distinct from
+    checked and still junk, which is a populated `DefaulterValidation` with
+    `flagged_real=False`. Never overwritten with a guess: every field here
+    either came from a matched Search Console row or was not set at all.
+
+    Attributes:
+        checked_at: ISO timestamp of the check. Empty until one has run.
+        gsc_impressions: Impressions Search Console reported for this exact
+            URL, or `None` if never looked up.
+        gsc_clicks: Clicks reported for the same URL, or `None` if never
+            looked up.
+        flagged_real: True when Search Console shows traffic for a URL this
+            module classified as structurally junk — the one signal strong
+            enough to contradict a pattern match instead of merely confirming
+            the absence the pattern already implied.
+    """
+
+    checked_at: str = ""
+    gsc_impressions: int | None = None
+    gsc_clicks: int | None = None
+    flagged_real: bool = False
+
+
 class UrlGap(StrictModel):
     """One URL that appears on a single side, and why.
 
@@ -258,10 +323,20 @@ class UrlGap(StrictModel):
         url: The address as its own tool reported it, *not* normalised — an
             analyst pastes this into a browser.
         reason: The single rule that explains it.
+        defaulter_category: Set only for a bare-list `UNKNOWN` row whose
+            address matched a structurally-junk pattern (see
+            `DefaulterCategory`). `None` for every other row, and also for a
+            bare-list `UNKNOWN` row that matched no pattern — that residual is
+            presumed real, not verified, and is reported as such rather than
+            invented a category to fill.
+        validation: A Search Console re-check of a defaulter row, or `None`
+            if none has run yet.
     """
 
     url: str = Field(min_length=1)
     reason: str = Field(min_length=1)
+    defaulter_category: DefaulterCategory | None = None
+    validation: DefaulterValidation | None = None
 
 
 class ReconciliationReport(StrictModel):
@@ -624,6 +699,88 @@ def _frog_reason(row: ScreamingFrogRow, base_host: str) -> FrogGapReason:
     return FrogGapReason.MISSED_PAGE
 
 
+_CORRUPT_ENCODED_MARKERS = ("%20", "%22", "%27")
+"""Percent-encoded space and quote characters. A hand-written or scraped link
+does not carry one of these; a URL that does was assembled wrong upstream of
+the list, not merely unlinked."""
+
+_CORRUPT_DOUBLED_EXTENSIONS = (".html.html", ".htm.htm", ".html.htm", ".htm.html")
+"""A page suffix appended twice — the signature of a resolver defaulting an
+extension onto an address that already carried one."""
+
+_DAM_PREFIX = "/content/dam/"
+"""AEM's asset-repository path. A URL under it names a binary or fragment in
+the CMS's own storage layout, not an address a visitor navigates to."""
+
+_DAM_INVESTORS_SEGMENT = "investors"
+"""The segment that separates infosys.com's investor-relations archive from
+every other DAM export, immediately after `/content/dam/<site>/<lang>/`."""
+
+
+def _is_corrupted_url(url: str) -> bool:
+    """True when a URL is malformed rather than merely unlinked or absent.
+
+    Checked before the DAM and CMS-leak rules: a broken address can also sit
+    under `/content/dam/` or `/content/`, and "this address is not well-formed"
+    explains it better than either — a path rule presumes the URL is at least
+    a real path, which a malformed one is not.
+    """
+    if any(marker in url for marker in _CORRUPT_ENCODED_MARKERS):
+        return True
+    if any(ext in url for ext in _CORRUPT_DOUBLED_EXTENSIONS):
+        return True
+    parts = urlsplit(url)
+    # `urlsplit` already separates the scheme's own `//`, so any `//` left in
+    # the path is either a leading doubled separator or an internal one — both
+    # covered by one check.
+    if "//" in parts.path:
+        return True
+    if url.count("http") >= 2:
+        return True
+    return bool(re.search(r"^\s|\s$|\s{2}", parts.path))
+
+
+def _dam_investors(path: str) -> bool:
+    """True when a DAM path's segment after `<site>/<lang>/` is `investors`.
+
+    infosys.com's investor-relations archive is filed in its own DAM subtree;
+    every other DAM export under the same prefix is a thumbnail, a form
+    fragment, or another asset with no equivalent analyst action.
+    """
+    tail = path.split(_DAM_PREFIX, 1)[1]
+    segments = tail.split("/")
+    return len(segments) >= 3 and segments[2] == _DAM_INVESTORS_SEGMENT
+
+
+def _defaulter_category(url: str) -> DefaulterCategory | None:
+    """Classify a bare-list `UNKNOWN` row as structurally junk, or leave it.
+
+    Called only for `FrogGapReason.UNKNOWN` rows sourced from a bare URL
+    list — the one bucket the module's own invariant says nothing can be
+    proven about beyond absence from the crawl. A category here is a stronger
+    claim than that invariant allows on its own, so it is made only where the
+    URL's shape gives it away outright. Everything else is left `None`: the
+    presumed-real residual, not a verified-live page and not junk either.
+
+    Order matters and mirrors `_frog_reason`: corrupted is checked first
+    because a malformed address can also happen to sit under `/content/dam/`
+    or `/content/`, and DAM is checked before the general CMS-leak rule
+    because every DAM path is also a `/content/` path.
+    """
+    if _is_corrupted_url(url):
+        return DefaulterCategory.CORRUPTED_URL
+    path = urlsplit(url).path.lower()
+    if _DAM_PREFIX in path and path.endswith((".html", ".htm")):
+        return (
+            DefaulterCategory.DAM_HTML_ARCHIVE
+            if _dam_investors(path)
+            else DefaulterCategory.DAM_FORMS_OTHER
+        )
+    if "/content/" in path and _DAM_PREFIX not in path:
+        return DefaulterCategory.CMS_INTERNAL_LEAK
+    return None
+
+
 def _repeated_tails(urls: list[str]) -> set[str]:
     """Path tails repeating often enough to be a relative-href loop.
 
@@ -709,6 +866,7 @@ def reconcile(
             reason=(
                 FrogGapReason.UNKNOWN if bare else _frog_reason(frog_by_key[key], base_host)
             ).value,
+            defaulter_category=_defaulter_category(frog_by_key[key].address) if bare else None,
         )
         for key in sorted(frog_only_keys)
     )
@@ -854,3 +1012,112 @@ def verify_missed_pages(
         extra={"checked": len(checks), "still_live": surviving},
     )
     return tuple(checks)
+
+
+def _as_count(value: object) -> int:
+    """Read a Search Console metric out of a loosely-typed sidecar row.
+
+    Distinct from `_as_int`: that one reads a spreadsheet cell (`str | None`).
+    This reads a value already unpacked from JSON or built in-process, so it
+    may already be an `int` — and mypy strict cannot narrow `object` to `int`
+    on its own, so the cast happens through `str` on any other input.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def revalidate_defaulters(
+    saved: Mapping[str, object], unmatched_rows: Sequence[Mapping[str, object]]
+) -> Mapping[str, object] | None:
+    """Re-check bare-list `UNKNOWN` rows against a newly attached GSC export.
+
+    Why this exists
+    ----------------
+    A defaulter category is a pattern match on a URL's shape, made without
+    fetching it — this module opens no sockets, by the same rule that keeps
+    `verify_missed_pages`'s probe injected rather than built in. Search
+    Console is not a live fetch either, but it is independent evidence: a URL
+    Google shows impressions or clicks for in the last 16 months was live and
+    was requested, whatever its path looks like. That is strong enough to flag
+    a pattern match as worth a second look without claiming to have re-crawled
+    anything.
+
+    The lookup this reuses (`unresolved_gsc` rows reasoned `not_crawled`) is
+    already exactly the right shape: an address Search Console reported that
+    this engine's own crawl never reached. A bare-list defaulter row is the
+    same fact from the other direction — a URL a list held that this crawl
+    never reached — so the two sets are answering the same question and the
+    join needs no new machinery.
+
+    Args:
+        saved: A job's saved reconciliation sidecar, as `state_store` returns
+            it — the same mapping `write_reconciliation` wrote.
+        unmatched_rows: The Search Console rows this crawl never resolved to a
+            page, in the shape the performance sidecar already stores them
+            (`url`, `clicks`, `impressions`, `reason`). Only rows reasoned
+            `"not_crawled"` are eligible: the other reasons (`off_site`,
+            `ambiguous`, `unparseable`, `other_subdomain`) do not mean "on this
+            site but absent from the crawl", which is the one fact a bare-list
+            defaulter row needs corroborated.
+
+    Returns:
+        An updated copy of `saved` with `DefaulterValidation` attached to
+        every matched `frog_only` row, or `None` when there is nothing to
+        write — no saved reconciliation, no bare-list `UNKNOWN` rows in it, or
+        none of them matched an eligible Search Console row. `None` is a
+        no-op instruction to the caller, never a signal to raise.
+    """
+    frog_only = saved.get("frog_only")
+    if not isinstance(frog_only, list) or not frog_only:
+        return None
+
+    lookup = {
+        normalise(str(row.get("url", ""))): row
+        for row in unmatched_rows
+        if row.get("reason") == "not_crawled"
+    }
+    if not lookup:
+        return None
+
+    checked_at = datetime.now(UTC).isoformat()
+    updated_rows: list[object] = []
+    updated_count = 0
+    for raw in frog_only:
+        if not isinstance(raw, Mapping):
+            updated_rows.append(raw)
+            continue
+        gap = UrlGap.model_validate(raw)
+        eligible = gap.reason == FrogGapReason.UNKNOWN.value
+        match = lookup.get(normalise(gap.url)) if eligible else None
+        if match is None:
+            updated_rows.append(dict(raw))
+            continue
+        impressions = _as_count(match.get("impressions"))
+        clicks = _as_count(match.get("clicks"))
+        gap = gap.model_copy(
+            update={
+                "validation": DefaulterValidation(
+                    checked_at=checked_at,
+                    gsc_impressions=impressions,
+                    gsc_clicks=clicks,
+                    flagged_real=impressions > 0 or clicks > 0,
+                )
+            }
+        )
+        updated_rows.append(gap.model_dump(mode="json"))
+        updated_count += 1
+
+    if not updated_count:
+        return None
+
+    result = dict(saved)
+    result["frog_only"] = updated_rows
+    _logger.info(
+        "defaulters_revalidated",
+        extra={"eligible": len(lookup), "updated": updated_count},
+    )
+    return result

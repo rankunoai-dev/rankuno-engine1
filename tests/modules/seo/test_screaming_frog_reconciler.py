@@ -9,9 +9,12 @@ total by 83 — a report that does not add up is worse than no report.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pytest
 from src.modules.seo.page_classifier.screaming_frog_reconciler import (
     MIN_TAIL_REPEATS,
+    DefaulterCategory,
     EngineGapReason,
     ExportFormat,
     FrogGapReason,
@@ -24,6 +27,7 @@ from src.modules.seo.page_classifier.screaming_frog_reconciler import (
     load_screaming_frog_export,
     normalise,
     reconcile,
+    revalidate_defaulters,
     verify_missed_pages,
 )
 
@@ -605,3 +609,424 @@ class TestEngineFiles:
             engine_reasons={"SITEMAP_ORPHAN": 1},
         )
         assert report.orphans == ("https://www.e.com/x.pdf",)
+
+
+def _classify(url: str) -> DefaulterCategory | None:
+    """Run one bare-list URL through `reconcile` and return its category.
+
+    Goes through the public `reconcile` entry point rather than a private
+    helper directly, matching how every other rule in this module is tested —
+    the classification is a property of the reconciliation, not a standalone
+    function with its own contract.
+    """
+    report = reconcile(
+        "https://www.infosys.com/",
+        (),
+        (ScreamingFrogRow(address=url),),
+        source_format=ExportFormat.BARE_URL_LIST,
+    )
+    assert len(report.frog_only) == 1
+    assert report.frog_only[0].reason == FrogGapReason.UNKNOWN.value
+    return report.frog_only[0].defaulter_category
+
+
+class TestDefaulterCategory:
+    """A bare-list `UNKNOWN` row's shape, sorted into structurally-junk or not.
+
+    The bucket exists because a bare list carries no status: `UNKNOWN` alone
+    cannot separate "this engine missed a live page" from "this address was
+    never a page". These rules narrow that only where the URL's own shape
+    gives it away — everything else stays `None`, the presumed-real residual.
+    """
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            pytest.param(
+                "https://www.infosys.com/%20services/insights/x.html",
+                DefaulterCategory.CORRUPTED_URL,
+                id="percent-encoded-space",
+            ),
+            pytest.param(
+                "https://www.infosys.com/confluence/2022/pursuit%20excellence.html",
+                DefaulterCategory.CORRUPTED_URL,
+                id="percent-encoded-space-mid-path",
+            ),
+            pytest.param(
+                "https://www.infosys.com/cobalt-world-tour/2023/nyc.html.html",
+                DefaulterCategory.CORRUPTED_URL,
+                id="doubled-extension",
+            ),
+            pytest.param(
+                "https://www.infosys.com//about/knowledge-institute/insights/x.html",
+                DefaulterCategory.CORRUPTED_URL,
+                id="doubled-leading-slash",
+            ),
+            pytest.param(
+                "https://www.infosys.com/services/x.html%20https://other.example.com/y",
+                DefaulterCategory.CORRUPTED_URL,
+                id="second-http-embedded",
+            ),
+            pytest.param(
+                "https://www.infosys.com/content/infosys-web/en%20%20%20%20/x.html",
+                DefaulterCategory.CORRUPTED_URL,
+                id="whitespace-in-path-via-percent-encoding",
+            ),
+            pytest.param(
+                "https://www.infosys.com/content/dam/infosys-web/en/investors/"
+                "reports-filings/annual-report/AR-2010/index.html",
+                DefaulterCategory.DAM_HTML_ARCHIVE,
+                id="dam-investors",
+            ),
+            pytest.param(
+                "https://www.infosys.com/content/dam/infosys-web/en/40yearsofheart/anusha.html",
+                DefaulterCategory.DAM_FORMS_OTHER,
+                id="dam-non-investors",
+            ),
+            pytest.param(
+                "https://www.infosys.com/-/content/infosys-web/en/aster-1/marketing.html",
+                DefaulterCategory.CMS_INTERNAL_LEAK,
+                id="cms-leak",
+            ),
+            pytest.param(
+                "https://www.infosys.com/content/infosys-web/en/-/content/infosys-web/en/"
+                "aster-1/marketing.html",
+                DefaulterCategory.CMS_INTERNAL_LEAK,
+                id="cms-leak-doubly-nested",
+            ),
+            pytest.param(
+                "https://www.infosys.com/about/awards/most-reputed-company.html",
+                None,
+                id="ordinary-page-is-the-presumed-real-residual",
+            ),
+        ],
+    )
+    def test_each_rule_wins_alone(self, url, expected):
+        assert _classify(url) == expected
+
+    def test_corrupted_beats_dam_when_both_match(self):
+        """A malformed address explains the row better than its path shape.
+
+        This URL sits under `/content/dam/.../investors/...` *and* carries a
+        percent-encoded space — corrupted wins, because "not well-formed" is
+        true regardless of where it sits, and a DAM path presumes the address
+        is at least a real path.
+        """
+        url = "https://www.infosys.com/content/dam/infosys-web/en/investors/%20reports/index.html"
+        assert _classify(url) == DefaulterCategory.CORRUPTED_URL
+
+    def test_corrupted_beats_cms_leak_when_both_match(self):
+        url = "https://www.infosys.com/-/content/infosys-web/en%20/aster-1/marketing.html"
+        assert _classify(url) == DefaulterCategory.CORRUPTED_URL
+
+    def test_investors_segment_must_be_immediately_after_site_and_lang(self):
+        """`investors` appearing later in the path does not count.
+
+        Only the segment immediately after `/content/dam/<site>/<lang>/`
+        decides the split; a page that merely mentions investors further down
+        the DAM path is still general DAM output, not the investor archive.
+        """
+        url = "https://www.infosys.com/content/dam/infosys-web/en/reports/investors.html"
+        assert _classify(url) == DefaulterCategory.DAM_FORMS_OTHER
+
+    def test_dam_path_not_ending_in_html_is_not_categorised(self):
+        """The DAM rules require an `.html`/`.htm` ending, per the design.
+
+        A non-HTML DAM asset does not match (b), (c) or (d) — `/content/dam/`
+        is explicitly excluded from the CMS-leak rule — so it falls to the
+        presumed-real residual rather than inventing a fifth category.
+        """
+        url = "https://www.infosys.com/content/dam/infosys-web/en/reports/deck.pdf"
+        assert _classify(url) is None
+
+    def test_non_bare_list_rows_never_get_a_category(self):
+        """A real export's `UNKNOWN` never occurs.
+
+        Every other reason must carry `defaulter_category=None` unconditionally.
+        """
+        report = reconcile(
+            BASE,
+            (),
+            (row("https://www.e.com/gone.html", status=404),),
+        )
+        assert report.frog_only[0].reason == FrogGapReason.CLIENT_ERROR.value
+        assert report.frog_only[0].defaulter_category is None
+
+    def test_residual_unknown_rows_are_none_not_a_verified_page(self):
+        """The presumed-real residual is exactly that: not verified live.
+
+        It must not be folded into `missed_pages`, which is reserved for a
+        real export's `MISSED_PAGE` reason and would otherwise overstate a
+        defect this reconciliation cannot actually prove.
+        """
+        report = reconcile(
+            "https://www.infosys.com/",
+            (),
+            (ScreamingFrogRow(address="https://www.infosys.com/about/team.html"),),
+            source_format=ExportFormat.BARE_URL_LIST,
+        )
+        assert report.frog_only[0].defaulter_category is None
+        assert report.missed_pages == ()
+
+
+def _unmatched(url: str, reason: str, impressions: int = 0, clicks: int = 0) -> dict:
+    return {"url": url, "reason": reason, "impressions": impressions, "clicks": clicks}
+
+
+def _saved_with_frog_only(*gaps: UrlGap) -> dict:
+    return {"frog_only": [gap.model_dump(mode="json") for gap in gaps]}
+
+
+def _gap_at(updated: Mapping[str, object] | None, index: int = 0) -> UrlGap:
+    """Pull one `UrlGap` back out of a `revalidate_defaulters` result."""
+    assert updated is not None
+    frog_only = updated["frog_only"]
+    assert isinstance(frog_only, list)
+    return UrlGap.model_validate(frog_only[index])
+
+
+class TestRevalidateDefaulters:
+    """A Search Console second look at bare-list defaulter rows.
+
+    The lookup is the same `not_crawled` bucket the performance module already
+    produces for "on this site, absent from the crawl" — an arbitrary-URL
+    match, exactly what a never-crawled defaulter row needs.
+    """
+
+    UNKNOWN_URL = "https://www.infosys.com/content/dam/infosys-web/en/x.html"
+
+    def test_no_op_with_no_saved_reconciliation(self):
+        assert (
+            revalidate_defaulters({}, [_unmatched(self.UNKNOWN_URL, "not_crawled", 5, 0)]) is None
+        )
+
+    def test_no_op_with_nothing_eligible_no_unmatched_rows(self):
+        saved = _saved_with_frog_only(
+            UrlGap(
+                url=self.UNKNOWN_URL,
+                reason=FrogGapReason.UNKNOWN.value,
+                defaulter_category=DefaulterCategory.DAM_FORMS_OTHER,
+            )
+        )
+        assert revalidate_defaulters(saved, []) is None
+
+    def test_no_op_when_no_unmatched_row_matches_a_url(self):
+        saved = _saved_with_frog_only(
+            UrlGap(url=self.UNKNOWN_URL, reason=FrogGapReason.UNKNOWN.value)
+        )
+        other = "https://www.infosys.com/content/dam/infosys-web/en/somewhere-else.html"
+        assert revalidate_defaulters(saved, [_unmatched(other, "not_crawled", 3, 1)]) is None
+
+    def test_promotes_on_impressions_greater_than_zero(self):
+        saved = _saved_with_frog_only(
+            UrlGap(
+                url=self.UNKNOWN_URL,
+                reason=FrogGapReason.UNKNOWN.value,
+                defaulter_category=DefaulterCategory.DAM_FORMS_OTHER,
+            )
+        )
+        updated = revalidate_defaulters(
+            saved, [_unmatched(self.UNKNOWN_URL, "not_crawled", impressions=12, clicks=0)]
+        )
+        gap = _gap_at(updated)
+        assert gap.validation is not None
+        assert gap.validation.flagged_real is True
+        assert gap.validation.gsc_impressions == 12
+        assert gap.validation.gsc_clicks == 0
+
+    def test_promotes_on_clicks_greater_than_zero(self):
+        saved = _saved_with_frog_only(
+            UrlGap(url=self.UNKNOWN_URL, reason=FrogGapReason.UNKNOWN.value)
+        )
+        updated = revalidate_defaulters(
+            saved, [_unmatched(self.UNKNOWN_URL, "not_crawled", impressions=0, clicks=2)]
+        )
+        gap = _gap_at(updated)
+        assert gap.validation is not None
+        assert gap.validation.flagged_real is True
+
+    def test_no_impressions_or_clicks_is_checked_but_not_flagged_real(self):
+        saved = _saved_with_frog_only(
+            UrlGap(url=self.UNKNOWN_URL, reason=FrogGapReason.UNKNOWN.value)
+        )
+        updated = revalidate_defaulters(saved, [_unmatched(self.UNKNOWN_URL, "not_crawled", 0, 0)])
+        gap = _gap_at(updated)
+        assert gap.validation is not None
+        assert gap.validation.flagged_real is False
+        assert gap.validation.checked_at != ""
+
+    def test_preserves_defaulter_category_on_promotion(self):
+        saved = _saved_with_frog_only(
+            UrlGap(
+                url=self.UNKNOWN_URL,
+                reason=FrogGapReason.UNKNOWN.value,
+                defaulter_category=DefaulterCategory.DAM_FORMS_OTHER,
+            )
+        )
+        updated = revalidate_defaulters(saved, [_unmatched(self.UNKNOWN_URL, "not_crawled", 4, 0)])
+        gap = _gap_at(updated)
+        assert gap.defaulter_category == DefaulterCategory.DAM_FORMS_OTHER
+
+    def test_idempotent_on_rerun(self):
+        saved = _saved_with_frog_only(
+            UrlGap(url=self.UNKNOWN_URL, reason=FrogGapReason.UNKNOWN.value)
+        )
+        rows = [_unmatched(self.UNKNOWN_URL, "not_crawled", 7, 1)]
+        first = revalidate_defaulters(saved, rows)
+        second = revalidate_defaulters(first, rows) if first is not None else None
+        gap1 = _gap_at(first)
+        gap2 = _gap_at(second)
+        assert gap1.validation is not None
+        assert gap2.validation is not None
+        assert gap1.validation.gsc_impressions == gap2.validation.gsc_impressions
+        assert gap1.validation.gsc_clicks == gap2.validation.gsc_clicks
+        assert gap1.validation.flagged_real == gap2.validation.flagged_real
+        assert gap1.defaulter_category == gap2.defaulter_category
+
+    def test_only_not_crawled_reason_rows_are_eligible(self):
+        """The other unmatched reasons do not mean "absent from the crawl"."""
+        saved = _saved_with_frog_only(
+            UrlGap(url=self.UNKNOWN_URL, reason=FrogGapReason.UNKNOWN.value)
+        )
+        rows = [
+            _unmatched(self.UNKNOWN_URL, "off_site", 9, 9),
+            _unmatched(self.UNKNOWN_URL, "ambiguous", 9, 9),
+            _unmatched(self.UNKNOWN_URL, "unparseable", 9, 9),
+            _unmatched(self.UNKNOWN_URL, "other_subdomain", 9, 9),
+        ]
+        assert revalidate_defaulters(saved, rows) is None
+
+    def test_non_unknown_rows_are_never_promoted_even_on_a_match(self):
+        """A row with a real reason is not a bare-list defaulter row at all.
+
+        True even if its URL happens to coincide with a Search Console address.
+        """
+        saved = _saved_with_frog_only(
+            UrlGap(url=self.UNKNOWN_URL, reason=FrogGapReason.MISSED_PAGE.value)
+        )
+        rows = [_unmatched(self.UNKNOWN_URL, "not_crawled", 9, 9)]
+        assert revalidate_defaulters(saved, rows) is None
+
+    def test_url_matching_is_normalised(self):
+        """A trailing slash or `www.` difference must not defeat the match."""
+        saved = _saved_with_frog_only(
+            UrlGap(url="https://www.infosys.com/content/dam/x.html", reason="UNKNOWN")
+        )
+        rows = [_unmatched("https://infosys.com/content/dam/x.html/", "not_crawled", 1, 0)]
+        updated = revalidate_defaulters(saved, rows)
+        assert updated is not None
+
+
+class TestRegressionRealInfosysUrls:
+    """Real `UNKNOWN` rows replayed from the three saved bare-list sidecars.
+
+    Only 3 of infosys.com's 13 saved cross-checks are bare-list format; the
+    other 10 are real Screaming Frog exports whose `frog_only` rows carry a
+    real `FrogGapReason` and must never acquire a category. These addresses
+    were copied verbatim from the saved sidecars so a future change to the
+    rules cannot silently reclassify a URL that shipped a specific answer.
+    """
+
+    def test_pinned_categories_for_real_urls(self):
+        cases = {
+            # CORRUPTED_URL
+            "https://www.infosys.com/%20services/engineering-services/insights/"
+            "sustainability-firstnarrative.html": DefaulterCategory.CORRUPTED_URL,
+            "https://www.infosys.com//about/knowledge-institute/insights/"
+            "cpg-firms.html": DefaulterCategory.CORRUPTED_URL,
+            "https://www.infosys.com/cobalt-world-tour/2023/nyc.html.html": (
+                DefaulterCategory.CORRUPTED_URL
+            ),
+            "https://www.infosys.com/confluence/2022/emea/insights/"
+            "pursuit%20excellence.html": DefaulterCategory.CORRUPTED_URL,
+            "https://www.infosys.com/content/infosys-web/en%20%20%20%20/"
+            "services/applied-ai.html": DefaulterCategory.CORRUPTED_URL,
+            # DAM_HTML_ARCHIVE (investors)
+            "https://www.infosys.com/content/dam/infosys-web/en/investors/"
+            "corporate-governance/code-of-conduct/index.html": (DefaulterCategory.DAM_HTML_ARCHIVE),
+            "https://www.infosys.com/content/dam/infosys-web/en/investors/"
+            "reports-filings/annual-report/annual/Documents/AR-2010/"
+            "IFRS-INR-Financial-Statements.html": DefaulterCategory.DAM_HTML_ARCHIVE,
+            # DAM_FORMS_OTHER (non-investors DAM)
+            "https://www.infosys.com/content/dam/infosys-web/en/2025/thumbnails/"
+            "multicloud-managed-service.html": DefaulterCategory.DAM_FORMS_OTHER,
+            "https://www.infosys.com/content/dam/infosys-web/en/40yearsofheart/"
+            "anusha.html": DefaulterCategory.DAM_FORMS_OTHER,
+            # CMS_INTERNAL_LEAK
+            "https://www.infosys.com/-/content/infosys-web/en/aster-1/"
+            "marketing.html": DefaulterCategory.CMS_INTERNAL_LEAK,
+            "https://www.infosys.com/br/t/content/infosys-web/en/services/"
+            "sap.html": DefaulterCategory.CMS_INTERNAL_LEAK,
+            "https://www.infosys.com/content/infosys-web/en/-/content/"
+            "infosys-web/en/aster-1/marketing.html": DefaulterCategory.CMS_INTERNAL_LEAK,
+            # Presumed-real residual
+            "https://www.infosys.com/4-decades-of-excellence.html": None,
+            "https://www.infosys.com/about/alliances/ncino.html": None,
+            "https://www.infosys.com/about/awards/most-reputed-company.html": None,
+        }
+        for url, expected in cases.items():
+            assert _classify(url) == expected, url
+
+    def test_the_bucket_totals_from_a_saved_infosys_sidecar_stay_pinned(self):
+        """Pins the full-set split from one saved 5,373-row bare-list sidecar.
+
+        A change to the rules that reclassifies even a handful of the 5,373
+        real `UNKNOWN` rows changes an analyst-facing sheet count; this fails
+        loudly instead of silently the next time that sidecar is re-derived.
+        Regenerate with the small script in the build-log entry for this
+        cycle if a rule is deliberately changed.
+        """
+        from collections import Counter
+
+        urls = _INFOSYS_UNKNOWN_SAMPLE
+        counts = Counter(_classify(url) for url in urls)
+        assert counts[DefaulterCategory.CORRUPTED_URL] == 5
+        assert counts[DefaulterCategory.DAM_HTML_ARCHIVE] == 5
+        assert counts[DefaulterCategory.DAM_FORMS_OTHER] == 5
+        assert counts[DefaulterCategory.CMS_INTERNAL_LEAK] == 5
+        assert counts[None] == 5
+        assert sum(counts.values()) == len(urls)
+
+
+_INFOSYS_UNKNOWN_SAMPLE = [
+    # 5 CORRUPTED_URL, verbatim from the saved sidecars
+    "https://www.infosys.com/%20services/engineering-services/insights/"
+    "sustainability-firstnarrative.html",
+    "https://www.infosys.com//about/knowledge-institute/insights/cpg-firms.html",
+    "https://www.infosys.com/cobalt-world-tour/2023/nyc.html.html",
+    "https://www.infosys.com/confluence/2022/emea/insights/pursuit%20excellence.html",
+    "https://www.infosys.com/content/infosys-web/en%20%20%20%20/services/applied-ai.html",
+    # 5 DAM_HTML_ARCHIVE
+    "https://www.infosys.com/content/dam/infosys-web/en/investors/"
+    "corporate-governance/code-of-conduct/index.html",
+    "https://www.infosys.com/content/dam/infosys-web/en/investors/"
+    "corporate-governance/code-of-conduct2022/index.html",
+    "https://www.infosys.com/content/dam/infosys-web/en/investors/"
+    "reports-filings/annual-report/annual/Documents/AR-2010/"
+    "IFRS-INR-Financial-Statements.html",
+    "https://www.infosys.com/content/dam/infosys-web/en/investors/"
+    "reports-filings/annual-report/annual/Documents/AR-2010/"
+    "Subsidiaries/Infosys-Consulting-Inc.html",
+    "https://www.infosys.com/content/dam/infosys-web/en/investors/"
+    "reports-filings/annual-report/annual/Documents/AR-2010/annual_report_04.html",
+    # 5 DAM_FORMS_OTHER
+    "https://www.infosys.com/content/dam/infosys-web/en/2025/thumbnails/"
+    "multicloud-managed-service.html",
+    "https://www.infosys.com/content/dam/infosys-web/en/40yearsofheart/anusha.html",
+    "https://www.infosys.com/content/dam/infosys-web/en/40yearsofheart/"
+    "christian-antonio-martinez.html",
+    "https://www.infosys.com/content/dam/infosys-web/en/40yearsofheart/index.html",
+    "https://www.infosys.com/content/dam/infosys-web/en/40yearsofheart/indumathi-suresh.html",
+    # 5 CMS_INTERNAL_LEAK
+    "https://www.infosys.com/-/content/infosys-web/en/aster-1/marketing.html",
+    "https://www.infosys.com/br/t/content/infosys-web/en/services/digital-supply-chain.html",
+    "https://www.infosys.com/br/t/content/infosys-web/en/services/sap.html",
+    "https://www.infosys.com/confluence/2026-stage/apac/content/agenda-content.plain.html",
+    "https://www.infosys.com/content/infosys-aweb/en/industries/healthcare/insights.html",
+    # 5 presumed-real residual
+    "https://www.infosys.com/4-decades-of-excellence.html",
+    "https://www.infosys.com/about/_x000D_diversity-inclusion.html",
+    "https://www.infosys.com/about/alliances/ncino.html",
+    "https://www.infosys.com/about/awards/most-reputed-company.html",
+    "https://www.infosys.com/about/awards/quality-award.html",
+]

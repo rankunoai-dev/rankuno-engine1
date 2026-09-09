@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  DEFAULTER_CATEGORY_LABELS,
   LEVEL_BADGE,
   TRAIL_SOURCE_BADGE,
   type DashModel,
@@ -194,6 +195,21 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
           >
             {node.label}
           </a>
+        ) : node.kind === "defaulter" ? (
+          // A real URL Screaming Frog listed, not a folder this tree needed to
+          // hold children — it opens like a page link, not like the neutral
+          // "no page crawled" segment below, which would assert this address
+          // was never anything but a path this tree invented.
+          <a
+            className="tlbl tlink"
+            href={node.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            title={`Open ${node.url} in a new tab — not crawled by this engine`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {node.label}
+          </a>
         ) : (
           <span className="tlbl">{node.label}</span>
         )}
@@ -213,6 +229,18 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
             title="Screaming Frog found this page; Rankuno's crawl did not. Merged in from the export."
           >
             from SF
+          </span>
+        )}
+        {node.kind === "defaulter" && (
+          <span
+            className="xmark xmark-defaulter"
+            title={`Bare-list URL Screaming Frog held; this engine never crawled it. Pattern: ${
+              DEFAULTER_CATEGORY_LABELS[node.defaulterCategory ?? ""] ??
+              node.defaulterCategory ??
+              "unknown"
+            }`}
+          >
+            Defaulter
           </span>
         )}
         {/* Only on section headers. On a leaf the badge would repeat on every
@@ -319,6 +347,22 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
  * in the payload; the row was showing a different number.
  */
 function LevelChip({ node }: { node: DashNode }): JSX.Element {
+  // Distinct from the "no page was crawled" fallback below: a defaulter leaf
+  // is not a path segment this tree invented to hold children, it is a real
+  // URL Screaming Frog listed that this engine never reached at all — a
+  // stronger and different absence than an uncrawled folder, and the "URL
+  // path segment" wording below would be false for it.
+  if (node.kind === "defaulter") {
+    return (
+      <span
+        className="lvchip lvdefaulter"
+        title="Bare-list URL, quarantined — not crawled or classified by this engine"
+      >
+        Q
+      </span>
+    );
+  }
+
   const level = node.profile?.hierarchy_level;
 
   // No profile means no page was crawled at this URL — it is a path segment

@@ -6,14 +6,12 @@ DiskJobStore and handles circuit breaker state transitions.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
-
-import pytest
 
 from src.core.circuit_breaker import CircuitBreaker
 from src.core.postgres_store import PostgresJobStore
-from src.core.state_store import JobRecord, JobStatus
+from src.core.state_store import JobRecord
 
 
 class TestPostgresJobStoreInitialization:
@@ -47,8 +45,8 @@ class TestPostgresJobStoreCircuitBreakerFallback:
         fallback.create.return_value = JobRecord(
             id="test-job",
             tool_name="test",
-            created_at=datetime.now(tz=timezone.utc),
-            updated_at=datetime.now(tz=timezone.utc),
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
         )
 
         breaker = CircuitBreaker(failure_threshold=1)
@@ -73,8 +71,8 @@ class TestPostgresJobStoreCircuitBreakerFallback:
         fallback.get.return_value = JobRecord(
             id="test-job",
             tool_name="test",
-            created_at=datetime.now(tz=timezone.utc),
-            updated_at=datetime.now(tz=timezone.utc),
+            created_at=datetime.now(tz=UTC),
+            updated_at=datetime.now(tz=UTC),
         )
 
         breaker = CircuitBreaker(failure_threshold=1)

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
-
 from src.api.server import make_app
 from src.core.state_store import DiskJobStore
 
@@ -42,9 +41,7 @@ class TestIdempotencyKeyDeduplication:
         assert "id" in data
         assert data["status"] == "queued"
 
-    def test_duplicate_request_returns_existing_job(
-        self, client: TestClient
-    ) -> None:
+    def test_duplicate_request_returns_existing_job(self, client: TestClient) -> None:
         """Duplicate request with same Idempotency-Key should return existing job."""
         payload = {
             "base_url": "https://example.com",
@@ -75,9 +72,7 @@ class TestIdempotencyKeyDeduplication:
         # Should return the same job
         assert job1_id == job2_id
 
-    def test_different_idempotency_keys_create_different_jobs(
-        self, client: TestClient
-    ) -> None:
+    def test_different_idempotency_keys_create_different_jobs(self, client: TestClient) -> None:
         """Different Idempotency-Key values should create different jobs."""
         payload = {
             "base_url": "https://example.com",

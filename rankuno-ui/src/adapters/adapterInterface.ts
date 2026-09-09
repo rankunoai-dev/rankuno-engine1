@@ -114,7 +114,24 @@ export interface SavedReconciliation {
    * sidecar must treat its absence as "not recorded", never as "none agreed".
    */
   in_both?: string[];
-  frog_only: { url: string; reason: string }[];
+  /**
+   * `defaulter_category` and `validation` are optional: they exist only on a
+   * bare-list `UNKNOWN` row (see `DefaulterCategory` in the reconciler), and
+   * every `frog_only` row saved before that classification existed omits both.
+   * Absence must read as "not applicable or not yet classified", never as
+   * "confirmed real".
+   */
+  frog_only: {
+    url: string;
+    reason: string;
+    defaulter_category?: string | null;
+    validation?: {
+      checked_at: string;
+      gsc_impressions: number | null;
+      gsc_clicks: number | null;
+      flagged_real: boolean;
+    } | null;
+  }[];
   engine_only: { url: string; reason: string }[];
 }
 

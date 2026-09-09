@@ -4,6 +4,32 @@ import { buildDashModel, OTHERS_LANE } from "./dashboardModel";
 import { addedFromFrog, buildTreeOverlay } from "./treeOverlay";
 import { crawl, page } from "../test/factories";
 
+function reconciliationWithDefaulters(
+  engineOnly: Array<{ url: string; reason: string }>,
+  frogOnly: Array<{ url: string; reason: string; defaulter_category?: string | null }>,
+  inBoth: number,
+): SavedReconciliation {
+  return {
+    summary: {
+      job_id: "j",
+      source_job_id: "j",
+      base_url: "https://e.com/",
+      frog_rows: frogOnly.length,
+      in_both: inBoth,
+      missed_pages: 0,
+      orphans: 0,
+      merged: 0,
+      frog_reasons: {},
+      engine_reasons: {},
+    },
+    created_at: "2026-09-04T00:00:00Z",
+    missed_pages: [],
+    orphans: [],
+    frog_only: frogOnly,
+    engine_only: engineOnly,
+  };
+}
+
 /**
  * The cross-check and Search Console overlay.
  *
@@ -217,5 +243,47 @@ describe("addedFromFrog", () => {
     const kb = m.roots.map((i) => m.nodes[i]!).find((n) => n.label === "Knowledge Bank")!;
     expect(overlay.addedCnt[kb.i]).toBe(1);
     expect(overlay.roots.find((r) => r.label === "Knowledge Bank")?.added).toBe(1);
+  });
+});
+
+describe("buildTreeOverlay ignores kind:'defaulter' nodes entirely", () => {
+  it("never marks a defaulter leaf, even when its URL matches an engine_only row", () => {
+    // The same address on both sides of a coincidence: an `engine_only` row
+    // that happens to be spelled identically to a quarantined bare-list URL.
+    // A defaulter was never crawled, so this must never resolve to a mark —
+    // proving `byUrl` truly excludes it rather than merely never colliding by
+    // accident of the fixture data.
+    const url = "https://e.com/content/dam/en/x.html";
+    const reconciliation = reconciliationWithDefaulters(
+      [{ url, reason: "SITEMAP_ORPHAN" }],
+      [{ url, reason: "UNKNOWN", defaulter_category: "DAM_FORMS_OTHER" }],
+      3,
+    );
+    const m = buildDashModel(crawl({ pages: PAGES }), "navigation", reconciliation, true);
+    const defaulterNode = m.nodes.find((n) => n.kind === "defaulter")!;
+    expect(defaulterNode).toBeDefined();
+
+    const overlay = buildTreeOverlay(m, reconciliation);
+    expect(overlay.mark[defaulterNode.i]).toBe("none");
+    expect(overlay.missedCnt[defaulterNode.i]).toBe(0);
+    expect(overlay.addedCnt[defaulterNode.i]).toBe(0);
+  });
+
+  it("keeps a defaulter node out of the OTHERS summary", () => {
+    const reconciliation = reconciliationWithDefaulters(
+      [],
+      [
+        {
+          url: "https://e.com/content/dam/en/x.html",
+          reason: "UNKNOWN",
+          defaulter_category: "DAM_FORMS_OTHER",
+        },
+      ],
+      3,
+    );
+    const m = buildDashModel(crawl({ pages: PAGES }), "navigation", reconciliation, true);
+    const overlay = buildTreeOverlay(m, reconciliation);
+    const defaulterNode = m.nodes.find((n) => n.kind === "defaulter")!;
+    expect(overlay.others.topPages.some((p) => p.i === defaulterNode.i)).toBe(false);
   });
 });

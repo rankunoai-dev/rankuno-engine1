@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   confidenceBand,
+  DEFAULTER_LANE,
   OTHERS_LANE,
   type ConfidenceBand,
   type DashModel,
@@ -135,7 +136,12 @@ function flatten(
   return rows;
 }
 
-const ALL_LANES = new Set([0, 1, 2, 3, OTHERS_LANE]);
+// `DEFAULTER_LANE` included so `setModel`'s reset (below) does not silently
+// filter out the "Defaulter / Quarantine" subtree the moment `buildDashModel`
+// is asked to build it — the toggle that puts it in the model lives in
+// `useCrawlStore`, entirely separate from this lane filter, and the two would
+// otherwise disagree about whether the feature is "on".
+const ALL_LANES = new Set([0, 1, 2, 3, OTHERS_LANE, DEFAULTER_LANE]);
 
 export const useDashboardStore = create<DashboardState>((set, get) => ({
   open: new Set<number>(),

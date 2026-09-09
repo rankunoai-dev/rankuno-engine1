@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildDashModel } from "../../lib/dashboardModel";
+import type { SavedReconciliation } from "../../adapters/adapterInterface";
+import { buildDashModel, QUARANTINE_ROOT_LABEL } from "../../lib/dashboardModel";
 import { useDashboardStore } from "../../store/useDashboardStore";
 import { crawl, page } from "../../test/factories";
 import { VirtualizedTree } from "./VirtualizedTree";
@@ -358,5 +359,93 @@ describe("reveal on selection", () => {
     expect(useDashboardStore.getState().flat.length).toBeGreaterThan(model.roots.length);
 
     expect(viewport.scrollTop).toBe(before);
+  });
+});
+
+describe("defaulter leaves", () => {
+  function reconciliationWithDefaulter(): SavedReconciliation {
+    return {
+      summary: {
+        job_id: "j",
+        source_job_id: "j",
+        base_url: "https://e.com/",
+        frog_rows: 1,
+        in_both: 0,
+        missed_pages: 0,
+        orphans: 0,
+        merged: 0,
+        frog_reasons: {},
+        engine_reasons: {},
+      },
+      created_at: "",
+      missed_pages: [],
+      orphans: [],
+      frog_only: [
+        {
+          url: "https://e.com/content/dam/en/thumb.html",
+          reason: "UNKNOWN",
+          defaulter_category: "DAM_FORMS_OTHER",
+        },
+      ],
+      engine_only: [],
+    };
+  }
+
+  function quarantined() {
+    // No real pages: jsdom has no layout engine, so the windowed list renders
+    // only its first few rows (see the module docstring above). Keeping the
+    // fixture to just the quarantine subtree — root, group, leaf — puts the
+    // leaf inside that window instead of past its edge.
+    const model = buildDashModel(
+      crawl({ pages: [] }),
+      "path",
+      reconciliationWithDefaulter(),
+      true,
+    );
+    useDashboardStore.getState().setModel(model);
+    useDashboardStore.getState().expandAll(model, 99);
+    return model;
+  }
+
+  it("renders the quarantined URL as an openable link, not a path-segment span", () => {
+    const model = quarantined();
+    render(<VirtualizedTree model={model} />);
+
+    const link = screen.getByRole("link", {
+      name: "https://e.com/content/dam/en/thumb.html",
+    });
+    expect(link).toHaveAttribute("href", "https://e.com/content/dam/en/thumb.html");
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
+  it("carries its own visual mark, not the missed/added cross-check marks", () => {
+    const model = quarantined();
+    const { container } = render(<VirtualizedTree model={model} />);
+
+    expect(container.querySelector(".xmark-defaulter")).not.toBeNull();
+    expect(container.querySelector(".xmark-missed")).toBeNull();
+    expect(container.querySelector(".xmark-added")).toBeNull();
+  });
+
+  it("gets its own level chip, not the 'no page crawled' path-segment badge", () => {
+    const model = quarantined();
+    const { container } = render(<VirtualizedTree model={model} />);
+
+    const defaulterNode = model.nodes.find((n) => n.kind === "defaulter")!;
+    expect(defaulterNode).toBeDefined();
+    const rows = [...container.querySelectorAll(".vrow")];
+    const row = rows.find((r) =>
+      r.querySelector("a.tlbl")?.textContent === defaulterNode.label,
+    )!;
+    expect(row).toBeDefined();
+    const chip = row.querySelector(".lvchip")!;
+    expect(chip.className).toContain("lvdefaulter");
+    expect(chip.getAttribute("title")).not.toMatch(/URL path segment/);
+  });
+
+  it("builds the quarantine root as a section, distinct from the real tree", () => {
+    const model = quarantined();
+    render(<VirtualizedTree model={model} />);
+    expect(screen.getByText(QUARANTINE_ROOT_LABEL)).toBeInTheDocument();
   });
 });

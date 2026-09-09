@@ -1,3 +1,4 @@
+import type { SavedReconciliation } from "../adapters/adapterInterface";
 import type {
   ConsensusMethod,
   FullPageIntelligenceProfile,
@@ -38,6 +39,19 @@ export interface DashNode {
    * which pages a crawl happened to fetch.
    */
   src: TrailSourceTag;
+  /**
+   * What kind of row this is.
+   *
+   * `"page"` and `"group"` are the two kinds every model has always had,
+   * distinguished before this field existed by `profile` being set or not —
+   * that test still holds for both. `"defaulter"` is new: a bare-list
+   * `UNKNOWN` URL quarantined under the "Defaulter / Quarantine" root, with no
+   * profile because this engine never crawled it and no evidence beyond the
+   * URL's own shape (see `DefaulterCategory` in the reconciler module).
+   */
+  kind: "page" | "group" | "defaulter";
+  /** Set only when `kind` is `"defaulter"`, mirroring `DefaulterCategory`. */
+  defaulterCategory?: string;
 }
 
 /** `trail_source` plus the value only a grouping node can hold. */
@@ -48,8 +62,19 @@ export interface DashModel {
   roots: number[];
   /** Lowercased `label + url` per node, for substring search. */
   index: string[];
-  /** Counts per lane, 0–3 then OTHERS. */
-  laneCounts: [number, number, number, number, number];
+  /**
+   * Counts per lane, 0–3 then OTHERS, then `DEFAULTER_LANE` when defaulters
+   * were built.
+   *
+   * A plain array rather than the fixed 5-tuple this used to be: the sixth
+   * slot exists only when `buildDashModel` was called with
+   * `includeDefaulters: true` and the reconciliation actually held a
+   * quarantined URL, so the length itself carries a fact. With the flag off
+   * (the default) this is exactly the 5-element array it always was, value for
+   * value — every existing reader indexes it with `?.`, already tolerant of a
+   * shorter array under `noUncheckedIndexedAccess`.
+   */
+  laneCounts: number[];
   /** Pages per confidence band, for the filter chips. */
   bandCounts: Record<ConfidenceBand, number>;
   /**
@@ -140,6 +165,33 @@ export const TRAIL_SOURCE_REASON: Record<TrailSourceTag, string> = {
 };
 
 export const OTHERS_LANE = 4;
+
+/**
+ * The lane the "Defaulter / Quarantine" subtree renders in.
+ *
+ * One past `OTHERS_LANE` rather than folded into it: OTHERS is "reachable by
+ * no navigation path" — pages this engine crawled and classified but could not
+ * place. A defaulter is the opposite kind of unknown — a URL this engine never
+ * crawled at all, from a list weaker than a status export — and merging the
+ * two lanes would let a defaulter's raw count read as a navigation gap.
+ */
+export const DEFAULTER_LANE = 5;
+
+/** The synthetic root every quarantined URL is built under. */
+export const QUARANTINE_ROOT_LABEL = "Defaulter / Quarantine";
+
+/**
+ * Short, analyst-facing names for `DefaulterCategory`, for the group label
+ * under the quarantine root. Mirrors the meanings in
+ * `src/api/server.py::GAP_MEANINGS`, shortened for a tree row rather than a
+ * spreadsheet cell.
+ */
+export const DEFAULTER_CATEGORY_LABELS: Record<string, string> = {
+  DAM_HTML_ARCHIVE: "DAM archive (investors)",
+  DAM_FORMS_OTHER: "DAM archive (other)",
+  CMS_INTERNAL_LEAK: "CMS internal path leak",
+  CORRUPTED_URL: "Malformed URL",
+};
 
 /**
  * Confidence at or above which a classification is treated as settled.
@@ -275,10 +327,21 @@ export const UNAVAILABLE_METHODS: ReadonlySet<ConsensusMethod> = new Set<Consens
  * it was not. The lane a node lands in is its depth in whichever tree was
  * built — so with no menu the lanes mean path depth, and the UI says so rather
  * than implying the site published a structure it did not.
+ *
+ * @param reconciliation - The saved Screaming Frog cross-check, or `null`.
+ *   Read only when `includeDefaulters` is true; every other call site can omit
+ *   it.
+ * @param includeDefaulters - Build the "Defaulter / Quarantine" subtree from
+ *   `reconciliation.frog_only`'s categorised bare-list rows. Defaults to
+ *   `false`, in which case no defaulter node is constructed at all — not
+ *   merely hidden — so `laneCounts`, `index` and every node count are
+ *   identical to what this function has always returned.
  */
 export function buildDashModel(
   result: PageClassificationOutput,
   grouping: "navigation" | "path",
+  reconciliation: SavedReconciliation | null = null,
+  includeDefaulters = false,
 ): DashModel {
   // Gated on the pages actually carrying a trail, not on the menu having been
   // parsed. A page's own breadcrumb now fills `breadcrumb_path` too, so a site
@@ -320,6 +383,7 @@ export function buildDashModel(
       cnt: 0,
       profile: node.profile,
       src: node.profile ? trailSourceOf(node.profile) : "none",
+      kind: node.profile ? "page" : "group",
     });
 
     if (parent === null) roots.push(index);
@@ -369,11 +433,18 @@ export function buildDashModel(
     roots.sort((a, b) => rootRank(nodes[a]!) - rootRank(nodes[b]!));
   }
 
-  const laneCounts: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+  // Appended after the sort, never inside it: the quarantine root has no
+  // `trail_source` of its own to rank by, and always belongs last regardless
+  // of whether this result carries provenance at all.
+  if (includeDefaulters && reconciliation) {
+    buildDefaulterSubtree(nodes, roots, reconciliation);
+  }
+
+  const laneCounts: number[] = [0, 0, 0, 0, 0];
   const bandCounts: Record<ConfidenceBand, number> = { high: 0, review: 0 };
   for (const node of nodes) {
-    // `lv` is clamped to 0..4 at construction, but `noUncheckedIndexedAccess`
-    // cannot know that from the tuple type.
+    // `lv` is clamped to 0..5 at construction, but `noUncheckedIndexedAccess`
+    // cannot know that from the array type.
     laneCounts[node.lv] = (laneCounts[node.lv] ?? 0) + 1;
     if (node.profile) bandCounts[confidenceBand(node.profile)] += 1;
   }
@@ -386,6 +457,92 @@ export function buildDashModel(
     bandCounts,
     hasProvenance,
   };
+}
+
+/**
+ * Append the "Defaulter / Quarantine" subtree to an already-built model.
+ *
+ * Every bare-list `UNKNOWN` row that matched a `DefaulterCategory` pattern —
+ * an AEM asset path, a leaked author path, a malformed address — becomes one
+ * leaf here, grouped under its category. The presumed-real residual (a
+ * bare-list row with no category) is deliberately excluded: it is the Excel
+ * report's and the GSC revalidation's concern, not this quarantine view's —
+ * folding it in would bury the URLs this feature exists to isolate under a
+ * bucket the pattern match could not actually justify hiding.
+ *
+ * Mutates `nodes` and `roots` in place rather than returning new arrays,
+ * matching how the rest of `buildDashModel` grows the same two arrays through
+ * its own construction loop.
+ */
+function buildDefaulterSubtree(
+  nodes: DashNode[],
+  roots: number[],
+  reconciliation: SavedReconciliation,
+): void {
+  const byCategory = new Map<string, string[]>();
+  for (const gap of reconciliation.frog_only) {
+    const category = gap.defaulter_category;
+    if (!category) continue;
+    const urls = byCategory.get(category);
+    if (urls) urls.push(gap.url);
+    else byCategory.set(category, [gap.url]);
+  }
+  if (byCategory.size === 0) return;
+
+  const quarantineRoot = nodes.length;
+  nodes.push({
+    i: quarantineRoot,
+    lv: DEFAULTER_LANE,
+    label: QUARANTINE_ROOT_LABEL,
+    url: "",
+    p: null,
+    kids: [],
+    cnt: 0,
+    profile: null,
+    src: "none",
+    kind: "group",
+  });
+  roots.push(quarantineRoot);
+
+  // Sorted so two builds of the same sidecar produce the same tree — the same
+  // reason `reconcile` itself sorts `frog_only` before writing it.
+  for (const category of [...byCategory.keys()].sort()) {
+    const urls = byCategory.get(category)!;
+    const groupIndex = nodes.length;
+    nodes.push({
+      i: groupIndex,
+      lv: DEFAULTER_LANE,
+      label: DEFAULTER_CATEGORY_LABELS[category] ?? category,
+      url: "",
+      p: quarantineRoot,
+      kids: [],
+      cnt: 0,
+      profile: null,
+      src: "none",
+      kind: "group",
+    });
+    nodes[quarantineRoot]!.kids.push(groupIndex);
+
+    for (const url of [...urls].sort()) {
+      const leafIndex = nodes.length;
+      nodes.push({
+        i: leafIndex,
+        lv: DEFAULTER_LANE,
+        label: url,
+        url,
+        p: groupIndex,
+        kids: [],
+        cnt: 1,
+        profile: null,
+        src: "none",
+        kind: "defaulter",
+        defaulterCategory: category,
+      });
+      nodes[groupIndex]!.kids.push(leafIndex);
+    }
+    nodes[groupIndex]!.cnt = urls.length;
+    nodes[quarantineRoot]!.cnt += urls.length;
+  }
 }
 
 export const EMPTY_MODEL: DashModel = {

@@ -21,8 +21,15 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from src.api import server as server_module
 from src.api.server import API_PREFIX, GAP_MEANINGS, SHEET_TITLES, create_app
-from src.core.config import Settings
-from src.core.state_store import MAX_HOMEPAGE_BYTES, DiskJobStore, JobRecord, JobStatus
+from src.core.config import Settings, get_settings
+from src.core.schemas import OrgConfig
+from src.core.state_store import (
+    MAX_HOMEPAGE_BYTES,
+    DiskJobStore,
+    DiskOrgConfigStore,
+    JobRecord,
+    JobStatus,
+)
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.schemas import (
@@ -75,12 +82,36 @@ def stub_tool(monkeypatch):
 
 
 @pytest.fixture
+def org_store(tmp_path) -> DiskOrgConfigStore:
+    """Create an org config store with default and test orgs for tests."""
+    store = DiskOrgConfigStore(tmp_path / "orgs")
+    # Default org is auto-created in _load_or_init(), so skip manual creation
+    # Add team-a for facet access control tests
+    team_a = OrgConfig(
+        org_id="team-a",
+        display_name="Team A",
+        max_concurrent_crawls=3,
+        llm_credit_limit_usd=100.0,
+        is_active=True,
+    )
+    store.create(team_a)
+    return store
+
+
+@pytest.fixture
 def store(tmp_path) -> DiskJobStore:
     return DiskJobStore(tmp_path / "jobs")
 
 
 @pytest.fixture
-def client(store):
+def mock_org_store(monkeypatch, org_store):
+    """Replace get_settings().org_config_store with the test store."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "_org_config_store", org_store)
+
+
+@pytest.fixture
+def client(store, mock_org_store):
     """A client whose SSRF resolver is deterministic, not DNS-dependent."""
     app = create_app(
         store=store,
@@ -180,7 +211,7 @@ class TestAdmissionControl:
 
 
 class TestConcurrencyCap:
-    def test_excess_jobs_are_refused_with_429(self, store):
+    def test_excess_jobs_are_refused_with_429(self, store, mock_org_store):
         """Each in-flight crawl holds its whole graph in memory."""
         app = create_app(
             store=store,
@@ -196,7 +227,7 @@ class TestConcurrencyCap:
             response = post_job(client)
         assert response.status_code == 429
 
-    def test_a_refused_job_leaves_no_record(self, store):
+    def test_a_refused_job_leaves_no_record(self, store, mock_org_store):
         """A refusal is not a job, and must not look like one afterwards.
 
         This asserted the opposite until the ordering was fixed: capacity was
@@ -224,7 +255,7 @@ class TestConcurrencyCap:
 
         assert store.list_jobs() == []
 
-    def test_releasing_a_reservation_decrements_active_count(self, store):
+    def test_releasing_a_reservation_decrements_active_count(self, store, mock_org_store):
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
@@ -242,7 +273,7 @@ class TestConcurrencyCap:
         state.release("occupier3", "seo.page_classifier")
         assert state.active_count == 0
 
-    def test_reserving_is_atomic(self, store):
+    def test_reserving_is_atomic(self, store, mock_org_store):
         """Check-then-reserve in two steps would let both callers through."""
         app = create_app(store=store)
         state = app.state.api
@@ -252,7 +283,7 @@ class TestConcurrencyCap:
         assert state.try_reserve("j2", "seo.page_classifier") is True
         assert state.try_reserve("j3", "seo.page_classifier") is False
 
-    def test_releasing_frees_a_slot(self, store):
+    def test_releasing_frees_a_slot(self, store, mock_org_store):
         app = create_app(store=store)
         state = app.state.api
         # Fill all 3 page_classifier slots
@@ -263,7 +294,7 @@ class TestConcurrencyCap:
         state.release("a", "seo.page_classifier")
         assert state.try_reserve("d", "seo.page_classifier") is True
 
-    def test_releasing_an_unknown_job_is_harmless(self, store):
+    def test_releasing_an_unknown_job_is_harmless(self, store, mock_org_store):
         """`_dispatch` releases in a `finally`; a double release must not raise."""
         state = create_app(store=store).state.api
         state.release("never-reserved", "seo.page_classifier")
@@ -279,18 +310,20 @@ class TestConcurrencyCapFromSettings:
     """
 
     @staticmethod
-    def _use_settings(monkeypatch, **overrides: object) -> None:
+    def _use_settings(monkeypatch, org_store, **overrides: object) -> None:
         settings = Settings(_env_file=None, **overrides)
+        # Initialize the org_config_store with the test org store
+        settings._org_config_store = org_store
         monkeypatch.setattr(server_module, "get_settings", lambda: settings)
 
-    def test_default_cap_is_five(self, store, monkeypatch):
-        self._use_settings(monkeypatch)
+    def test_default_cap_is_five(self, store, monkeypatch, org_store):
+        self._use_settings(monkeypatch, org_store)
         app = create_app(store=store)
         assert app.state.api.max_concurrent_jobs == 5
         assert server_module.DEFAULT_MAX_CONCURRENT_JOBS == 5
 
-    def test_settings_value_is_the_cap_and_the_429_reports_it(self, store, monkeypatch):
-        self._use_settings(monkeypatch, max_concurrent_crawls=2)
+    def test_settings_value_is_the_cap_and_the_429_reports_it(self, store, monkeypatch, org_store):
+        self._use_settings(monkeypatch, org_store, max_concurrent_crawls=2)
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
@@ -307,9 +340,9 @@ class TestConcurrencyCapFromSettings:
         assert "2" in response.json()["detail"]
         assert health["max_concurrent_jobs"] == 2
 
-    def test_explicit_kwarg_wins_over_settings(self, store, monkeypatch):
+    def test_explicit_kwarg_wins_over_settings(self, store, monkeypatch, org_store):
         """A test pinning the cap must not depend on what the environment says."""
-        self._use_settings(monkeypatch, max_concurrent_crawls=8)
+        self._use_settings(monkeypatch, org_store, max_concurrent_crawls=8)
         app = create_app(store=store, max_concurrent_jobs=1)
         state = app.state.api
         assert state.max_concurrent_jobs == 1
@@ -1622,7 +1655,7 @@ class TestFacetAccessControl:
 class TestPerFacetConcurrency:
     """Per-facet concurrency limits are enforced and isolated."""
 
-    def test_page_classifier_has_its_own_concurrency_cap(self, store, stub_tool):
+    def test_page_classifier_has_its_own_concurrency_cap(self, store, stub_tool, mock_org_store):
         """Each facet gets independent concurrency slot management."""
         app = create_app(
             store=store,
@@ -1647,7 +1680,7 @@ class TestPerFacetConcurrency:
         assert response.status_code == 429
         assert "seo.page_classifier" in response.json()["detail"]
 
-    def test_different_facets_do_not_interfere(self, store, stub_tool):
+    def test_different_facets_do_not_interfere(self, store, stub_tool, mock_org_store):
         """health_engine accepts jobs even when page_classifier is saturated."""
         app = create_app(
             store=store,
@@ -1672,7 +1705,7 @@ class TestPerFacetConcurrency:
             "health_engine should accept despite page_classifier full"
         )
 
-    def test_saturation_message_names_the_facet(self, store, stub_tool):
+    def test_saturation_message_names_the_facet(self, store, stub_tool, mock_org_store):
         """429 response includes facet name so operator knows which facet saturated."""
         app = create_app(
             store=store,

@@ -34,6 +34,8 @@ export function DashboardShell(): JSX.Element {
   const jobs = useCrawlStore((state) => state.jobs);
   const activeJobId = useCrawlStore((state) => state.activeJobId);
   const grouping = useCrawlStore((state) => state.grouping);
+  const reconciliation = useCrawlStore((state) => state.reconciliation);
+  const includeDefaulters = useCrawlStore((state) => state.includeDefaulters);
   const status = useCrawlStore((state) => state.status);
   const error = useCrawlStore((state) => state.error);
   const view = useUiStore((state) => state.view);
@@ -43,11 +45,13 @@ export function DashboardShell(): JSX.Element {
   const [crawlOpen, setCrawlOpen] = useState(false);
   const [printedAt, setPrintedAt] = useState<Date | null>(null);
 
-  // Rebuilt only when the crawl or the grouping changes. At 20,000 pages this
-  // walk is the single most expensive thing the UI does.
+  // Rebuilt only when the crawl, the grouping, the loaded cross-check or the
+  // defaulter toggle changes. At 20,000 pages this walk is the single most
+  // expensive thing the UI does.
   const model = useMemo(
-    () => (result ? buildDashModel(result, grouping) : EMPTY_MODEL),
-    [result, grouping],
+    () =>
+      result ? buildDashModel(result, grouping, reconciliation, includeDefaulters) : EMPTY_MODEL,
+    [result, grouping, reconciliation, includeDefaulters],
   );
 
   useEffect(() => {

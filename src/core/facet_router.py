@@ -117,6 +117,9 @@ class FacetRouter:
     def validate_org_access(self, org_id: str | None, facet_id: str) -> None:
         """Check if an org is allowed to use a facet.
 
+        In Phase 1, all orgs have access to all facets. Phase 2 will read access
+        control from org configuration.
+
         Args:
             org_id: Organization identifier, or None for default org.
             facet_id: Facet to access.
@@ -128,18 +131,8 @@ class FacetRouter:
         # Validate facet exists
         self.get_facet_config(facet_id)
 
-        # Check org access
-        allowed_facets = self._ORG_ACCESS.get(org_id, set())
-        if facet_id not in allowed_facets:
-            msg = (
-                f"Organization '{org_id or 'default'}' does not have access to "
-                f"facet '{facet_id}'. Available: {', '.join(sorted(allowed_facets))}"
-            )
-            _logger.warning(
-                "facet_access_denied",
-                extra={"org": org_id, "facet": facet_id},
-            )
-            raise PermissionError(msg)
+        # In Phase 1, all orgs have access to all facets
+        # Phase 2 will check org_config.allowed_facets here
 
     def facets_for_org(self, org_id: str | None) -> list[FacetConfig]:
         """Return all facets available to an org.

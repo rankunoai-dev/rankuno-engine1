@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from src.core.circuit_breaker import CircuitBreaker
@@ -76,9 +76,7 @@ class PostgresJobStore(JobStore):
 
         settings = get_postgres_settings()
         password = (
-            settings.postgres_password.get_secret_value()
-            if settings.postgres_password
-            else ""
+            settings.postgres_password.get_secret_value() if settings.postgres_password else ""
         )
         connection_string = (
             f"postgresql://{settings.postgres_user}:{password}@"
@@ -121,7 +119,7 @@ class PostgresJobStore(JobStore):
         """
         org_id = org_id or "default"
         job_id = str(uuid.uuid4())
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
 
         # Check circuit breaker first
         if self.circuit_breaker.is_open():
@@ -147,46 +145,45 @@ class PostgresJobStore(JobStore):
 
             conn = self._get_connection()
             try:
-                with conn:
-                    with conn.cursor() as cur:
-                        # Lock org budget row (SELECT FOR UPDATE)
-                        cur.execute(
-                            "SELECT llm_credit_limit_usd FROM org_configs "
-                            "WHERE org_id = %s FOR UPDATE",
-                            (org_id,),
-                        )
-                        budget_row = cur.fetchone()
+                with conn, conn.cursor() as cur:
+                    # Lock org budget row (SELECT FOR UPDATE)
+                    cur.execute(
+                        "SELECT llm_credit_limit_usd FROM org_configs "
+                        "WHERE org_id = %s FOR UPDATE",
+                        (org_id,),
+                    )
+                    budget_row = cur.fetchone()
 
-                        if not budget_row or budget_row[0] <= 0:
-                            raise ValueError(
-                                f"Organization {org_id} has no budget or does not exist"
-                            )
-
-                        # Create job
-                        cur.execute(
-                            "INSERT INTO jobs "
-                            "(id, org_id, tool_name, facet_id, request, status, "
-                            "created_at, updated_at) "
-                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                            (
-                                job_id,
-                                org_id,
-                                tool_name,
-                                facet_id,
-                                json.dumps(request),
-                                "queued",
-                                now,
-                                now,
-                            ),
+                    if not budget_row or budget_row[0] <= 0:
+                        raise ValueError(
+                            f"Organization {org_id} has no budget or does not exist"
                         )
 
-                        # Charge cost (estimated $0.50)
-                        cur.execute(
-                            "INSERT INTO cost_ledger "
-                            "(org_id, job_id, amount_usd, status) "
-                            "VALUES (%s, %s, %s, %s)",
-                            (org_id, job_id, 0.50, "charged"),
-                        )
+                    # Create job
+                    cur.execute(
+                        "INSERT INTO jobs "
+                        "(id, org_id, tool_name, facet_id, request, status, "
+                        "created_at, updated_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (
+                            job_id,
+                            org_id,
+                            tool_name,
+                            facet_id,
+                            json.dumps(request),
+                            "queued",
+                            now,
+                            now,
+                        ),
+                    )
+
+                    # Charge cost (estimated $0.50)
+                    cur.execute(
+                        "INSERT INTO cost_ledger "
+                        "(org_id, job_id, amount_usd, status) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (org_id, job_id, 0.50, "charged"),
+                    )
 
                 self.circuit_breaker.record_success()
                 return JobRecord(
@@ -242,7 +239,6 @@ class PostgresJobStore(JobStore):
             return self.fallback_store.get(job_id)
 
         try:
-            import psycopg
 
             conn = self._get_connection()
             try:
@@ -272,9 +268,7 @@ class PostgresJobStore(JobStore):
                         finished_at=row[9],
                         error=row[10],
                         has_result=row[11],
-                        telemetry=JobTelemetry(**row[12])
-                        if row[12]
-                        else JobTelemetry(),
+                        telemetry=JobTelemetry(**row[12]) if row[12] else JobTelemetry(),
                     )
             finally:
                 conn.close()
@@ -297,7 +291,6 @@ class PostgresJobStore(JobStore):
             return self.fallback_store.list_jobs()
 
         try:
-            import psycopg
 
             conn = self._get_connection()
             try:
@@ -327,9 +320,7 @@ class PostgresJobStore(JobStore):
                                 finished_at=row[9],
                                 error=row[10],
                                 has_result=row[11],
-                                telemetry=JobTelemetry(**row[12])
-                                if row[12]
-                                else JobTelemetry(),
+                                telemetry=JobTelemetry(**row[12]) if row[12] else JobTelemetry(),
                             )
                         )
                     return jobs

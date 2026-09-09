@@ -104,7 +104,13 @@ class JsonFormatter(logging.Formatter):
 
         for key, value in record.__dict__.items():
             if key not in _RESERVED_ATTRS and not key.startswith("_"):
-                payload[key] = value
+                # Mask org_id values in logs
+                if key in ("org", "org_id", "owner_org", "requesting_org") and isinstance(
+                    value, str
+                ):
+                    payload[key] = "<org>"
+                else:
+                    payload[key] = value
 
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)

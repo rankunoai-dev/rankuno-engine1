@@ -86,6 +86,15 @@ interface CrawlState {
   reconciliation: SavedReconciliation | null;
   /** How the tree is grouped. Navigation mirrors the site's own header menu. */
   grouping: "navigation" | "path";
+  /**
+   * Whether `buildDashModel` builds the "Defaulter / Quarantine" subtree.
+   *
+   * Off by default and reset on every job switch: a defaulter row names a URL
+   * this engine never crawled, and carrying the toggle across to a job with no
+   * reconciliation loaded would leave a stale "on" state disabled but sticky,
+   * with no visible reason once the panel reopens.
+   */
+  includeDefaulters: boolean;
 
   /**
    * Crawls started this session, keyed by job id.
@@ -102,6 +111,7 @@ interface CrawlState {
   liveJobs: Record<string, LiveJob>;
 
   setGrouping: (grouping: "navigation" | "path") => void;
+  toggleIncludeDefaulters: () => void;
   init: (adapter: CrawlDataAdapter) => Promise<void>;
   selectJob: (jobId: string) => Promise<void>;
   /** Submit a crawl and return its id. Resolves at submission, not completion. */
@@ -183,6 +193,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
   result: null,
   reconciliation: null,
   grouping: "navigation",
+  includeDefaulters: false,
 
   async init(adapter) {
     set({ adapter, status: "queued", error: null });
@@ -209,6 +220,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       error: null,
       result: null,
       reconciliation: null,
+      includeDefaulters: false,
     });
 
     try {
@@ -345,6 +357,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       error: null,
       result: null,
       reconciliation: null,
+      includeDefaulters: false,
       activeJobId: jobId,
     });
     try {
@@ -410,6 +423,13 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     // `result` and `grouping`, so there is no derived state here to keep in
     // step — which is what made the previous version easy to leave stale.
     set({ grouping });
+  },
+
+  toggleIncludeDefaulters() {
+    // Same shape as `setGrouping`: the flag alone is state, and
+    // `DashboardShell`'s `useMemo` over `[result, grouping, reconciliation,
+    // includeDefaulters]` is what turns a flip of this into a rebuilt model.
+    set((state) => ({ includeDefaulters: !state.includeDefaulters }));
   },
 }));
 

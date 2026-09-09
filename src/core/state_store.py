@@ -44,22 +44,27 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 
+if TYPE_CHECKING:
+    from src.core.schemas import OrgConfig
+
 __all__ = [
     "MAX_HOMEPAGE_BYTES",
     "MAX_RECENT_ITEMS",
     "DiskJobStore",
+    "DiskOrgConfigStore",
     "JobNotFoundError",
     "JobRecord",
     "JobStatus",
     "JobStore",
     "JobTelemetry",
+    "OrgConfigStore",
 ]
 
 _logger = get_logger("core.state_store")
@@ -168,6 +173,8 @@ class JobRecord(StrictModel):
             client-supplied id is a path-traversal parameter.
         tool_name: Which tool this job runs, e.g. `seo.page_classifier`.
         label: Human-facing description, shown in a job list.
+        org_id: Organization that owns this job. Defaults to "default" for
+            backward compatibility. Used for multi-tenant isolation.
         facet_id: Which facet this job executes under (e.g., `seo.page_classifier`).
             Defaults to `seo.page_classifier` for backward compatibility with old jobs.
             Used to enforce per-facet concurrency, rate limiting, and cost budgets.
@@ -190,6 +197,7 @@ class JobRecord(StrictModel):
     id: str = Field(min_length=1)
     tool_name: str = Field(min_length=1)
     label: str = ""
+    org_id: str = Field(default="default", min_length=1, pattern=r"^[a-z0-9_-]+$")
     facet_id: str = Field(default="seo.page_classifier", min_length=1)
     request: Mapping[str, object] = Field(default_factory=dict)
     status: JobStatus = JobStatus.QUEUED
@@ -223,6 +231,7 @@ class JobStore(Protocol):
         request: Mapping[str, object],
         label: str = "",
         facet_id: str = "seo.page_classifier",
+        org_id: str | None = None,
     ) -> JobRecord:
         """Persist a new job in `QUEUED` and return it."""
         ...
@@ -377,6 +386,7 @@ class DiskJobStore:
         request: Mapping[str, object],
         label: str = "",
         facet_id: str = "seo.page_classifier",
+        org_id: str | None = None,
     ) -> JobRecord:
         """Persist a new job in `QUEUED`.
 
@@ -390,6 +400,8 @@ class DiskJobStore:
             label: Human-facing description for a job list.
             facet_id: Which facet this job belongs to. Defaults to
                 `seo.page_classifier` for backward compatibility.
+            org_id: Organization that owns this job. Defaults to "default" for
+                backward compatibility with old jobs.
 
         Returns:
             The persisted record.
@@ -399,6 +411,7 @@ class DiskJobStore:
             id=uuid.uuid4().hex,
             tool_name=tool_name,
             label=label,
+            org_id=org_id or "default",
             facet_id=facet_id,
             request=dict(request),
             status=JobStatus.QUEUED,
@@ -409,7 +422,7 @@ class DiskJobStore:
             self._write(record)
         _logger.info(
             "job_created",
-            extra={"job_id": record.id, "tool": tool_name, "facet": facet_id},
+            extra={"job_id": record.id, "tool": tool_name, "facet": facet_id, "org": record.org_id},
         )
         return record
 
@@ -727,3 +740,166 @@ class DiskJobStore:
         if recovered:
             _logger.warning("orphaned_jobs_recovered", extra={"count": len(recovered)})
         return recovered
+
+
+class OrgConfigStore(Protocol):
+    """The persistence seam for organization configurations.
+
+    A Protocol so the hosted deployment (ADR 0004) can drop in a shared
+    implementation — Redis, Postgres — without the API layer changing.
+    """
+
+    def create(self, org_config: OrgConfig) -> OrgConfig:
+        """Persist a new organization configuration."""
+        ...
+
+    def get(self, org_id: str) -> OrgConfig:
+        """Read one organization's configuration.
+
+        Raises:
+            KeyError: If no such organization exists.
+        """
+        ...
+
+    def list_orgs(self) -> list[OrgConfig]:
+        """Every organization, sorted by org_id."""
+        ...
+
+    def update(self, org_config: OrgConfig) -> OrgConfig:
+        """Update an organization's configuration."""
+        ...
+
+    def delete(self, org_id: str) -> None:
+        """Remove an organization configuration."""
+        ...
+
+
+class DiskOrgConfigStore:
+    """An `OrgConfigStore` backed by a single JSON file.
+
+    Single-process only, same limitation as DiskJobStore (ADR 0004). All writes
+    go through `os.replace` for atomicity.
+    """
+
+    def __init__(self, root: Path | str) -> None:
+        """Create the store, making its directory if absent.
+
+        Args:
+            root: Directory to hold the org configs file.
+        """
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._config_path = self._root / "org_configs.json"
+        self._lock = threading.Lock()
+        self._load_or_init()
+
+    def _load_or_init(self) -> None:
+        """Load existing configs or create with default org."""
+        if self._config_path.exists():
+            try:
+                content = self._config_path.read_text(encoding="utf-8")
+                self._configs: dict[str, dict[str, object]] = json.loads(content)
+            except (OSError, ValueError) as exc:
+                _logger.warning("org_configs_load_failed", extra={"error": str(exc)})
+                self._configs = {}
+        else:
+            self._configs = {}
+
+        # Ensure default org exists for backward compatibility
+        if "default" not in self._configs:
+            self._configs["default"] = {
+                "org_id": "default",
+                "display_name": "Default Organization",
+                "allowed_facets": frozenset(
+                    ("seo.page_classifier", "seo.health_engine", "seo.theme_classification")
+                ),
+                "max_concurrent_crawls": 5,
+                "llm_credit_limit_usd": 5.0,
+                "is_active": True,
+            }
+            self._save()
+
+    def _save(self) -> None:
+        """Write all configs to disk atomically."""
+        # Convert frozensets to lists for JSON serialization
+        serializable = {}
+        for org_id, config in self._configs.items():
+            config_copy = dict(config)
+            if "allowed_facets" in config_copy and isinstance(
+                config_copy["allowed_facets"], frozenset
+            ):
+                config_copy["allowed_facets"] = sorted(config_copy["allowed_facets"])
+            serializable[org_id] = config_copy
+        payload = json.dumps(serializable, indent=2, sort_keys=True)
+        _atomic_write(self._config_path, payload)
+
+    def create(self, org_config: OrgConfig) -> OrgConfig:
+        """Persist a new organization configuration."""
+        with self._lock:
+            if org_config.org_id in self._configs:
+                msg = f"Organization '{org_config.org_id}' already exists"
+                raise ValueError(msg)
+            self._configs[org_config.org_id] = org_config.model_dump()
+            self._save()
+        _logger.info(
+            "org_config_created",
+            extra={"org": org_config.org_id},
+        )
+        return org_config
+
+    def get(self, org_id: str) -> OrgConfig:
+        """Read one organization's configuration.
+
+        Raises:
+            KeyError: If no such organization exists.
+        """
+        from src.core.schemas import OrgConfig
+
+        with self._lock:
+            if org_id not in self._configs:
+                msg = f"Organization '{org_id}' not found"
+                raise KeyError(msg)
+            return OrgConfig.model_validate(self._configs[org_id])
+
+    def list_orgs(self) -> list[OrgConfig]:
+        """Every organization, sorted by org_id."""
+        from src.core.schemas import OrgConfig
+
+        with self._lock:
+            orgs = [OrgConfig.model_validate(cfg) for cfg in self._configs.values()]
+        return sorted(orgs, key=lambda o: o.org_id)
+
+    def update(self, org_config: OrgConfig) -> OrgConfig:
+        """Update an organization's configuration.
+
+        Raises:
+            KeyError: If the organization does not exist.
+        """
+        with self._lock:
+            if org_config.org_id not in self._configs:
+                msg = f"Organization '{org_config.org_id}' not found"
+                raise KeyError(msg)
+            self._configs[org_config.org_id] = org_config.model_dump()
+            self._save()
+        _logger.info(
+            "org_config_updated",
+            extra={"org": org_config.org_id},
+        )
+        return org_config
+
+    def delete(self, org_id: str) -> None:
+        """Remove an organization configuration.
+
+        Raises:
+            KeyError: If the organization does not exist.
+        """
+        with self._lock:
+            if org_id not in self._configs:
+                msg = f"Organization '{org_id}' not found"
+                raise KeyError(msg)
+            del self._configs[org_id]
+            self._save()
+        _logger.info(
+            "org_config_deleted",
+            extra={"org": org_id},
+        )
