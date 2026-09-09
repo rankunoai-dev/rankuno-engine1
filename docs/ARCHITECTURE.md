@@ -77,10 +77,17 @@ src/
     │       ├── logical_hierarchy.py  # Maps URLs to menu sections; OTHERS bucket
     │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
     │       ├── signal_parsers.py     # The 5 structural consensus signals
-    │       └── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
+    │       ├── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
+    │       └── audit_export.py       # Profiles -> AuditDataset(source=ENGINE).
+    │                                 # 16 of 110 issues MEASURED, 94 NOT_MEASURED
+    │                                 # with reasons in notes; links never filled.
+    │                                 # The only page_classifier file that
+    │                                 # imports contracts (build-log 0079)
     │   ├── contracts/           # Seam between the crawler and client
     │   │   │                    # deliverables (ADR 0011). Imports core only;
-    │   │   │                    # never page_classifier or deliverables
+    │   │   │                    # never page_classifier or deliverables.
+    │   │   │                    # Enforced in every direction by
+    │   │   │                    # tests/modules/seo/test_import_boundary.py
     │   │   ├── issue_ids.py          # IssueCategory, Severity, Priority, IssueId
     │   │   ├── catalogue.py          # IssueSpec + ISSUE_CATALOGUE (110 rows),
     │   │   │                         # RAE_LABELS for the differential check
@@ -89,8 +96,8 @@ src/
     │   │   └── audit.py              # AuditDataset / AuditPage / AuditLink /
     │   │                             # Coverage / AuditSource; four invariants
     │   ├── deliverables/        # Producers of AuditDataset (ADR 0011). Imports
-    │   │   │                    # contracts and core only; an ast test pins that
-    │   │   │                    # it never imports page_classifier
+    │   │   │                    # contracts and core only; test_import_boundary.py
+    │   │   │                    # pins that it never imports page_classifier
     │   │   ├── _bundle.py            # Guarded directory-or-zip access: traversal,
     │   │   │                         # symlink, zip-bomb, nested-archive refusal
     │   │   └── screaming_frog_adapter.py  # SF CSV export -> AuditDataset.
@@ -124,7 +131,7 @@ src/
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
-| `page_classifier/audit_export.py` (P0-4), `tests/modules/seo/test_import_boundary.py` (P0-6), `scripts/diff_against_rae.py` (P0-7), `deliverables/rulebook.py` (Phase 1) | Remaining Phase 0 items of [DELIVERABLES_IMPLEMENTATION_PLAN.md](DELIVERABLES_IMPLEMENTATION_PLAN.md). P0-3/P0-5 (`deliverables/screaming_frog_adapter.py`, `_bundle.py`, the synthetic SF fixture) **are implemented** as of [build-log 0077](build-log/0077-screaming-frog-adapter-and-zip-guards.md). The engine adapter does not exist, so only a Screaming Frog export produces an `AuditDataset`; the boundary test covering `contracts/` and `page_classifier` directions is not written (this cycle's ast test covers `deliverables -> page_classifier` only) |
+| `scripts/diff_against_rae.py` (P0-7), `deliverables/rulebook.py` (Phase 1) | Remaining items of [DELIVERABLES_IMPLEMENTATION_PLAN.md](DELIVERABLES_IMPLEMENTATION_PLAN.md). P0-3/P0-5 (`deliverables/screaming_frog_adapter.py`, `_bundle.py`, the synthetic SF fixture) **are implemented** as of [build-log 0077](build-log/0077-screaming-frog-adapter-and-zip-guards.md); P0-4 (`page_classifier/audit_export.py`) and P0-6 (`tests/modules/seo/test_import_boundary.py`, all three packages, both directions) **are implemented** as of [build-log 0079](build-log/0079-sixteen-measured-ninety-four-not.md). Both adapters produce an `AuditDataset`; nothing consumes one yet — no endpoint, workbook or UI until Phase 2 |
 
 > Two rows were removed from this table in cycle 0039 because they were false.
 > Crawl checkpointing **exists** (`CrawlCheckpointer`, cycle 0019) and

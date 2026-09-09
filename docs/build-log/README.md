@@ -108,6 +108,7 @@ which, for an AI-assisted codebase, is every session.
 | [0076](0076-a-pdf-is-not-an-orphan.md) | 2026-09-08 | Engine-only PDFs, decks, spreadsheets and other files get their own reason and sheet; infosys orphans 8,123 to 630 | 1,964 py + 232 ui |
 | [0077](0077-screaming-frog-adapter-and-zip-guards.md) | 2026-09-08 | Screaming Frog adapter & streaming zip guards (P0-3/P0-5); 1,000 member cap, 2 GB file / 8 GB bundle limits; `links = ()` with note | 1,964 py + 232 ui |
 | [0078](0078-the-fields-that-never-left-the-call-site.md) | 2026-09-08 | `get_logger` dropped every caller `extra=` field since the first commit; merging adapter, caller keys win | **RED**: 3 failed / 1,967 py (failures in another session's `test_server.py`, §1.2) + 232 ui; 93.81% |
+| [0079](0079-sixteen-measured-ninety-four-not.md) | 2026-09-08 | Engine adapter (P0-4): profiles → `AuditDataset`, 16 measured / 94 `NOT_MEASURED`, `CANONICALS_MISSING` unmeasurable (D-A); import-boundary test (P0-6) in all directions | **RED**: 1 failed / 2,012 py (one of the 0078 §1.2 `test_server.py` set, §1.3) + 232 ui; 93.91% |
 
 
 ---
