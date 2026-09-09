@@ -27,8 +27,12 @@ import asyncio
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from src.core.config import get_settings
+
+if TYPE_CHECKING:
+    import redis
 from src.core.errors import BudgetExceededError, RateLimitExceededError
 from src.core.logger import get_logger
 
@@ -490,3 +494,119 @@ class CostLedger:
         """Zero the ledger. Tests and explicit session boundaries only."""
         with self._lock:
             self._spent = 0.0
+
+
+class AsyncRedisTokenBucket:
+    """Redis-backed token bucket for multi-worker rate limiting.
+
+    Suitable for distributed deployments where multiple worker processes
+    share rate limits across a Redis cluster. Uses Lua scripts for atomic
+    acquire operations to prevent race conditions.
+
+    Attributes:
+        redis_client: Redis client for distributed state.
+        key: Identifier of the quota this bucket protects (e.g., "org:1:facet:seo").
+        capacity: Maximum burst size, in tokens.
+        refill_rate: Sustained rate at which tokens are replenished (tokens/second).
+    """
+
+    # Lua script for atomic token acquire
+    ACQUIRE_SCRIPT = """
+    local key = KEYS[1]
+    local capacity = tonumber(ARGV[1])
+    local tokens_requested = tonumber(ARGV[2])
+    local now = tonumber(ARGV[3])
+    local refill_rate = tonumber(ARGV[4])
+
+    -- Get current token count and last update time
+    local state = redis.call('HMGET', key, 'tokens', 'updated_at')
+    local tokens = tonumber(state[1]) or capacity
+    local updated_at = tonumber(state[2]) or now
+
+    -- Calculate accrued tokens since last update
+    local elapsed = math.max(0, now - updated_at)
+    local accrued = elapsed * refill_rate
+    tokens = math.min(capacity, tokens + accrued)
+
+    -- Try to acquire
+    if tokens >= tokens_requested then
+        tokens = tokens - tokens_requested
+        redis.call('HSET', key, 'tokens', tokens, 'updated_at', now)
+        redis.call('EXPIRE', key, 3600)  -- 1 hour TTL
+        return 1
+    else
+        redis.call('HSET', key, 'tokens', tokens, 'updated_at', now)
+        redis.call('EXPIRE', key, 3600)
+        return 0
+    end
+    """
+
+    def __init__(
+        self,
+        redis_client: redis.Redis,  # type: ignore
+        key: str,
+        capacity: int,
+        refill_rate: float,
+    ) -> None:
+        """Initialize Redis-backed token bucket.
+
+        Args:
+            redis_client: Configured redis.Redis client.
+            key: Quota identifier (e.g., org_id, domain, facet).
+            capacity: Maximum burst size.
+            refill_rate: Tokens replenished per second.
+
+        Raises:
+            ValueError: If capacity or refill_rate is invalid.
+        """
+        _validate_bucket_config(key, capacity, refill_rate)
+
+        self.redis_client = redis_client
+        self.key = key
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+
+        # Register Lua script
+        self._acquire_script = self.redis_client.register_script(self.ACQUIRE_SCRIPT)
+
+    @classmethod
+    def per_minute(
+        cls,
+        redis_client: redis.Redis,  # type: ignore
+        key: str,
+        requests_per_minute: int,
+        burst: int | None = None,
+    ) -> AsyncRedisTokenBucket:
+        """Build a bucket from a requests-per-minute quota.
+
+        Args:
+            redis_client: Configured Redis client.
+            key: Quota identifier.
+            requests_per_minute: Sustained rate.
+            burst: Maximum burst (defaults to requests_per_minute).
+
+        Returns:
+            AsyncRedisTokenBucket instance.
+        """
+        capacity = max(1, burst if burst is not None else requests_per_minute)
+        refill_rate = requests_per_minute / 60.0
+        return cls(redis_client, key, capacity, refill_rate)
+
+    async def try_acquire(self, tokens: int = 1) -> bool:
+        """Atomically acquire tokens from the Redis bucket.
+
+        Uses Lua script to ensure atomicity across multiple workers.
+
+        Args:
+            tokens: Number of tokens to acquire.
+
+        Returns:
+            True if tokens were acquired, False if bucket is empty.
+        """
+        now = time.time()
+        result = await asyncio.to_thread(
+            self._acquire_script,
+            keys=[self.key],
+            args=[self.capacity, tokens, now, self.refill_rate],
+        )
+        return bool(result)
