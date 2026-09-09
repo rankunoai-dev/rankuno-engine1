@@ -38,6 +38,7 @@ dev = [
     "ruff>=0.5.0",
     "mypy>=1.10",
     "pre-commit>=3.7",
+    "alembic>=1.13.0,<2.0.0",
 ]
 # Domain extras are declared up-front so the dependency surface is reviewable,
 # but they are NOT installed by default and no code imports them yet.
