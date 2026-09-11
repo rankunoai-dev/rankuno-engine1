@@ -274,3 +274,96 @@ class TestScopeValidation:
             assert state.access_token.get_secret_value() == "ya29.test-token-123"  # noqa: S105
             assert "ya29.test-token-123" not in repr(state)
             assert "ya29.test-token-123" not in state.model_dump_json()
+
+
+class TestCircuitBreaker:
+    """Tests for circuit breaker resilience in token refresh."""
+
+    def test_circuit_breaker_initialized(self, mock_oauth_settings):
+        """Token manager initializes with a circuit breaker."""
+        manager = GscTokenManager(settings=mock_oauth_settings)
+        assert manager._circuit_breaker is not None
+        assert not manager._circuit_breaker.is_open()
+
+    def test_circuit_breaker_records_failures(self, mock_oauth_settings):
+        """Refresh failures record in circuit breaker."""
+        with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
+            mock_post.side_effect = Exception("Network error")
+            manager = GscTokenManager(settings=mock_oauth_settings)
+
+            for _ in range(3):
+                try:
+                    manager.get_or_refresh_token()
+                except GscAuthenticationError:
+                    pass
+
+            assert manager._circuit_breaker._failure_count == 3
+
+    def test_circuit_breaker_opens_after_threshold(self, mock_oauth_settings):
+        """Circuit breaker opens after failure threshold."""
+        with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
+            mock_post.side_effect = Exception("Endpoint down")
+            manager = GscTokenManager(settings=mock_oauth_settings)
+
+            # Trigger failures to open circuit
+            for _ in range(5):
+                try:
+                    manager.get_or_refresh_token()
+                except GscAuthenticationError:
+                    pass
+
+            assert manager._circuit_breaker.is_open()
+
+    def test_circuit_breaker_uses_stale_token(self, mock_oauth_settings):
+        """When circuit is open, uses stale token if not expired."""
+        from datetime import UTC, datetime, timedelta
+
+        manager = GscTokenManager(settings=mock_oauth_settings)
+
+        # Manually set a non-expired stale token
+        manager._access_token = "stale-valid-token"
+        manager._token_expiry = datetime.now(UTC) + timedelta(hours=1)
+
+        # Force circuit breaker open
+        for _ in range(5):
+            manager._circuit_breaker.record_failure(Exception("endpoint down"))
+
+        # Should return stale token without calling endpoint
+        with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
+            token = manager.get_or_refresh_token()
+            assert token == "stale-valid-token"
+            mock_post.assert_not_called()
+
+    def test_circuit_breaker_fails_with_expired_stale_token(self, mock_oauth_settings):
+        """When circuit is open and stale token expired, raises error."""
+        from datetime import UTC, datetime, timedelta
+
+        manager = GscTokenManager(settings=mock_oauth_settings)
+
+        # Set an expired stale token
+        manager._access_token = "expired-token"
+        manager._token_expiry = datetime.now(UTC) - timedelta(seconds=1)
+
+        # Force circuit breaker open
+        for _ in range(5):
+            manager._circuit_breaker.record_failure(Exception("endpoint down"))
+
+        # Should raise error instead of using expired token
+        with pytest.raises(GscAuthenticationError, match="Token endpoint unreachable"):
+            manager.get_or_refresh_token()
+
+    def test_circuit_breaker_recovers_after_success(self, mock_oauth_settings):
+        """Circuit breaker closes after successful refresh."""
+        with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
+            mock_post.return_value = _token_response()
+            manager = GscTokenManager(settings=mock_oauth_settings)
+
+            # Open the circuit
+            for _ in range(5):
+                manager._circuit_breaker.record_failure(Exception("test"))
+
+            assert manager._circuit_breaker.is_open()
+
+            # Successful refresh should close it
+            manager.get_or_refresh_token()
+            assert not manager._circuit_breaker.is_open()

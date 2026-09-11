@@ -185,7 +185,12 @@ class JobRecord(StrictModel):
         updated_at: When the status last changed.
         started_at: When a worker picked it up.
         finished_at: When it reached a terminal status.
-        error: Failure reason. Set only for `FAILED`.
+        error: Why the job did not finish cleanly. Set for `FAILED`, and for a
+            `PARTIAL` whose crawl was abandoned rather than merely hitting its
+            page ceiling (a stall or an aborted crawl — see
+            `DiscoveryReport.stopped_reason` in `modules/seo/page_classifier`,
+            which `core` must not import but whose message this field carries
+            verbatim). `None` for `SUCCEEDED` and for a ceiling-only `PARTIAL`.
         has_result: Whether a result blob exists to fetch.
         has_checkpoint: Whether partial work was saved before the job ended.
             Distinct from `has_result`: a checkpoint is what survived an
@@ -257,7 +262,12 @@ class JobStore(Protocol):
         ...
 
     def finish(
-        self, job_id: str, result: Mapping[str, object], *, partial: bool = False
+        self,
+        job_id: str,
+        result: Mapping[str, object],
+        *,
+        partial: bool = False,
+        error: str | None = None,
     ) -> JobRecord:
         """Store a result and move the job to a terminal success state."""
         ...
@@ -507,7 +517,12 @@ class DiskJobStore:
         )
 
     def finish(
-        self, job_id: str, result: Mapping[str, object], *, partial: bool = False
+        self,
+        job_id: str,
+        result: Mapping[str, object],
+        *,
+        partial: bool = False,
+        error: str | None = None,
     ) -> JobRecord:
         """Store a result blob and move the job to a terminal success state.
 
@@ -520,8 +535,14 @@ class DiskJobStore:
         Args:
             job_id: The job.
             result: The tool's serialised output.
-            partial: True when the result is incomplete, e.g. a crawl that hit
-                its page ceiling.
+            partial: True when the result is incomplete — either a crawl that
+                hit its page ceiling, or one that was abandoned before reaching
+                it (`error` distinguishes the two).
+            error: Why the crawl stopped early, when it did not run to
+                completion cleanly. `None` for a normal finish and for a
+                ceiling-only `partial`; set on `partial` when the crawl instead
+                stalled or aborted, so that case is distinguishable without
+                reading the full result blob.
 
         Returns:
             The updated record.
@@ -531,7 +552,9 @@ class DiskJobStore:
             _atomic_write(self._result_path(job_id), json.dumps(dict(result)))
 
         status = JobStatus.PARTIAL if partial else JobStatus.SUCCEEDED
-        record = self._transition(job_id, status=status, has_result=True, finished_at=_now())
+        record = self._transition(
+            job_id, status=status, has_result=True, finished_at=_now(), error=error
+        )
         _logger.info("job_finished", extra={"job_id": job_id, "status": status.value})
         return record
 
@@ -820,8 +843,22 @@ class DiskOrgConfigStore:
             self._save()
 
     def _save(self) -> None:
-        """Write all configs to disk atomically."""
-        # Convert frozensets to lists for JSON serialization
+        """Write all configs to disk atomically.
+
+        SecretStr fields (in gsc_accounts) must be converted to strings for JSON.
+        """
+
+        def _convert_secrets(obj: object) -> object:  # noqa: ANN001 - complex recursive type
+            """Recursively convert SecretStr to plain strings."""
+            if isinstance(obj, dict):
+                return {k: _convert_secrets(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_convert_secrets(item) for item in obj]
+            if hasattr(obj, "get_secret_value"):
+                return obj.get_secret_value()
+            return obj
+
+        # Convert frozensets and SecretStr to JSON-serializable types
         serializable = {}
         for org_id, config in self._configs.items():
             config_copy = dict(config)
@@ -829,6 +866,10 @@ class DiskOrgConfigStore:
                 config_copy["allowed_facets"], frozenset
             ):
                 config_copy["allowed_facets"] = sorted(config_copy["allowed_facets"])
+
+            # Recursively convert all SecretStr objects to strings
+            config_copy = _convert_secrets(config_copy)
+
             serializable[org_id] = config_copy
         payload = json.dumps(serializable, indent=2, sort_keys=True)
         _atomic_write(self._config_path, payload)

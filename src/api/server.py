@@ -50,21 +50,23 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, st
 from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
-from pydantic import Field, ValidationError
+from pydantic import Field, SecretStr, ValidationError
 
 from src.core.config import get_settings
 from src.core.errors import UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.logger import get_logger
-from src.core.schemas import StrictModel
+from src.core.schemas import GscAccountCredential, OrgConfig, StrictModel
 from src.core.state_store import (
     MAX_RECENT_ITEMS,
     DiskJobStore,
+    DiskOrgConfigStore,
     JobNotFoundError,
     JobRecord,
     JobStatus,
     JobStore,
     JobTelemetry,
+    OrgConfigStore,
 )
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
@@ -697,6 +699,42 @@ class GscAccountsView(StrictModel):
     accounts: list[str]
 
 
+class OrgGscAccountRequest(StrictModel):
+    """Request body for adding/updating an org-level GSC account.
+
+    Attributes:
+        account_name: Profile name for the account. Must match ^[a-z0-9_-]{1,64}$.
+        refresh_token: OAuth 2.0 refresh token (SecretStr).
+        client_id: Optional OAuth client ID override.
+        client_secret: Optional OAuth client secret override.
+    """
+
+    account_name: str
+    refresh_token: SecretStr
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+
+
+class OrgGscAccountView(StrictModel):
+    """Org-level GSC account for read operations (no secret exposure).
+
+    Attributes:
+        account_name: Profile name.
+        client_id: OAuth client ID (or None if inherits from Settings).
+        has_secret_override: Whether this account has a custom client_secret.
+    """
+
+    account_name: str
+    client_id: str | None = None
+    has_secret_override: bool = False
+
+
+class OrgGscAccountsView(StrictModel):
+    """List of org-level GSC accounts."""
+
+    accounts: list[OrgGscAccountView]
+
+
 class JobAccepted(StrictModel):
     """What `POST /jobs` returns: an id to poll, not a result."""
 
@@ -717,6 +755,7 @@ class ApiState:
         self,
         store: JobStore,
         url_policy: UrlSafetyPolicy,
+        org_config_store: OrgConfigStore,
         max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
     ) -> None:
         """Build the shared state.
@@ -724,17 +763,15 @@ class ApiState:
         Args:
             store: Job persistence.
             url_policy: SSRF policy used at admission and by the crawl.
+            org_config_store: Organization configuration persistence.
             max_concurrent_jobs: Simultaneous crawls before requests are refused.
                 (Deprecated in Phase 1: per-facet limits now apply instead.)
         """
         self.store = store
         self.url_policy = url_policy
+        self.org_config_store = org_config_store
         self.max_concurrent_jobs = max_concurrent_jobs
-        self.facet_router = FacetRouter(
-            max_concurrent=max_concurrent_jobs
-            if max_concurrent_jobs != DEFAULT_MAX_CONCURRENT_JOBS
-            else 3
-        )
+        self.facet_router = FacetRouter(max_concurrent=max_concurrent_jobs)
         self._active: set[str] = set()
         self._facet_active: dict[str, set[str]] = {}  # facet_id -> active job ids
         self._lock = threading.Lock()
@@ -850,13 +887,28 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
             store.mark_failed(job_id, f"unexpected output type {type(output).__name__}")
             return
 
-        # `truncated` means the crawl hit its ceiling, so the graph is a subset
-        # of the site. Recorded as PARTIAL so the UI can say so rather than
-        # presenting an incomplete crawl as a finished one.
+        # `truncated` means the crawl hit its ceiling: a planned stop at a known
+        # boundary. `stopped_reason` means it was abandoned instead — a stall
+        # (`CrawlStalledError`) or a generic exception `async_discovery` caught
+        # and recorded rather than raised. Either one leaves the graph a subset
+        # of the site, so either one must block `SUCCEEDED`; checking `truncated`
+        # alone let a stalled or aborted crawl with `truncated=False` report as
+        # complete. `retrieved_nothing` never reaches this branch: `execute()`
+        # raises `CrawlBlockedError` for it before returning a result, which the
+        # `not result.ok` check above already routes to `mark_failed`
+        # (macys.com-403, build-log 0013).
+        #
+        # Both signals are carried into the record rather than one collapsing
+        # into the other: `stopped_reason` becomes `error`, so a stalled/aborted
+        # PARTIAL is distinguishable — even in the cheap job-list metadata, with
+        # no need to fetch the full result — from a PARTIAL that merely hit its
+        # ceiling, whose `error` stays `None`.
+        discovery = output.discovery
         store.finish(
             job_id,
             output.model_dump(mode="json"),
-            partial=output.discovery.truncated,
+            partial=discovery.truncated or discovery.stopped_reason is not None,
+            error=discovery.stopped_reason,
         )
     except Exception as exc:  # noqa: BLE001 - a detached worker must not leak
         _logger.exception("job_crashed", extra={"job_id": job_id})
@@ -883,6 +935,7 @@ async def _dispatch(
 def create_app(
     store: JobStore | None = None,
     url_policy: UrlSafetyPolicy | None = None,
+    org_config_store: OrgConfigStore | None = None,
     *,
     jobs_root: Path | str | None = None,
     max_concurrent_jobs: int | None = None,
@@ -898,6 +951,7 @@ def create_app(
     Args:
         store: Job persistence. Defaults to a `DiskJobStore` under `jobs_root`.
         url_policy: SSRF policy applied at admission and inherited by the crawl.
+        org_config_store: Organization config persistence. Defaults to `DiskOrgConfigStore`.
         jobs_root: Directory for the default store. Defaults to `.jobs/`.
         max_concurrent_jobs: Simultaneous crawls before `429`. `None` means
             `Settings.max_concurrent_crawls` (`MAX_CONCURRENT_CRAWLS`); an
@@ -911,9 +965,13 @@ def create_app(
     resolved_store: JobStore = (
         store if store is not None else DiskJobStore(jobs_root or Path(".jobs"))
     )
+    resolved_org_config_store: OrgConfigStore = (
+        org_config_store if org_config_store is not None else DiskOrgConfigStore(".orgs")
+    )
     state = ApiState(
         store=resolved_store,
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
+        org_config_store=resolved_org_config_store,
         max_concurrent_jobs=(
             max_concurrent_jobs
             if max_concurrent_jobs is not None
@@ -2454,6 +2512,115 @@ def create_app(
             resumed,
             f"{payload.base_url} (resumed +{len(remaining):,})",
             facet_id=record.facet_id,
+        )
+
+    # --- Organization-level GSC account management ---
+
+    @app.get(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts", response_model=OrgGscAccountsView)
+    def list_org_gsc_accounts(org_id: str) -> OrgGscAccountsView:
+        """List all GSC accounts configured for an organization.
+
+        Args:
+            org_id: Organization identifier.
+
+        Returns:
+            List of GSC account names and metadata.
+
+        Raises:
+            HTTPException: 404 if organization not found.
+        """
+        try:
+            org = state.org_config_store.get(org_id)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found")
+
+        accounts = [
+            OrgGscAccountView(
+                account_name=name,
+                client_id=cred.client_id,
+                has_secret_override=cred.client_secret is not None,
+            )
+            for name, cred in sorted(org.gsc_accounts.items())
+        ]
+        return OrgGscAccountsView(accounts=accounts)
+
+    @app.post(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts", status_code=status.HTTP_201_CREATED)
+    def create_org_gsc_account(org_id: str, req: OrgGscAccountRequest) -> OrgGscAccountView:
+        """Add or replace a GSC account for an organization.
+
+        Validates account name against ^[a-z0-9_-]{1,64}$ before storage.
+
+        Args:
+            org_id: Organization identifier.
+            req: Account credentials.
+
+        Returns:
+            The created account metadata.
+
+        Raises:
+            HTTPException: 400 if account name is invalid, 404 if org not found,
+                422 if request body is invalid.
+        """
+        # Validate account name
+        if not re.match(r"^[a-z0-9_-]{1,64}$", req.account_name):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="Account name must match ^[a-z0-9_-]{1,64}$",
+            )
+
+        try:
+            org = state.org_config_store.get(org_id)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found")
+
+        org.gsc_accounts[req.account_name] = GscAccountCredential(
+            refresh_token=req.refresh_token,
+            client_id=req.client_id,
+            client_secret=req.client_secret,
+        )
+
+        updated_org = state.org_config_store.update(org)
+        cred = updated_org.gsc_accounts[req.account_name]
+
+        _logger.info(
+            "org_gsc_account_created",
+            extra={"org": org_id, "account": req.account_name},
+        )
+
+        return OrgGscAccountView(
+            account_name=req.account_name,
+            client_id=cred.client_id,
+            has_secret_override=cred.client_secret is not None,
+        )
+
+    @app.delete(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts/{{account_name}}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_org_gsc_account(org_id: str, account_name: str) -> None:
+        """Delete a GSC account from an organization.
+
+        Args:
+            org_id: Organization identifier.
+            account_name: Account to delete.
+
+        Raises:
+            HTTPException: 404 if org or account not found.
+        """
+        try:
+            org = state.org_config_store.get(org_id)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found")
+
+        if account_name not in org.gsc_accounts:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"Account '{account_name}' not found in organization '{org_id}'",
+            )
+
+        del org.gsc_accounts[account_name]
+        state.org_config_store.update(org)
+
+        _logger.info(
+            "org_gsc_account_deleted",
+            extra={"org": org_id, "account": account_name},
         )
 
     return app
