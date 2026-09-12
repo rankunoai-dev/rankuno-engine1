@@ -820,28 +820,42 @@ class ApiState:
             self._active.add(job_id)
             return True
 
-    def release(self, job_id: str, facet_id: str | None = None) -> None:
+    def release(self, job_id: str, facet_id: str) -> None:
         """Give a concurrency slot back.
+
+        `facet_id` is required, not looked up. A release that does not name the
+        facet clears the global count and leaves the per-facet claim in place —
+        which is the leak `cancel_job` had — and the per-facet set is the one
+        that gates admission. Every caller already holds the facet, so a
+        required argument lets the type checker catch the next omission.
 
         Args:
             job_id: The job being released.
-            facet_id: The facet it belongs to (optional, found from store if None).
+            facet_id: The facet it was reserved under.
         """
         with self._lock:
             self._active.discard(job_id)
-            if facet_id is not None and facet_id in self._facet_active:
+            if facet_id in self._facet_active:
                 self._facet_active[facet_id].discard(job_id)
 
-    def rekey(self, provisional: str, job_id: str) -> None:
+    def rekey(self, provisional: str, job_id: str, facet_id: str) -> None:
         """Move a reservation from a provisional id onto the real one.
 
         Capacity has to be claimed before the store mints an id, or a refusal
         leaves a persisted job behind. This transfers the claim without ever
         dropping it, so the slot cannot be taken in between.
+
+        Both sets move. `try_reserve` claims in `_active` and in the facet's
+        set, and the normal-exit release is keyed on the real id — so a
+        provisional id left behind in the facet set could never be released,
+        and each crawl cost the facet one slot for the life of the process.
         """
         with self._lock:
             self._active.discard(provisional)
             self._active.add(job_id)
+            facet = self._facet_active.setdefault(facet_id, set())
+            facet.discard(provisional)
+            facet.add(job_id)
 
     def is_active(self, job_id: str) -> bool:
         """Whether this job currently holds a concurrency slot."""
@@ -1401,7 +1415,7 @@ def create_app(
             # this slot. Leaking it would cost a permanent slot per failure.
             state.release(pending, facet_id)
             raise
-        state.rekey(pending, record.id)
+        state.rekey(pending, record.id, facet_id)
         state.track(asyncio.create_task(_dispatch(state, record.id, payload, facet_id)))
 
         # Dispatch to Celery worker queue for background execution
@@ -2401,7 +2415,7 @@ def create_app(
                 detail=f"job is {record.status.value} and has already finished",
             )
 
-        state.release(job_id)
+        state.release(job_id, record.facet_id)
         updated = state.store.mark_failed(
             job_id,
             "cancelled by operator — the crawl thread may still be running until it "
