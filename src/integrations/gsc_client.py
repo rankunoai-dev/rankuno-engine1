@@ -55,19 +55,29 @@ class GscApiClient(BaseAPIClient):
     rate_limit_key = "gsc_quota"
     requests_per_minute = 60  # 2x headroom per property (120 QPM per property, 1200 total)
 
-    def __init__(self, settings: Settings | None = None, *, account: str | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        account: str | None = None,
+        org_id: str | None = None,
+    ) -> None:
         """Initialize GSC API client.
 
         Args:
             settings: Configuration override, primarily for tests.
             account: Named GSC profile. `None` is the single-account default.
+            org_id: Organization whose stored accounts `account` may name.
+                `None` means the default org.
 
         Raises:
             ConfigurationError: If the profile is unknown or credentials are missing.
         """
         super().__init__(settings=settings)
 
-        self._token_manager = GscTokenManager(settings=self._settings, account=account)
+        self._token_manager = GscTokenManager(
+            settings=self._settings, account=account, org_id=org_id
+        )
 
         # Validate authentication immediately
         self.authenticate()

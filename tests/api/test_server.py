@@ -451,6 +451,39 @@ class TestCors:
         response = client.get(f"{API_PREFIX}/health", headers={"Origin": "https://evil.test"})
         assert response.headers.get("access-control-allow-origin") is None
 
+    def _preflight(self, client, method: str, path: str) -> httpx.Response:
+        return client.options(
+            path,
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": method,
+            },
+        )
+
+    def test_delete_passes_preflight(self, client):
+        """The UI's delete button issues DELETE; a browser asks permission first.
+
+        With DELETE missing from `allow_methods` the preflight was a 400 and the
+        button did nothing at all — the request never left the browser, so the
+        server logs showed no failure to find.
+        """
+        response = self._preflight(
+            client, "DELETE", f"{API_PREFIX}/orgs/default/gsc-accounts/anything"
+        )
+        assert response.status_code == 200, response.text
+        assert "DELETE" in response.headers.get("access-control-allow-methods", "")
+
+    @pytest.mark.parametrize("method", ["GET", "POST"])
+    def test_the_methods_the_app_serves_pass_preflight(self, client, method):
+        response = self._preflight(client, method, f"{API_PREFIX}/jobs")
+        assert response.status_code == 200
+        assert method in response.headers.get("access-control-allow-methods", "")
+
+    @pytest.mark.parametrize("method", ["PUT", "PATCH"])
+    def test_a_method_no_route_serves_is_refused(self, client, method):
+        """Enumerated, never `*`: the list is meant to shrink to what exists."""
+        assert self._preflight(client, method, f"{API_PREFIX}/jobs").status_code == 400
+
 
 class TestStartupRecovery:
     def test_orphaned_jobs_are_failed_on_startup(self, tmp_path):

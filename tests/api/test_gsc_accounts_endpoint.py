@@ -11,13 +11,16 @@ Two properties, and every test here is about one of them:
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from src.api import server as server_module
 from src.api.server import API_PREFIX, create_app
 from src.core.config import Settings
-from src.core.state_store import DiskJobStore
+from src.core.schemas import GscAccountCredential, OrgConfig
+from src.core.state_store import DiskJobStore, DiskOrgConfigStore
 from src.core.url_safety import UrlSafetyPolicy
 
 PUBLIC_IP = "93.184.216.34"
@@ -60,14 +63,33 @@ def store(tmp_path) -> DiskJobStore:
 
 
 @pytest.fixture
-def client(store, monkeypatch):
+def org_store(tmp_path) -> DiskOrgConfigStore:
+    """An isolated org store holding only the auto-created default org.
+
+    Passed explicitly so no test here reads the workstation's real
+    `.orgs/org_configs.json` — accounts an operator added on this machine would
+    otherwise show up in the account list these tests assert on.
+    """
+    return DiskOrgConfigStore(tmp_path / "orgs")
+
+
+@pytest.fixture
+def client(store, org_store, monkeypatch):
     monkeypatch.setattr(server_module, "PageClassificationTool", StubTool)
     app = create_app(
         store=store,
         url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        org_config_store=org_store,
     )
     with TestClient(app) as test_client:
         yield test_client
+
+
+def add_org_account(org_store, name: str, *, org_id: str = "default") -> None:
+    """Store a GSC account against an org, as the UI tab's POST does."""
+    org = org_store.get(org_id)
+    org.gsc_accounts[name] = GscAccountCredential(refresh_token=SecretStr(f"rt-{name}-org"))
+    org_store.update(org)
 
 
 @pytest.fixture
@@ -164,8 +186,8 @@ class TestOrgLevelGscAccounts:
     @pytest.fixture
     def org_config_store(self, tmp_path):
         """Create an organization config store for testing."""
-        from src.core.state_store import DiskOrgConfigStore
         from src.core.schemas import OrgConfig
+        from src.core.state_store import DiskOrgConfigStore
 
         store = DiskOrgConfigStore(tmp_path / "orgs")
         # Create a default test organization
@@ -332,3 +354,94 @@ class TestOrgLevelGscAccounts:
         text = response.text
         assert "rt-super-secret-token" not in text
         assert "secret-value-12345" not in text
+
+
+class TestOrgAccountsAreSelectable:
+    """An account added in the UI must be choosable for a crawl.
+
+    The defect: the tab wrote to the org store and the picker read `.env.local`,
+    so an operator could add an account and then never use it. Both endpoints
+    answered truthfully about different sets, which is why nothing looked broken.
+    """
+
+    def test_the_picker_list_includes_org_stored_accounts(self, client, org_store, configured):
+        add_org_account(org_store, "initech")
+        response = client.get(f"{API_PREFIX}/gsc/accounts")
+        assert response.status_code == 200
+        assert response.json() == {"accounts": ["acme", "globex", "initech"]}
+
+    def test_the_picker_list_is_still_names_only(self, client, org_store, configured):
+        """An org credential must not reach the browser any more than an env one."""
+        add_org_account(org_store, "initech")
+        assert "rt-initech-org" not in client.get(f"{API_PREFIX}/gsc/accounts").text
+
+    def test_the_picker_list_works_with_no_env_profiles(self, client, org_store, unconfigured):
+        """The org store alone is a complete answer."""
+        add_org_account(org_store, "initech")
+        assert client.get(f"{API_PREFIX}/gsc/accounts").json() == {"accounts": ["initech"]}
+
+    def test_an_unknown_org_is_not_an_error_for_the_list(self, client, configured):
+        """A header naming no org degrades to the env profiles, never a 500."""
+        response = client.get(f"{API_PREFIX}/gsc/accounts", headers={"X-Org-Id": "nobody"})
+        assert response.status_code == 200
+        assert response.json() == {"accounts": ["acme", "globex"]}
+
+    def test_another_orgs_accounts_are_not_listed(self, client, org_store, configured):
+        team_a = OrgConfig(org_id="team-a", display_name="Team A")
+        org_store.create(team_a)
+        add_org_account(org_store, "initech", org_id="team-a")
+        assert client.get(f"{API_PREFIX}/gsc/accounts").json() == {"accounts": ["acme", "globex"]}
+
+    def test_an_org_stored_account_is_accepted_at_admission(
+        self, client, store, org_store, configured
+    ):
+        """Previously 400: admission checked `.env.local` and nothing else."""
+        add_org_account(org_store, "initech")
+        response = post_job(client, gsc_account="initech")
+        assert response.status_code == 202, response.text
+        assert store.get(response.json()["id"]).request["gsc_account"] == "initech"
+
+    def test_an_account_in_neither_source_is_still_refused(self, client, store, org_store):
+        add_org_account(org_store, "initech")
+        assert post_job(client, gsc_account="nobody").status_code == 400
+        assert store.list_jobs() == []
+
+
+class TestTheCrawlIsToldItsOrg:
+    """The crawl resolves the credential, so it needs to know whose it may read.
+
+    Admission accepting an org-stored name is only half a fix: the tool runs on a
+    worker thread with nothing but its payload, and the payload deliberately does
+    not carry the org — a request that could name its own tenant could name
+    someone else's refresh token.
+    """
+
+    def test_the_tool_is_built_with_the_jobs_org(self, store, org_store, monkeypatch):
+        captured: dict[str, object] = {}
+
+        class Capturing(StubTool):
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+        monkeypatch.setattr(server_module, "PageClassificationTool", Capturing)
+        org_store.create(OrgConfig(org_id="team-a", display_name="Team A"))
+
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            org_config_store=org_store,
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                f"{API_PREFIX}/jobs",
+                json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+                headers={"X-Org-Id": "team-a"},
+            )
+            assert response.status_code == 202, response.text
+            job_id = response.json()["id"]
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not store.get(job_id).is_terminal:
+                time.sleep(0.01)
+
+        assert captured["org_id"] == "team-a"
+        assert store.get(job_id).request.get("org_id") is None

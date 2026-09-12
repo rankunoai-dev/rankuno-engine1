@@ -47,8 +47,9 @@ class GscTokenManager:
     that tokens have the required read-only scope.
 
     Design:
-    - Credentials resolved per crawl from settings (.env.local), by profile name
-      or the flat default (`Settings.resolve_gsc_account`)
+    - Credentials resolved per crawl by `Settings.resolve_gsc_account`: a profile
+      name looks in the org store first and `.env.local` second, while no name
+      means the flat `GOOGLE_OAUTH_*` default
     - Proactive refresh: if `expires_at - now < 5 minutes`, refresh immediately
     - Circuit breaker on token refresh: if endpoint fails repeatedly, falls back
       to stale token if not yet expired (Option B from feature brief)
@@ -58,13 +59,22 @@ class GscTokenManager:
 
     REFRESH_WINDOW_SECONDS = 300  # 5 minutes before expiry
 
-    def __init__(self, settings: Settings | None = None, *, account: str | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        account: str | None = None,
+        org_id: str | None = None,
+    ) -> None:
         """Initialize token manager from OAuth 2.0 credentials.
 
         Args:
             settings: Configuration override (primarily for tests).
             account: Named GSC profile to use. `None` keeps the single-account
                 default, so callers that predate profiles are unchanged.
+            org_id: Organization the crawl belongs to, which decides whose
+                stored accounts a name may resolve against. `None` means the
+                default org — what a request with no `X-Org-Id` header gets.
 
         Raises:
             ConfigurationError: If the profile is unknown or its credentials
@@ -74,7 +84,7 @@ class GscTokenManager:
         self._access_token: str | None = None
         self._token_expiry: datetime | None = None
 
-        creds = self._settings.resolve_gsc_account(account)
+        creds = self._settings.resolve_gsc_account(account, org_id=org_id)
         self._account = creds.account
         self._client_id = creds.client_id
         self._client_secret = creds.client_secret

@@ -72,6 +72,11 @@ reports/
 # source: each finished 20k-page crawl stores a ~16 MB result blob here.
 .jobs/
 
+# Organization configs written by the local API server (`Settings.org_config_path`).
+# Holds Search Console refresh tokens and client secrets in clear text, so this
+# must never be committable — it was one `git add -A` from being published.
+.orgs/
+
 # Tree reports written by scripts/run_crawl.py --out
 *-tree.html
 

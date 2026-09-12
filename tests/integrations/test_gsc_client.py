@@ -309,21 +309,33 @@ class TestFetchAnalytics:
 
 
 class TestNamedAccountSelection:
-    """The client hands the profile name to the token manager and nothing else."""
+    """The client hands the profile name and its org to the token manager.
+
+    The org decides *whose* stored accounts the name may match, so forwarding it
+    is not cosmetic: dropping it would resolve every crawl against the default
+    organization's accounts.
+    """
 
     def test_init_forwards_account_to_token_manager(self, mock_settings, mock_token_manager):
         with patch(
             "src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager
         ) as tm_class:
             GscApiClient(settings=mock_settings, account="acme")
-        tm_class.assert_called_once_with(settings=mock_settings, account="acme")
+        tm_class.assert_called_once_with(settings=mock_settings, account="acme", org_id=None)
 
     def test_init_default_account_is_none(self, mock_settings, mock_token_manager):
         with patch(
             "src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager
         ) as tm_class:
             GscApiClient(settings=mock_settings)
-        tm_class.assert_called_once_with(settings=mock_settings, account=None)
+        tm_class.assert_called_once_with(settings=mock_settings, account=None, org_id=None)
+
+    def test_init_forwards_the_org(self, mock_settings, mock_token_manager):
+        with patch(
+            "src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager
+        ) as tm_class:
+            GscApiClient(settings=mock_settings, account="acme", org_id="team-a")
+        tm_class.assert_called_once_with(settings=mock_settings, account="acme", org_id="team-a")
 
 
 class TestAuthenticationIsNotRetried:

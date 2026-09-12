@@ -1,20 +1,49 @@
 """Tests for GSC OAuth token manager."""
 
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
 import requests
 from pydantic import SecretStr
-from src.core.config import Settings
+from src.core.config import DEFAULT_ORG_ID, Settings
 from src.core.errors import ConfigurationError, GscAuthenticationError
+from src.core.schemas import GscAccountCredential, OrgConfig
+from src.core.state_store import OrgConfigStore
 from src.integrations.gsc_token_manager import GSC_READONLY_SCOPE, GscTokenManager
 
 
-def _settings(**overrides: object) -> Settings:
+class _OrgStore:
+    """The `get()` half of `OrgConfigStore`, which is all resolution reads.
+
+    Present in every settings object these tests build, so that no test reads
+    the real `.orgs/org_configs.json`: accounts an operator added on this
+    workstation would otherwise leak into the fixture.
+    """
+
+    def __init__(self, accounts: dict[str, GscAccountCredential] | None = None) -> None:
+        self._accounts = accounts or {}
+
+    def get(self, org_id: str) -> OrgConfig:
+        if org_id != DEFAULT_ORG_ID:
+            raise KeyError(org_id)
+        return OrgConfig(
+            org_id=DEFAULT_ORG_ID,
+            display_name="Default Organization",
+            gsc_accounts=dict(self._accounts),
+        )
+
+
+def _settings(org_accounts: dict[str, str] | None = None, **overrides: object) -> Settings:
     """Real settings, never a Mock.
 
     The manager resolves credentials through `Settings.resolve_gsc_account`,
     which a spec'd Mock would silently stub.
+
+    Args:
+        org_accounts: Accounts to place in the default org's store, as
+            name -> refresh token. Empty unless a test asks for them.
+        **overrides: Settings fields.
     """
     base = {
         "_env_file": None,
@@ -23,7 +52,13 @@ def _settings(**overrides: object) -> Settings:
         "google_oauth_refresh_token": SecretStr("test-refresh-token"),
     }
     base.update(overrides)
-    return Settings(**base)
+    settings = Settings(**base)
+    stored = {
+        name: GscAccountCredential(refresh_token=SecretStr(token))
+        for name, token in (org_accounts or {}).items()
+    }
+    settings._org_config_store = cast(OrgConfigStore, _OrgStore(stored))  # noqa: SLF001 - see above
+    return settings
 
 
 @pytest.fixture
@@ -131,6 +166,50 @@ class TestNamedAccounts:
         manager = GscTokenManager(settings=profile_settings, account="globex")
         assert manager.get_account_email() == "oauth2://profile/globex"
         assert "globex-id" not in manager.get_account_email()
+
+
+class TestOrgStoredAccounts:
+    """Accounts an operator added in the UI, held per organization.
+
+    The defect these cover: the store was write-only. A crawl naming an account
+    that existed only there could not start, because resolution looked at
+    `.env.local` and nowhere else.
+    """
+
+    def test_an_org_stored_account_resolves_at_crawl_time(self):
+        settings = _settings(org_accounts={"initech": "rt-initech-org"})
+        with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
+            mock_post.return_value = _token_response()
+            GscTokenManager(settings=settings, account="initech").get_or_refresh_token()
+
+        sent = mock_post.call_args.kwargs["data"]
+        assert sent["refresh_token"] == "rt-initech-org"  # noqa: S105
+        assert sent["client_id"] == "test-client-id"
+
+    def test_an_env_only_account_still_resolves(self):
+        """Backwards compatibility: the `.env.local` table predates the store."""
+        settings = _settings(
+            org_accounts={"initech": "rt-initech-org"},
+            gsc_accounts={"acme": {"refresh_token": "rt-acme"}},
+        )
+        with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
+            mock_post.return_value = _token_response()
+            GscTokenManager(settings=settings, account="acme").get_or_refresh_token()
+
+        assert mock_post.call_args.kwargs["data"]["refresh_token"] == "rt-acme"  # noqa: S105
+
+    def test_another_orgs_account_does_not_resolve(self):
+        """One organization's refresh token is not another's to spend."""
+        settings = _settings(org_accounts={"initech": "rt-initech-org"})
+        with pytest.raises(ConfigurationError, match="Unknown GSC account 'initech'"):
+            GscTokenManager(settings=settings, account="initech", org_id="team-a")
+
+    def test_the_account_email_is_the_name_for_an_org_account(self):
+        """No credential in the audit identity, same rule as an `.env` profile."""
+        settings = _settings(org_accounts={"initech": "rt-initech-org"})
+        manager = GscTokenManager(settings=settings, account="initech")
+        assert manager.get_account_email() == "oauth2://profile/initech"
+        assert "rt-initech-org" not in manager.get_account_email()
 
 
 class TestTokenRetrieval:

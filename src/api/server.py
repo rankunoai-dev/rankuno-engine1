@@ -56,11 +56,10 @@ from src.core.config import get_settings
 from src.core.errors import UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.logger import get_logger
-from src.core.schemas import GscAccountCredential, OrgConfig, StrictModel
+from src.core.schemas import GscAccountCredential, StrictModel
 from src.core.state_store import (
     MAX_RECENT_ITEMS,
     DiskJobStore,
-    DiskOrgConfigStore,
     JobNotFoundError,
     JobRecord,
     JobStatus,
@@ -882,9 +881,14 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
     """
     store = state.store
     try:
-        store.mark_running(job_id)
+        running = store.mark_running(job_id)
         result = PageClassificationTool(
             url_policy=state.url_policy,
+            # Whose Search Console accounts this crawl may resolve. Taken from
+            # the record, where admission put the `X-Org-Id` it validated, so a
+            # crawl can never borrow another organization's refresh token by
+            # asking for it in the payload.
+            org_id=running.org_id,
             progress_sink=TelemetryRecorder(store, job_id, payload.resolved_max_pages),
             checkpoint_sink=CrawlCheckpointer(store, job_id, payload.base_url),
             # Kept so a later fix to the header-menu parser can be applied to
@@ -965,7 +969,9 @@ def create_app(
     Args:
         store: Job persistence. Defaults to a `DiskJobStore` under `jobs_root`.
         url_policy: SSRF policy applied at admission and inherited by the crawl.
-        org_config_store: Organization config persistence. Defaults to `DiskOrgConfigStore`.
+        org_config_store: Organization config persistence. Defaults to the one
+            `get_settings()` exposes, which is what crawl-time credential
+            resolution reads.
         jobs_root: Directory for the default store. Defaults to `.jobs/`.
         max_concurrent_jobs: Simultaneous crawls before `429`. `None` means
             `Settings.max_concurrent_crawls` (`MAX_CONCURRENT_CRAWLS`); an
@@ -979,8 +985,13 @@ def create_app(
     resolved_store: JobStore = (
         store if store is not None else DiskJobStore(jobs_root or Path(".jobs"))
     )
+    # `get_settings().org_config_store`, not a second store over a hard-coded
+    # path. Credential resolution at crawl time has only settings to find the
+    # store by, so an API that wrote somewhere else produced accounts the tab
+    # could list and the crawl could not resolve — the two halves have to be the
+    # same object, not merely the same shape.
     resolved_org_config_store: OrgConfigStore = (
-        org_config_store if org_config_store is not None else DiskOrgConfigStore(".orgs")
+        org_config_store if org_config_store is not None else get_settings().org_config_store
     )
     state = ApiState(
         store=resolved_store,
@@ -1026,7 +1037,12 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        # Exactly the verbs this app routes, never `*`. DELETE is here because
+        # one route serves it (removing an org's GSC account); the browser sends
+        # a preflight for it, and a method missing from this list makes the
+        # preflight a 400 that the page can only observe as nothing happening.
+        # Add a verb here when a route starts serving it, and not before.
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type"],
     )
 
@@ -1046,9 +1062,22 @@ def create_app(
         )
 
     @app.get(f"{API_PREFIX}/gsc/accounts", response_model=GscAccountsView)
-    def list_gsc_accounts() -> GscAccountsView:
-        """Profile names a crawl may select, sorted. Empty when none are configured."""
-        return GscAccountsView(accounts=sorted(get_settings().gsc_account_names()))
+    def list_gsc_accounts(x_org_id: str | None = Header(default=None)) -> GscAccountsView:
+        """Profile names a crawl may select, sorted. Empty when none are configured.
+
+        Both sources, because both are selectable: accounts the operator added
+        through the UI (held per organization) and the `.env.local` profiles that
+        predate them. Listing only the latter is what made the UI tab write-only
+        — an account could be added and then never chosen.
+
+        Args:
+            x_org_id: Organization id header (X-Org-Id). `None` for the default
+                org, which is the org the UI writes to.
+        """
+        store = state.org_config_store
+        return GscAccountsView(
+            accounts=list(get_settings().gsc_account_names_for_org(x_org_id, org_store=store))
+        )
 
     @app.post(
         f"{API_PREFIX}/jobs", response_model=JobAccepted, status_code=status.HTTP_202_ACCEPTED
@@ -1090,9 +1119,12 @@ def create_app(
                 detail=f"invalid org_id '{org_id}': must match ^[a-z0-9_-]{{1,64}}$",
             )
 
-        # Load org config
+        # Load org config. `state.org_config_store`, the same store the GSC
+        # account endpoints write to — reading org existence from one store and
+        # its accounts from another is how an org could hold an account that no
+        # crawl was allowed to start against.
         try:
-            org_config = get_settings().org_config_store.get(org_id)
+            org_config = state.org_config_store.get(org_id)
         except KeyError as err:
             _logger.warning("job_rejected_unknown_org", extra={"requested_org": org_id})
             raise HTTPException(
@@ -1366,12 +1398,17 @@ def create_app(
 
         # The same argument applies to the Search Console profile. A retry or
         # resume replays a stored name, and a profile can be removed from
-        # `.env.local` between runs. Refused here rather than left for the
-        # enrichment step, which degrades gracefully and would report the
-        # missing account as "no search data" — and never defaulted, because
-        # reading the wrong client's property is worse than a failed crawl.
+        # `.env.local` — or deleted from the org in the UI — between runs.
+        # Refused here rather than left for the enrichment step, which degrades
+        # gracefully and would report the missing account as "no search data" —
+        # and never defaulted, because reading the wrong client's property is
+        # worse than a failed crawl. Checked against this org's accounts *and*
+        # the environment's, which is exactly the set the crawl will later be
+        # able to resolve.
         if payload.gsc_account is not None:
-            known = get_settings().gsc_account_names()
+            known = get_settings().gsc_account_names_for_org(
+                org_id, org_store=state.org_config_store
+            )
             if payload.gsc_account not in known:
                 _logger.warning(
                     "job_rejected_unknown_gsc_account", extra={"account": payload.gsc_account}
@@ -2546,7 +2583,9 @@ def create_app(
         try:
             org = state.org_config_store.get(org_id)
         except KeyError:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found")
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
+            )
 
         accounts = [
             OrgGscAccountView(
@@ -2585,7 +2624,9 @@ def create_app(
         try:
             org = state.org_config_store.get(org_id)
         except KeyError:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found")
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
+            )
 
         org.gsc_accounts[req.account_name] = GscAccountCredential(
             refresh_token=req.refresh_token,
@@ -2607,7 +2648,10 @@ def create_app(
             has_secret_override=cred.client_secret is not None,
         )
 
-    @app.delete(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts/{{account_name}}", status_code=status.HTTP_204_NO_CONTENT)
+    @app.delete(
+        f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts/{{account_name}}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
     def delete_org_gsc_account(org_id: str, account_name: str) -> None:
         """Delete a GSC account from an organization.
 
@@ -2621,7 +2665,9 @@ def create_app(
         try:
             org = state.org_config_store.get(org_id)
         except KeyError:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found")
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
+            )
 
         if account_name not in org.gsc_accounts:
             raise HTTPException(

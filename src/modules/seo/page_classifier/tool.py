@@ -350,6 +350,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         progress_sink: ProgressSink | None = None,
         checkpoint_sink: CheckpointSink | None = None,
         homepage_sink: Callable[[str], None] | None = None,
+        org_id: str | None = None,
         **kwargs: object,
     ) -> None:
         """Build the tool.
@@ -374,6 +375,14 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             llm_classifier: Layer 3 handler. `None` means ambiguous pages keep
                 their structural guess.
             cost_ledger: Ledger charged for Layer 3.
+            org_id: Which organization's stored Search Console accounts
+                `payload.gsc_account` may name. Constructor-injected for the
+                same reason as the sinks above, and more pressingly: tenancy is
+                the *caller's* claim, read from the `X-Org-Id` header. A field
+                on the input model would let a request nominate the org whose
+                refresh token it borrows, and the payload is persisted under
+                `.jobs/` where a credential-bearing name has no business being.
+                `None` means the default org.
             **kwargs: Forwarded to `BaseTool`.
         """
         super().__init__(**kwargs)  # type: ignore[arg-type]
@@ -385,6 +394,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         self._progress_sink = progress_sink
         self._checkpoint_sink = checkpoint_sink
         self._homepage_sink = homepage_sink
+        self._org_id = org_id
 
     def describe_invocation(self, payload: PageClassificationInput) -> str:
         """Operator-facing summary. Names the site, not the object graph."""
@@ -510,7 +520,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             return pages
 
         try:
-            client = GscApiClient(account=payload.gsc_account)
+            client = GscApiClient(account=payload.gsc_account, org_id=self._org_id)
             response = client.fetch_analytics(
                 property_url=payload.gsc_property_url,
                 start_date="2026-01-01",
