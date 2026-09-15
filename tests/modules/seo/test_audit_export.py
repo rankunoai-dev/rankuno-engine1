@@ -1,7 +1,7 @@
-"""Tests for the engine adapter (plan P0-4, ADR 0011).
+"""Tests for the engine adapter (plan P0-4, ADR 0011; content signals ADR 0014).
 
-The number that matters most is the one asserted first: sixteen issues are
-measured and ninety-four are not, and every NOT_MEASURED set is empty. A rule
+The number that matters most is the one asserted first: twenty-nine issues are
+measured and eighty-one are not, and every NOT_MEASURED set is empty. A rule
 that quietly starts flagging something the profile cannot support would move
 that count, and the test would say so.
 """
@@ -61,6 +61,19 @@ EXPECTED_MEASURED = frozenset(
         IssueId.URL_MULTIPLE_SLASHES,
         IssueId.URL_REPETITIVE_PATH,
         IssueId.URL_CONTAINS_SPACE,
+        IssueId.PAGE_TITLES_MISSING,
+        IssueId.PAGE_TITLES_MULTIPLE,
+        IssueId.PAGE_TITLES_OUTSIDE_HEAD,
+        IssueId.PAGE_TITLES_SAME_AS_H1,
+        IssueId.PAGE_TITLES_DUPLICATE,
+        IssueId.META_DESCRIPTION_MISSING,
+        IssueId.META_DESCRIPTION_MULTIPLE,
+        IssueId.META_DESCRIPTION_OUTSIDE_HEAD,
+        IssueId.META_DESCRIPTION_DUPLICATE,
+        IssueId.H1_MISSING,
+        IssueId.H1_MULTIPLE,
+        IssueId.H1_OVER_70_CHARACTERS,
+        IssueId.H1_DUPLICATE,
     }
 )
 
@@ -74,6 +87,14 @@ def profile(
     indexability: Indexability = Indexability.INDEXABLE,
     reason: str = "",
     redirect_chain: tuple[str, ...] = (),
+    page_title: str = "",
+    page_title_count: int = 0,
+    page_title_outside_head: bool = False,
+    meta_description: str = "",
+    meta_description_count: int = 0,
+    meta_description_outside_head: bool = False,
+    h1_text: str = "",
+    h1_count: int = 0,
 ) -> FullPageIntelligenceProfile:
     """A minimal valid profile; built in full because the model validates itself."""
     return FullPageIntelligenceProfile(
@@ -99,6 +120,14 @@ def profile(
         indexability=indexability,
         indexability_reason=reason,
         redirect_chain=redirect_chain,
+        page_title=page_title,
+        page_title_count=page_title_count,
+        page_title_outside_head=page_title_outside_head,
+        meta_description=meta_description,
+        meta_description_count=meta_description_count,
+        meta_description_outside_head=meta_description_outside_head,
+        h1_text=h1_text,
+        h1_count=h1_count,
     )
 
 
@@ -124,13 +153,13 @@ def test_source_is_engine_and_links_are_empty():
     assert LINKS_NOT_RETAINED_NOTE in dataset.notes
 
 
-def test_sixteen_measured_ninety_four_not():
+def test_twenty_nine_measured_eighty_one_not():
     dataset = with_sitemap()
     measured = {i for i, c in dataset.coverage.items() if c is Coverage.MEASURED}
     assert measured == EXPECTED_MEASURED
-    assert len(measured) == 16
+    assert len(measured) == 29
     assert len(dataset.coverage) == len(IssueId) == 110
-    assert sum(1 for c in dataset.coverage.values() if c is Coverage.NOT_MEASURED) == 94
+    assert sum(1 for c in dataset.coverage.values() if c is Coverage.NOT_MEASURED) == 81
 
 
 def test_every_not_measured_issue_is_present_with_an_empty_set():
@@ -151,11 +180,37 @@ def test_canonicals_missing_is_not_measured_because_the_profile_cannot_express_i
 
 def test_notes_name_every_category_with_something_unmeasured():
     dataset = with_sitemap()
-    partly = {IssueCategory.SITEMAPS, IssueCategory.URL_ISSUES}
+    # SITEMAPS has its own dedicated notes (SITEMAP_TRUNCATION_NOTE /
+    # SITEMAP_NOT_READ_NOTE). URL_ISSUES and H1 are fully measured - H1 has no
+    # pixel-width ids to leave unmeasured (ADR 0014) - so neither needs a note.
+    fully_covered_or_handled_separately = {
+        IssueCategory.SITEMAPS,
+        IssueCategory.URL_ISSUES,
+        IssueCategory.H1,
+    }
     for category in IssueCategory:
-        if category in partly:
+        if category in fully_covered_or_handled_separately:
             continue
         assert any(f"not measured ({category.value}):" in n for n in dataset.notes), category
+
+
+def test_pixel_ids_are_not_measured_with_a_rewritten_reason():
+    """The fallback ADR 0014 took: no verified glyph-width table, so honest NOT_MEASURED."""
+    dataset = with_sitemap()
+    for issue in (
+        IssueId.PAGE_TITLES_OVER_561_PIXELS,
+        IssueId.PAGE_TITLES_BELOW_200_PIXELS,
+        IssueId.META_DESCRIPTION_OVER_985_PIXELS,
+        IssueId.META_DESCRIPTION_BELOW_400_PIXELS,
+    ):
+        assert dataset.coverage[issue] is Coverage.NOT_MEASURED
+        assert dataset.issues[issue] == frozenset()
+    page_titles_note = next(n for n in dataset.notes if "not measured (PAGE_TITLES):" in n)
+    assert "PAGE_TITLES_OVER_561_PIXELS" in page_titles_note
+    assert "PAGE_TITLES_BELOW_200_PIXELS" in page_titles_note
+    meta_note = next(n for n in dataset.notes if "not measured (META_DESCRIPTION):" in n)
+    assert "META_DESCRIPTION_OVER_985_PIXELS" in meta_note
+    assert "META_DESCRIPTION_BELOW_400_PIXELS" in meta_note
 
 
 # --------------------------------------------------------------------------
@@ -295,6 +350,155 @@ def test_unknown_lands_in_no_response_code_set():
 
 
 # --------------------------------------------------------------------------
+# Native content signals (ADR 0014)
+# --------------------------------------------------------------------------
+
+
+class TestMissingIsGatedOnFetchedStatus:
+    """A page the crawl never read must not read as a page with no title.
+
+    `export()`, not `with_sitemap()`: the latter's own homepage fixture has an
+    empty default title, which would otherwise land in every assertion below.
+    Whether a sitemap was read is irrelevant to these rules regardless -
+    `PAGE_TITLES`/`META_DESCRIPTION`/`H1` are not in `_SITEMAP_ISSUES`.
+    """
+
+    def test_an_indexable_page_with_no_title_is_missing(self):
+        dataset = export(profile("https://example.com/a/", page_title=""))
+        assert dataset.issues[IssueId.PAGE_TITLES_MISSING] == {"https://example.com/a/"}
+
+    def test_whitespace_only_title_counts_as_missing(self):
+        dataset = export(profile("https://example.com/a/", page_title="   "))
+        assert dataset.issues[IssueId.PAGE_TITLES_MISSING] == {"https://example.com/a/"}
+
+    def test_a_never_fetched_page_is_not_flagged_missing(self):
+        dataset = export(
+            profile("https://example.com/u/", page_title="", indexability=Indexability.UNKNOWN)
+        )
+        assert dataset.issues[IssueId.PAGE_TITLES_MISSING] == frozenset()
+        assert dataset.issues[IssueId.META_DESCRIPTION_MISSING] == frozenset()
+        assert dataset.issues[IssueId.H1_MISSING] == frozenset()
+
+    def test_a_not_a_page_verdict_is_not_flagged_missing(self):
+        """An error/redirect/non-HTML response never runs extraction either."""
+        dataset = export(
+            profile(
+                "https://example.com/gone/",
+                page_title="",
+                indexability=Indexability.NOT_A_PAGE,
+                reason="Answered 404.",
+            )
+        )
+        assert dataset.issues[IssueId.PAGE_TITLES_MISSING] == frozenset()
+
+    def test_a_page_with_a_title_is_not_flagged_missing(self):
+        dataset = export(profile("https://example.com/a/", page_title="Has One"))
+        assert dataset.issues[IssueId.PAGE_TITLES_MISSING] == frozenset()
+
+
+class TestMultipleAndOutsideHead:
+    def test_multiple_reads_the_count_not_whether_text_matches(self):
+        dataset = export(
+            profile("https://example.com/a/", page_title="Same", page_title_count=2),
+            profile("https://example.com/b/", page_title="Same", page_title_count=1),
+        )
+        assert dataset.issues[IssueId.PAGE_TITLES_MULTIPLE] == {"https://example.com/a/"}
+
+    def test_meta_description_multiple(self):
+        dataset = export(profile("https://example.com/a/", meta_description_count=2))
+        assert dataset.issues[IssueId.META_DESCRIPTION_MULTIPLE] == {"https://example.com/a/"}
+
+    def test_h1_multiple(self):
+        dataset = export(profile("https://example.com/a/", h1_count=3))
+        assert dataset.issues[IssueId.H1_MULTIPLE] == {"https://example.com/a/"}
+
+    def test_outside_head_reads_the_boolean(self):
+        dataset = export(
+            profile("https://example.com/a/", page_title_outside_head=True),
+            profile("https://example.com/b/", page_title_outside_head=False),
+        )
+        assert dataset.issues[IssueId.PAGE_TITLES_OUTSIDE_HEAD] == {"https://example.com/a/"}
+
+    def test_meta_description_outside_head(self):
+        dataset = export(profile("https://example.com/a/", meta_description_outside_head=True))
+        assert dataset.issues[IssueId.META_DESCRIPTION_OUTSIDE_HEAD] == {"https://example.com/a/"}
+
+
+class TestSameAsH1AndOver70Characters:
+    def test_identical_title_and_h1_flags(self):
+        dataset = export(
+            profile("https://example.com/a/", page_title="Same Thing", h1_text="Same Thing")
+        )
+        assert dataset.issues[IssueId.PAGE_TITLES_SAME_AS_H1] == {"https://example.com/a/"}
+
+    def test_case_and_whitespace_differences_still_match(self):
+        dataset = export(
+            profile("https://example.com/a/", page_title="Same  Thing", h1_text="same thing")
+        )
+        assert dataset.issues[IssueId.PAGE_TITLES_SAME_AS_H1] == {"https://example.com/a/"}
+
+    def test_two_blank_fields_are_not_flagged_as_matching(self):
+        dataset = export(profile("https://example.com/a/", page_title="", h1_text=""))
+        assert dataset.issues[IssueId.PAGE_TITLES_SAME_AS_H1] == frozenset()
+
+    def test_different_text_is_not_flagged(self):
+        dataset = export(profile("https://example.com/a/", page_title="One", h1_text="Two"))
+        assert dataset.issues[IssueId.PAGE_TITLES_SAME_AS_H1] == frozenset()
+
+    def test_h1_over_70_characters(self):
+        dataset = export(profile("https://example.com/a/", h1_text="x" * 71))
+        assert dataset.issues[IssueId.H1_OVER_70_CHARACTERS] == {"https://example.com/a/"}
+
+    def test_h1_at_exactly_70_characters_is_not_over(self):
+        dataset = export(profile("https://example.com/a/", h1_text="x" * 70))
+        assert dataset.issues[IssueId.H1_OVER_70_CHARACTERS] == frozenset()
+
+
+class TestDuplicateContentSignals:
+    def test_duplicate_titles_group_by_normalised_text(self):
+        dataset = export(
+            profile("https://example.com/a/", page_title="Welcome"),
+            profile("https://example.com/b/", page_title="welcome"),
+            profile("https://example.com/c/", page_title="Something Else"),
+        )
+        assert dataset.issues[IssueId.PAGE_TITLES_DUPLICATE] == {
+            "https://example.com/a/",
+            "https://example.com/b/",
+        }
+
+    def test_blank_titles_are_not_counted_as_duplicates_of_each_other(self):
+        dataset = export(
+            profile("https://example.com/a/", page_title=""),
+            profile("https://example.com/b/", page_title=""),
+        )
+        assert dataset.issues[IssueId.PAGE_TITLES_DUPLICATE] == frozenset()
+
+    def test_duplicate_meta_descriptions(self):
+        dataset = export(
+            profile("https://example.com/a/", meta_description="Buy now"),
+            profile("https://example.com/b/", meta_description="Buy now"),
+        )
+        assert dataset.issues[IssueId.META_DESCRIPTION_DUPLICATE] == {
+            "https://example.com/a/",
+            "https://example.com/b/",
+        }
+
+    def test_duplicate_h1s(self):
+        dataset = export(
+            profile("https://example.com/a/", h1_text="Our Products"),
+            profile("https://example.com/b/", h1_text="Our Products"),
+        )
+        assert dataset.issues[IssueId.H1_DUPLICATE] == {
+            "https://example.com/a/",
+            "https://example.com/b/",
+        }
+
+    def test_a_unique_title_is_not_a_duplicate(self):
+        dataset = export(profile("https://example.com/a/", page_title="Unique"))
+        assert dataset.issues[IssueId.PAGE_TITLES_DUPLICATE] == frozenset()
+
+
+# --------------------------------------------------------------------------
 # URL string rules
 # --------------------------------------------------------------------------
 
@@ -394,4 +598,4 @@ def test_logs_carry_counts_never_urls(caplog: pytest.LogCaptureFixture):
     built = next(r for r in caplog.records if r.getMessage() == "audit_export_built")
     assert built.__dict__["pages"] == 1
     assert built.__dict__["duplicates_dropped"] == 1
-    assert built.__dict__["coverage_measured"] == 12  # no sitemap read: 16 - 4
+    assert built.__dict__["coverage_measured"] == 25  # no sitemap read: 29 - 4

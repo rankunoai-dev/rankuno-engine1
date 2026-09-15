@@ -39,8 +39,24 @@ src/
 │   ├── retry.py                 # Exponential backoff with jitter (tenacity)
 │   ├── url_safety.py            # SSRF guard: private-range blocker, scheme allowlist
 │   ├── robots.py                # robots.txt & crawl-delay parsing (RFC 9309)
-│   └── state_store.py           # Durable background-job records. Domain-agnostic:
-│                                # opaque request/result mappings, atomic writes
+│   ├── state_store.py           # Durable background-job records. Domain-agnostic:
+│   │                            # opaque request/result mappings, atomic writes
+│   ├── process_supervisor.py    # Windows Job Object process supervision (ADR
+│   │                            # 0013). Domain-agnostic core infrastructure,
+│   │                            # not SEO-specific: launch_supervised(),
+│   │                            # SupervisedProcess.terminate()/is_running(),
+│   │                            # reconcile_orphans(). Reusable by any future
+│   │                            # desktop-tool integration this engine
+│   │                            # supervises, not only Screaming Frog
+│   ├── _process_ledger.py       # PID + process-start-time ledger, independent
+│   │                            # of DiskJobStore (answers "which OS process
+│   │                            # is still alive", not "which job record")
+│   ├── _process_orphans.py      # Startup reconciliation: named-Job-Object
+│   │                            # reopen, Toolhelp32 tree-walk fallback,
+│   │                            # PID+start-time matching before any kill
+│   └── _win32_bindings.py       # Deferred pywin32 import (load_win32()) so
+│                                # importing process_supervisor.py never
+│                                # requires Windows -- only calling it does
 ├── api/                         # Local HTTP API (ADR 0008). Outermost layer;
 │   │                            # nothing below imports from it.
 │   ├── server.py                # Implements no safety control of its own — all
@@ -84,6 +100,11 @@ src/
     │       ├── discovery.py          # 3-path merged discovery -> PageEvidence
     │       ├── async_discovery.py    # Concurrent crawl path (level-synchronous BFS)
     │       ├── discovery_parsers.py  # Sitemap XML, DOM links, CMS payloads
+    │       ├── content_signals.py    # Native title/H1/meta-description
+    │       │                         # extraction (html.parser, no new dep).
+    │       │                         # Hooked into discovery.SiteGraph
+    │       │                         # .record_fetch, the one method both
+    │       │                         # sync and async discovery call (ADR 0014)
     │       ├── tree_visualizer.py    # Standalone interactive HTML site tree
     │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
     │       │                         # crawl job, RiskClass.READ (ADR 0003).
@@ -95,10 +116,13 @@ src/
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       ├── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
     │       └── audit_export.py       # Profiles -> AuditDataset(source=ENGINE).
-    │                                 # 16 of 110 issues MEASURED, 94 NOT_MEASURED
+    │                                 # 29 of 110 issues MEASURED, 81 NOT_MEASURED
     │                                 # with reasons in notes; links never filled.
+    │                                 # The four PAGE_TITLES/META_DESCRIPTION
+    │                                 # pixel-width ids stay NOT_MEASURED - no
+    │                                 # verified glyph-width table (ADR 0014).
     │                                 # The only page_classifier file that
-    │                                 # imports contracts (build-log 0079)
+    │                                 # imports contracts (build-log 0079, 0096)
     │   ├── contracts/           # Seam between the crawler and client
     │   │   │                    # deliverables (ADR 0011). Imports core only;
     │   │   │                    # never page_classifier or deliverables.
@@ -190,6 +214,7 @@ src/
 | Path | Purpose |
 | :--- | :--- |
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
+| `modules/seo/screaming_frog_control/` (ADR 0013 conditions 4-8) | Screaming Frog integration itself: CLI/`.seospiderconfig` field mapping, license-failure detection, the seed-URL `UrlSafetyPolicy` gate, the `RiskClass.WRITE`/`MANDATORY_HITL` tool, and the UI to trigger/monitor a run. The process-supervision primitive these would call (conditions 1-3) shipped in [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md) — `core/process_supervisor.py` |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
@@ -261,6 +286,8 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0010](adr/0010-gsc-api-security-and-safety-controls.md) | Search Console API security and safety controls |
 | [0011](adr/0011-deliverables-boundary-and-screaming-frog-input.md) | `AuditDataset` contract as the seam to deliverables; Screaming Frog is an input format, never a driven dependency |
 | [0012](adr/0012-gsc-account-profiles.md) | Named Search Console profiles as `GSC_ACCOUNTS__<name>__*` env keys; a crawl selects one by name; the API publishes names only, never credentials; unknown name is refused, never defaulted |
+| [0013](adr/0013-screaming-frog-cli-process-governance-exception.md) | Governance exception lifting ADR 0011 §3's ban on driving Screaming Frog via CLI, conditional on 8 binding security requirements (real Windows Job Object, independent PID+start-time ledger, same-process design, `UrlSafetyPolicy` seed-URL gate, explicit CLI field mapping, named license-failure error, `RiskClass.WRITE`/`MANDATORY_HITL`). Status: APPROVED. Conditions 1–3 implemented [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md); conditions 4–8 remain open |
+| [0014](adr/0014-native-title-h1-meta-description-extraction.md) | Extract title/H1/meta description natively at fetch time (`content_signals.py`, `html.parser`, no new dependency), hooked into the one `SiteGraph.record_fetch` method both sync and async discovery share. 13 of 17 `PAGE_TITLES`/`META_DESCRIPTION`/`H1` catalogue ids move to `MEASURED`; the 4 pixel-width ids stay `NOT_MEASURED` by design fallback — no verified glyph-width table available, and a live font-rendering substitute would be non-deterministic across machines. [build-log 0096](build-log/0096-twenty-nine-measured-eighty-one-not.md) |
 
 ---
 

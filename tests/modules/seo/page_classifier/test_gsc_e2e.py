@@ -467,7 +467,11 @@ class TestGscE2eDataIntegrity:
 
 
 class TestGscAccountSelection:
-    """The crawl's named profile reaches the client; nothing else decides it."""
+    """The crawl's named profile reaches the client; nothing else decides it.
+
+    The org travels with it, because a name alone no longer identifies a
+    credential: the same name can exist in two organizations' stores.
+    """
 
     @staticmethod
     def _empty_response() -> GscAnalyticsResponse:
@@ -489,7 +493,7 @@ class TestGscAccountSelection:
             mock_client.return_value.fetch_analytics.return_value = self._empty_response()
             tool._enrich_with_gsc(tuple(minimal_crawl), payload)
 
-        mock_client.assert_called_once_with(account="acme")
+        mock_client.assert_called_once_with(account="acme", org_id=None)
 
     def test_enrichment_default_account_is_none(self, tool, minimal_crawl):
         """No profile named means the flat default credentials, explicitly."""
@@ -502,7 +506,21 @@ class TestGscAccountSelection:
             mock_client.return_value.fetch_analytics.return_value = self._empty_response()
             tool._enrich_with_gsc(tuple(minimal_crawl), payload)
 
-        mock_client.assert_called_once_with(account=None)
+        mock_client.assert_called_once_with(account=None, org_id=None)
+
+    def test_enrichment_passes_the_tools_org_to_the_client(self, minimal_crawl):
+        """The org is the tool's, handed to it by the API — never the payload's."""
+        tool = PageClassificationTool(org_id="team-a")
+        payload = PageClassificationInput(
+            base_url="https://example.com",
+            gsc_property_url="https://example.com",
+            gsc_account="acme",
+        )
+        with patch("src.modules.seo.page_classifier.tool.GscApiClient") as mock_client:
+            mock_client.return_value.fetch_analytics.return_value = self._empty_response()
+            tool._enrich_with_gsc(tuple(minimal_crawl), payload)
+
+        mock_client.assert_called_once_with(account="acme", org_id="team-a")
 
     @pytest.mark.parametrize("bad", ["Acme", "a b", "x" * 65, ""])
     def test_account_name_shape_is_enforced_at_the_boundary(self, bad: str):

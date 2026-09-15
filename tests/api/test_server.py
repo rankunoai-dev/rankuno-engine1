@@ -451,6 +451,39 @@ class TestCors:
         response = client.get(f"{API_PREFIX}/health", headers={"Origin": "https://evil.test"})
         assert response.headers.get("access-control-allow-origin") is None
 
+    def _preflight(self, client, method: str, path: str) -> httpx.Response:
+        return client.options(
+            path,
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": method,
+            },
+        )
+
+    def test_delete_passes_preflight(self, client):
+        """The UI's delete button issues DELETE; a browser asks permission first.
+
+        With DELETE missing from `allow_methods` the preflight was a 400 and the
+        button did nothing at all — the request never left the browser, so the
+        server logs showed no failure to find.
+        """
+        response = self._preflight(
+            client, "DELETE", f"{API_PREFIX}/orgs/default/gsc-accounts/anything"
+        )
+        assert response.status_code == 200, response.text
+        assert "DELETE" in response.headers.get("access-control-allow-methods", "")
+
+    @pytest.mark.parametrize("method", ["GET", "POST"])
+    def test_the_methods_the_app_serves_pass_preflight(self, client, method):
+        response = self._preflight(client, method, f"{API_PREFIX}/jobs")
+        assert response.status_code == 200
+        assert method in response.headers.get("access-control-allow-methods", "")
+
+    @pytest.mark.parametrize("method", ["PUT", "PATCH"])
+    def test_a_method_no_route_serves_is_refused(self, client, method):
+        """Enumerated, never `*`: the list is meant to shrink to what exists."""
+        assert self._preflight(client, method, f"{API_PREFIX}/jobs").status_code == 400
+
 
 class TestStartupRecovery:
     def test_orphaned_jobs_are_failed_on_startup(self, tmp_path):
@@ -1728,6 +1761,83 @@ class TestPerFacetConcurrency:
         detail = response.json()["detail"]
         assert "seo.theme_classification" in detail
         assert "capacity" in detail
+
+
+class TestFacetSlotReturn:
+    """A facet slot claimed at admission comes back on every exit path.
+
+    Regression coverage for a leak that made a server refuse work while idle.
+    `_start` reserves against a provisional id and re-keys it onto the real one
+    once the store has minted it, but `rekey` moved the claim in `_active`
+    only: the provisional id stayed in the per-facet set, and the normal-exit
+    release — keyed on the real id — could not remove it. Every crawl therefore
+    consumed one facet slot for the life of the process, and after five the
+    endpoint answered 429 with nothing running. `cancel_job` leaked a second
+    way, releasing without naming the facet at all.
+    """
+
+    FACET = "seo.page_classifier"
+
+    def test_six_sequential_crawls_on_one_facet_are_all_admitted(
+        self, store, stub_tool, mock_org_store
+    ):
+        """Sequential crawls never legitimately reach a cap of five."""
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            max_concurrent_jobs=5,
+        )
+        state = app.state.api
+        stub_tool.result = StubResult(ok=False, error="stopped")
+
+        with TestClient(app) as client:
+            for _ in range(6):
+                run_job(client, store)  # asserts 202 and waits for a terminal status
+            # The release runs on the event loop after the worker thread has
+            # written the terminal status, so the last slot may still be in
+            # flight when `run_job` returns.
+            deadline = time.monotonic() + 5.0
+            while state.active_count and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        assert state.active_count == 0
+        assert state.try_reserve("probe", self.FACET) is True
+
+    def test_rekey_moves_the_facet_claim_with_the_global_one(self, store, mock_org_store):
+        """The provisional id must leave the per-facet set, not only `_active`."""
+        state = create_app(store=store, max_concurrent_jobs=1).state.api
+        assert state.try_reserve("pending:1", self.FACET) is True
+
+        state.rekey("pending:1", "real-1", self.FACET)
+
+        assert state.is_active("real-1") is True
+        assert state.is_active("pending:1") is False
+        # Still exactly one claim, not two: the facet is full, not over-full.
+        assert state.try_reserve("other", self.FACET) is False
+        # And that one claim is the real id's, so releasing it frees the facet.
+        state.release("real-1", self.FACET)
+        assert state.try_reserve("other", self.FACET) is True
+
+    def test_cancelling_frees_the_facet_slot(self, store, mock_org_store):
+        """`TestCancel` checks `active_count`; this checks the set that gates admission."""
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            max_concurrent_jobs=1,
+        )
+        state = app.state.api
+        record = store.create("tool", {"base_url": SAFE_URL}, label="stuck")
+
+        with TestClient(app) as client:
+            # Same race as TestCancel: wait for orphan recovery before marking
+            # the job RUNNING, or recovery fails it out from under the test.
+            assert state.recovery_done.wait(timeout=5), "recovery did not finish in time"
+            store.mark_running(record.id)
+            assert state.try_reserve(record.id, record.facet_id) is True
+            assert state.try_reserve("next", record.facet_id) is False
+            assert client.post(f"{API_PREFIX}/jobs/{record.id}/cancel").status_code == 200
+
+        assert state.try_reserve("next", record.facet_id) is True
 
 
 class TestBackwardCompatibility:

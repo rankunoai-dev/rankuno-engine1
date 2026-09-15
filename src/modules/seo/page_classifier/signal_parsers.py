@@ -264,6 +264,19 @@ class PageEvidence(StrictModel):
             headers, and they are discarded one line after the fetch returns.
             `UNKNOWN` for anything never fetched.
         indexability_reason: One line saying why, for a client to read.
+        page_title: Text of the page's first `<title>` element, `""` if none
+            or never fetched. From `content_signals.extract_content_signals`.
+        page_title_count: Every `<title>` occurrence seen, independent of text.
+        page_title_outside_head: Whether any `<title>` occurrence appeared
+            after the document's head had already closed.
+        meta_description: `content` of the first `<meta name="description">`,
+            `""` if none or never fetched.
+        meta_description_count: Every matching `<meta>` occurrence seen.
+        meta_description_outside_head: As `page_title_outside_head`, for the
+            meta description.
+        h1_text: Text of the page's first `<h1>` element, `""` if none or
+            never fetched.
+        h1_count: Every `<h1>` occurrence seen, independent of text.
     """
 
     url: str = Field(min_length=1)
@@ -282,6 +295,14 @@ class PageEvidence(StrictModel):
     outbound_internal_links: int = Field(default=0, ge=0)
     total_pages_in_crawl: int = Field(default=0, ge=0)
     breadcrumb_path: tuple[str, ...] = ()
+    page_title: str = ""
+    page_title_count: int = Field(default=0, ge=0)
+    page_title_outside_head: bool = False
+    meta_description: str = ""
+    meta_description_count: int = Field(default=0, ge=0)
+    meta_description_outside_head: bool = False
+    h1_text: str = ""
+    h1_count: int = Field(default=0, ge=0)
 
 
 class _NavLinkExtractor(HTMLParser):

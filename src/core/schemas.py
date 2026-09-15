@@ -11,11 +11,12 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 __all__ = [
     "ApprovalMode",
     "ExecutionStatus",
+    "GscAccountCredential",
     "OrgConfig",
     "RiskClass",
     "StrictModel",
@@ -154,6 +155,23 @@ class ToolResult(StrictModel, Generic[PayloadT]):
         return self.status is ExecutionStatus.SUCCESS
 
 
+class GscAccountCredential(StrictModel):
+    """Google Search Console account credentials stored per organization.
+
+    One GSC account can be authorised to read Search Console. This replaces
+    GscAccountProfile for organization-level storage, with the same fields.
+
+    Attributes:
+        refresh_token: OAuth 2.0 refresh token for reading GSC.
+        client_id: Optional override. Inherits from organization or Settings if None.
+        client_secret: Optional override. Inherits from organization or Settings if None.
+    """
+
+    refresh_token: SecretStr
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+
+
 class OrgConfig(StrictModel):
     """Configuration for one organization in a multi-tenant deployment.
 
@@ -166,6 +184,8 @@ class OrgConfig(StrictModel):
         llm_credit_limit_usd: Maximum cumulative spend on LLM inference for this org.
             Must be > 0 for the org to start jobs. Set to 0 to disable the org.
         is_active: Whether this organization can create new jobs.
+        gsc_accounts: GSC account credentials keyed by account name.
+            Names must match ^[a-z0-9_-]{1,64}$ (enforced at API boundary).
     """
 
     org_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_-]+$")
@@ -174,3 +194,4 @@ class OrgConfig(StrictModel):
     max_concurrent_crawls: int = Field(default=3, ge=1, le=50)
     llm_credit_limit_usd: float = Field(default=100.0, ge=0.0)
     is_active: bool = True
+    gsc_accounts: dict[str, GscAccountCredential] = Field(default_factory=dict)

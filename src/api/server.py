@@ -50,14 +50,14 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, st
 from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
-from pydantic import Field, ValidationError
+from pydantic import Field, SecretStr, ValidationError
 
 from src.api.deliverables_routes import build_deliverables_router
 from src.core.config import get_settings
 from src.core.errors import UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.logger import get_logger
-from src.core.schemas import StrictModel
+from src.core.schemas import GscAccountCredential, StrictModel
 from src.core.state_store import (
     MAX_RECENT_ITEMS,
     DiskJobStore,
@@ -66,6 +66,7 @@ from src.core.state_store import (
     JobStatus,
     JobStore,
     JobTelemetry,
+    OrgConfigStore,
 )
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.deliverables.rulebook_store import RulebookStore
@@ -708,6 +709,42 @@ class GscAccountsView(StrictModel):
     accounts: list[str]
 
 
+class OrgGscAccountRequest(StrictModel):
+    """Request body for adding/updating an org-level GSC account.
+
+    Attributes:
+        account_name: Profile name for the account. Must match ^[a-z0-9_-]{1,64}$.
+        refresh_token: OAuth 2.0 refresh token (SecretStr).
+        client_id: Optional OAuth client ID override.
+        client_secret: Optional OAuth client secret override.
+    """
+
+    account_name: str
+    refresh_token: SecretStr
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+
+
+class OrgGscAccountView(StrictModel):
+    """Org-level GSC account for read operations (no secret exposure).
+
+    Attributes:
+        account_name: Profile name.
+        client_id: OAuth client ID (or None if inherits from Settings).
+        has_secret_override: Whether this account has a custom client_secret.
+    """
+
+    account_name: str
+    client_id: str | None = None
+    has_secret_override: bool = False
+
+
+class OrgGscAccountsView(StrictModel):
+    """List of org-level GSC accounts."""
+
+    accounts: list[OrgGscAccountView]
+
+
 class JobAccepted(StrictModel):
     """What `POST /jobs` returns: an id to poll, not a result."""
 
@@ -728,6 +765,7 @@ class ApiState:
         self,
         store: JobStore,
         url_policy: UrlSafetyPolicy,
+        org_config_store: OrgConfigStore,
         max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
         *,
         deliverable_store: DiskJobStore | None = None,
@@ -739,6 +777,7 @@ class ApiState:
         Args:
             store: Job persistence.
             url_policy: SSRF policy used at admission and by the crawl.
+            org_config_store: Organization configuration persistence.
             max_concurrent_jobs: Simultaneous crawls before requests are refused.
                 (Deprecated in Phase 1: per-facet limits now apply instead.)
             deliverable_store: Persistence for workbook build jobs. A
@@ -754,12 +793,9 @@ class ApiState:
         """
         self.store = store
         self.url_policy = url_policy
+        self.org_config_store = org_config_store
         self.max_concurrent_jobs = max_concurrent_jobs
-        self.facet_router = FacetRouter(
-            max_concurrent=max_concurrent_jobs
-            if max_concurrent_jobs != DEFAULT_MAX_CONCURRENT_JOBS
-            else 3
-        )
+        self.facet_router = FacetRouter(max_concurrent=max_concurrent_jobs)
         self._active: set[str] = set()
         self._facet_active: dict[str, set[str]] = {}  # facet_id -> active job ids
         self._lock = threading.Lock()
@@ -814,28 +850,42 @@ class ApiState:
             self._active.add(job_id)
             return True
 
-    def release(self, job_id: str, facet_id: str | None = None) -> None:
+    def release(self, job_id: str, facet_id: str) -> None:
         """Give a concurrency slot back.
+
+        `facet_id` is required, not looked up. A release that does not name the
+        facet clears the global count and leaves the per-facet claim in place —
+        which is the leak `cancel_job` had — and the per-facet set is the one
+        that gates admission. Every caller already holds the facet, so a
+        required argument lets the type checker catch the next omission.
 
         Args:
             job_id: The job being released.
-            facet_id: The facet it belongs to (optional, found from store if None).
+            facet_id: The facet it was reserved under.
         """
         with self._lock:
             self._active.discard(job_id)
-            if facet_id is not None and facet_id in self._facet_active:
+            if facet_id in self._facet_active:
                 self._facet_active[facet_id].discard(job_id)
 
-    def rekey(self, provisional: str, job_id: str) -> None:
+    def rekey(self, provisional: str, job_id: str, facet_id: str) -> None:
         """Move a reservation from a provisional id onto the real one.
 
         Capacity has to be claimed before the store mints an id, or a refusal
         leaves a persisted job behind. This transfers the claim without ever
         dropping it, so the slot cannot be taken in between.
+
+        Both sets move. `try_reserve` claims in `_active` and in the facet's
+        set, and the normal-exit release is keyed on the real id — so a
+        provisional id left behind in the facet set could never be released,
+        and each crawl cost the facet one slot for the life of the process.
         """
         with self._lock:
             self._active.discard(provisional)
             self._active.add(job_id)
+            facet = self._facet_active.setdefault(facet_id, set())
+            facet.discard(provisional)
+            facet.add(job_id)
 
     def is_active(self, job_id: str) -> bool:
         """Whether this job currently holds a concurrency slot."""
@@ -893,9 +943,14 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
     """
     store = state.store
     try:
-        store.mark_running(job_id)
+        running = store.mark_running(job_id)
         result = PageClassificationTool(
             url_policy=state.url_policy,
+            # Whose Search Console accounts this crawl may resolve. Taken from
+            # the record, where admission put the `X-Org-Id` it validated, so a
+            # crawl can never borrow another organization's refresh token by
+            # asking for it in the payload.
+            org_id=running.org_id,
             progress_sink=TelemetryRecorder(store, job_id, payload.resolved_max_pages),
             checkpoint_sink=CrawlCheckpointer(store, job_id, payload.base_url),
             # Kept so a later fix to the header-menu parser can be applied to
@@ -912,13 +967,28 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
             store.mark_failed(job_id, f"unexpected output type {type(output).__name__}")
             return
 
-        # `truncated` means the crawl hit its ceiling, so the graph is a subset
-        # of the site. Recorded as PARTIAL so the UI can say so rather than
-        # presenting an incomplete crawl as a finished one.
+        # `truncated` means the crawl hit its ceiling: a planned stop at a known
+        # boundary. `stopped_reason` means it was abandoned instead — a stall
+        # (`CrawlStalledError`) or a generic exception `async_discovery` caught
+        # and recorded rather than raised. Either one leaves the graph a subset
+        # of the site, so either one must block `SUCCEEDED`; checking `truncated`
+        # alone let a stalled or aborted crawl with `truncated=False` report as
+        # complete. `retrieved_nothing` never reaches this branch: `execute()`
+        # raises `CrawlBlockedError` for it before returning a result, which the
+        # `not result.ok` check above already routes to `mark_failed`
+        # (macys.com-403, build-log 0013).
+        #
+        # Both signals are carried into the record rather than one collapsing
+        # into the other: `stopped_reason` becomes `error`, so a stalled/aborted
+        # PARTIAL is distinguishable — even in the cheap job-list metadata, with
+        # no need to fetch the full result — from a PARTIAL that merely hit its
+        # ceiling, whose `error` stays `None`.
+        discovery = output.discovery
         store.finish(
             job_id,
             output.model_dump(mode="json"),
-            partial=output.discovery.truncated,
+            partial=discovery.truncated or discovery.stopped_reason is not None,
+            error=discovery.stopped_reason,
         )
     except Exception as exc:  # noqa: BLE001 - a detached worker must not leak
         _logger.exception("job_crashed", extra={"job_id": job_id})
@@ -945,6 +1015,7 @@ async def _dispatch(
 def create_app(
     store: JobStore | None = None,
     url_policy: UrlSafetyPolicy | None = None,
+    org_config_store: OrgConfigStore | None = None,
     *,
     jobs_root: Path | str | None = None,
     max_concurrent_jobs: int | None = None,
@@ -963,6 +1034,9 @@ def create_app(
     Args:
         store: Job persistence. Defaults to a `DiskJobStore` under `jobs_root`.
         url_policy: SSRF policy applied at admission and inherited by the crawl.
+        org_config_store: Organization config persistence. Defaults to the one
+            `get_settings()` exposes, which is what crawl-time credential
+            resolution reads.
         jobs_root: Directory for the default store. Defaults to `.jobs/`.
         max_concurrent_jobs: Simultaneous crawls before `429`. `None` means
             `Settings.max_concurrent_crawls` (`MAX_CONCURRENT_CRAWLS`); an
@@ -984,9 +1058,18 @@ def create_app(
     )
     resolved_deliverable_store = DiskJobStore(deliverable_jobs_root or Path(".deliverable_jobs"))
     resolved_rulebook_store = RulebookStore(rulebooks_root or Path(".deliverable_rulebooks"))
+    # `get_settings().org_config_store`, not a second store over a hard-coded
+    # path. Credential resolution at crawl time has only settings to find the
+    # store by, so an API that wrote somewhere else produced accounts the tab
+    # could list and the crawl could not resolve — the two halves have to be the
+    # same object, not merely the same shape.
+    resolved_org_config_store: OrgConfigStore = (
+        org_config_store if org_config_store is not None else get_settings().org_config_store
+    )
     state = ApiState(
         store=resolved_store,
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
+        org_config_store=resolved_org_config_store,
         max_concurrent_jobs=(
             max_concurrent_jobs
             if max_concurrent_jobs is not None
@@ -1030,9 +1113,12 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(allowed_origins),
         allow_credentials=False,
-        # DELETE joined GET/POST for the rulebook-deletion endpoint
-        # (`DELETE /deliverables/rulebooks/{id}`, cycle 0087) — every other
-        # route in this API is GET or POST.
+        # Exactly the verbs this app routes, never `*`. DELETE is here because
+        # two routes serve it (removing an org's GSC account, and cycle 0087's
+        # `DELETE /deliverables/rulebooks/{id}`); the browser sends a preflight
+        # for it, and a method missing from this list makes the preflight a 400
+        # that the page can only observe as nothing happening.
+        # Add a verb here when a route starts serving it, and not before.
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type"],
     )
@@ -1058,9 +1144,22 @@ def create_app(
         )
 
     @app.get(f"{API_PREFIX}/gsc/accounts", response_model=GscAccountsView)
-    def list_gsc_accounts() -> GscAccountsView:
-        """Profile names a crawl may select, sorted. Empty when none are configured."""
-        return GscAccountsView(accounts=sorted(get_settings().gsc_account_names()))
+    def list_gsc_accounts(x_org_id: str | None = Header(default=None)) -> GscAccountsView:
+        """Profile names a crawl may select, sorted. Empty when none are configured.
+
+        Both sources, because both are selectable: accounts the operator added
+        through the UI (held per organization) and the `.env.local` profiles that
+        predate them. Listing only the latter is what made the UI tab write-only
+        — an account could be added and then never chosen.
+
+        Args:
+            x_org_id: Organization id header (X-Org-Id). `None` for the default
+                org, which is the org the UI writes to.
+        """
+        store = state.org_config_store
+        return GscAccountsView(
+            accounts=list(get_settings().gsc_account_names_for_org(x_org_id, org_store=store))
+        )
 
     @app.post(
         f"{API_PREFIX}/jobs", response_model=JobAccepted, status_code=status.HTTP_202_ACCEPTED
@@ -1102,9 +1201,12 @@ def create_app(
                 detail=f"invalid org_id '{org_id}': must match ^[a-z0-9_-]{{1,64}}$",
             )
 
-        # Load org config
+        # Load org config. `state.org_config_store`, the same store the GSC
+        # account endpoints write to — reading org existence from one store and
+        # its accounts from another is how an org could hold an account that no
+        # crawl was allowed to start against.
         try:
-            org_config = get_settings().org_config_store.get(org_id)
+            org_config = state.org_config_store.get(org_id)
         except KeyError as err:
             _logger.warning("job_rejected_unknown_org", extra={"requested_org": org_id})
             raise HTTPException(
@@ -1378,12 +1480,17 @@ def create_app(
 
         # The same argument applies to the Search Console profile. A retry or
         # resume replays a stored name, and a profile can be removed from
-        # `.env.local` between runs. Refused here rather than left for the
-        # enrichment step, which degrades gracefully and would report the
-        # missing account as "no search data" — and never defaulted, because
-        # reading the wrong client's property is worse than a failed crawl.
+        # `.env.local` — or deleted from the org in the UI — between runs.
+        # Refused here rather than left for the enrichment step, which degrades
+        # gracefully and would report the missing account as "no search data" —
+        # and never defaulted, because reading the wrong client's property is
+        # worse than a failed crawl. Checked against this org's accounts *and*
+        # the environment's, which is exactly the set the crawl will later be
+        # able to resolve.
         if payload.gsc_account is not None:
-            known = get_settings().gsc_account_names()
+            known = get_settings().gsc_account_names_for_org(
+                org_id, org_store=state.org_config_store
+            )
             if payload.gsc_account not in known:
                 _logger.warning(
                     "job_rejected_unknown_gsc_account", extra={"account": payload.gsc_account}
@@ -1427,7 +1534,7 @@ def create_app(
             # this slot. Leaking it would cost a permanent slot per failure.
             state.release(pending, facet_id)
             raise
-        state.rekey(pending, record.id)
+        state.rekey(pending, record.id, facet_id)
         state.track(asyncio.create_task(_dispatch(state, record.id, payload, facet_id)))
 
         # Dispatch to Celery worker queue for background execution
@@ -2427,7 +2534,7 @@ def create_app(
                 detail=f"job is {record.status.value} and has already finished",
             )
 
-        state.release(job_id)
+        state.release(job_id, record.facet_id)
         updated = state.store.mark_failed(
             job_id,
             "cancelled by operator — the crawl thread may still be running until it "
@@ -2538,6 +2645,124 @@ def create_app(
             resumed,
             f"{payload.base_url} (resumed +{len(remaining):,})",
             facet_id=record.facet_id,
+        )
+
+    # --- Organization-level GSC account management ---
+
+    @app.get(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts", response_model=OrgGscAccountsView)
+    def list_org_gsc_accounts(org_id: str) -> OrgGscAccountsView:
+        """List all GSC accounts configured for an organization.
+
+        Args:
+            org_id: Organization identifier.
+
+        Returns:
+            List of GSC account names and metadata.
+
+        Raises:
+            HTTPException: 404 if organization not found.
+        """
+        try:
+            org = state.org_config_store.get(org_id)
+        except KeyError:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
+            )
+
+        accounts = [
+            OrgGscAccountView(
+                account_name=name,
+                client_id=cred.client_id,
+                has_secret_override=cred.client_secret is not None,
+            )
+            for name, cred in sorted(org.gsc_accounts.items())
+        ]
+        return OrgGscAccountsView(accounts=accounts)
+
+    @app.post(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts", status_code=status.HTTP_201_CREATED)
+    def create_org_gsc_account(org_id: str, req: OrgGscAccountRequest) -> OrgGscAccountView:
+        """Add or replace a GSC account for an organization.
+
+        Validates account name against ^[a-z0-9_-]{1,64}$ before storage.
+
+        Args:
+            org_id: Organization identifier.
+            req: Account credentials.
+
+        Returns:
+            The created account metadata.
+
+        Raises:
+            HTTPException: 400 if account name is invalid, 404 if org not found,
+                422 if request body is invalid.
+        """
+        # Validate account name
+        if not re.match(r"^[a-z0-9_-]{1,64}$", req.account_name):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="Account name must match ^[a-z0-9_-]{1,64}$",
+            )
+
+        try:
+            org = state.org_config_store.get(org_id)
+        except KeyError:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
+            )
+
+        org.gsc_accounts[req.account_name] = GscAccountCredential(
+            refresh_token=req.refresh_token,
+            client_id=req.client_id,
+            client_secret=req.client_secret,
+        )
+
+        updated_org = state.org_config_store.update(org)
+        cred = updated_org.gsc_accounts[req.account_name]
+
+        _logger.info(
+            "org_gsc_account_created",
+            extra={"org": org_id, "account": req.account_name},
+        )
+
+        return OrgGscAccountView(
+            account_name=req.account_name,
+            client_id=cred.client_id,
+            has_secret_override=cred.client_secret is not None,
+        )
+
+    @app.delete(
+        f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts/{{account_name}}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def delete_org_gsc_account(org_id: str, account_name: str) -> None:
+        """Delete a GSC account from an organization.
+
+        Args:
+            org_id: Organization identifier.
+            account_name: Account to delete.
+
+        Raises:
+            HTTPException: 404 if org or account not found.
+        """
+        try:
+            org = state.org_config_store.get(org_id)
+        except KeyError:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
+            )
+
+        if account_name not in org.gsc_accounts:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"Account '{account_name}' not found in organization '{org_id}'",
+            )
+
+        del org.gsc_accounts[account_name]
+        state.org_config_store.update(org)
+
+        _logger.info(
+            "org_gsc_account_deleted",
+            extra={"org": org_id, "account": account_name},
         )
 
     return app

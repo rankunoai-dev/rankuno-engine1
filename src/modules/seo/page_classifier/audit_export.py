@@ -5,12 +5,14 @@ is the engine's side of the seam: it reads `FullPageIntelligenceProfile` and
 writes the shared contract, and it is the only file in `page_classifier` that
 knows the contract exists. It never imports `deliverables`.
 
-The governing stance is honesty of coverage. The profile carries a handful of
-facts a deliverable can use - discovery flags, a redirect chain, an
-indexability verdict, the raw URL - and nothing about titles, headers, links
-or content. Sixteen issues are measured from those facts; the other
-ninety-four are declared `NOT_MEASURED` with the reason in `notes`, so a
-workbook renders "not measured by this crawl" rather than a clean bill of
+The governing stance is honesty of coverage. The profile carries a resolved
+canonical URL, an indexability verdict, discovery flags, a redirect chain, and
+— since native content-signal extraction shipped (`docs/adr/0014-native-title-
+h1-meta-description-extraction.md`) — the page's own title, meta description
+and H1. It still carries nothing about pixel width, body content beyond those
+three elements, or links. Twenty-nine issues are measured from those facts;
+the other eighty-one are declared `NOT_MEASURED` with the reason in `notes`,
+so a workbook renders "not measured by this crawl" rather than a clean bill of
 health (ADR 0011 §5).
 
 Two limits are worth knowing before reading the rules:
@@ -91,9 +93,15 @@ NOT_MEASURED_REASONS: Final[dict[IssueCategory, str]] = {
         "is declared; tag count, position and attributes are dropped at extraction"
     ),
     IssueCategory.DIRECTIVES: "nofollow is not folded into the indexability verdict",
-    IssueCategory.PAGE_TITLES: "titles are not carried on the profile",
-    IssueCategory.META_DESCRIPTION: "meta descriptions are not carried on the profile",
-    IssueCategory.H1: "headings are not carried on the profile",
+    IssueCategory.PAGE_TITLES: (
+        "no verified pixel-width table was sourced, so PAGE_TITLES_OVER_561_PIXELS and "
+        "PAGE_TITLES_BELOW_200_PIXELS stay NOT_MEASURED; every other PAGE_TITLES issue is measured"
+    ),
+    IssueCategory.META_DESCRIPTION: (
+        "no verified pixel-width table was sourced, so META_DESCRIPTION_OVER_985_PIXELS and "
+        "META_DESCRIPTION_BELOW_400_PIXELS stay NOT_MEASURED; every other META_DESCRIPTION issue "
+        "is measured"
+    ),
     IssueCategory.SECURITY: "response headers and mixed-content data are not on the profile",
     IssueCategory.PAGE_SPEED_CWV: "Core Web Vitals are not crawled",
     IssueCategory.STRUCTURED_DATA: "structured data is not parsed onto the profile",
@@ -116,6 +124,24 @@ _Rule = Callable[[FullPageIntelligenceProfile], bool]
 _NON_INDEXABLE: Final[frozenset[Indexability]] = frozenset(
     {Indexability.NOINDEX, Indexability.CANONICALISED_AWAY, Indexability.NOT_A_PAGE}
 )
+_UNFETCHED: Final[frozenset[Indexability]] = frozenset(
+    {Indexability.UNKNOWN, Indexability.NOT_A_PAGE}
+)
+"""Verdicts meaning the crawl never actually read the page's markup - never
+fetched, or a redirect/error/non-HTML response that skipped content-signal
+extraction - so `page_title` etc. read `""` regardless of the real page.
+Gates the three `*_MISSING` rules so that absence never reads as a content
+defect on a page the crawl never examined (ADR 0014)."""
+
+
+def _normalize_text(value: str) -> str:
+    """Casefold and collapse whitespace so near-identical text compares equal.
+
+    Shared by `PAGE_TITLES_SAME_AS_H1` and the three `*_DUPLICATE` rules below:
+    "My Title" and "my   title" are the same finding to a client, and comparing
+    raw strings would under-report both.
+    """
+    return " ".join(value.casefold().split())
 
 
 def _status(profile: FullPageIntelligenceProfile) -> int | None:
@@ -176,6 +202,27 @@ _RULES: Final[dict[IssueId, _Rule]] = {
     IssueId.URL_MULTIPLE_SLASHES: lambda p: "//" in _path_and_query(p.url)[0],
     IssueId.URL_REPETITIVE_PATH: _repeats_a_segment,
     IssueId.URL_CONTAINS_SPACE: lambda p: " " in p.url or "%20" in p.url,
+    # Native content signals (ADR 0014). MISSING is gated on `_UNFETCHED` so a
+    # page the crawl never read cannot be confused with one that genuinely
+    # declares no title/meta description/H1. The four *_PIXELS ids from the
+    # same three categories are absent here - see `NOT_MEASURED_REASONS`.
+    IssueId.PAGE_TITLES_MISSING: lambda p: (
+        not p.page_title.strip() and p.indexability not in _UNFETCHED
+    ),
+    IssueId.PAGE_TITLES_MULTIPLE: lambda p: p.page_title_count > 1,
+    IssueId.PAGE_TITLES_OUTSIDE_HEAD: lambda p: p.page_title_outside_head,
+    IssueId.PAGE_TITLES_SAME_AS_H1: lambda p: (
+        bool(_normalize_text(p.page_title))
+        and _normalize_text(p.page_title) == _normalize_text(p.h1_text)
+    ),
+    IssueId.META_DESCRIPTION_MISSING: lambda p: (
+        not p.meta_description.strip() and p.indexability not in _UNFETCHED
+    ),
+    IssueId.META_DESCRIPTION_MULTIPLE: lambda p: p.meta_description_count > 1,
+    IssueId.META_DESCRIPTION_OUTSIDE_HEAD: lambda p: p.meta_description_outside_head,
+    IssueId.H1_MISSING: lambda p: not p.h1_text.strip() and p.indexability not in _UNFETCHED,
+    IssueId.H1_MULTIPLE: lambda p: p.h1_count > 1,
+    IssueId.H1_OVER_70_CHARACTERS: lambda p: len(p.h1_text) > 70,
 }
 
 _SITEMAP_ISSUES: Final[frozenset[IssueId]] = frozenset(
@@ -194,6 +241,57 @@ def _over_50k(profiles: Sequence[FullPageIntelligenceProfile]) -> frozenset[str]
     if not oversized:
         return frozenset()
     return frozenset(normalize_url(p.url) for p in profiles if p.sitemap_source in oversized)
+
+
+def _duplicates_by(
+    profiles: Sequence[FullPageIntelligenceProfile],
+    extract: Callable[[FullPageIntelligenceProfile], str],
+) -> frozenset[str]:
+    """Keys of every URL whose normalised text (via `extract`) recurs elsewhere.
+
+    Blank text is excluded before grouping: two pages both missing a title are
+    two `PAGE_TITLES_MISSING` findings, not one `PAGE_TITLES_DUPLICATE`
+    finding. Returns normalised URL keys, the same shape `_over_50k` returns.
+    """
+    grouped: dict[str, list[str]] = {}
+    for profile in profiles:
+        text = _normalize_text(extract(profile))
+        if not text:
+            continue
+        grouped.setdefault(text, []).append(normalize_url(profile.url))
+
+    duplicates: set[str] = set()
+    for keys in grouped.values():
+        if len(keys) > 1:
+            duplicates.update(keys)
+    return frozenset(duplicates)
+
+
+def _duplicate_titles(profiles: Sequence[FullPageIntelligenceProfile]) -> frozenset[str]:
+    """`PAGE_TITLES_DUPLICATE`: pages whose title text is not unique in the crawl."""
+    return _duplicates_by(profiles, lambda p: p.page_title)
+
+
+def _duplicate_meta_descriptions(profiles: Sequence[FullPageIntelligenceProfile]) -> frozenset[str]:
+    """`META_DESCRIPTION_DUPLICATE`: pages whose meta description is not unique."""
+    return _duplicates_by(profiles, lambda p: p.meta_description)
+
+
+def _duplicate_h1s(profiles: Sequence[FullPageIntelligenceProfile]) -> frozenset[str]:
+    """`H1_DUPLICATE`: pages whose H1 text is not unique in the crawl."""
+    return _duplicates_by(profiles, lambda p: p.h1_text)
+
+
+_CrossProfileRule = Callable[[Sequence[FullPageIntelligenceProfile]], frozenset[str]]
+_CROSS_PROFILE_RULES: Final[dict[IssueId, _CrossProfileRule]] = {
+    IssueId.SITEMAPS_XML_SITEMAP_OVER_50K_URLS: _over_50k,
+    IssueId.PAGE_TITLES_DUPLICATE: _duplicate_titles,
+    IssueId.META_DESCRIPTION_DUPLICATE: _duplicate_meta_descriptions,
+    IssueId.H1_DUPLICATE: _duplicate_h1s,
+}
+"""Issues that compare a profile against the rest of the crawl (sitemap size,
+duplicate text) rather than evaluating one profile in isolation, and so are
+dispatched separately in `to_audit_dataset` rather than living in `_RULES`."""
 
 
 def _derive_site(keys: Iterable[str]) -> tuple[str, int]:
@@ -227,7 +325,7 @@ def to_audit_dataset(
 
     Returns:
         A validated dataset with `source=ENGINE`, every `IssueId` covered,
-        sixteen issues `MEASURED`, and `links` empty.
+        twenty-nine issues `MEASURED`, and `links` empty.
 
     Raises:
         AuditExportError: No profiles, or no hostname the contract accepts.
@@ -249,7 +347,7 @@ def to_audit_dataset(
     issues: dict[IssueId, frozenset[str]] = {}
     coverage: dict[IssueId, Coverage] = {}
     for spec in ISSUE_CATALOGUE:
-        measured = spec.id in _RULES or spec.id is IssueId.SITEMAPS_XML_SITEMAP_OVER_50K_URLS
+        measured = spec.id in _RULES or spec.id in _CROSS_PROFILE_RULES
         if spec.id in _SITEMAP_ISSUES and not sitemap_read:
             measured = False
         if not measured:
@@ -257,8 +355,9 @@ def to_audit_dataset(
             issues[spec.id] = frozenset()
             continue
         coverage[spec.id] = Coverage.MEASURED
-        if spec.id is IssueId.SITEMAPS_XML_SITEMAP_OVER_50K_URLS:
-            issues[spec.id] = _over_50k(profiles)
+        cross_profile_rule = _CROSS_PROFILE_RULES.get(spec.id)
+        if cross_profile_rule is not None:
+            issues[spec.id] = cross_profile_rule(profiles)
         else:
             issues[spec.id] = frozenset(members[spec.id])
 

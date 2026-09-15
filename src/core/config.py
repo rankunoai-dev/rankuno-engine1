@@ -25,9 +25,11 @@ from src.core.errors import ConfigurationError
 from src.core.schemas import StrictModel
 
 if TYPE_CHECKING:
+    from src.core.schemas import GscAccountCredential
     from src.core.state_store import OrgConfigStore
 
 __all__ = [
+    "DEFAULT_ORG_ID",
     "GSC_ACCOUNT_NAME_PATTERN",
     "Environment",
     "GscAccountProfile",
@@ -38,6 +40,15 @@ __all__ = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+DEFAULT_ORG_ID = "default"
+"""The organization a request belongs to when it names none.
+
+The API reads tenancy from the `X-Org-Id` header and substitutes this when the
+header is absent, so credential resolution has to agree: an account added
+through the UI — which sends no header — lands in this org, and a crawl started
+without a header must find it there.
+"""
 
 GSC_ACCOUNT_NAME_PATTERN = r"^[a-z0-9_-]{1,64}$"
 """What a GSC profile name may look like.
@@ -237,10 +248,13 @@ class Settings(BaseSettings):
 
     # -- Multi-tenant organization configs -----------------------------------
     org_config_path: Path = Field(
-        default=REPO_ROOT / ".jobs",
+        default=REPO_ROOT / ".orgs",
         description=(
-            "Directory to hold organization configuration files. Created if absent. "
-            "Initialized at startup with a default org if none exists."
+            "Directory holding org_configs.json. Created if absent, initialized "
+            "with a default org if empty. `.orgs` rather than `.jobs` because "
+            "that is where the API has been writing org GSC accounts since the "
+            "feature shipped; one location, or an account added in the UI is "
+            "invisible to the crawl that wants to use it."
         ),
     )
 
@@ -292,26 +306,97 @@ class Settings(BaseSettings):
         self._org_config_store: OrgConfigStore | None = None
 
     def gsc_account_names(self) -> tuple[str, ...]:
-        """Configured profile names, sorted. Safe to publish: names, never secrets."""
+        """Profile names from `.env.local` only, sorted. Names, never secrets.
+
+        Kept Settings-only on purpose: it answers "what does the environment
+        declare". What a *crawl* may select is the wider question answered by
+        `gsc_account_names_for_org`.
+        """
         return tuple(sorted(self.gsc_accounts))
 
-    def resolve_gsc_account(self, name: str | None) -> ResolvedGscCredentials:
+    def _org_gsc_accounts(
+        self,
+        org_id: str | None,
+        org_store: OrgConfigStore | None,
+    ) -> dict[str, GscAccountCredential]:
+        """The org's stored GSC accounts, or empty if the org or store is absent.
+
+        Fail-soft by design. An unreadable or missing org store means "this
+        deployment has no org-level accounts", which degrades to the `.env.local`
+        profiles that predate them — never to an exception on a path whose real
+        job is to resolve a credential.
+
+        Args:
+            org_id: Organization to read. `None` means `DEFAULT_ORG_ID`.
+            org_store: Store to read. `None` means `self.org_config_store`.
+        """
+        try:
+            store = org_store if org_store is not None else self.org_config_store
+            return dict(store.get(org_id or DEFAULT_ORG_ID).gsc_accounts)
+        except (KeyError, OSError, ValueError):
+            # Unknown org, unreadable file, unparseable contents. Named rather
+            # than a bare `except`, so a bug in the store still surfaces. Not
+            # logged: `logger` imports this module, so this one cannot log
+            # without a cycle — the caller reports the outcome instead, as
+            # "Unknown GSC account" or a list that omits the org's entries.
+            return {}
+
+    def gsc_account_names_for_org(
+        self,
+        org_id: str | None = None,
+        *,
+        org_store: OrgConfigStore | None = None,
+    ) -> tuple[str, ...]:
+        """Every profile name a crawl in this org may select, sorted.
+
+        The union of the org store and `.env.local`, because both are real
+        sources and a picker that showed only one would hide accounts the engine
+        will happily accept. Names only, as with `gsc_account_names`.
+
+        Args:
+            org_id: Organization to read. `None` means `DEFAULT_ORG_ID`.
+            org_store: Store to read. `None` means `self.org_config_store`.
+        """
+        org_names = self._org_gsc_accounts(org_id, org_store)
+        return tuple(sorted(set(org_names) | set(self.gsc_accounts)))
+
+    def resolve_gsc_account(
+        self,
+        name: str | None,
+        *,
+        org_id: str | None = None,
+        org_store: OrgConfigStore | None = None,
+    ) -> ResolvedGscCredentials:
         """Produce the credential triple for a profile, or for the default.
 
         Deliberately the only place the inheritance rule lives, so the token
         manager and any future Google connector agree on what "default" means.
 
+        Two sources hold profiles: the org store, written by the API when an
+        operator adds an account in the UI, and the `.env.local` table that
+        predates it. The org store is consulted first — an operator who re-enters
+        an account in the UI means the credential they just typed, not the stale
+        one in the file — and `.env.local` answers every name the org does not
+        carry, so accounts that only ever existed there keep working untouched.
+
         Args:
             name: A profile name, or `None` for the flat `GOOGLE_OAUTH_*` triple.
+                `None` never consults the org store; the flat triple is an
+                environment fact with no org dimension.
+            org_id: Organization whose stored accounts to search. `None` means
+                `DEFAULT_ORG_ID`, which is the org the API uses for a request
+                carrying no `X-Org-Id`.
+            org_store: Store to read, for a caller that holds one already. `None`
+                means `self.org_config_store`.
 
         Returns:
             Complete credentials with the account name attached.
 
         Raises:
-            ConfigurationError: If the profile does not exist — no fallback to
-                the default, because silently querying the wrong client's
-                Search Console is worse than a failed crawl — or if whatever
-                is selected is incomplete.
+            ConfigurationError: If the profile exists in neither source — no
+                fallback to the default, because silently querying the wrong
+                client's Search Console is worse than a failed crawl — or if
+                whatever is selected is incomplete.
         """
         if name is None:
             if (
@@ -332,19 +417,38 @@ class Settings(BaseSettings):
             )
 
         key = name.lower()
-        profile = self.gsc_accounts.get(key)
+        org_accounts = self._org_gsc_accounts(org_id, org_store)
+        # Both sources yield the same three optional/required fields, so one
+        # inheritance rule covers both: the profile's own OAuth client if it
+        # declared one, otherwise the shared GOOGLE_OAUTH_* client.
+        profile: GscAccountCredential | GscAccountProfile | None = org_accounts.get(key)
+        source = "org"
         if profile is None:
-            known = ", ".join(self.gsc_account_names()) or "none configured"
+            profile = self.gsc_accounts.get(key)
+            source = "env"
+        if profile is None:
+            known = (
+                ", ".join(self.gsc_account_names_for_org(org_id, org_store=org_store))
+                or "none configured"
+            )
             msg = f"Unknown GSC account '{name}'. Configured accounts: {known}."
             raise ConfigurationError(msg)
 
         client_id = profile.client_id or self.google_oauth_client_id
         client_secret = profile.client_secret or self.google_oauth_client_secret
         if not client_id or client_secret is None:
+            where = (
+                f"add a client id and secret to account '{key}' for organization "
+                f"'{org_id or DEFAULT_ORG_ID}'"
+                if source == "org"
+                else (
+                    f"or GSC_ACCOUNTS__{key.upper()}__CLIENT_ID and "
+                    f"GSC_ACCOUNTS__{key.upper()}__CLIENT_SECRET for this account"
+                )
+            )
             msg = (
                 f"GSC account '{key}' has no OAuth client. Set GOOGLE_OAUTH_CLIENT_ID and "
-                f"GOOGLE_OAUTH_CLIENT_SECRET (shared), or GSC_ACCOUNTS__{key.upper()}__CLIENT_ID "
-                f"and GSC_ACCOUNTS__{key.upper()}__CLIENT_SECRET for this account."
+                f"GOOGLE_OAUTH_CLIENT_SECRET (shared), {where}."
             )
             raise ConfigurationError(msg)
         return ResolvedGscCredentials(
