@@ -43,6 +43,7 @@ from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.integrations.http_fetcher import FetchResult, HttpFetcher
 from src.modules.seo.page_classifier.breadcrumb_parser import extract_breadcrumb
+from src.modules.seo.page_classifier.content_signals import extract_content_signals
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
     parse_link_header,
@@ -212,6 +213,19 @@ class DiscoveredNode(StrictModel):
             `UNKNOWN` until a fetch is recorded, which is the honest reading for
             a sitemap entry nothing ever requested.
         indexability_reason: One line saying why, for a client to read.
+        page_title: Text of the page's first `<title>` element, `""` if none
+            or never fetched. See `content_signals.extract_content_signals`.
+        page_title_count: Every `<title>` occurrence seen, independent of text.
+        page_title_outside_head: Whether any `<title>` occurrence appeared
+            after the document's head had already closed.
+        meta_description: `content` of the first `<meta name="description">`,
+            `""` if none or never fetched.
+        meta_description_count: Every matching `<meta>` occurrence seen.
+        meta_description_outside_head: As `page_title_outside_head`, for the
+            meta description.
+        h1_text: Text of the page's first `<h1>` element, `""` if none or
+            never fetched.
+        h1_count: Every `<h1>` occurrence seen, independent of text.
     """
 
     url: str = Field(min_length=1)
@@ -227,6 +241,14 @@ class DiscoveredNode(StrictModel):
     canonical_url: str = ""
     indexability: Indexability = Indexability.UNKNOWN
     indexability_reason: str = ""
+    page_title: str = ""
+    page_title_count: int = Field(default=0, ge=0)
+    page_title_outside_head: bool = False
+    meta_description: str = ""
+    meta_description_count: int = Field(default=0, ge=0)
+    meta_description_outside_head: bool = False
+    h1_text: str = ""
+    h1_count: int = Field(default=0, ge=0)
 
     @property
     def is_orphan(self) -> bool:
@@ -589,6 +611,13 @@ class SiteGraph:
         destination. Holding those as *aliases* of a page we already have is
         enough to match them, and costs the graph nothing.
 
+        The same guard that reads the canonical tag also reads the page's own
+        title, meta description and H1 (`content_signals.extract_content_signals`).
+        One shared method, deliberately: `discover_site` and `adiscover_site`
+        both call this method rather than duplicating the guard, so sync/async
+        parity is structural rather than a promise that could drift the next
+        time one path grows a branch the other lacks.
+
         Nothing is fetched here. Both values were computed by the fetcher and
         then discarded one line later, and every redirect hop was re-validated
         against the SSRF policy on the way — the chain cannot name a private
@@ -612,6 +641,15 @@ class SiteGraph:
         node.redirect_chain = result.redirect_chain
         if result.is_html and result.body:
             node.canonical_url = extract_canonical_url(result.body, result.final_url or url)
+            signals = extract_content_signals(result.body)
+            node.page_title = signals.page_title
+            node.page_title_count = signals.page_title_count
+            node.page_title_outside_head = signals.page_title_outside_head
+            node.meta_description = signals.meta_description
+            node.meta_description_count = signals.meta_description_count
+            node.meta_description_outside_head = signals.meta_description_outside_head
+            node.h1_text = signals.h1_text
+            node.h1_count = signals.h1_count
         node.indexability, node.indexability_reason = indexability_of(
             url,
             status_code=result.status_code,
@@ -705,6 +743,14 @@ class SiteGraph:
                     canonical_url=node.canonical_url,
                     indexability=node.indexability,
                     indexability_reason=node.indexability_reason,
+                    page_title=node.page_title,
+                    page_title_count=node.page_title_count,
+                    page_title_outside_head=node.page_title_outside_head,
+                    meta_description=node.meta_description,
+                    meta_description_count=node.meta_description_count,
+                    meta_description_outside_head=node.meta_description_outside_head,
+                    h1_text=node.h1_text,
+                    h1_count=node.h1_count,
                 )
             )
         return tuple(evidence)
