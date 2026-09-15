@@ -42,13 +42,27 @@ src/
 │   └── state_store.py           # Durable background-job records. Domain-agnostic:
 │                                # opaque request/result mappings, atomic writes
 ├── api/                         # Local HTTP API (ADR 0008). Outermost layer;
-│   └── server.py                # nothing below imports from it. Implements no
-│                                # safety control of its own — all inherited from
-│                                # BaseTool.run(). Binds 127.0.0.1. Runs at most
-│                                # MAX_CONCURRENT_CRAWLS jobs (default 5) — the
-│                                # RAM bound; the rest get 429
-│                                # GET /api/v1/gsc/accounts lists profile names;
-│                                # admission refuses an unknown gsc_account (400)
+│   │                            # nothing below imports from it.
+│   ├── server.py                # Implements no safety control of its own — all
+│   │                            # inherited from BaseTool.run(). Binds 127.0.0.1.
+│   │                            # Runs at most MAX_CONCURRENT_CRAWLS jobs (default
+│   │                            # 5) — the RAM bound; the rest get 429
+│   │                            # GET /api/v1/gsc/accounts lists profile names;
+│   │                            # admission refuses an unknown gsc_account (400)
+│   └── deliverables_routes.py   # Workbook build/download HTTP surface (cycle
+│                                # 0087). A separate router, not routes on
+│                                # server.py, included via app.include_router();
+│                                # imports ApiState only under TYPE_CHECKING so
+│                                # the two modules cannot form an import cycle.
+│                                # Every build (POST /jobs/{id}/deliverable,
+│                                # POST /deliverables/from-screaming-frog) runs
+│                                # on a worker thread behind ApiState's own
+│                                # deliverable concurrency guard (independent of
+│                                # FacetRouter) and returns 202 immediately —
+│                                # build_workbook alone measures up to 26.3s at
+│                                # the 500k-page ceiling. Every record carries
+│                                # org_id; every read enforces record.org_id ==
+│                                # org_id, the same shape get_job/get_result use
 ├── integrations/                # External API wrappers
 │   ├── base_client.py           # Quota, retry, credential handling for all connectors
 │   ├── http_fetcher.py          # The ONLY outbound web fetcher. Enforces SSRF,
@@ -123,18 +137,35 @@ src/
     │   │   ├── workbook.py           # AuditDataset + ScoringResult -> 4-sheet
     │   │   │                         # .xlsx (Overview/Issues/Pages/Notes),
     │   │   │                         # write_only openpyxl, MAX_PAGES_PER_WORKBOOK
-    │   │   │                         # = 500_000 raises WorkbookBuildError instead
-    │   │   │                         # of truncating. Every text cell routed
+    │   │   │                         # = 500_000 raises WorkbookPageLimitExceededError
+    │   │   │                         # (a WorkbookBuildError subclass, cycle 0087)
+    │   │   │                         # instead of truncating. Every text cell routed
     │   │   │                         # through _safe_cell() so no client-supplied
     │   │   │                         # string can become a live formula
-    │   │   │                         # (build-log 0084). Upload endpoint deferred
-    │   │   └── pipeline.py           # run_deliverable_pipeline(): theme
-    │   │                             # (optional) -> score -> workbook. Takes
-    │   │                             # an already-built AuditDataset and never
-    │   │                             # loads one itself; loading dispatch lives
-    │   │                             # in scripts/build_deliverable.py, the one
-    │   │                             # layer allowed to import both contracts
-    │   │                             # sides (ADR 0011 d.1, build-log 0085)
+    │   │   │                         # (build-log 0084)
+    │   │   ├── pipeline.py           # run_deliverable_pipeline(): theme
+    │   │   │                         # (optional) -> score -> workbook. Takes
+    │   │   │                         # an already-built AuditDataset and never
+    │   │   │                         # loads one itself; loading dispatch lives
+    │   │   │                         # in scripts/build_deliverable.py, the one
+    │   │   │                         # layer allowed to import both contracts
+    │   │   │                         # sides (ADR 0011 d.1, build-log 0085)
+    │   │   ├── rulebook_store.py     # Disk-backed store for uploaded rulebooks
+    │   │   │                         # (cycle 0087). One .xlsx + one JSON sidecar
+    │   │   │                         # per record; create() validates through
+    │   │   │                         # Rulebook.from_xlsx before persisting.
+    │   │   │                         # Unfiltered by org_id, like DiskJobStore —
+    │   │   │                         # the API layer enforces ownership
+    │   │   └── build_runner.py       # run_build(): the async-job worker-thread
+    │   │                             # body for src/api/deliverables_routes.py.
+    │   │                             # Takes dataset_loader and normalize as
+    │   │                             # parameters rather than importing
+    │   │                             # to_audit_dataset/normalize_url directly —
+    │   │                             # both are page_classifier-side, and
+    │   │                             # deliverables/ may not import that package
+    │   │                             # (ADR 0011 d.1). Catches every build-failure
+    │   │                             # type via their shared ValueError base for
+    │   │                             # the same reason (cycle 0087)
     │   └── performance/         # GSC + GA4 joined onto a crawl. Pure domain:
     │       │                    # no I/O, no settings. Ingestion belongs in
     │       │                    # integrations/, persistence in the job store.
@@ -163,13 +194,19 @@ src/
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
-| Deliverables Phase 2 upload endpoint | [DELIVERABLES_IMPLEMENTATION_PLAN.md](DELIVERABLES_IMPLEMENTATION_PLAN.md) §10. Phase 0 (P0-1 through P0-8), Phase 1 (P1-1 through P1-4, `deliverables/rulebook.py`) and Phase 2a/2b (`deliverables/scoring.py`, `deliverables/workbook.py`) are all now implemented: Phase 0 as of [build-log 0073](build-log/0073-not-measured-is-a-value.md), [0074](build-log/0074-absent-is-not-empty.md), [0077](build-log/0077-screaming-frog-adapter-and-zip-guards.md), [0079](build-log/0079-sixteen-measured-ninety-four-not.md), [0081](build-log/0081-an-oracle-for-membership-only.md); Phase 1 as of [build-log 0083](build-log/0083-a-rulebook-that-never-says-low.md); Phase 2a/2b as of [build-log 0084](build-log/0084-a-workbook-behind-every-category-total.md). `deliverables/pipeline.py` and `scripts/build_deliverable.py` (cycle [0085](build-log/0085-a-cli-for-a-pipeline-that-already-existed.md)) now chain a source loader into scoring/theming/workbook end to end from the command line — `build_workbook()` is no longer uncalled. What remains is the HTTP endpoint that would move a written workbook off this workstation; that is parked for its own future plan section with its own Step 3 + Step 5 (`security-auditor` as pre-step), not scheduled as a P2-c row |
 
 > Two rows were removed from this table in cycle 0039 because they were false.
 > Crawl checkpointing **exists** (`CrawlCheckpointer`, cycle 0019) and
 > `tree_visualizer.py` **shipped** — it was listed in the tree above and in this
 > table at the same time. Both were already ruled closed in
 > [CLAUDE.md](../CLAUDE.md) §8; this table had not caught up.
+>
+> A third row, "Deliverables Phase 2 upload endpoint", was removed in cycle
+> 0087: `src/api/deliverables_routes.py` now implements it —
+> `POST /jobs/{id}/deliverable`, `POST /deliverables/from-screaming-frog`, the
+> rulebook CRUD routes, and `GET /deliverables/{id}/download` — async, job-
+> gated and org-scoped. No web UI page calls it yet; that remains open, tracked
+> as a handoff to `ui-engineer`, not as a gap in the API itself.
 
 > **Pipeline status**: `base_tool.py` implements 7 of the specified 10 steps. Idempotency
 > key validation, circuit breaker checks, and state checkpointing are **not** implemented.

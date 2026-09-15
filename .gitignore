@@ -72,6 +72,11 @@ reports/
 # source: each finished 20k-page crawl stores a ~16 MB result blob here.
 .jobs/
 
+# Workbook build jobs and uploaded rulebooks (cycle 0087). Separate stores
+# from .jobs/ — see ApiState in src/api/server.py.
+.deliverable_jobs/
+.deliverable_rulebooks/
+
 # Tree reports written by scripts/run_crawl.py --out
 *-tree.html
 

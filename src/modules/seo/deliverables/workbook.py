@@ -47,6 +47,7 @@ __all__ = [
     "SHEET_OVERVIEW",
     "SHEET_PAGES",
     "WorkbookBuildError",
+    "WorkbookPageLimitExceededError",
     "build_workbook",
 ]
 
@@ -78,6 +79,19 @@ class WorkbookBuildError(ValueError):
 
     One exception type, matching `RulebookError` / `ScreamingFrogBundleError`:
     there is no path here on which a build failure is mistaken for success.
+    """
+
+
+class WorkbookPageLimitExceededError(WorkbookBuildError):
+    """`dataset.pages` exceeds `MAX_PAGES_PER_WORKBOOK`.
+
+    A distinct subclass, not a new exception family: every existing
+    `except WorkbookBuildError` still catches this. It exists so a caller that
+    *can* do something different with "too many pages" - an HTTP handler
+    rejecting an oversized request without inspecting a message string, for
+    one - is not forced to string-match `WorkbookBuildError`'s text to tell
+    that case apart from "the disk write failed", which is not actionable the
+    same way (Step 5 audit, cycle 0087).
     """
 
 
@@ -197,7 +211,7 @@ def build_workbook(
             f"MAX_PAGES_PER_WORKBOOK ({MAX_PAGES_PER_WORKBOOK}); refusing to "
             "build a workbook that would have to truncate rows"
         )
-        raise WorkbookBuildError(msg)
+        raise WorkbookPageLimitExceededError(msg)
 
     target_dir = output_dir if output_dir is not None else get_settings().deliverables_output_dir
     target_dir.mkdir(parents=True, exist_ok=True)

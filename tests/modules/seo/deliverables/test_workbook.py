@@ -23,6 +23,7 @@ from src.modules.seo.deliverables.workbook import (
     SHEET_OVERVIEW,
     SHEET_PAGES,
     WorkbookBuildError,
+    WorkbookPageLimitExceededError,
     _safe_cell,
     build_workbook,
 )
@@ -246,6 +247,23 @@ def test_dataset_over_the_page_cap_raises_instead_of_truncating(tmp_path: Path) 
     oversized = dataset.model_copy(update={"pages": _OversizedTuple(dataset.pages)})
 
     with pytest.raises(WorkbookBuildError, match="exceeds MAX_PAGES_PER_WORKBOOK"):
+        build_workbook(oversized, scoring, output_dir=tmp_path)
+
+
+def test_dataset_over_the_page_cap_raises_the_distinguishable_subclass(tmp_path: Path) -> None:
+    """A caller that wants to react to "too many pages" specifically can.
+
+    `WorkbookPageLimitExceededError` is a `WorkbookBuildError`, so the test
+    above (a bare `except WorkbookBuildError`) still catches it - this test
+    is the other half: the *exact* type raised is the subclass, not the base,
+    so a caller with `except WorkbookPageLimitExceededError` can tell this
+    case apart from "the disk write failed" without matching on message text.
+    """
+    dataset = make_dataset()
+    scoring = score_dataset(dataset)
+    oversized = dataset.model_copy(update={"pages": _OversizedTuple(dataset.pages)})
+
+    with pytest.raises(WorkbookPageLimitExceededError):
         build_workbook(oversized, scoring, output_dir=tmp_path)
 
 

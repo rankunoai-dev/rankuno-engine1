@@ -114,13 +114,14 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `page_classifier/weights.py` — weight profiles & site-profile seam | ✅ Seam live; adaptive selection off pending corpus |
 | `modules/seo/contracts/` — `AuditDataset` contract + 110-row issue catalogue ([ADR 0011](docs/adr/0011-deliverables-boundary-and-screaming-frog-input.md)) | ✅ Models, catalogue and the `UrlNormalizer` seam (Phase 0 P0-1/P0-2/P0-3). Four invariants; `AuditSource` is a `StrEnum`. The seam is enforced by `tests/modules/seo/test_import_boundary.py` (P0-6, [build-log 0079](docs/build-log/0079-sixteen-measured-ninety-four-not.md)): `ast` over every module in `contracts/`, `page_classifier/`, `deliverables/`; no import crosses in any direction |
 | `modules/seo/deliverables/` — Screaming Frog export → `AuditDataset` (`screaming_frog_adapter.py`, `_bundle.py`) | ✅ Implemented & tested (P0-3/P0-5, [build-log 0074](docs/build-log/0074-absent-is-not-empty.md)). `links` is never filled |
-| `modules/seo/deliverables/rulebook.py` — client URL-pattern rulebook → `theme_1`/`theme_2`/`language`/`business_priority` on `AuditPage` | ✅ Implemented & tested (P1-1–P1-4, [build-log 0083](docs/build-log/0083-a-rulebook-that-never-says-low.md)). `from_xlsx()` tolerant header/fallback detection; `classify()` order-independent (`EXACT` wins, then longest pattern); missing file raises unless `lenient=True`; no match and no fallback row → `Others`/`N/A`, never `Low`. Not yet wired to an endpoint, CLI or a real client file (Phase 2) |
-| `page_classifier/audit_export.py` — crawl profiles → `AuditDataset(source=ENGINE)` | ✅ Implemented & tested (P0-4, [build-log 0079](docs/build-log/0079-sixteen-measured-ninety-four-not.md)). **16 of 110 issues `MEASURED`**, 94 `NOT_MEASURED` with the reason in `notes`; `CANONICALS_MISSING` is not measurable from the profile; 4xx/5xx are read from `indexability_reason` and test-bound; `links` never filled. Nothing calls it yet — no endpoint, workbook or UI (Phase 2) |
+| `modules/seo/deliverables/rulebook.py` — client URL-pattern rulebook → `theme_1`/`theme_2`/`language`/`business_priority` on `AuditPage` | ✅ Implemented & tested (P1-1–P1-4, [build-log 0083](docs/build-log/0083-a-rulebook-that-never-says-low.md)). `from_xlsx()` tolerant header/fallback detection; `classify()` order-independent (`EXACT` wins, then longest pattern); missing file raises unless `lenient=True`; no match and no fallback row → `Others`/`N/A`, never `Low`. Reachable from the CLI and, as of cycle 0087, `POST /api/v1/deliverables/rulebooks` |
+| `page_classifier/audit_export.py` — crawl profiles → `AuditDataset(source=ENGINE)` | ✅ Implemented & tested (P0-4, [build-log 0079](docs/build-log/0079-sixteen-measured-ninety-four-not.md)). **16 of 110 issues `MEASURED`**, 94 `NOT_MEASURED` with the reason in `notes`; `CANONICALS_MISSING` is not measurable from the profile; 4xx/5xx are read from `indexability_reason` and test-bound; `links` never filled. Called from `POST /api/v1/jobs/{id}/deliverable` as of cycle 0087 |
 | `modules/seo/deliverables/scoring.py` — per-category penalty totals over `AuditDataset` (ADR 0011 D2) | ✅ Implemented & tested (P2-a, [build-log 0084](docs/build-log/0084-a-workbook-behind-every-category-total.md)). `score_dataset()` produces one `IssuePenalty` per catalogue row (all 110, `NOT_MEASURED` included at zero) and one `CategoryPenalty` per category; no field anywhere aggregates into a single site score. `get_severity_weights()` is a swappable seam, same shape as `weights.get_weight_profile()` (ADR 0006) |
-| `modules/seo/deliverables/workbook.py` — four-sheet client workbook (Overview/Issues/Pages/Notes) | ✅ Implemented & tested (P2-b, [build-log 0084](docs/build-log/0084-a-workbook-behind-every-category-total.md)). `build_workbook(dataset, scoring, *, output_dir=None)`; `write_only` openpyxl mode; `MAX_PAGES_PER_WORKBOOK = 500_000` raises `WorkbookBuildError` instead of truncating. Every text cell across all four sheets passes through `_safe_cell()`, which neutralises openpyxl's leading-character formula classification (`= + - @`, tab, CR) — a workbook-wide test asserts zero cells anywhere have `data_type == "f"`. Writes to `Settings.deliverables_output_dir` by default. The upload endpoint that would move a workbook off this workstation is a separate, deferred cycle with its own Step 3 + Step 5, `security-auditor` as pre-step |
+| `modules/seo/deliverables/workbook.py` — four-sheet client workbook (Overview/Issues/Pages/Notes) | ✅ Implemented & tested (P2-b, [build-log 0084](docs/build-log/0084-a-workbook-behind-every-category-total.md)). `build_workbook(dataset, scoring, *, output_dir=None)`; `write_only` openpyxl mode; `MAX_PAGES_PER_WORKBOOK = 500_000` raises `WorkbookPageLimitExceededError` (a `WorkbookBuildError` subclass since cycle 0087, so an oversized dataset is distinguishable from a generic write failure) instead of truncating. Every text cell across all four sheets passes through `_safe_cell()`, which neutralises openpyxl's leading-character formula classification (`= + - @`, tab, CR) — a workbook-wide test asserts zero cells anywhere have `data_type == "f"`. Writes to `Settings.deliverables_output_dir` by default when built from the CLI; the API routes each build under its own job-scoped directory instead (see below) |
 | `scripts/diff_against_rae.py` — opt-in differential check, our SF adapter vs an independent reimplementation of RAE's `load_url_set` semantics (ADR 0011) | ✅ Implemented & tested (P0-7, [build-log 0081](docs/build-log/0081-an-oracle-for-membership-only.md)). Reads `Settings.rae_archive_dir`; skips cleanly (exit 0) when unset. Not part of `verify.ps1` — the 49-crawl archive lives outside the repo and is run manually by an operator who has it |
 | `modules/seo/deliverables/pipeline.py` — `run_deliverable_pipeline()`, the one call every entry point uses: theme (optional) → score → workbook | ✅ Implemented & tested ([build-log 0085](docs/build-log/0085-a-cli-for-a-pipeline-that-already-existed.md)). Never loads a source itself — see `scripts/build_deliverable.py` below |
-| `scripts/build_deliverable.py` — operator CLI chaining a source loader into `run_deliverable_pipeline()`; `sf-bundle` and `engine-crawl` subcommands | ✅ Implemented & tested ([build-log 0085](docs/build-log/0085-a-cli-for-a-pipeline-that-already-existed.md)). Loading dispatch lives in the script, not `pipeline.py`, so `deliverables/` never imports `page_classifier` (ADR 0011 d.1) — same pattern as `reconcile_screaming_frog.py` and `diff_against_rae.py`. No HTTP endpoint yet (deferred, separate cycle) |
+| `scripts/build_deliverable.py` — operator CLI chaining a source loader into `run_deliverable_pipeline()`; `sf-bundle` and `engine-crawl` subcommands | ✅ Implemented & tested ([build-log 0085](docs/build-log/0085-a-cli-for-a-pipeline-that-already-existed.md)). Loading dispatch lives in the script, not `pipeline.py`, so `deliverables/` never imports `page_classifier` (ADR 0011 d.1) — same pattern as `reconcile_screaming_frog.py` and `diff_against_rae.py`. Still the only way to build a workbook from a terminal; `src/api/deliverables_routes.py` is the separate, equivalent HTTP surface (cycle 0087) |
+| `src/api/deliverables_routes.py` — `POST /jobs/{id}/deliverable`, `POST /deliverables/from-screaming-frog`, `POST`/`GET`/`DELETE /deliverables/rulebooks`, `GET /deliverables`, `GET /deliverables/{id}`, `GET /deliverables/{id}/download` | ✅ Implemented & tested (cycle 0087). Every build runs as an async job on a worker thread (`asyncio.to_thread`), gated by `ApiState`'s own deliverable concurrency guard (default 3, independent of `FacetRouter`) — never a synchronous handler blocking on `build_workbook` (measured up to 26.3s at 500k pages). `ApiState.deliverable_store` is a second `DiskJobStore` under `.deliverable_jobs/`, separate from crawl jobs; `ApiState.rulebook_store` is a new `RulebookStore` under `.deliverable_rulebooks/`. Every record carries `org_id`; every read, status check and download enforces `record.org_id == org_id`, the same 403-after-404 shape `get_job`/`get_result` already use. No web UI page yet — only the API (deferred, separate cycle) |
 | `core/logger.py` — structured `extra=` fields on log records | ✅ Fixed in [build-log 0078](docs/build-log/0078-the-fields-that-never-left-the-call-site.md): `get_logger` returns a merging adapter, caller keys win (6 tests). Was dropped on Python 3.11 from the first commit; found in cycle 0074 |
 | Layer 2 local ML classifier | ❌ Protocol only; needs local GPU ([ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
 | Layer 3 `LlmPageClassifier` implementation | ❌ Protocol only; needs a live credential |
@@ -217,8 +218,45 @@ itself: the two loaders (Screaming Frog bundle vs. engine crawl) are not
 symmetric enough to hide behind one injected callable without `deliverables/`
 importing `page_classifier` (ADR 0011 d.1), so loading dispatch stays in this
 script — the one layer allowed to import both packages, the same pattern as
-`reconcile_screaming_frog.py` and `diff_against_rae.py`. There is no HTTP
-endpoint yet; that is a separate, deferred cycle with its own Step 3 + Step 5.
+`reconcile_screaming_frog.py` and `diff_against_rae.py`.
+
+#### The same thing over HTTP (cycle 0087)
+
+Everything above is also reachable from the local API server — an operator no
+longer needs a terminal to produce a workbook, only the browser's `fetch` (or
+`curl`) against `127.0.0.1`. Every build is async: the endpoint returns `202`
+with an id immediately, and the client polls `GET /deliverables/{id}` for a
+terminal `status` before downloading.
+
+```
+# Upload a rulebook once, reuse its id on later builds. Body is the raw
+# .xlsx, not multipart/form-data — the same reasoning the GSC and Screaming
+# Frog upload endpoints already give.
+POST   /api/v1/deliverables/rulebooks?label=Acme        Content-Type: application/octet-stream
+GET    /api/v1/deliverables/rulebooks
+DELETE /api/v1/deliverables/rulebooks/{id}
+
+# Build from an already-finished crawl job
+POST   /api/v1/jobs/{job_id}/deliverable    {"rulebook_id": "..."}   (or an empty body)
+
+# Build from an uploaded Screaming Frog export bundle (a zip, sent as the raw body)
+POST   /api/v1/deliverables/from-screaming-frog?rulebook_id=...
+
+# Poll, list, download
+GET    /api/v1/deliverables
+GET    /api/v1/deliverables/{id}
+GET    /api/v1/deliverables/{id}/download
+```
+
+Every endpoint is org-scoped: `X-Org-Id` (defaulting to `default`) is checked
+on every read the same way `GET /jobs/{id}` and `GET /jobs/{id}/result`
+already check it — a `403` for a record another org owns, never a silent
+empty response. Workbook builds run on a worker thread behind their own
+concurrency guard on `ApiState` (default 3 at once, independent of the crawl
+`FacetRouter`) — `build_workbook` alone measures up to 26.3s at the 500k-page
+ceiling, so nothing here may block a request handler on it. There is still no
+web UI page for this — only the API; a UI affordance is a follow-up, tracked
+as a handoff to `ui-engineer`.
 
 ### The local API and the React UI
 

@@ -52,6 +52,7 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from pydantic import Field, ValidationError
 
+from src.api.deliverables_routes import build_deliverables_router
 from src.core.config import get_settings
 from src.core.errors import UnsafeUrlError
 from src.core.facet_router import FacetRouter
@@ -67,6 +68,7 @@ from src.core.state_store import (
     JobTelemetry,
 )
 from src.core.url_safety import UrlSafetyPolicy
+from src.modules.seo.deliverables.rulebook_store import RulebookStore
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.schemas import (
     ConsensusMethod,
@@ -139,6 +141,15 @@ when the caller passes nothing, so a host with more or less RAM sets the cap
 through the environment. This constant remains the schema default for
 `HealthView` and the documented fallback, not a second source of truth.
 """
+
+DEFAULT_MAX_CONCURRENT_DELIVERABLES = 3
+"""Simultaneous workbook builds this process will run at once.
+
+A deliberately separate cap from `DEFAULT_MAX_CONCURRENT_JOBS`, guarded by its
+own lock on `ApiState` rather than `FacetRouter`: a workbook build holds a
+whole `AuditDataset` in RAM the same way a crawl holds its graph, but it is a
+different resource with a different lifecycle (seconds, not minutes) and no
+facet concept of its own."""
 
 DEFAULT_ALLOWED_ORIGINS = (
     "http://localhost:5173",
@@ -718,6 +729,10 @@ class ApiState:
         store: JobStore,
         url_policy: UrlSafetyPolicy,
         max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
+        *,
+        deliverable_store: DiskJobStore | None = None,
+        rulebook_store: RulebookStore | None = None,
+        max_concurrent_deliverables: int = DEFAULT_MAX_CONCURRENT_DELIVERABLES,
     ) -> None:
         """Build the shared state.
 
@@ -726,6 +741,16 @@ class ApiState:
             url_policy: SSRF policy used at admission and by the crawl.
             max_concurrent_jobs: Simultaneous crawls before requests are refused.
                 (Deprecated in Phase 1: per-facet limits now apply instead.)
+            deliverable_store: Persistence for workbook build jobs. A
+                separate `DiskJobStore` from `store` — different lifecycle and
+                retention needs (cycle 0087). Defaults to a store under
+                `.deliverable_jobs/` when omitted.
+            rulebook_store: Persistence for uploaded client rulebooks.
+                Defaults to a store under `.deliverable_rulebooks/` when
+                omitted.
+            max_concurrent_deliverables: Simultaneous workbook builds before
+                requests are refused. Independent of `max_concurrent_jobs`
+                and `FacetRouter` — a different resource class (cycle 0087).
         """
         self.store = store
         self.url_policy = url_policy
@@ -747,6 +772,12 @@ class ApiState:
         # right after boot) needs a way to know it is done rather than racing a
         # bare thread. `threading.Event` costs nothing while unused.
         self.recovery_done = threading.Event()
+
+        self.deliverable_store = deliverable_store or DiskJobStore(Path(".deliverable_jobs"))
+        self.rulebook_store = rulebook_store or RulebookStore(Path(".deliverable_rulebooks"))
+        self.max_concurrent_deliverables = max_concurrent_deliverables
+        self._deliverable_active: set[str] = set()
+        self._deliverable_lock = threading.Lock()
 
     @property
     def active_count(self) -> int:
@@ -821,6 +852,37 @@ class ApiState:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def try_reserve_deliverable(self, deliverable_id: str) -> bool:
+        """Claim a concurrency slot for a workbook build, or report none is free.
+
+        A separate lock and set from `try_reserve`/`_active`, deliberately:
+        deliverable builds are a different resource class from crawls (cycle
+        0087) and must not compete for, or be starved by, the crawl-facet cap.
+
+        Args:
+            deliverable_id: The build being admitted (a provisional id before
+                the store mints the real one — see `deliverables_routes._start_build`).
+
+        Returns:
+            True if reserved successfully. False if at capacity.
+        """
+        with self._deliverable_lock:
+            if len(self._deliverable_active) >= self.max_concurrent_deliverables:
+                return False
+            self._deliverable_active.add(deliverable_id)
+            return True
+
+    def release_deliverable(self, deliverable_id: str) -> None:
+        """Give a deliverable concurrency slot back."""
+        with self._deliverable_lock:
+            self._deliverable_active.discard(deliverable_id)
+
+    def rekey_deliverable(self, provisional: str, deliverable_id: str) -> None:
+        """Move a deliverable reservation from a provisional id onto the real one."""
+        with self._deliverable_lock:
+            self._deliverable_active.discard(provisional)
+            self._deliverable_active.add(deliverable_id)
+
 
 def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> None:
     """Execute one crawl to completion. Runs on a worker thread.
@@ -887,6 +949,9 @@ def create_app(
     jobs_root: Path | str | None = None,
     max_concurrent_jobs: int | None = None,
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS,
+    deliverable_jobs_root: Path | str | None = None,
+    rulebooks_root: Path | str | None = None,
+    max_concurrent_deliverables: int = DEFAULT_MAX_CONCURRENT_DELIVERABLES,
 ) -> FastAPI:
     """Build the application.
 
@@ -904,6 +969,12 @@ def create_app(
             explicit value always wins over the environment so a test can pin
             the cap without touching settings.
         allowed_origins: Exact CORS origins. Never a wildcard.
+        deliverable_jobs_root: Directory for workbook build jobs. A sibling of
+            `jobs_root`, never the same directory — see `ApiState`. Defaults
+            to `.deliverable_jobs/`.
+        rulebooks_root: Directory for uploaded client rulebooks. Defaults to
+            `.deliverable_rulebooks/`.
+        max_concurrent_deliverables: Simultaneous workbook builds before `429`.
 
     Returns:
         The configured application.
@@ -911,6 +982,8 @@ def create_app(
     resolved_store: JobStore = (
         store if store is not None else DiskJobStore(jobs_root or Path(".jobs"))
     )
+    resolved_deliverable_store = DiskJobStore(deliverable_jobs_root or Path(".deliverable_jobs"))
+    resolved_rulebook_store = RulebookStore(rulebooks_root or Path(".deliverable_rulebooks"))
     state = ApiState(
         store=resolved_store,
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
@@ -919,6 +992,9 @@ def create_app(
             if max_concurrent_jobs is not None
             else get_settings().max_concurrent_crawls
         ),
+        deliverable_store=resolved_deliverable_store,
+        rulebook_store=resolved_rulebook_store,
+        max_concurrent_deliverables=max_concurrent_deliverables,
     )
 
     @asynccontextmanager
@@ -954,9 +1030,17 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        # DELETE joined GET/POST for the rulebook-deletion endpoint
+        # (`DELETE /deliverables/rulebooks/{id}`, cycle 0087) — every other
+        # route in this API is GET or POST.
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type"],
     )
+
+    # A separate router, not more routes bolted onto this factory: see
+    # `deliverables_routes.py`'s module docstring for why the split exists
+    # and how it avoids an import cycle back into this module.
+    app.include_router(build_deliverables_router(state), prefix=API_PREFIX)
 
     # The endpoints close over `state` rather than receiving it through
     # `Depends`. With `from __future__ import annotations` every annotation is a
@@ -2517,6 +2601,8 @@ class ServerConfig(StrictModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8000, gt=0, le=65535)
     jobs_root: str = ".jobs"
+    deliverable_jobs_root: str = ".deliverable_jobs"
+    rulebooks_root: str = ".deliverable_rulebooks"
 
 
 def serve(config: ServerConfig | None = None) -> None:  # pragma: no cover - process entry point
@@ -2530,7 +2616,11 @@ def serve(config: ServerConfig | None = None) -> None:  # pragma: no cover - pro
 
     settings = config or ServerConfig()
     uvicorn.run(
-        create_app(jobs_root=settings.jobs_root),
+        create_app(
+            jobs_root=settings.jobs_root,
+            deliverable_jobs_root=settings.deliverable_jobs_root,
+            rulebooks_root=settings.rulebooks_root,
+        ),
         host=settings.host,
         port=settings.port,
         log_config=None,
