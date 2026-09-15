@@ -190,6 +190,23 @@ src/
     │   │                             # (ADR 0011 d.1). Catches every build-failure
     │   │                             # type via their shared ValueError base for
     │   │                             # the same reason (cycle 0087)
+    │   ├── screaming_frog_control/  # ADR 0013 conditions 4-8: launches Screaming
+    │   │   │                    # Frog CLI via core/process_supervisor.py under
+    │   │   │                    # a RiskClass.WRITE/MANDATORY_HITL tool. Imports
+    │   │   │                    # core only.
+    │   │   ├── schemas.py            # ScreamingFrogTemplate/JobInput/JobOutput/
+    │   │   │                         # LicenceStatus StrictModels
+    │   │   ├── export_manifest.py    # --export-tabs/--bulk-export argument list,
+    │   │   │                         # derived from contracts/catalogue.py and
+    │   │   │                         # cross-checked against a real CLI run
+    │   │   ├── template_registry.py  # .seospiderconfig name -> path; cannot
+    │   │   │                         # author or validate the file's contents
+    │   │   ├── license_check.py      # Offset-scoped trace.txt parse for the
+    │   │   │                         # "Licence Status:" line + free-tier cap
+    │   │   ├── preview_tokens.py     # Preview -> confirm token exchange that
+    │   │   │                         # supplies HITL approval (condition 8)
+    │   │   └── tool.py               # ScreamingFrogControlTool: the governed
+    │   │                             # entry point
     │   └── performance/         # GSC + GA4 joined onto a crawl. Pure domain:
     │       │                    # no I/O, no settings. Ingestion belongs in
     │       │                    # integrations/, persistence in the job store.
@@ -214,7 +231,7 @@ src/
 | Path | Purpose |
 | :--- | :--- |
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
-| `modules/seo/screaming_frog_control/` (ADR 0013 conditions 4-8) | Screaming Frog integration itself: CLI/`.seospiderconfig` field mapping, license-failure detection, the seed-URL `UrlSafetyPolicy` gate, the `RiskClass.WRITE`/`MANDATORY_HITL` tool, and the UI to trigger/monitor a run. The process-supervision primitive these would call (conditions 1-3) shipped in [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md) — `core/process_supervisor.py` |
+| The React UI for `modules/seo/screaming_frog_control/` (ADR 0013) | The API surface (`preview`/confirm/templates) is implemented; no confirmation-modal UI consumes it yet — an operator would call it directly today |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
@@ -286,7 +303,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0010](adr/0010-gsc-api-security-and-safety-controls.md) | Search Console API security and safety controls |
 | [0011](adr/0011-deliverables-boundary-and-screaming-frog-input.md) | `AuditDataset` contract as the seam to deliverables; Screaming Frog is an input format, never a driven dependency |
 | [0012](adr/0012-gsc-account-profiles.md) | Named Search Console profiles as `GSC_ACCOUNTS__<name>__*` env keys; a crawl selects one by name; the API publishes names only, never credentials; unknown name is refused, never defaulted |
-| [0013](adr/0013-screaming-frog-cli-process-governance-exception.md) | Governance exception lifting ADR 0011 §3's ban on driving Screaming Frog via CLI, conditional on 8 binding security requirements (real Windows Job Object, independent PID+start-time ledger, same-process design, `UrlSafetyPolicy` seed-URL gate, explicit CLI field mapping, named license-failure error, `RiskClass.WRITE`/`MANDATORY_HITL`). Status: APPROVED. Conditions 1–3 implemented [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md); conditions 4–8 remain open |
+| [0013](adr/0013-screaming-frog-cli-process-governance-exception.md) | Governance exception lifting ADR 0011 §3's ban on driving Screaming Frog via CLI, conditional on 8 binding security requirements (real Windows Job Object, independent PID+start-time ledger, same-process design, `UrlSafetyPolicy` seed-URL gate, explicit CLI field mapping, named license-failure error, `RiskClass.WRITE`/`MANDATORY_HITL`). Status: APPROVED. Conditions 1–3 implemented [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md); conditions 4–8 implemented (build-log entry pending — docs-scribe) as `modules/seo/screaming_frog_control/`. No React UI consumes the preview/confirm API yet |
 | [0014](adr/0014-native-title-h1-meta-description-extraction.md) | Extract title/H1/meta description natively at fetch time (`content_signals.py`, `html.parser`, no new dependency), hooked into the one `SiteGraph.record_fetch` method both sync and async discovery share. 13 of 17 `PAGE_TITLES`/`META_DESCRIPTION`/`H1` catalogue ids move to `MEASURED`; the 4 pixel-width ids stay `NOT_MEASURED` by design fallback — no verified glyph-width table available, and a live font-rendering substitute would be non-deterministic across machines. [build-log 0096](build-log/0096-twenty-nine-measured-eighty-one-not.md) |
 
 ---

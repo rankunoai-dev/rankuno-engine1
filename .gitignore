@@ -82,6 +82,12 @@ reports/
 # must never be committable — it was one `git add -A` from being published.
 .orgs/
 
+# Independent PID + process-start-time ledger for launch_supervised()
+# (`Settings.process_supervisor_ledger_path`, ADR 0013 condition 2). Rewritten
+# by `reconcile_orphans()` on every API server startup, including to an empty
+# file when there is nothing to reconcile — machine state, not source.
+.process_ledger.json
+
 # Tree reports written by scripts/run_crawl.py --out
 *-tree.html
 

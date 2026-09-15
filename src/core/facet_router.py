@@ -59,8 +59,18 @@ class FacetRouter:
     # Phase 1 hardcoded org access: all orgs have access to all facets
     # Phase 2 will read this from Settings or a database
     _ORG_ACCESS = {
-        None: {"seo.page_classifier", "seo.health_engine", "seo.theme_classification"},
-        "default": {"seo.page_classifier", "seo.health_engine", "seo.theme_classification"},
+        None: {
+            "seo.page_classifier",
+            "seo.health_engine",
+            "seo.theme_classification",
+            "seo.screaming_frog",
+        },
+        "default": {
+            "seo.page_classifier",
+            "seo.health_engine",
+            "seo.theme_classification",
+            "seo.screaming_frog",
+        },
     }
 
     def __init__(self, max_concurrent: int | None = None) -> None:
@@ -94,6 +104,17 @@ class FacetRouter:
                     "(Unimplemented) Classify pages by visual design theme and content pattern."
                 ),
                 max_concurrent=2,
+            ),
+            "seo.screaming_frog": FacetConfig(
+                facet_id="seo.screaming_frog",
+                display_name="Screaming Frog Crawl",
+                description=(
+                    "Launch Screaming Frog CLI as a supervised, MANDATORY_HITL crawl "
+                    "(ADR 0013). Capped at 1: only one process this engine supervises "
+                    "may run at a time, which is also what keeps offset-scoped reads "
+                    "of Screaming Frog's own shared trace.txt log correct."
+                ),
+                max_concurrent=1,
             ),
         }
 
