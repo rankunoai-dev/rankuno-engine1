@@ -180,6 +180,14 @@ export interface FullPageIntelligenceProfile {
   navigation_source_authority: NavigationSourceAuthority | null;
   /** DOES THE PATH MAKE SENSE (logical hierarchy, lateral, disconnected) */
   navigation_path_quality: NavigationPathQuality | null;
+  page_title: string;
+  page_title_count: number;
+  page_title_outside_head: boolean;
+  meta_description: string;
+  meta_description_count: number;
+  meta_description_outside_head: boolean;
+  h1_text: string;
+  h1_count: number;
 }
 
 /** A content record retrieved from a CMS API. */
@@ -212,6 +220,14 @@ export interface DiscoveredNode {
   canonical_url: string;
   indexability: Indexability;
   indexability_reason: string;
+  page_title: string;
+  page_title_count: number;
+  page_title_outside_head: boolean;
+  meta_description: string;
+  meta_description_count: number;
+  meta_description_outside_head: boolean;
+  h1_text: string;
+  h1_count: number;
 }
 
 /** Summary of one discovery pass. */

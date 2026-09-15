@@ -200,6 +200,23 @@ class TestProfileContract:
         with pytest.raises(ValueError):
             profile.final_confidence_score = 2.0
 
+    def test_content_signal_fields_default_safely(self):
+        """A profile persisted before ADR 0014 shipped must still deserialise.
+
+        `extra="forbid"` means the eight new fields must carry defaults rather
+        than becoming required, or every profile written before this cycle
+        would fail to load.
+        """
+        profile = a_profile()
+        assert profile.page_title == ""
+        assert profile.page_title_count == 0
+        assert profile.page_title_outside_head is False
+        assert profile.meta_description == ""
+        assert profile.meta_description_count == 0
+        assert profile.meta_description_outside_head is False
+        assert profile.h1_text == ""
+        assert profile.h1_count == 0
+
 
 class TestEscalationReporting:
     def test_llm_layer_marks_the_page_as_escalated(self):

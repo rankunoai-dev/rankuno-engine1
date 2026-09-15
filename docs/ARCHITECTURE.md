@@ -86,6 +86,11 @@ src/
     │       ├── discovery.py          # 3-path merged discovery -> PageEvidence
     │       ├── async_discovery.py    # Concurrent crawl path (level-synchronous BFS)
     │       ├── discovery_parsers.py  # Sitemap XML, DOM links, CMS payloads
+    │       ├── content_signals.py    # Native title/H1/meta-description
+    │       │                         # extraction (html.parser, no new dep).
+    │       │                         # Hooked into discovery.SiteGraph
+    │       │                         # .record_fetch, the one method both
+    │       │                         # sync and async discovery call (ADR 0014)
     │       ├── tree_visualizer.py    # Standalone interactive HTML site tree
     │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
     │       │                         # crawl job, RiskClass.READ (ADR 0003).
@@ -97,10 +102,13 @@ src/
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       ├── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
     │       └── audit_export.py       # Profiles -> AuditDataset(source=ENGINE).
-    │                                 # 16 of 110 issues MEASURED, 94 NOT_MEASURED
+    │                                 # 29 of 110 issues MEASURED, 81 NOT_MEASURED
     │                                 # with reasons in notes; links never filled.
+    │                                 # The four PAGE_TITLES/META_DESCRIPTION
+    │                                 # pixel-width ids stay NOT_MEASURED - no
+    │                                 # verified glyph-width table (ADR 0014).
     │                                 # The only page_classifier file that
-    │                                 # imports contracts (build-log 0079)
+    │                                 # imports contracts (build-log 0079, 0096)
     │   ├── contracts/           # Seam between the crawler and client
     │   │   │                    # deliverables (ADR 0011). Imports core only;
     │   │   │                    # never page_classifier or deliverables.
@@ -242,6 +250,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0011](adr/0011-deliverables-boundary-and-screaming-frog-input.md) | `AuditDataset` contract as the seam to deliverables; Screaming Frog is an input format, never a driven dependency |
 | [0012](adr/0012-gsc-account-profiles.md) | Named Search Console profiles as `GSC_ACCOUNTS__<name>__*` env keys; a crawl selects one by name; the API publishes names only, never credentials; unknown name is refused, never defaulted |
 | [0013](adr/0013-screaming-frog-cli-process-governance-exception.md) | Governance exception lifting ADR 0011 §3's ban on driving Screaming Frog via CLI, conditional on 8 binding security requirements (real Windows Job Object, independent PID+start-time ledger, same-process design, `UrlSafetyPolicy` seed-URL gate, explicit CLI field mapping, named license-failure error, `RiskClass.WRITE`/`MANDATORY_HITL`). Status: APPROVED. Conditions 1–3 implemented [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md); conditions 4–8 remain open |
+| [0014](adr/0014-native-title-h1-meta-description-extraction.md) | Extract title/H1/meta description natively at fetch time (`content_signals.py`, `html.parser`, no new dependency), hooked into the one `SiteGraph.record_fetch` method both sync and async discovery share. 13 of 17 `PAGE_TITLES`/`META_DESCRIPTION`/`H1` catalogue ids move to `MEASURED`; the 4 pixel-width ids stay `NOT_MEASURED` by design fallback — no verified glyph-width table available, and a live font-rendering substitute would be non-deterministic across machines. [build-log 0096](build-log/0096-twenty-nine-measured-eighty-one-not.md) |
 
 ---
 

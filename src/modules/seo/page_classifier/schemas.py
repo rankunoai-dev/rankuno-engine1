@@ -494,6 +494,24 @@ class FullPageIntelligenceProfile(StrictModel):
         signals_evaluated: Every signal that produced an opinion.
         final_confidence_score: Combined confidence after consensus.
         consensus_method: Which cascade layer settled it.
+        page_title: Text of the page's first `<title>` element, `""` if none
+            was declared or the page was never fetched. Empty on every crawl
+            stored before native content-signal extraction shipped, same as
+            `canonical_url` above.
+        page_title_count: Every `<title>` occurrence seen, independent of
+            `page_title` — two identical titles still count as two, which is
+            what `PAGE_TITLES_MULTIPLE` reads.
+        page_title_outside_head: Whether any `<title>` occurrence appeared
+            after the document's head had already closed, by
+            `content_signals`' heuristic.
+        meta_description: `content` of the first `<meta name="description">`,
+            `""` if none was declared or the page was never fetched.
+        meta_description_count: Every matching `<meta>` occurrence seen.
+        meta_description_outside_head: As `page_title_outside_head`, for the
+            meta description.
+        h1_text: Text of the page's first `<h1>` element, `""` if none or
+            never fetched.
+        h1_count: Every `<h1>` occurrence seen, independent of `h1_text`.
     """
 
     url: str = Field(min_length=1)
@@ -577,6 +595,19 @@ class FullPageIntelligenceProfile(StrictModel):
         default=None,
         description="DOES THE PATH MAKE SENSE (logical hierarchy, lateral, disconnected)",
     )
+
+    # Native content signals (title/meta description/H1 extraction). Defaults
+    # of "" / 0 / False so a profile persisted before this shipped still
+    # deserialises under `extra="forbid"` and reads as unmeasured rather than
+    # as a page that genuinely has none of the three.
+    page_title: str = Field(default="", max_length=500)
+    page_title_count: int = Field(default=0, ge=0)
+    page_title_outside_head: bool = False
+    meta_description: str = Field(default="", max_length=500)
+    meta_description_count: int = Field(default=0, ge=0)
+    meta_description_outside_head: bool = False
+    h1_text: str = Field(default="", max_length=1000)
+    h1_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _check_taxonomy_pair(self) -> FullPageIntelligenceProfile:

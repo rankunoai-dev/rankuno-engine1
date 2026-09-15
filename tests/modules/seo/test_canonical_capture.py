@@ -141,3 +141,72 @@ class TestRecordOnly:
         assert evidence.canonical_url == "https://e.com/c"
         assert evidence.final_url == "https://e.com/f"
         assert evidence.redirect_chain == (PAGE,)
+
+
+class TestContentSignalsCapture:
+    """The same record-only wiring, mirrored for title/meta description/H1."""
+
+    def _graph(self) -> SiteGraph:
+        graph = SiteGraph(base_url=BASE, max_pages=100)
+        graph.add(PAGE, dom_link=True)
+        return graph
+
+    def test_content_signals_are_read_from_the_body(self):
+        graph = self._graph()
+        body = (
+            "<html><head><title>A Title</title>"
+            '<meta name="description" content="A description"></head>'
+            "<body><h1>A Heading</h1></body></html>"
+        )
+        graph.record_fetch(PAGE, fetched(body=body))
+        (node,) = graph._nodes.values()
+        assert node.page_title == "A Title"
+        assert node.page_title_count == 1
+        assert node.page_title_outside_head is False
+        assert node.meta_description == "A description"
+        assert node.meta_description_count == 1
+        assert node.meta_description_outside_head is False
+        assert node.h1_text == "A Heading"
+        assert node.h1_count == 1
+
+    def test_a_page_declaring_none_keeps_safe_defaults(self):
+        graph = self._graph()
+        graph.record_fetch(PAGE, fetched(body="<html><body>no signals here</body></html>"))
+        (node,) = graph._nodes.values()
+        assert node.page_title == ""
+        assert node.page_title_count == 0
+        assert node.meta_description == ""
+        assert node.h1_text == ""
+        assert node.h1_count == 0
+
+    def test_a_non_html_response_never_runs_extraction(self):
+        graph = self._graph()
+        pdf = FetchResult(
+            requested_url=PAGE,
+            final_url=PAGE,
+            status_code=200,
+            content_type="application/pdf",
+            body="<title>would-be title inside a non-HTML body</title>",
+            elapsed_ms=1,
+        )
+        graph.record_fetch(PAGE, pdf)
+        (node,) = graph._nodes.values()
+        assert node.page_title == ""
+        assert node.page_title_count == 0
+
+    def test_the_fields_reach_page_evidence(self):
+        graph = self._graph()
+        body = "<title>Evidence Title</title><h1>Evidence H1</h1>"
+        graph.store_html(PAGE, body)
+        graph.record_fetch(PAGE, fetched(body=body))
+        (evidence,) = graph.to_page_evidence()
+        assert evidence.page_title == "Evidence Title"
+        assert evidence.page_title_count == 1
+        assert evidence.h1_text == "Evidence H1"
+        assert evidence.h1_count == 1
+
+    def test_recording_an_unknown_url_is_ignored(self):
+        """A URL refused by a filter is fetched by nobody, but be safe anyway."""
+        graph = self._graph()
+        graph.record_fetch("https://e.com/never-added", fetched(body="<title>x</title>"))
+        assert graph.report().total_urls == 1

@@ -171,6 +171,39 @@ class TestLayerOne:
         assert len(profile.signals_evaluated) == 3
 
 
+class TestContentSignalsPassthrough:
+    """The 8 native content-signal fields flow evidence -> profile unchanged."""
+
+    def test_all_eight_fields_reach_the_profile(self):
+        profile = classify_page(
+            evidence(
+                cms_record=CmsRecord(record_type="product"),
+                page_title="A Title",
+                page_title_count=2,
+                page_title_outside_head=True,
+                meta_description="A description",
+                meta_description_count=1,
+                meta_description_outside_head=False,
+                h1_text="A Heading",
+                h1_count=1,
+            )
+        )
+        assert profile.page_title == "A Title"
+        assert profile.page_title_count == 2
+        assert profile.page_title_outside_head is True
+        assert profile.meta_description == "A description"
+        assert profile.meta_description_count == 1
+        assert profile.meta_description_outside_head is False
+        assert profile.h1_text == "A Heading"
+        assert profile.h1_count == 1
+
+    def test_evidence_with_no_content_signals_yields_safe_defaults(self):
+        profile = classify_page(evidence(cms_record=CmsRecord(record_type="product")))
+        assert profile.page_title == ""
+        assert profile.page_title_count == 0
+        assert profile.h1_text == ""
+
+
 class TestEscalation:
     def test_weak_evidence_reaches_layer_two(self):
         stub = StubClassifier(
