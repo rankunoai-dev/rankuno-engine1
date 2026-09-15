@@ -246,6 +246,57 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- Screaming Frog CLI process governance (ADR 0013) --------------------
+    screaming_frog_cli_path: Path = Field(
+        default=Path(
+            r"C:\Program Files (x86)\Screaming Frog SEO Spider\ScreamingFrogSEOSpiderCli.exe"
+        ),
+        description=(
+            "ScreamingFrogSEOSpiderCli.exe on this workstation (ADR 0004: single "
+            "Windows workstation, not a fleet). Existence is checked at launch "
+            "time by the tool, not here, so importing Settings never fails on a "
+            "machine that does not have Screaming Frog installed."
+        ),
+    )
+    screaming_frog_template_dir: Path = Field(
+        default=REPO_ROOT / "templates" / "screaming_frog",
+        description=(
+            "Pre-authored .seospiderconfig files, operator-selected by name "
+            "(ADR 0013 condition 5). Nothing in this engine can create one: a "
+            "config is a Java ObjectInputStream-serialised file, producible only "
+            "by the real Screaming Frog GUI's File > Configuration > Save As."
+        ),
+    )
+    screaming_frog_max_runtime_s: float = Field(
+        default=7200.0,
+        gt=0.0,
+        description=(
+            "Wall-clock ceiling before ScreamingFrogControlTool terminates its "
+            "own supervised process rather than trusting the CLI to exit."
+        ),
+    )
+    process_supervisor_ledger_path: Path = Field(
+        default=REPO_ROOT / ".process_ledger.json",
+        description=(
+            "Independent PID + process-start-time ledger `launch_supervised()` "
+            "writes before a Job Object exists (ADR 0013 condition 2). Never "
+            "DiskJobStore's `.jobs/` directory — that store answers 'which job "
+            "record was left RUNNING', this one answers 'which OS process is "
+            "still alive', and the two must not be conflated."
+        ),
+    )
+    screaming_frog_trace_log_path: Path = Field(
+        default_factory=lambda: Path.home() / ".ScreamingFrogSEOSpider" / "trace.txt",
+        description=(
+            "Screaming Frog's own rolling log file, read offset-scoped (never "
+            "from the start) for the 'Licence Status:' line (ADR 0013 condition "
+            "6). Confirmed live against a real 19.4 install; Screaming Frog "
+            "exposes no CLI flag to redirect it, and it is shared across every "
+            "invocation on this workstation, which is why the 'seo.screaming_frog' "
+            "facet's max_concurrent=1 cap matters for reading it correctly."
+        ),
+    )
+
     # -- Multi-tenant organization configs -----------------------------------
     org_config_path: Path = Field(
         default=REPO_ROOT / ".orgs",

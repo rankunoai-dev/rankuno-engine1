@@ -39,7 +39,7 @@ import io
 import re
 import threading
 import time
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,8 +55,10 @@ from pydantic import Field, SecretStr, ValidationError
 from src.core.config import get_settings
 from src.core.errors import UnsafeUrlError
 from src.core.facet_router import FacetRouter
+from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.logger import get_logger
-from src.core.schemas import GscAccountCredential, StrictModel
+from src.core.process_supervisor import ProcessSupervisorUnavailableError, reconcile_orphans
+from src.core.schemas import GscAccountCredential, StrictModel, ToolMetadata
 from src.core.state_store import (
     MAX_RECENT_ITEMS,
     DiskJobStore,
@@ -112,6 +114,20 @@ from src.modules.seo.performance.schemas import (
     PerformanceRollup,
 )
 from src.modules.seo.performance.url_identity import UrlResolutionIndex
+from src.modules.seo.screaming_frog_control.preview_tokens import (
+    PreviewTokenStore,
+    make_approval_callback,
+)
+from src.modules.seo.screaming_frog_control.schemas import (
+    ScreamingFrogJobInput,
+    ScreamingFrogJobOutput,
+    ScreamingFrogTemplate,
+)
+from src.modules.seo.screaming_frog_control.template_registry import (
+    TemplateNotFoundError,
+    TemplateRegistry,
+)
+from src.modules.seo.screaming_frog_control.tool import ScreamingFrogControlTool
 
 __all__ = ["ApiState", "CrawlCheckpointer", "TelemetryRecorder", "create_app", "serve"]
 
@@ -152,6 +168,9 @@ crawl results out of this server.
 """
 
 TOOL_NAME = "seo.page_classifier"
+
+SF_TOOL_NAME = "seo.screaming_frog_control"
+SF_FACET_ID = "seo.screaming_frog"
 
 TELEMETRY_FLUSH_SECONDS = 0.5
 """Minimum gap between telemetry writes.
@@ -742,6 +761,46 @@ class JobAccepted(StrictModel):
     label: str = ""
 
 
+class ScreamingFrogTemplatesView(StrictModel):
+    """Every pre-authored `.seospiderconfig` an operator may select by name."""
+
+    templates: list[ScreamingFrogTemplate]
+
+
+class ScreamingFrogJobPreviewRequest(StrictModel):
+    """What `POST /screaming-frog/jobs/preview` accepts."""
+
+    seed_url: str = Field(min_length=1, max_length=2048)
+    template_name: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ScreamingFrogJobPreviewResponse(StrictModel):
+    """A confirmation-modal-ready preview, and the token that stands for it.
+
+    Nothing has run yet. `token` must be handed back, unmodified, to
+    `POST /screaming-frog/jobs` — it is what supplies HITL approval
+    (`preview_tokens.py`), not a client-asserted boolean.
+    """
+
+    token: str
+    expires_at: datetime
+    seed_url: str
+    template_name: str | None = None
+
+
+class ScreamingFrogJobConfirmRequest(StrictModel):
+    """What `POST /screaming-frog/jobs` accepts.
+
+    Deliberately carries no `confirmed: true` field: `token` is the only
+    evidence of approval this endpoint accepts, and it is re-validated
+    server-side, never trusted at face value.
+    """
+
+    token: str = Field(min_length=1)
+    seed_url: str = Field(min_length=1, max_length=2048)
+    template_name: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class ApiState:
     """Everything the endpoints need, built once per application.
 
@@ -756,6 +815,8 @@ class ApiState:
         url_policy: UrlSafetyPolicy,
         org_config_store: OrgConfigStore,
         max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
+        sf_template_registry: TemplateRegistry | None = None,
+        sf_token_store: PreviewTokenStore | None = None,
     ) -> None:
         """Build the shared state.
 
@@ -765,12 +826,21 @@ class ApiState:
             org_config_store: Organization configuration persistence.
             max_concurrent_jobs: Simultaneous crawls before requests are refused.
                 (Deprecated in Phase 1: per-facet limits now apply instead.)
+            sf_template_registry: Screaming Frog `.seospiderconfig` catalogue
+                (ADR 0013 condition 5). Defaults to `Settings.
+                screaming_frog_template_dir`.
+            sf_token_store: Preview/confirm approval tokens (ADR 0013
+                condition 8). Defaults to a fresh, empty store.
         """
         self.store = store
         self.url_policy = url_policy
         self.org_config_store = org_config_store
         self.max_concurrent_jobs = max_concurrent_jobs
         self.facet_router = FacetRouter(max_concurrent=max_concurrent_jobs)
+        self.sf_templates = sf_template_registry or TemplateRegistry(
+            get_settings().screaming_frog_template_dir
+        )
+        self.sf_tokens = sf_token_store or PreviewTokenStore()
         self._active: set[str] = set()
         self._facet_active: dict[str, set[str]] = {}  # facet_id -> active job ids
         self._lock = threading.Lock()
@@ -783,6 +853,10 @@ class ApiState:
         # right after boot) needs a way to know it is done rather than racing a
         # bare thread. `threading.Event` costs nothing while unused.
         self.recovery_done = threading.Event()
+        # Mirrors `recovery_done`, for the independent Screaming Frog OS
+        # process reconciliation (ADR 0013 condition 2) rather than the
+        # `DiskJobStore` recovery above.
+        self.sf_reconciliation_done = threading.Event()
 
     @property
     def active_count(self) -> int:
@@ -950,6 +1024,73 @@ async def _dispatch(
         state.release(job_id, facet_id)
 
 
+def _run_sf_job(
+    state: ApiState,
+    job_id: str,
+    payload: ScreamingFrogJobInput,
+    approval_callback: Callable[[ToolMetadata, str], bool],
+) -> None:
+    """Execute one Screaming Frog run to completion. Runs on a worker thread.
+
+    Never raises: this runs detached, so an exception escaping here would be
+    logged by asyncio and leave the job `RUNNING` forever with nothing to
+    move it. Every path ends in a terminal status.
+
+    The `GuardrailEngine` built here is scoped to this one call: its
+    `CallbackApprovalProvider` is `approval_callback`, which closes over the
+    exact preview token `POST .../jobs` already re-validated once (`peek`)
+    before this was ever dispatched, and burns it for real (`consume`) the
+    moment `tool.run()` asks for approval (ADR 0013 condition 8). A denial
+    here — an expired or already-used token, most commonly a losing race
+    against a second confirm click — fails the job with
+    `BLOCKED_PENDING_APPROVAL`, exactly as `DenyByDefaultProvider` would for
+    any other `RiskClass.WRITE` tool with no approval wired in.
+    """
+    store = state.store
+    settings = get_settings()
+    try:
+        store.mark_running(job_id)
+        guardrails = GuardrailEngine(approval_provider=CallbackApprovalProvider(approval_callback))
+        tool = ScreamingFrogControlTool(
+            guardrails=guardrails,
+            cli_path=settings.screaming_frog_cli_path,
+            template_registry=state.sf_templates,
+            output_root=settings.deliverables_output_dir / "screaming_frog",
+            ledger_path=settings.process_supervisor_ledger_path,
+            trace_log_path=settings.screaming_frog_trace_log_path,
+            url_policy=state.url_policy,
+            max_runtime_s=settings.screaming_frog_max_runtime_s,
+            job_id=job_id,
+        )
+        result = tool.run(payload)
+        if not result.ok or result.data is None:
+            store.mark_failed(job_id, result.error or "the tool returned no data")
+            return
+
+        output = result.data
+        if not isinstance(output, ScreamingFrogJobOutput):  # pragma: no cover - defensive
+            store.mark_failed(job_id, f"unexpected output type {type(output).__name__}")
+            return
+        store.finish(job_id, output.model_dump(mode="json"))
+    except Exception as exc:  # noqa: BLE001 - a detached worker must not leak
+        _logger.exception("sf_job_crashed", extra={"job_id": job_id})
+        store.mark_failed(job_id, f"{type(exc).__name__}: {exc}")
+
+
+async def _dispatch_sf_job(
+    state: ApiState,
+    job_id: str,
+    payload: ScreamingFrogJobInput,
+    approval_callback: Callable[[ToolMetadata, str], bool],
+    facet_id: str,
+) -> None:
+    """Run a Screaming Frog job on a worker thread and always release its slot."""
+    try:
+        await asyncio.to_thread(_run_sf_job, state, job_id, payload, approval_callback)
+    finally:
+        state.release(job_id, facet_id)
+
+
 def create_app(
     store: JobStore | None = None,
     url_policy: UrlSafetyPolicy | None = None,
@@ -958,6 +1099,8 @@ def create_app(
     jobs_root: Path | str | None = None,
     max_concurrent_jobs: int | None = None,
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS,
+    sf_template_registry: TemplateRegistry | None = None,
+    sf_token_store: PreviewTokenStore | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -978,6 +1121,10 @@ def create_app(
             explicit value always wins over the environment so a test can pin
             the cap without touching settings.
         allowed_origins: Exact CORS origins. Never a wildcard.
+        sf_template_registry: Screaming Frog `.seospiderconfig` catalogue.
+            Defaults to `Settings.screaming_frog_template_dir`.
+        sf_token_store: Screaming Frog preview/confirm approval tokens
+            (ADR 0013 condition 8). Defaults to a fresh, empty store.
 
     Returns:
         The configured application.
@@ -1002,6 +1149,8 @@ def create_app(
             if max_concurrent_jobs is not None
             else get_settings().max_concurrent_crawls
         ),
+        sf_template_registry=sf_template_registry,
+        sf_token_store=sf_token_store,
     )
 
     @asynccontextmanager
@@ -1022,7 +1171,27 @@ def create_app(
                 # former to know it is now safe to touch job state.
                 state.recovery_done.set()
 
+        # Independent of the DiskJobStore recovery above (ADR 0013 condition
+        # 2): this kills any Screaming Frog OS process a previous, killed
+        # server left running, using the PID ledger, not a job record. Kept
+        # to its own background thread and its own failure boundary so a
+        # workstation without pywin32 (any non-Windows dev/CI box) still
+        # boots cleanly — `ProcessSupervisorUnavailableError` is expected
+        # there, not a startup failure.
+        def _reconcile_sf_orphans_in_bg() -> None:
+            try:
+                killed = reconcile_orphans(get_settings().process_supervisor_ledger_path)
+                if killed:
+                    _logger.warning("sf_orphans_reconciled", extra={"count": len(killed)})
+            except ProcessSupervisorUnavailableError:
+                _logger.info("sf_orphan_reconciliation_skipped_no_win32")
+            except Exception as e:  # noqa: BLE001 - startup must not crash on this
+                _logger.error("sf_orphan_reconciliation_failed", extra={"error": str(e)})
+            finally:
+                state.sf_reconciliation_done.set()
+
         threading.Thread(target=_recover_in_bg, daemon=True).start()
+        threading.Thread(target=_reconcile_sf_orphans_in_bg, daemon=True).start()
         yield
 
     app = FastAPI(
@@ -1078,6 +1247,160 @@ def create_app(
         return GscAccountsView(
             accounts=list(get_settings().gsc_account_names_for_org(x_org_id, org_store=store))
         )
+
+    @app.get(f"{API_PREFIX}/screaming-frog/templates", response_model=ScreamingFrogTemplatesView)
+    def list_screaming_frog_templates() -> ScreamingFrogTemplatesView:
+        """Every pre-authored `.seospiderconfig` an operator may select by name.
+
+        Empty, not an error, until an operator saves a real config into
+        `Settings.screaming_frog_template_dir` from the Screaming Frog GUI —
+        nothing in this engine can create one (ADR 0013).
+        """
+        return ScreamingFrogTemplatesView(templates=list(state.sf_templates.list_templates()))
+
+    @app.post(
+        f"{API_PREFIX}/screaming-frog/jobs/preview",
+        response_model=ScreamingFrogJobPreviewResponse,
+    )
+    def preview_screaming_frog_job(
+        payload: ScreamingFrogJobPreviewRequest,
+        x_org_id: str | None = Header(default=None),
+    ) -> ScreamingFrogJobPreviewResponse:
+        """Validate a seed URL and template, and mint a short-lived confirm token.
+
+        Nothing runs yet (ADR 0013 condition 8's two-call design). The UI
+        shows this response in a confirmation modal; only
+        `POST /screaming-frog/jobs`, given the token back, can start a crawl.
+
+        Raises:
+            HTTPException: `400` on an unknown facet/template or an unsafe
+                seed URL; `403` if the org lacks facet access.
+        """
+        org_id = x_org_id or "default"
+        try:
+            state.facet_router.validate_org_access(org_id, SF_FACET_ID)
+        except KeyError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+        try:
+            safe_url = state.url_policy.validate(payload.seed_url)
+        except UnsafeUrlError as exc:
+            _logger.warning("sf_preview_rejected_unsafe_url", extra={"url": payload.seed_url})
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        if payload.template_name is not None:
+            try:
+                state.sf_templates.resolve(payload.template_name)
+            except TemplateNotFoundError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        record = state.sf_tokens.mint(
+            org_id=org_id, seed_url=safe_url.url, template_name=payload.template_name
+        )
+        return ScreamingFrogJobPreviewResponse(
+            token=record.token,
+            expires_at=record.expires_at,
+            seed_url=safe_url.url,
+            template_name=payload.template_name,
+        )
+
+    @app.post(
+        f"{API_PREFIX}/screaming-frog/jobs",
+        response_model=JobAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def create_screaming_frog_job(
+        payload: ScreamingFrogJobConfirmRequest,
+        x_org_id: str | None = Header(default=None),
+    ) -> JobAccepted:
+        """Start a Screaming Frog crawl, given a token minted by `.../preview`.
+
+        `payload` carries no `confirmed: true` field: the token is the only
+        evidence of approval this accepts. It is checked twice, on purpose —
+        `peek()` here, for a fast, synchronous rejection before a `JobRecord`
+        or a concurrency slot is ever claimed, and `consume()` again (via
+        `CallbackApprovalProvider`) inside the governed `tool.run()` call that
+        actually decides `RiskClass.WRITE` approval (`preview_tokens.py`).
+        Neither check alone is treated as sufficient; `consume()` is what
+        actually burns the token and is the one that matters if the two ever
+        disagree (e.g. two concurrent confirms racing the same token).
+
+        Raises:
+            HTTPException: `400`/`403` for the same admission checks as
+                `.../preview`; `403` if the token is missing, expired,
+                already used, or does not match this exact
+                `(org, seed_url, template)` triple; `429` if the
+                `seo.screaming_frog` facet is already at its `max_concurrent`
+                of 1.
+        """
+        org_id = x_org_id or "default"
+        try:
+            state.facet_router.validate_org_access(org_id, SF_FACET_ID)
+        except KeyError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+        try:
+            safe_url = state.url_policy.validate(payload.seed_url)
+        except UnsafeUrlError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        if not state.sf_tokens.peek(
+            payload.token,
+            org_id=org_id,
+            seed_url=safe_url.url,
+            template_name=payload.template_name,
+        ):
+            _logger.warning("sf_confirm_rejected_bad_token", extra={"org": org_id})
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="preview token is invalid, expired, or already used",
+            )
+
+        pending = f"pending:{uuid4().hex}"
+        if not state.try_reserve(pending, SF_FACET_ID):
+            facet_cfg = state.facet_router.get_facet_config(SF_FACET_ID)
+            _logger.warning("sf_job_rejected_facet_saturation", extra={"facet": SF_FACET_ID})
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"facet '{SF_FACET_ID}' is at capacity "
+                    f"({facet_cfg.max_concurrent} concurrent); please retry once it finishes"
+                ),
+            )
+
+        tool_input = ScreamingFrogJobInput(
+            seed_url=safe_url.url, template_name=payload.template_name
+        )
+        try:
+            record = state.store.create(
+                SF_TOOL_NAME,
+                tool_input.model_dump(mode="json"),
+                label=f"Screaming Frog: {safe_url.url}",
+                facet_id=SF_FACET_ID,
+                org_id=org_id,
+            )
+        except Exception:
+            state.release(pending, SF_FACET_ID)
+            raise
+        state.rekey(pending, record.id, SF_FACET_ID)
+
+        approval_callback = make_approval_callback(
+            state.sf_tokens,
+            token=payload.token,
+            org_id=org_id,
+            seed_url=safe_url.url,
+            template_name=payload.template_name,
+        )
+        state.track(
+            asyncio.create_task(
+                _dispatch_sf_job(state, record.id, tool_input, approval_callback, SF_FACET_ID)
+            )
+        )
+        return JobAccepted(id=record.id, status=record.status.value, label=record.label)
 
     @app.post(
         f"{API_PREFIX}/jobs", response_model=JobAccepted, status_code=status.HTTP_202_ACCEPTED
