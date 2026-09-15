@@ -73,6 +73,18 @@ gsc = [
     "google-api-python-client>=2.100,<3.0",
     "requests>=2.32,<3.0",
 ]
+pywin32 = [
+    # Windows Job Object process governance (ADR 0013): `CreateJobObject` /
+    # `AssignProcessToJobObject` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is
+    # what `src/core/process_supervisor.py` uses to guarantee a supervised
+    # child cannot outlive this engine's control of it, even across a crash.
+    # `sys_platform=='win32'` so `pip install -e ".[dev]"` still succeeds on
+    # a non-Windows contributor machine or CI runner (`ci.yml` runs on
+    # `ubuntu-latest`) — the import itself is deferred inside
+    # `_win32_bindings.load_win32()` for exactly this reason, so the rest of
+    # `process_supervisor.py` stays importable and unit-testable without it.
+    "pywin32>=306; sys_platform=='win32'",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
@@ -141,6 +153,16 @@ disallow_untyped_defs = false
 # fails on a fresh clone for a dependency that is deliberately optional.
 [[tool.mypy.overrides]]
 module = "openpyxl.*"
+ignore_missing_imports = true
+
+# `pywin32` ships no type information and is Windows-only (`sys_platform`
+# marker on the `pywin32` extra), so it is never installed on the
+# `ubuntu-latest` CI runners `mypy src` runs on. Without this, `mypy --strict`
+# would fail to resolve `win32api`/`win32job`/`win32process`/`win32con`/
+# `win32event`/`pywintypes`, imported only inside
+# `src/core/_win32_bindings.py::load_win32()`.
+[[tool.mypy.overrides]]
+module = ["win32api", "win32con", "win32event", "win32job", "win32process", "pywintypes"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
