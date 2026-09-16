@@ -37,6 +37,8 @@ from src.modules.seo.page_classifier.schemas import (
 from src.modules.seo.page_classifier.tool import CrawlSummary, PageClassificationOutput
 from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
 
+from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
+
 PUBLIC_IP = "93.184.216.34"
 SAFE_URL = "https://e.com/"
 
@@ -127,8 +129,9 @@ def client(tmp_path, crawl_store):
         url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
         deliverable_jobs_root=tmp_path / "deliverable_jobs",
         rulebooks_root=tmp_path / "rulebooks",
+        session_secret=TEST_SESSION_SECRET,
     )
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=auth_headers()) as test_client:
         yield test_client
 
 

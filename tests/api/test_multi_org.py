@@ -2,6 +2,13 @@
 
 Covers IDOR prevention, budget enforcement, concurrency isolation, org_id
 validation, and context preservation across mutations.
+
+Updated for ADR 0016: every test that used to steer `org_id` with an
+`X-Org-Id` header now authenticates as that org via a minted session token
+instead — that header stopped being anything but inert the moment `org_id`
+became a value derived from a verified principal (condition 4). Corrections
+to specific tests are called out where their *expected result* changed, not
+only their mechanism.
 """
 
 from __future__ import annotations
@@ -13,6 +20,8 @@ from src.core.config import get_settings
 from src.core.schemas import OrgConfig
 from src.core.state_store import DiskJobStore, DiskOrgConfigStore
 from src.core.url_safety import UrlSafetyPolicy
+
+from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
 
 PUBLIC_IP = "93.184.216.34"
 SAFE_URL = "https://e.com/"
@@ -99,17 +108,22 @@ def client(job_store):
     app = create_app(
         store=job_store,
         url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        session_secret=TEST_SESSION_SECRET,
     )
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=auth_headers()) as test_client:
         yield test_client
 
 
 def post_job(client, url: str = SAFE_URL, org_id: str | None = None, **overrides: object):
-    """Post a job with optional org_id header."""
+    """Post a job, authenticated as `org_id` (or the client's default org).
+
+    ADR 0016 condition 4: `org_id` is a claim inside a verified session
+    token now, never a header. `org_id=None` sends no override, so the
+    request runs under whatever org the `client` fixture's own default
+    `Authorization` header already authenticates as.
+    """
     body = {"base_url": url, "max_pages": 5, "crawl_dom": False, **overrides}
-    headers = {}
-    if org_id is not None:
-        headers["X-Org-Id"] = org_id
+    headers = auth_headers(org_id=org_id) if org_id is not None else {}
     return client.post(f"{API_PREFIX}/jobs", json=body, headers=headers)
 
 
@@ -124,22 +138,31 @@ class TestOrgIdValidation:
             # All valid; either 202 (if org exists) or 404 (if org doesn't exist)
             assert response.status_code in (202, 404)
 
-    def test_invalid_org_ids_are_rejected(self, client):
-        """Test that invalid org_id formats are rejected with 400."""
-        invalid_ids = [
-            "../admin",  # path traversal
-            "Org_A",  # uppercase
-            "org@a",  # special char
-            "org a",  # space
-            "org\0",  # null byte
-            "a" * 65,  # too long
-        ]
-        for org_id in invalid_ids:
-            response = post_job(client, org_id=org_id)
-            assert response.status_code == 400, (
-                f"Expected 400 for org_id={org_id}, got {response.status_code}"
-            )
-            assert "invalid org_id" in response.json()["detail"].lower()
+    def test_malformed_org_ids_cannot_even_authenticate(self, client):
+        """A syntactically invalid org_id can no longer reach admission at all.
+
+        Correction from the pre-ADR-0016 version of this test: `create_job`
+        used to validate `org_id`'s shape itself and answer `400`, because
+        the header was trusted at face value. `org_id` now comes from a
+        verified `Principal`, which carries the identical
+        `^[a-z0-9_-]{1,64}$` pattern as a field constraint — so a caller can
+        no longer construct a *valid, verifiable* token naming an invalid
+        org_id in the first place. `tests/core/test_auth.py` covers a
+        forged token asserting one directly against `verify_session_token`;
+        this only confirms the legitimate minting path enforces the same
+        rule `Operator`/`Principal` already do.
+        """
+        from pydantic import ValidationError
+        from src.core.auth import Operator
+
+        for bad_org_id in ("../admin", "Org_A", "org@a", "org a", "a" * 65):
+            with pytest.raises(ValidationError):
+                Operator(
+                    operator_id="attacker",
+                    org_id=bad_org_id,
+                    display_name="attacker",
+                    password_hash="unused",  # noqa: S106 - a hash placeholder, not a credential
+                )
 
     def test_unknown_org_is_404(self, client):
         """Test that unknown org_id returns 404."""
@@ -177,8 +200,7 @@ class TestIDORPrevention:
         job_id_a = response_a.json()["id"]
 
         # Org B tries to read Org A's job
-        headers_b = {"X-Org-Id": "org_b"}
-        response = client.get(f"{API_PREFIX}/jobs/{job_id_a}", headers=headers_b)
+        response = client.get(f"{API_PREFIX}/jobs/{job_id_a}", headers=auth_headers(org_id="org_b"))
         assert response.status_code == 403, "Org B should not access Org A's job"
         assert "access denied" in response.json()["detail"].lower()
 
@@ -196,8 +218,9 @@ class TestIDORPrevention:
         job_id_b = job.id
 
         # Org A tries to read Org B's result
-        headers_a = {"X-Org-Id": "org_a"}
-        response = client.get(f"{API_PREFIX}/jobs/{job_id_b}/result", headers=headers_a)
+        response = client.get(
+            f"{API_PREFIX}/jobs/{job_id_b}/result", headers=auth_headers(org_id="org_a")
+        )
         assert response.status_code == 403, "Org A should not access Org B's result"
 
     def test_default_org_cannot_read_org_a_job(self, client, monkeypatch):
@@ -212,9 +235,18 @@ class TestIDORPrevention:
         assert response.status_code == 202
         job_id = response.json()["id"]
 
-        # Default org tries to read without X-Org-Id (defaults to "default")
+        # Default org (the client fixture's own default session) tries to read it
         response = client.get(f"{API_PREFIX}/jobs/{job_id}")
         assert response.status_code == 403, "Default org should not access Org A's job"
+
+    def test_unauthenticated_request_is_401(self, client):
+        """No bearer token at all must be rejected before any ownership check runs."""
+        response = post_job(client, org_id="org_a")
+        assert response.status_code == 202
+        job_id = response.json()["id"]
+
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}", headers={"Authorization": ""})
+        assert response.status_code == 401
 
 
 class TestListJobsFiltering:
@@ -237,12 +269,12 @@ class TestListJobsFiltering:
         assert response_b1.status_code == 202
 
         # Org A lists jobs
-        response = client.get(f"{API_PREFIX}/jobs", headers={"X-Org-Id": "org_a"})
+        response = client.get(f"{API_PREFIX}/jobs", headers=auth_headers(org_id="org_a"))
         jobs_a = response.json()
         assert len(jobs_a) == 2, "Org A should see exactly 2 jobs"
 
         # Org B lists jobs
-        response = client.get(f"{API_PREFIX}/jobs", headers={"X-Org-Id": "org_b"})
+        response = client.get(f"{API_PREFIX}/jobs", headers=auth_headers(org_id="org_b"))
         jobs_b = response.json()
         assert len(jobs_b) == 1, "Org B should see exactly 1 job"
 
@@ -252,21 +284,28 @@ class TestListJobsFiltering:
         for job in jobs_b:
             assert job["org_id"] == "org_b"
 
-    def test_list_jobs_defaults_to_default_org(self, client, monkeypatch):
-        """Test that list_jobs without X-Org-Id header defaults to 'default' org."""
+    def test_list_jobs_uses_the_sessions_own_org(self, client, monkeypatch):
+        """`list_jobs` scopes to whatever org the session token claims.
+
+        Correction from the pre-ADR-0016 version: this used to be about an
+        absent `X-Org-Id` header defaulting to `"default"`; there is no
+        header involved any more; the `client` fixture's own default
+        session already claims `"default"`, and this asserts that claim is
+        what scopes the list, not any request header.
+        """
         import src.api.server as server_module
 
         monkeypatch.setattr(server_module, "PageClassificationTool", StubTool)
         StubTool.result = StubResult(ok=False, error="stopped")
 
         # Create jobs
-        response_default = post_job(client)  # No org_id, defaults to "default"
+        response_default = post_job(client)  # No org override; uses the session's own org
         response_a = post_job(client, org_id="org_a")
 
         assert response_default.status_code == 202
         assert response_a.status_code == 202
 
-        # List without X-Org-Id (defaults to "default")
+        # List with no org override: the session's own claim, "default"
         response = client.get(f"{API_PREFIX}/jobs")
         jobs = response.json()
         assert len(jobs) == 1, "Should see only the default org's job"
@@ -281,6 +320,7 @@ class TestConcurrencyIsolation:
         app = create_app(
             store=job_store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
 
@@ -304,6 +344,7 @@ class TestConcurrencyIsolation:
         app = create_app(
             store=job_store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
 
@@ -396,8 +437,11 @@ class TestContextPreservation:
         assert response.status_code == 202
         job_id = response.json()["id"]
 
-        # Retry the job
-        retry_response = client.post(f"{API_PREFIX}/jobs/{job_id}/retry")
+        # Retry the job, authenticated as its owning org (ADR 0016 condition 2:
+        # retry_job now enforces ownership, so the default session would 403 here)
+        retry_response = client.post(
+            f"{API_PREFIX}/jobs/{job_id}/retry", headers=auth_headers(org_id="org_a")
+        )
         assert retry_response.status_code == 202
         retry_job_id = retry_response.json()["id"]
 
@@ -460,13 +504,18 @@ class TestJobRecordOrgId:
         assert job.org_id == "org_a"
 
     def test_default_org_id_is_default(self, client, monkeypatch):
-        """Test that jobs without X-Org-Id get org_id='default'."""
+        """A session with no org override uses whatever org it authenticated as.
+
+        The `client` fixture's default session claims `org_id="default"`
+        (`tests/api/conftest.py::auth_headers`); no header steers this any
+        more (ADR 0016 condition 4).
+        """
         import src.api.server as server_module
 
         monkeypatch.setattr(server_module, "PageClassificationTool", StubTool)
         StubTool.result = StubResult(ok=False, error="stopped")
 
-        response = post_job(client)  # No org_id header
+        response = post_job(client)  # No org override
         assert response.status_code == 202
         job_id = response.json()["id"]
 

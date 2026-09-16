@@ -13,6 +13,7 @@ Rules enforced here:
 from __future__ import annotations
 
 import re
+import secrets
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -25,6 +26,7 @@ from src.core.errors import ConfigurationError
 from src.core.schemas import StrictModel
 
 if TYPE_CHECKING:
+    from src.core.auth import OperatorStore
     from src.core.schemas import GscAccountCredential
     from src.core.state_store import OrgConfigStore
 
@@ -309,6 +311,54 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- API authentication (ADR 0016) ---------------------------------------
+    auth_session_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "HMAC-SHA256 signing key for session tokens (ADR 0016). Required in "
+            "production (`model_post_init` refuses to boot without it). Left "
+            "unset elsewhere, `Settings.session_secret` generates one random key "
+            "per process and caches it, so a restart invalidates every "
+            "outstanding session rather than trusting a default nobody chose."
+        ),
+    )
+    auth_session_ttl_s: int = Field(
+        default=43_200,
+        gt=0,
+        description=(
+            "Session token lifetime in seconds (12h default). Short enough that "
+            "deactivating an operator takes effect on a human timescale — the "
+            "token is self-contained (ADR 0016 condition 6) and is not checked "
+            "against the operator store again before this expiry — long enough "
+            "that an operator is not asked to log in again mid-session."
+        ),
+    )
+    auth_operator_store_path: Path = Field(
+        default=REPO_ROOT / ".operators",
+        description=(
+            "Directory holding operators.json (ADR 0016). Created if absent. "
+            "Never auto-seeded the way `.orgs` is: there is no safe default "
+            "password, so an empty store stays empty until "
+            "`scripts/create_operator.py` or `AUTH_BOOTSTRAP_OPERATOR_*` "
+            "creates the first operator."
+        ),
+    )
+    auth_bootstrap_operator_id: str | None = Field(
+        default=None,
+        description=(
+            "If set alongside AUTH_BOOTSTRAP_OPERATOR_PASSWORD and the operator "
+            "store is empty, create_app() seeds exactly one operator at "
+            "startup — the only way to log in before any operator exists "
+            "without leaving a network-reachable, unauthenticated "
+            "operator-creation endpoint for the same problem to reappear on."
+        ),
+    )
+    auth_bootstrap_operator_password: SecretStr | None = None
+    auth_bootstrap_operator_org_id: str = Field(
+        default=DEFAULT_ORG_ID,
+        description="Org the bootstrap operator belongs to. Defaults to 'default'.",
+    )
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
@@ -354,7 +404,16 @@ class Settings(BaseSettings):
                     "Policy overrides cannot loosen FINANCIAL guardrails (CLAUDE.md §7 ruling 10)."
                 )
                 raise ConfigurationError(msg)
+            if self.auth_session_secret is None:
+                msg = (
+                    "AUTH_SESSION_SECRET must be set in production (ADR 0016). A "
+                    "process-local random key is permitted only outside production, "
+                    "where invalidating every session on restart is an acceptable cost."
+                )
+                raise ConfigurationError(msg)
         self._org_config_store: OrgConfigStore | None = None
+        self._operator_store: OperatorStore | None = None
+        self._session_secret: SecretStr | None = None
 
     def gsc_account_names(self) -> tuple[str, ...]:
         """Profile names from `.env.local` only, sorted. Names, never secrets.
@@ -521,6 +580,47 @@ class Settings(BaseSettings):
 
             self._org_config_store = DiskOrgConfigStore(self.org_config_path)
         return self._org_config_store
+
+    @property
+    def operator_store(self) -> OperatorStore:
+        """Get the operator identity store, creating it on first access (ADR 0016).
+
+        Returns:
+            The `OperatorStore` for this deployment.
+        """
+        if self._operator_store is None:
+            from src.core.auth import DiskOperatorStore
+
+            self._operator_store = DiskOperatorStore(self.auth_operator_store_path)
+        return self._operator_store
+
+    @property
+    def session_secret(self) -> SecretStr:
+        """The HMAC signing key for ADR 0016 session tokens.
+
+        Required in production (`model_post_init` already refuses to boot
+        without one there). Elsewhere, an unset key is generated once per
+        process and cached on this instance rather than regenerated per
+        call — every token a process issues must stay verifiable by that same
+        process for as long as it runs, and a fresh key per call would make
+        the very first request's own token fail its own verification.
+
+        Not logged here even on the generated path: `logger.py` imports this
+        module (`get_settings`), so logging from here would be an import
+        cycle — the same constraint `_org_gsc_accounts` documents above.
+        """
+        if self._session_secret is not None:
+            return self._session_secret
+        if self.auth_session_secret is not None:
+            self._session_secret = self.auth_session_secret
+            return self._session_secret
+        if self.environment is Environment.PRODUCTION:
+            # Reachable if `environment` is reassigned after construction —
+            # `model_post_init` already refuses to boot in the normal path.
+            msg = "AUTH_SESSION_SECRET must be set in production (ADR 0016)."
+            raise ConfigurationError(msg)
+        self._session_secret = SecretStr(secrets.token_hex(32))
+        return self._session_secret
 
     def require(self, field_name: str) -> str:
         """Return a required credential, or fail loudly with an actionable message.

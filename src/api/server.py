@@ -24,11 +24,27 @@ not a second guard but an early one: the same `UrlSafetyPolicy` the crawl will
 use anyway, run at admission so a bad URL is a `400` the operator sees
 immediately rather than a job that fails a moment later.
 
+Authentication and authorization (ADR 0016)
+--------------------------------------------
+Every route below that reads or mutates an org-owned record requires a bearer
+session token (`POST /auth/login`, `src/api/auth.py`) and derives `org_id`
+from that token's verified claim — never from the `X-Org-Id` header this file
+used to trust, and never from a URL path segment. Job-family routes that own
+a specific record additionally call `org_scoped_or_404` so an authenticated
+caller from one org cannot read, cancel, retry, or download another org's
+job. Being authenticated is not itself approval for a `RiskClass.WRITE` or
+`FINANCIAL` action — `GuardrailEngine`'s deny-by-default `MANDATORY_HITL`
+posture (`src/core/guardrails.py`) is unchanged and sits behind this layer,
+not replaced by it.
+
 Binding
 -------
-`serve()` binds `127.0.0.1` deliberately. This server has no authentication, and
-it will fetch arbitrary URLs on request — on a routable interface that is an
-open proxy. Local-only is the security boundary (ADR 0004).
+`serve()` binds `127.0.0.1` deliberately. Authentication answers *who* is
+calling, not *what* this server will fetch on their behalf — it still fetches
+arbitrary URLs on request, and on a routable interface that remains an open
+proxy regardless of login. Local-only stays the security boundary for that
+reason (ADR 0004); ADR 0016 adds the capability to authenticate, it does not
+itself authorize moving off loopback.
 """
 
 from __future__ import annotations
@@ -52,13 +68,16 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from pydantic import Field, SecretStr, ValidationError
 
+from src.api.auth import build_auth_router, org_scoped_or_404, require_principal
 from src.api.deliverables_routes import build_deliverables_router
-from src.core.config import get_settings
+from src.core.auth import Operator, OperatorStore, hash_password
+from src.core.config import Settings, get_settings
 from src.core.errors import UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.logger import get_logger
 from src.core.process_supervisor import ProcessSupervisorUnavailableError, reconcile_orphans
+from src.core.rate_limiter import RateLimiterRegistry
 from src.core.schemas import GscAccountCredential, StrictModel, ToolMetadata
 from src.core.state_store import (
     MAX_RECENT_ITEMS,
@@ -832,6 +851,9 @@ class ApiState:
         max_concurrent_deliverables: int = DEFAULT_MAX_CONCURRENT_DELIVERABLES,
         sf_template_registry: TemplateRegistry | None = None,
         sf_token_store: PreviewTokenStore | None = None,
+        operator_store: OperatorStore | None = None,
+        session_secret: SecretStr | None = None,
+        session_ttl_s: int | None = None,
     ) -> None:
         """Build the shared state.
 
@@ -856,6 +878,14 @@ class ApiState:
                 screaming_frog_template_dir`.
             sf_token_store: Preview/confirm approval tokens (ADR 0013
                 condition 8). Defaults to a fresh, empty store.
+            operator_store: Operator identity persistence (ADR 0016). Defaults
+                to `Settings.operator_store`.
+            session_secret: HMAC key session tokens are signed and verified
+                against (ADR 0016). Defaults to `Settings.session_secret`,
+                which is production-mandatory and process-local-random
+                elsewhere.
+            session_ttl_s: Session token lifetime. Defaults to
+                `Settings.auth_session_ttl_s`.
         """
         self.store = store
         self.url_policy = url_policy
@@ -866,6 +896,16 @@ class ApiState:
             get_settings().screaming_frog_template_dir
         )
         self.sf_tokens = sf_token_store or PreviewTokenStore()
+        self.operator_store = operator_store or get_settings().operator_store
+        self.session_secret = session_secret or get_settings().session_secret
+        self.session_ttl_s = session_ttl_s or get_settings().auth_session_ttl_s
+        # A separate registry from `base_tool.py`'s module-global one
+        # (ADR 0016 condition 7): scoped to this `ApiState` so a test creating
+        # a fresh app per case cannot leak a bucket into the next one, and
+        # keyed per authenticated principal/operator rather than the shared
+        # `web.crawl` key every crawl tool already uses — one bad actor must
+        # not be able to starve every other org's admission capacity.
+        self.principal_rate_limiter = RateLimiterRegistry()
         self._active: set[str] = set()
         self._facet_active: dict[str, set[str]] = {}  # facet_id -> active job ids
         self._lock = threading.Lock()
@@ -1153,6 +1193,35 @@ async def _dispatch_sf_job(
         state.release(job_id, facet_id)
 
 
+def _seed_bootstrap_operator(operator_store: OperatorStore, settings: Settings) -> None:
+    """Create exactly one operator on an empty store, if settings ask for it.
+
+    The only way to log in before any operator exists, short of a
+    network-reachable operator-creation endpoint — which would need auth of
+    its own, reintroducing the exact chicken-and-egg problem this avoids.
+    Runs every `create_app()` call, but only ever acts once: the moment the
+    store holds one operator, every later boot with the same bootstrap
+    settings is a no-op.
+    """
+    bootstrap_id = settings.auth_bootstrap_operator_id
+    bootstrap_password = settings.auth_bootstrap_operator_password
+    if bootstrap_id is None or bootstrap_password is None:
+        return
+    if operator_store.list_operators():
+        return
+    operator = Operator(
+        operator_id=bootstrap_id,
+        org_id=settings.auth_bootstrap_operator_org_id,
+        display_name=bootstrap_id,
+        password_hash=hash_password(bootstrap_password.get_secret_value()),
+    )
+    operator_store.create(operator)
+    _logger.warning(
+        "bootstrap_operator_created",
+        extra={"operator_id": operator.operator_id, "org": operator.org_id},
+    )
+
+
 def create_app(
     store: JobStore | None = None,
     url_policy: UrlSafetyPolicy | None = None,
@@ -1166,6 +1235,8 @@ def create_app(
     max_concurrent_deliverables: int = DEFAULT_MAX_CONCURRENT_DELIVERABLES,
     sf_template_registry: TemplateRegistry | None = None,
     sf_token_store: PreviewTokenStore | None = None,
+    operator_store: OperatorStore | None = None,
+    session_secret: SecretStr | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -1196,6 +1267,14 @@ def create_app(
             Defaults to `Settings.screaming_frog_template_dir`.
         sf_token_store: Screaming Frog preview/confirm approval tokens
             (ADR 0013 condition 8). Defaults to a fresh, empty store.
+        operator_store: Operator identity persistence (ADR 0016). Defaults to
+            `Settings.operator_store`. A test that mints its own tokens never
+            needs this — verification is self-contained (condition 6) — but a
+            test exercising `POST /auth/login` itself passes one directly.
+        session_secret: HMAC key for session tokens (ADR 0016). Defaults to
+            `Settings.session_secret`. Passing one explicitly is how a test
+            mints a token with `issue_session_token` that this app will then
+            accept.
 
     Returns:
         The configured application.
@@ -1213,6 +1292,10 @@ def create_app(
     resolved_org_config_store: OrgConfigStore = (
         org_config_store if org_config_store is not None else get_settings().org_config_store
     )
+    resolved_operator_store: OperatorStore = (
+        operator_store if operator_store is not None else get_settings().operator_store
+    )
+    _seed_bootstrap_operator(resolved_operator_store, get_settings())
     state = ApiState(
         store=resolved_store,
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
@@ -1227,6 +1310,8 @@ def create_app(
         max_concurrent_deliverables=max_concurrent_deliverables,
         sf_template_registry=sf_template_registry,
         sf_token_store=sf_token_store,
+        operator_store=resolved_operator_store,
+        session_secret=session_secret,
     )
 
     @asynccontextmanager
@@ -1289,13 +1374,19 @@ def create_app(
         # that the page can only observe as nothing happening.
         # Add a verb here when a route starts serving it, and not before.
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Content-Type"],
+        # `Authorization` added for ADR 0016: every authenticated route now
+        # reads a bearer token from this header, and a header missing from
+        # this list makes the preflight a 400 the browser can only observe as
+        # "the request never went out".
+        allow_headers=["Content-Type", "Authorization"],
     )
 
-    # A separate router, not more routes bolted onto this factory: see
+    # Separate routers, not more routes bolted onto this factory: see
     # `deliverables_routes.py`'s module docstring for why the split exists
-    # and how it avoids an import cycle back into this module.
+    # and how it avoids an import cycle back into this module. `auth.py`'s
+    # router follows the same shape for the same reason.
     app.include_router(build_deliverables_router(state), prefix=API_PREFIX)
+    app.include_router(build_auth_router(state), prefix=API_PREFIX)
 
     # The endpoints close over `state` rather than receiving it through
     # `Depends`. With `from __future__ import annotations` every annotation is a
@@ -1313,7 +1404,7 @@ def create_app(
         )
 
     @app.get(f"{API_PREFIX}/gsc/accounts", response_model=GscAccountsView)
-    def list_gsc_accounts(x_org_id: str | None = Header(default=None)) -> GscAccountsView:
+    def list_gsc_accounts(authorization: str | None = Header(default=None)) -> GscAccountsView:
         """Profile names a crawl may select, sorted. Empty when none are configured.
 
         Both sources, because both are selectable: accounts the operator added
@@ -1322,12 +1413,18 @@ def create_app(
         — an account could be added and then never chosen.
 
         Args:
-            x_org_id: Organization id header (X-Org-Id). `None` for the default
-                org, which is the org the UI writes to.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim, never from a header the caller set.
+
+        Raises:
+            HTTPException: `401` if the token is missing or invalid.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
         store = state.org_config_store
         return GscAccountsView(
-            accounts=list(get_settings().gsc_account_names_for_org(x_org_id, org_store=store))
+            accounts=list(
+                get_settings().gsc_account_names_for_org(principal.org_id, org_store=store)
+            )
         )
 
     @app.get(f"{API_PREFIX}/screaming-frog/templates", response_model=ScreamingFrogTemplatesView)
@@ -1346,7 +1443,7 @@ def create_app(
     )
     def preview_screaming_frog_job(
         payload: ScreamingFrogJobPreviewRequest,
-        x_org_id: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> ScreamingFrogJobPreviewResponse:
         """Validate a seed URL and template, and mint a short-lived confirm token.
 
@@ -1354,11 +1451,18 @@ def create_app(
         shows this response in a confirmation modal; only
         `POST /screaming-frog/jobs`, given the token back, can start a crawl.
 
+        Args:
+            payload: The seed URL and optional template to validate.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `400` on an unknown facet/template or an unsafe
-                seed URL; `403` if the org lacks facet access.
+            HTTPException: `401` if the token is missing or invalid; `400` on
+                an unknown facet/template or an unsafe seed URL; `403` if the
+                org lacks facet access.
         """
-        org_id = x_org_id or "default"
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        org_id = principal.org_id
         try:
             state.facet_router.validate_org_access(org_id, SF_FACET_ID)
         except KeyError as exc:
@@ -1395,7 +1499,7 @@ def create_app(
     )
     async def create_screaming_frog_job(
         payload: ScreamingFrogJobConfirmRequest,
-        x_org_id: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> JobAccepted:
         """Start a Screaming Frog crawl, given a token minted by `.../preview`.
 
@@ -1409,15 +1513,29 @@ def create_app(
         actually burns the token and is the one that matters if the two ever
         disagree (e.g. two concurrent confirms racing the same token).
 
+        Being authenticated is not the approval `consume()` checks for — ADR
+        0016 condition 9. This route derives *who is asking*; whether the
+        `RiskClass.WRITE` action itself is approved is still entirely
+        `GuardrailEngine`'s question, unchanged by this ADR.
+
         Raises:
-            HTTPException: `400`/`403` for the same admission checks as
-                `.../preview`; `403` if the token is missing, expired,
-                already used, or does not match this exact
-                `(org, seed_url, template)` triple; `429` if the
-                `seo.screaming_frog` facet is already at its `max_concurrent`
-                of 1.
+            HTTPException: `401` if the token is missing or invalid; `400`/
+                `403` for the same admission checks as `.../preview`; `403`
+                if the confirm token is missing, expired, already used, or
+                does not match this exact `(org, seed_url, template)` triple;
+                `429` if the caller's own request rate or the
+                `seo.screaming_frog` facet's `max_concurrent` of 1 is
+                exhausted.
         """
-        org_id = x_org_id or "default"
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        org_id = principal.org_id
+        bucket = state.principal_rate_limiter.get_or_create(f"principal:{principal.operator_id}")
+        if not bucket.try_acquire():
+            _logger.warning("sf_job_rate_limited", extra={"operator_id": principal.operator_id})
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many requests from this session; please slow down",
+            )
         try:
             state.facet_router.validate_org_access(org_id, SF_FACET_ID)
         except KeyError as exc:
@@ -1490,7 +1608,7 @@ def create_app(
     async def create_job(
         payload: PageClassificationInput,
         facet_id: str = Query(default="seo.page_classifier"),
-        x_org_id: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> JobAccepted:
         """Accept a crawl and return an id to poll.
@@ -1504,24 +1622,36 @@ def create_app(
             payload: The crawl configuration.
             facet_id: Which facet to run under (query parameter). Defaults to
                 page_classifier. Must be a facet the org has access to.
-            x_org_id: Organization id header (X-Org-Id). `None` for default org.
+            authorization: Bearer session token (ADR 0016). `org_id` — and the
+                `OrgConfig.llm_credit_limit_usd` budget this admits against —
+                comes from its verified claim, never from a header the caller
+                set: this is the route the ADR calls out by name for
+                attributing spend-adjacent budget on a self-asserted value.
             idempotency_key: Idempotency-Key header for request deduplication.
                 If provided and a job with this key already exists for the org,
                 return the existing job instead of creating a new one.
 
         Raises:
-            HTTPException: `400` on URL/GSC/facet/org issues; `403` if org lacks facet access
-                or is inactive; `402` if org budget exceeded; `429` if facet at concurrency
-                capacity.
+            HTTPException: `401` if the token is missing or invalid; `400` on
+                URL/GSC/facet/org issues; `403` if org lacks facet access or
+                is inactive; `402` if org budget exceeded; `429` if the
+                caller's own request rate or the facet's concurrency capacity
+                is exhausted.
         """
-        org_id = x_org_id or "default"
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        org_id = principal.org_id
 
-        # Validate org_id format
-        if not re.fullmatch(r"^[a-z0-9_-]{1,64}$", org_id):
-            _logger.warning("job_rejected_invalid_org_id", extra={"requested_org": org_id})
+        # A new per-principal key (ADR 0016 condition 7), distinct from the
+        # `web.crawl` key every crawl tool already shares and from
+        # `ApiState._facet_active`'s process-global cap: neither is
+        # partitioned by caller, so one authenticated actor could otherwise
+        # exhaust admission for every other org.
+        bucket = state.principal_rate_limiter.get_or_create(f"principal:{principal.operator_id}")
+        if not bucket.try_acquire():
+            _logger.warning("job_rate_limited", extra={"operator_id": principal.operator_id})
             raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                detail=f"invalid org_id '{org_id}': must match ^[a-z0-9_-]{{1,64}}$",
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many requests from this session; please slow down",
             )
 
         # Load org config. `state.org_config_store`, the same store the GSC
@@ -1580,50 +1710,48 @@ def create_app(
         return result
 
     @app.get(f"{API_PREFIX}/jobs", response_model=list[JobRecord])
-    def list_jobs(x_org_id: str | None = Header(default=None)) -> list[JobRecord]:
+    def list_jobs(authorization: str | None = Header(default=None)) -> list[JobRecord]:
         """Every job for the organization, newest first. Metadata only — never a result blob.
 
         Args:
-            x_org_id: Organization id header (X-Org-Id). `None` for default org.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
 
         Returns:
-            Jobs belonging to the requested organization.
+            Jobs belonging to the caller's organization.
+
+        Raises:
+            HTTPException: `401` if the token is missing or invalid.
         """
-        org_id = x_org_id or "default"
+        principal = require_principal(authorization, session_secret=state.session_secret)
         all_jobs = state.store.list_jobs()
-        return [job for job in all_jobs if job.org_id == org_id]
+        return [job for job in all_jobs if job.org_id == principal.org_id]
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}", response_model=JobRecord)
-    def get_job(job_id: str, x_org_id: str | None = Header(default=None)) -> JobRecord:
+    def get_job(job_id: str, authorization: str | None = Header(default=None)) -> JobRecord:
         """One job's status.
 
         Args:
             job_id: The job to retrieve.
-            x_org_id: Organization id header (X-Org-Id). `None` for default org.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
 
         Raises:
-            HTTPException: `404` if no such job exists or org does not own it,
-                `403` if org differs.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                no such job exists, `403` if another org owns it.
         """
-        org_id = x_org_id or "default"
+        principal = require_principal(authorization, session_secret=state.session_secret)
         try:
             job = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
 
-        # IDOR check: org must own this job
-        if job.org_id != org_id:
-            _logger.warning(
-                "job_access_denied_org_mismatch",
-                extra={"job_id": job_id, "requesting_org": org_id, "owner_org": job.org_id},
-            )
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
-
+        org_scoped_or_404(record=job, record_id=job_id, org_id=principal.org_id, kind="job")
         return job
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/result")
     def get_result(
-        job_id: str, x_org_id: str | None = Header(default=None)
+        job_id: str, authorization: str | None = Header(default=None)
     ) -> Mapping[str, object]:
         """A finished job's `PageClassificationOutput`.
 
@@ -1633,25 +1761,21 @@ def create_app(
 
         Args:
             job_id: The job to retrieve the result for.
-            x_org_id: Organization id header (X-Org-Id). `None` for default org.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
 
         Raises:
-            HTTPException: `404` if unknown or org does not own it, `403` if org differs,
-                `409` if the job has not finished.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                unknown, `403` if another org owns it, `409` if the job has
+                not finished.
         """
-        org_id = x_org_id or "default"
+        principal = require_principal(authorization, session_secret=state.session_secret)
         try:
             record = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
 
-        # IDOR check: org must own this job
-        if record.org_id != org_id:
-            _logger.warning(
-                "result_access_denied_org_mismatch",
-                extra={"job_id": job_id, "requesting_org": org_id, "owner_org": record.org_id},
-            )
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
+        org_scoped_or_404(record=record, record_id=job_id, org_id=principal.org_id, kind="result")
 
         if not record.has_result:
             # 409, not 404: the job exists and may yet produce a result. A 404
@@ -1663,7 +1787,9 @@ def create_app(
         return state.store.read_result(job_id)
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/checkpoint")
-    def get_checkpoint(job_id: str) -> Mapping[str, object]:
+    def get_checkpoint(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Mapping[str, object]:
         """A renderable view of what a job saved before it ended.
 
         Shaped as a `PageClassificationOutput` so the client renders it through
@@ -1674,13 +1800,23 @@ def create_app(
         checkpoint stores URLs, not classifications. The structure is real; what
         each page *is* was never determined.
 
+        Args:
+            job_id: The job whose checkpoint to read.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if the job or its checkpoint does not exist.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                the job or its checkpoint does not exist, `403` if another
+                org owns the job (ADR 0016 condition 2 — this route
+                previously performed no ownership check at all).
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
         try:
-            state.store.get(job_id)
+            job = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+        org_scoped_or_404(record=job, record_id=job_id, org_id=principal.org_id, kind="checkpoint")
 
         checkpoint = state.store.read_checkpoint(job_id)
         if checkpoint is None:
@@ -1900,7 +2036,9 @@ def create_app(
         response_model=JobAccepted,
         status_code=status.HTTP_202_ACCEPTED,
     )
-    async def retry_job(job_id: str) -> JobAccepted:
+    async def retry_job(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> JobAccepted:
         """Run a job's crawl again from scratch, with its original settings.
 
         A new job, never a mutation of the old one. The original record is the
@@ -1911,15 +2049,27 @@ def create_app(
         *successful* crawl to pick up site changes is as legitimate as retrying
         a failed one.
 
+        Args:
+            job_id: The job to retry.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if there is no such job, `409` if its settings
-                cannot be replayed, `400` if the URL no longer passes SSRF
-                validation, `429` if no concurrency slot is free.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                there is no such job, `403` if another org owns it (ADR 0016
+                condition 2 — this route previously performed no ownership
+                check at all), `409` if its settings cannot be replayed, `400`
+                if the URL no longer passes SSRF validation, `429` if no
+                concurrency slot is free.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
         try:
             original_record = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+        org_scoped_or_404(
+            record=original_record, record_id=job_id, org_id=principal.org_id, kind="job"
+        )
 
         payload = _stored_payload(job_id)
         # Retry under the same facet and org as the original job
@@ -1931,7 +2081,9 @@ def create_app(
         )
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/reparse", response_model=JobRecord)
-    async def reparse_job(job_id: str) -> JobRecord:
+    async def reparse_job(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> JobRecord:
         """Re-run placement over a finished job under today's rules.
 
         Synchronous and offline. No worker thread, no concurrency slot, no
@@ -1950,10 +2102,18 @@ def create_app(
         stored menu stands and only the placement rules re-run. Breadcrumbs are
         never re-extracted: the page bodies are gone.
 
+        Args:
+            job_id: The finished job to reparse.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if there is no such job, `409` if it has no
-                stored result to reparse.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                there is no such job, `403` if another org owns it (ADR 0016
+                condition 2 — this route previously performed no ownership
+                check at all), `409` if it has no stored result to reparse.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
         try:
             original_record = state.store.get(job_id)
             stored = state.store.read_result(job_id)
@@ -1961,6 +2121,9 @@ def create_app(
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"no job {job_id} with a result"
             ) from exc
+        org_scoped_or_404(
+            record=original_record, record_id=job_id, org_id=principal.org_id, kind="job"
+        )
 
         try:
             before = PageClassificationOutput.model_validate(stored)
@@ -1999,7 +2162,9 @@ def create_app(
         f"{API_PREFIX}/jobs/{{job_id}}/reconcile/screaming-frog",
         response_model=ReconciliationSummary,
     )
-    async def reconcile_screaming_frog(job_id: str, request: Request) -> ReconciliationSummary:
+    async def reconcile_screaming_frog(
+        job_id: str, request: Request, authorization: str | None = Header(default=None)
+    ) -> ReconciliationSummary:
         """Compare a Screaming Frog export against a finished job, and merge the gap.
 
         **Entirely optional.** Nothing else in the engine calls this, and a crawl
@@ -2022,11 +2187,21 @@ def create_app(
         value of a reconciliation is the comparison. When nothing merges, no job
         is created and `job_id` echoes the source.
 
+        Args:
+            job_id: The finished job to cross-check.
+            request: Carries the raw CSV/xlsx body.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if there is no such job, `409` if its result
-                predates the current output contract, `400` if the body is
-                empty or is not a readable export.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                there is no such job, `403` if another org owns it (ADR 0016
+                condition 2 — this route previously performed no ownership
+                check at all), `409` if its result predates the current
+                output contract, `400` if the body is empty or is not a
+                readable export.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
         body = await request.body()
         if not body.strip():
             raise HTTPException(
@@ -2041,6 +2216,9 @@ def create_app(
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"no job {job_id} with a result"
             ) from exc
+        org_scoped_or_404(
+            record=original_record, record_id=job_id, org_id=principal.org_id, kind="job"
+        )
 
         try:
             before = PageClassificationOutput.model_validate(stored)
@@ -2123,17 +2301,49 @@ def create_app(
         )
         return summary
 
+    def _owned_job(job_id: str, org_id: str, kind: str) -> JobRecord:
+        """Fetch a job record and enforce ownership in one call.
+
+        Every route below this point used to read a job-scoped artefact
+        directly by `job_id` with no ownership check at all (ADR 0016
+        condition 2's Finding #2) — this is the one place that gap closes for
+        all of them: fetch the owning record first, then apply the same
+        shared `org_scoped_or_404` `get_job`/`get_result` already used.
+
+        Raises:
+            HTTPException: `404` if no such job exists, `403` if another org
+                owns it.
+        """
+        try:
+            record = state.store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+        org_scoped_or_404(record=record, record_id=job_id, org_id=org_id, kind=kind)
+        return record
+
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation")
-    def get_reconciliation(job_id: str) -> Mapping[str, object]:
+    def get_reconciliation(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Mapping[str, object]:
         """The last Screaming Frog cross-check run against this job.
 
         Kept so the panel can be reopened. Returns the counts *and* the URL
         lists behind them, because "892 missed pages" is the headline and the
         892 addresses are the work.
 
+        Args:
+            job_id: The cross-checked job.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if this job has never been cross-checked.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                the job or its cross-check does not exist, `403` if another
+                org owns the job (ADR 0016 condition 2 — this route
+                previously performed no ownership check at all).
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _owned_job(job_id, principal.org_id, "reconciliation")
         saved = state.store.read_reconciliation(job_id)
         if saved is None:
             raise HTTPException(
@@ -2143,7 +2353,9 @@ def create_app(
         return saved
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation.csv")
-    def download_reconciliation(job_id: str) -> Response:
+    def download_reconciliation(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Response:
         """The cross-check as a spreadsheet, one row per disagreement.
 
         The saved JSON is for the panel to redraw itself; this is for a person
@@ -2160,9 +2372,19 @@ def create_app(
         large majority and carry no finding; their count is in the summary rows
         at the top of the file.
 
+        Args:
+            job_id: The cross-checked job.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if this job has never been cross-checked.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                the job or its cross-check does not exist, `403` if another
+                org owns the job (ADR 0016 condition 2 — this route
+                previously performed no ownership check at all).
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _owned_job(job_id, principal.org_id, "reconciliation")
         saved = state.store.read_reconciliation(job_id)
         if saved is None:
             raise HTTPException(
@@ -2200,7 +2422,9 @@ def create_app(
         f"{API_PREFIX}/jobs/{{job_id}}/performance/gsc",
         response_model=PerformanceSummary,
     )
-    async def upload_gsc(job_id: str, request: Request) -> PerformanceSummary:
+    async def upload_gsc(
+        job_id: str, request: Request, authorization: str | None = Header(default=None)
+    ) -> PerformanceSummary:
         """Attach a Search Console page export to a finished crawl.
 
         The body is the raw file, sent as `application/octet-stream` — not
@@ -2227,11 +2451,22 @@ def create_app(
         a wrong date range or the wrong property, and keeping the superseded one
         would leave two reports with no way to tell which is being looked at.
 
+        Args:
+            job_id: The finished crawl to attach the export to.
+            request: Carries the raw export body.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if there is no such job, `409` if its result
-                predates the current output contract, `400` if the body is
-                empty, oversized, or not a readable export.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                there is no such job, `403` if another org owns it — this
+                route previously performed no ownership check at all, the
+                same gap ADR 0016 condition 2 retrofits elsewhere in this
+                file — `409` if its result predates the current output
+                contract, `400` if the body is empty, oversized, or not a
+                readable export.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
         body = await request.body()
         if not body.strip():
             raise HTTPException(
@@ -2247,6 +2482,7 @@ def create_app(
                 ),
             )
 
+        _owned_job(job_id, principal.org_id, "performance")
         try:
             stored = state.store.read_result(job_id)
         except JobNotFoundError as exc:
@@ -2343,15 +2579,27 @@ def create_app(
         return summary
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/performance")
-    def get_performance(job_id: str) -> Mapping[str, object]:
+    def get_performance(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Mapping[str, object]:
         """The last Search Console report attached to this job.
 
         Kept so the panel redraws itself without asking for the file again — the
         export took a person a trip to another product to obtain.
 
+        Args:
+            job_id: The job whose attached report to read.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if no export has been attached to this job.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                the job or its export does not exist, `403` if another org
+                owns the job (ADR 0016 condition 2 — this route previously
+                performed no ownership check at all).
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _owned_job(job_id, principal.org_id, "performance")
         saved = state.store.read_performance(job_id)
         if saved is None:
             raise HTTPException(
@@ -2361,7 +2609,9 @@ def create_app(
         return saved
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/opportunities.csv")
-    def download_opportunities(job_id: str) -> Response:
+    def download_opportunities(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Response:
         """The recommendations as a spreadsheet, one row per finding.
 
         The panel is for reading; this is the artefact that gets assigned. It
@@ -2373,9 +2623,19 @@ def create_app(
         conclude the site has no orphans, when the truth is that this crawl
         could not tell.
 
+        Args:
+            job_id: The job whose recommendations to download.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if no export has been attached to this job.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                the job or its export does not exist, `403` if another org
+                owns the job (ADR 0016 condition 2 — this route previously
+                performed no ownership check at all).
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _owned_job(job_id, principal.org_id, "performance")
         saved = state.store.read_performance(job_id)
         if saved is None:
             raise HTTPException(
@@ -2432,7 +2692,9 @@ def create_app(
         return _csv_response(buffer.getvalue(), name)
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/opportunities.xlsx")
-    def download_opportunities_workbook(job_id: str) -> Response:
+    def download_opportunities_workbook(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Response:
         """The recommendations as a workbook, one sheet per kind.
 
         The same data as `opportunities.csv`, which stays for anything already
@@ -2448,9 +2710,19 @@ def create_app(
         the site has no orphans, when the truth is that this crawl could not
         tell.
 
+        Args:
+            job_id: The job whose recommendations to download.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if no export has been attached to this job.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                the job or its export does not exist, `403` if another org
+                owns the job (ADR 0016 condition 2 — this route previously
+                performed no ownership check at all).
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _owned_job(job_id, principal.org_id, "performance")
         saved = state.store.read_performance(job_id)
         if saved is None:
             raise HTTPException(
@@ -2523,7 +2795,7 @@ def create_app(
         return _workbook_response(sheets, f"recommendations-{job_id[:8]}-{stamp or 'undated'}.xlsx")
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/matched.csv")
-    def download_matched(job_id: str) -> Response:
+    def download_matched(job_id: str, authorization: str | None = Header(default=None)) -> Response:
         """The pages the export did reach, with the crawl's columns beside them.
 
         The other half of `unmatched.csv`, and the more useful half: this is the
@@ -2535,10 +2807,20 @@ def create_app(
         Sorted by clicks. One row per crawled page, not per export row — several
         Google URLs can name one page, and they were summed on the way in.
 
+        Args:
+            job_id: The job whose matched rows to download.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if no export has been attached, or `409` if the
-                attached report predates this download and holds no page rows.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                no export has been attached or another org owns the job (ADR
+                0016 condition 2 — this route previously performed no
+                ownership check at all), or `409` if the attached report
+                predates this download and holds no page rows.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _owned_job(job_id, principal.org_id, "performance")
         saved = state.store.read_performance(job_id)
         if saved is None:
             raise HTTPException(
@@ -2581,7 +2863,9 @@ def create_app(
         return _csv_response(buffer.getvalue(), name)
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/unmatched.csv")
-    def download_unmatched(job_id: str) -> Response:
+    def download_unmatched(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Response:
         """Every export row that reached no crawled page.
 
         The evidence behind the match rate. "41.5% matched" is a number an
@@ -2598,9 +2882,19 @@ def create_app(
         without them invites the reader to count the rows and think that is the
         finding.
 
+        Args:
+            job_id: The job whose unmatched rows to download.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if no export has been attached to this job.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                the job or its export does not exist, `403` if another org
+                owns the job (ADR 0016 condition 2 — this route previously
+                performed no ownership check at all).
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _owned_job(job_id, principal.org_id, "performance")
         saved = state.store.read_performance(job_id)
         if saved is None:
             raise HTTPException(
@@ -2665,7 +2959,9 @@ def create_app(
         return _csv_response(buffer.getvalue(), name)
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation.xlsx")
-    def download_reconciliation_workbook(job_id: str, side: str = "") -> Response:
+    def download_reconciliation_workbook(
+        job_id: str, side: str = "", authorization: str | None = Header(default=None)
+    ) -> Response:
         """The cross-check as a workbook, one sheet per question.
 
         The same data as `reconciliation.csv`, which stays for anything already
@@ -2696,11 +2992,17 @@ def create_app(
                 reason. An unrecognised value is refused rather than quietly
                 treated as "both", because a caller that misspells it would
                 otherwise hand someone twice the report they asked for.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
 
         Raises:
-            HTTPException: `404` if this job has never been cross-checked,
-                `422` if `side` is not one of the accepted values.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                this job has never been cross-checked or does not exist,
+                `403` if another org owns it (ADR 0016 condition 2 — this
+                route previously performed no ownership check at all), `422`
+                if `side` is not one of the accepted values.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
         sides_wanted = {
             "": (("frog_only", "Screaming Frog"), ("engine_only", "Rankuno")),
             "frog": (("frog_only", "Screaming Frog"),),
@@ -2713,6 +3015,7 @@ def create_app(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"side must be 'frog', 'engine' or omitted, not {side!r}",
             )
+        _owned_job(job_id, principal.org_id, "reconciliation")
         saved = state.store.read_reconciliation(job_id)
         if saved is None:
             raise HTTPException(
@@ -2824,7 +3127,9 @@ def create_app(
         return _workbook_response(sheets, name)
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
-    async def cancel_job(job_id: str) -> JobRecord:
+    async def cancel_job(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> JobRecord:
         """Abandon a job and give its concurrency slot back.
 
         **This releases the slot; it does not stop the crawl.** The work runs on
@@ -2843,14 +3148,24 @@ def create_app(
         A real stop needs a cancellation flag the crawl checks between fetches.
         That does not exist yet — see the build log for this cycle.
 
+        Args:
+            job_id: The job to cancel.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if there is no such job, `409` if it has
-                already reached a terminal state.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                there is no such job, `403` if another org owns it (ADR 0016
+                condition 2 — this route previously performed no ownership
+                check at all), `409` if it has already reached a terminal
+                state.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
         try:
             record = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+        org_scoped_or_404(record=record, record_id=job_id, org_id=principal.org_id, kind="job")
         if record.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -2871,7 +3186,9 @@ def create_app(
         response_model=JobAccepted,
         status_code=status.HTTP_202_ACCEPTED,
     )
-    async def resume_job(job_id: str) -> JobAccepted:
+    async def resume_job(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> JobAccepted:
         """Crawl the URLs an interrupted job discovered but never fetched.
 
         A separate job producing a separate result — **not** a merge into the
@@ -2888,13 +3205,26 @@ def create_app(
         purpose — so `discovered > fetched` is normal and is not unfinished
         work. `truncated` and `stopped_reason` are what distinguish the two.
 
+        Args:
+            job_id: The interrupted job to resume.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
         Raises:
-            HTTPException: `404` if there is no such job or it saved no partial
-                work, `409` if it did not stop early, is still running, or has
-                nothing left to fetch, and the codes `retry` can raise.
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                there is no such job or it saved no partial work, `403` if
+                another org owns it (ADR 0016 condition 2 — this route
+                previously performed no ownership check at all), `409` if it
+                did not stop early, is still running, or has nothing left to
+                fetch, and the codes `retry` can raise.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        try:
+            record = state.store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+        org_scoped_or_404(record=record, record_id=job_id, org_id=principal.org_id, kind="job")
         payload = _stored_payload(job_id)
-        record = state.store.get(job_id)
 
         if not record.is_terminal:
             # Its checkpoint is still moving, so any delta read now is stale
@@ -2963,34 +3293,65 @@ def create_app(
                 "facet": record.facet_id,
             },
         )
-        # Resume under the same facet as the original job
+        # Resume under the same facet and org as the original job. `org_id`
+        # was omitted here before ADR 0016 condition 3, which silently
+        # misattributed every resumed crawl to the "default" org regardless
+        # of who actually owned the job being resumed — the same fix
+        # `retry_job` already applied correctly.
         return _start(
             resumed,
             f"{payload.base_url} (resumed +{len(remaining):,})",
             facet_id=record.facet_id,
+            org_id=record.org_id,
         )
 
     # --- Organization-level GSC account management ---
 
+    def _require_own_org(path_org_id: str, principal_org_id: str) -> None:
+        """Refuse a path `org_id` that disagrees with the verified principal's own org.
+
+        ADR 0016 condition 1 (the CRITICAL finding): these three routes must
+        derive the org they operate on from the authenticated principal, not
+        from this path parameter alone. The segment stays in the URL — it is
+        what makes the route readable and keeps the existing path shape — but
+        it is a consistency check against ground truth here, never ground
+        truth itself. A caller authenticated as one org cannot read, create,
+        or delete another org's GSC OAuth credentials by editing the URL.
+        """
+        if path_org_id != principal_org_id:
+            _logger.warning(
+                "gsc_account_access_denied_org_mismatch",
+                extra={"path_org": path_org_id, "principal_org": principal_org_id},
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
+
     @app.get(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts", response_model=OrgGscAccountsView)
-    def list_org_gsc_accounts(org_id: str) -> OrgGscAccountsView:
+    def list_org_gsc_accounts(
+        org_id: str, authorization: str | None = Header(default=None)
+    ) -> OrgGscAccountsView:
         """List all GSC accounts configured for an organization.
 
         Args:
-            org_id: Organization identifier.
+            org_id: Organization identifier. Must match the caller's own org.
+            authorization: Bearer session token (ADR 0016).
 
         Returns:
             List of GSC account names and metadata.
 
         Raises:
-            HTTPException: 404 if organization not found.
+            HTTPException: `401` if the token is missing or invalid, `403` if
+                `org_id` is not the caller's own org (ADR 0016 condition 1 —
+                this route previously accepted any `org_id` with zero
+                verification), `404` if organization not found.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _require_own_org(org_id, principal.org_id)
         try:
             org = state.org_config_store.get(org_id)
-        except KeyError:
+        except KeyError as exc:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
-            )
+            ) from exc
 
         accounts = [
             OrgGscAccountView(
@@ -3003,22 +3364,31 @@ def create_app(
         return OrgGscAccountsView(accounts=accounts)
 
     @app.post(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts", status_code=status.HTTP_201_CREATED)
-    def create_org_gsc_account(org_id: str, req: OrgGscAccountRequest) -> OrgGscAccountView:
+    def create_org_gsc_account(
+        org_id: str, req: OrgGscAccountRequest, authorization: str | None = Header(default=None)
+    ) -> OrgGscAccountView:
         """Add or replace a GSC account for an organization.
 
         Validates account name against ^[a-z0-9_-]{1,64}$ before storage.
 
         Args:
-            org_id: Organization identifier.
+            org_id: Organization identifier. Must match the caller's own org.
             req: Account credentials.
+            authorization: Bearer session token (ADR 0016).
 
         Returns:
             The created account metadata.
 
         Raises:
-            HTTPException: 400 if account name is invalid, 404 if org not found,
-                422 if request body is invalid.
+            HTTPException: `401` if the token is missing or invalid, `403` if
+                `org_id` is not the caller's own org (ADR 0016 condition 1 —
+                the CRITICAL finding: this route previously wrote a third
+                party's Google OAuth refresh token for any `org_id` with zero
+                verification), `400` if account name is invalid, `404` if org
+                not found, `422` if request body is invalid.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _require_own_org(org_id, principal.org_id)
         # Validate account name
         if not re.match(r"^[a-z0-9_-]{1,64}$", req.account_name):
             raise HTTPException(
@@ -3028,10 +3398,10 @@ def create_app(
 
         try:
             org = state.org_config_store.get(org_id)
-        except KeyError:
+        except KeyError as exc:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
-            )
+            ) from exc
 
         org.gsc_accounts[req.account_name] = GscAccountCredential(
             refresh_token=req.refresh_token,
@@ -3057,22 +3427,31 @@ def create_app(
         f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts/{{account_name}}",
         status_code=status.HTTP_204_NO_CONTENT,
     )
-    def delete_org_gsc_account(org_id: str, account_name: str) -> None:
+    def delete_org_gsc_account(
+        org_id: str, account_name: str, authorization: str | None = Header(default=None)
+    ) -> None:
         """Delete a GSC account from an organization.
 
         Args:
-            org_id: Organization identifier.
+            org_id: Organization identifier. Must match the caller's own org.
             account_name: Account to delete.
+            authorization: Bearer session token (ADR 0016).
 
         Raises:
-            HTTPException: 404 if org or account not found.
+            HTTPException: `401` if the token is missing or invalid, `403` if
+                `org_id` is not the caller's own org (ADR 0016 condition 1 —
+                the CRITICAL finding: this route previously deleted any
+                org's stored GSC credential with zero verification), `404`
+                if org or account not found.
         """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        _require_own_org(org_id, principal.org_id)
         try:
             org = state.org_config_store.get(org_id)
-        except KeyError:
+        except KeyError as exc:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
-            )
+            ) from exc
 
         if account_name not in org.gsc_accounts:
             raise HTTPException(
@@ -3156,9 +3535,10 @@ class ServerConfig(StrictModel):
 def serve(config: ServerConfig | None = None) -> None:  # pragma: no cover - process entry point
     """Run the server.
 
-    Binds loopback by default and that default should not be changed casually:
-    there is no authentication, and the server fetches arbitrary URLs on
-    request. Exposed on a routable interface it is an open proxy.
+    Binds loopback by default and that default should not be changed casually.
+    ADR 0016 authenticates *who* is calling; it does not change what a crawl
+    may fetch, so this server still fetches arbitrary URLs on request and
+    remains an open proxy on a routable interface regardless of login.
     """
     import uvicorn
 

@@ -44,6 +44,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
 from pydantic import Field, ValidationError
 
+from src.api.auth import org_scoped_or_404
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.core.state_store import JobNotFoundError, JobRecord
@@ -100,7 +101,20 @@ class DeliverableBuildRequest(StrictModel):
 
 
 def _org_id(x_org_id: str | None) -> str:
-    """Resolve and validate the `X-Org-Id` header, same rule `create_job` uses."""
+    """Resolve and validate the `X-Org-Id` header, same rule `create_job` used.
+
+    Known gap, recorded rather than silently carried forward: ADR 0016
+    ("Cloud API Authentication & Authorization") retrofits `server.py`'s
+    job-family and GSC-account routes so `org_id` is derived from a verified
+    session principal instead of this client-asserted header, but its own
+    route enumeration does not name this module's routes. They inherit
+    `org_scoped_or_404` from `src/api/auth.py` (condition 2's shared
+    ownership check now covers rulebooks and deliverables too), but org
+    *derivation* here is unchanged — an authenticated caller could still set
+    `X-Org-Id` to another org's id and this header would still be trusted.
+    Handed off rather than fixed inline, per CLAUDE.md's scope discipline:
+    the ADR that approved this change did not cover these routes.
+    """
     org_id = x_org_id or "default"
     if not _ORG_ID_RE.fullmatch(org_id):
         raise HTTPException(
@@ -122,16 +136,7 @@ def _resolve_rulebook(state: ApiState, rulebook_id: str | None, org_id: str) -> 
         record = state.rulebook_store.get(rulebook_id)
     except RulebookNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no rulebook {rulebook_id}") from exc
-    if record.org_id != org_id:
-        _logger.warning(
-            "rulebook_access_denied_org_mismatch",
-            extra={
-                "rulebook_id": rulebook_id,
-                "requesting_org": org_id,
-                "owner_org": record.org_id,
-            },
-        )
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
+    org_scoped_or_404(record=record, record_id=rulebook_id, org_id=org_id, kind="rulebook")
     return state.rulebook_store.path_for(rulebook_id)
 
 
@@ -216,18 +221,6 @@ def _start_build(
     return DeliverableAccepted(id=record.id, status=record.status.value, label=record.label)
 
 
-def _org_scoped_or_404(
-    *, record: JobRecord | RulebookRecord, record_id: str, org_id: str, kind: str
-) -> None:
-    """Raise the shared 403 for a record that exists but belongs to another org."""
-    if record.org_id != org_id:
-        _logger.warning(
-            f"{kind}_access_denied_org_mismatch",
-            extra={"id": record_id, "requesting_org": org_id, "owner_org": record.org_id},
-        )
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
-
-
 def build_deliverables_router(state: ApiState) -> APIRouter:
     """Build the `/deliverables` and `/jobs/{id}/deliverable` routes over `state`.
 
@@ -297,7 +290,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"no rulebook {rulebook_id}"
             ) from exc
-        _org_scoped_or_404(record=record, record_id=rulebook_id, org_id=org_id, kind="rulebook")
+        org_scoped_or_404(record=record, record_id=rulebook_id, org_id=org_id, kind="rulebook")
         state.rulebook_store.delete(rulebook_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -329,7 +322,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             crawl_record = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
-        _org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="deliverable")
+        org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="deliverable")
         if not crawl_record.has_result:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -458,7 +451,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"no deliverable {deliverable_id}"
             ) from exc
-        _org_scoped_or_404(
+        org_scoped_or_404(
             record=record, record_id=deliverable_id, org_id=org_id, kind="deliverable"
         )
         return record
@@ -488,7 +481,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, detail=f"no deliverable {deliverable_id}"
             ) from exc
-        _org_scoped_or_404(
+        org_scoped_or_404(
             record=record, record_id=deliverable_id, org_id=org_id, kind="deliverable"
         )
         if not record.has_result:
