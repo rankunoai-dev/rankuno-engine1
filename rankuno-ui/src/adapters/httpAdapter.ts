@@ -81,6 +81,53 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * The active session token, or `null` when signed out (ADR 0016).
+ *
+ * Pushed in by `useAuthStore` through `setAuthToken`, never read from that
+ * store directly: `httpAdapter.ts` is API plumbing beneath the store layer —
+ * `useCrawlStore` already imports `HttpAdapter` from here — and importing the
+ * store back would point that dependency the other way, the same inward-only
+ * rule `CLAUDE.md` holds `src/core` to against `src/modules` on the Python
+ * side. A module-level binding plus two setters keeps it one-way while still
+ * letting every outbound request carry the current token.
+ */
+let currentToken: string | null = null;
+
+/** What runs when a request comes back `401`. Wired up once, by `useAuthStore`. */
+let onSessionExpired: (() => void) | null = null;
+
+/** Called by `useAuthStore` on login, logout, and its start-up restore. */
+export function setAuthToken(token: string | null): void {
+  currentToken = token;
+}
+
+/** Called once by `useAuthStore` to wire up what a dead session should do. */
+export function setSessionExpiredHandler(handler: (() => void) | null): void {
+  onSessionExpired = handler;
+}
+
+/**
+ * `fetch`, with the stored session token attached as `Authorization: Bearer
+ * <token>` and a `401` treated as a dead session wherever it is felt.
+ *
+ * `HttpAdapter.request` below is the main caller. `GscAccountsView` and
+ * `GscAccountForm` call `fetch` directly instead of going through the class —
+ * they predate it — and the routes they call are guarded by ADR 0016 exactly
+ * like every job route, so they share this rather than growing a second copy
+ * of the same two lines. `403` (a real org-ownership mismatch, not a dead
+ * session) is left for the caller to handle like any other non-2xx status;
+ * only `401` fires the session-expired callback, matching the server's own
+ * distinction between "who are you" and "not your record."
+ */
+export async function authorizedFetch(url: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  if (currentToken) headers.set("Authorization", `Bearer ${currentToken}`);
+  const response = await fetch(url, { ...init, headers });
+  if (response.status === 401) onSessionExpired?.();
+  return response;
+}
+
+/**
  * Reads crawl data from the local FastAPI server.
  *
  * The counterpart to `MockAdapter`. Components see the same interface, so
@@ -98,7 +145,7 @@ export class HttpAdapter implements CrawlDataAdapter {
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}${path}`, init);
+      response = await authorizedFetch(`${this.baseUrl}${path}`, init);
     } catch (cause) {
       // fetch rejects only on a transport failure, which here almost always
       // means the server is not running. Say that, rather than surfacing

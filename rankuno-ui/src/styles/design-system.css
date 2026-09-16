@@ -506,6 +506,12 @@
 .rit {
   position: relative;
 }
+/* Pinned to the foot of the rail rather than sitting in the flow with the
+   destinations above it: `.rail` is already a column flexbox, so `auto`
+   margin is enough — no wrapper needed to split "navigate" from "sign out". */
+.rit-logout {
+  margin-top: auto;
+}
 .rit-badge {
   position: absolute;
   top: 4px;

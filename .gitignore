@@ -82,6 +82,11 @@ reports/
 # must never be committable — it was one `git add -A` from being published.
 .orgs/
 
+# Operator identities for session-token authentication (ADR 0016,
+# `Settings.auth_operator_store_path`). Holds PBKDF2 password hashes — not
+# plaintext, but still machine state that must never enter git history.
+.operators/
+
 # Independent PID + process-start-time ledger for launch_supervised()
 # (`Settings.process_supervisor_ledger_path`, ADR 0013 condition 2). Rewritten
 # by `reconcile_orphans()` on every API server startup, including to an empty

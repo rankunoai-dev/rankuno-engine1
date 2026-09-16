@@ -1,4 +1,5 @@
 import { isLive, useCrawlStore } from "../../store/useCrawlStore";
+import { useAuthStore } from "../../store/useAuthStore";
 import { useUiStore } from "../../store/useUiStore";
 
 /**
@@ -13,6 +14,11 @@ export function NavigationRail(): JSX.Element {
   const view = useUiStore((state) => state.view);
   const setView = useUiStore((state) => state.setView);
   const liveJobs = useCrawlStore((state) => state.liveJobs);
+  // `null` in offline/fixture mode, which never logged in and has nothing to
+  // log out of — the button below is conditional on this for that reason,
+  // not merely to hide it while `App` is still choosing an adapter.
+  const token = useAuthStore((state) => state.token);
+  const logout = useAuthStore((state) => state.logout);
 
   const running = Object.values(liveJobs).filter(isLive).length;
 
@@ -77,6 +83,24 @@ export function NavigationRail(): JSX.Element {
         </svg>
         Audit
       </button>
+
+      {/* Only shown once there is a session to end — `token` is `null` in
+          offline/fixture mode, which never went through `/auth/login` and
+          has no server-side identity for this to sign out of. */}
+      {token !== null && (
+        <button
+          className="rit rit-logout"
+          type="button"
+          onClick={() => logout()}
+          title="Sign out"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 4H6a2 2 0 00-2 2v12a2 2 0 002 2h9" />
+            <path d="M10 12h10m0 0l-3.5-3.5M20 12l-3.5 3.5" />
+          </svg>
+          Log out
+        </button>
+      )}
     </nav>
   );
 }
