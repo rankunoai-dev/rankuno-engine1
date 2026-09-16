@@ -181,6 +181,7 @@ fixes:
 
 The downloadable workbook is one sheet per reason: `Summary`, `Missed pages`,
 `Orphans`, then `PDF files`, `Presentations`, `Spreadsheets`, `Other files`,
+then, for a bare-list cross-check, one sheet per `DefaulterCategory` (below),
 then every other reason by size. Splitting the files out took infosys.com's
 Orphans sheet from 8,123 rows to 630
 ([build-log 0076](docs/build-log/0076-a-pdf-is-not-an-orphan.md)).
@@ -199,6 +200,21 @@ status, indexability or content type, so a URL it holds that the crawl lacks is
 reported as `UNKNOWN`, never as a missed page, and nothing from a list is ever
 merged; the report declares `source_format=BARE_URL_LIST`. Anything else without
 an `Address` column is still refused ([build-log 0072](docs/build-log/0072-a-list-is-not-an-export.md)).
+
+Because a bare list carries no status, an `UNKNOWN` row is further guessed at
+by URL shape alone: `DefaulterCategory` sorts it into `DAM_HTML_ARCHIVE`,
+`DAM_FORMS_OTHER`, `CMS_INTERNAL_LEAK`, `CORRUPTED_URL`, or leaves it
+uncategorised (`None`) as a "presumed real" residual — a guess, not a
+verification; roughly 80% of a real bare-list `UNKNOWN` bucket stays
+uncategorised even after the rules run. All four categories are quarantined
+out of the interactive tree by default behind an "Include Defaulters" toggle
+in the React UI — whether `DAM_FORMS_OTHER` belongs there is still an open
+question, see the build log — and each gets its own workbook sheet.
+Attaching a Search Console export to a job re-checks every
+defaulter row against GSC's own "not crawled" bucket and marks any with real
+impressions or clicks `flagged_real=True` — additively, without erasing or
+overwriting the original shape-based guess
+([build-log 0086](docs/build-log/0086-a-pattern-is-not-a-verdict.md)).
 
 ### Building a client deliverable workbook
 
@@ -251,14 +267,13 @@ GET    /api/v1/deliverables/{id}
 GET    /api/v1/deliverables/{id}/download
 ```
 
-Every endpoint is org-scoped: `X-Org-Id` (defaulting to `default`) is checked
-on every read the same way `GET /jobs/{id}` and `GET /jobs/{id}/result`
-already check it — a `403` for a record another org owns, never a silent
-empty response. **Not yet migrated to ADR 0016's authenticated org
-derivation** — this header remains client-asserted here, unlike the
-job-family and GSC-account routes in `server.py`; a known gap recorded at
-`_org_id()`'s docstring in `deliverables_routes.py`, not a silent omission.
-Workbook builds run on a worker thread behind their own
+Every endpoint requires a bearer session token and derives `org_id` from it,
+the same as every route in `server.py` ([ADR 0016](docs/adr/0016-cloud-api-authentication.md)) —
+a `403` for a record another org owns, never a silent empty response. This
+closed a second instance of ADR 0016's own IDOR class: at merge time this
+module still derived `org_id` from the client-asserted `X-Org-Id` header, a
+gap ADR 0016's own route enumeration did not name because it never listed
+this file (build-log 0097). Workbook builds run on a worker thread behind their own
 concurrency guard on `ApiState` (default 3 at once, independent of the crawl
 `FacetRouter`) — `build_workbook` alone measures up to 26.3s at the 500k-page
 ceiling, so nothing here may block a request handler on it. There is still no
