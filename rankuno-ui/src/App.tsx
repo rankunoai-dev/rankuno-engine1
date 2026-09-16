@@ -49,7 +49,7 @@ export default function App(): JSX.Element {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          background: "#f5f6f8",
+          background: "var(--bg)",
         }}
       >
         <Spin size="large" tip="Connecting…" />

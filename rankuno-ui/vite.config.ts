@@ -37,5 +37,11 @@ export default defineConfig({
     // an orderly close when one is possible. Revisit if Vitest resolves it
     // upstream.
     teardownTimeout: 1_000,
+    // `tokens.test.ts` reads design-system.css as text to hold the antd theme
+    // to it. Vitest stubs CSS imports to an empty string by default, which the
+    // `?raw` suffix does not escape, so that one id is opted back in. Scoped to
+    // the query on purpose: the plain `.css` imports every component makes stay
+    // stubbed, so no stylesheet is injected into jsdom that was not before.
+    css: { include: [/design-system\.css\?raw/] },
   },
 });

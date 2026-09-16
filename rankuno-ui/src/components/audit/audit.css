@@ -34,10 +34,10 @@
 }
 
 .au-caveat {
-  border: 1px solid #f0b4b4;
+  border: 1px solid var(--danger-line);
   border-left-width: 3px;
   border-radius: 4px;
-  background: #fdeaea;
+  background: var(--danger-bg);
   color: var(--danger);
   padding: 8px 12px;
   font-size: 12px;
@@ -84,12 +84,12 @@
 .au-action {
   font-size: 12px;
   line-height: 1.5;
-  color: #bfdbfe;
+  color: var(--accent-pale);
   margin: 0 0 8px;
 }
 
 .au-action strong {
-  color: #7dd3fc;
+  color: var(--accent-soft);
   margin-right: 6px;
 }
 
@@ -108,7 +108,7 @@
 }
 
 .au-more {
-  color: #64748b;
+  color: var(--meta-text);
   font-style: italic;
 }
 
@@ -154,7 +154,7 @@
 }
 
 .au-stale {
-  border: 1px solid #e6cf94;
+  border: 1px solid var(--warn-line);
   border-left-width: 3px;
   border-radius: 4px;
   background: var(--l0bg);
@@ -167,7 +167,7 @@
 
 .au-hint {
   font-size: 11px;
-  color: #64748b;
+  color: var(--meta-text);
 }
 
 .au-members {
@@ -188,7 +188,7 @@
 
 .au-member-meta {
   font-size: 10.5px;
-  color: #64748b;
+  color: var(--meta-text);
 }
 
 /* The destination cell: an arrow, the address, and a flag when it is the

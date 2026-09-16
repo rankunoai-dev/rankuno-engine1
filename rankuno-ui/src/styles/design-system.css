@@ -5,9 +5,11 @@
  * object because the lane bands, level chips and node borders all need the same
  * five-colour ramp, and a second copy in TypeScript would drift from this one.
  *
- * The palette is light. AntD is configured with its dark algorithm elsewhere in
- * the app, so components that mix the two must not rely on AntD's own surface
- * colours — every surface here sets its own background explicitly.
+ * The palette is light, and AntD follows it: `main.tsx` runs `defaultAlgorithm`
+ * and builds its theme from `styles/tokens.ts`, which is held to the `:root`
+ * block below by test. (This paragraph used to say AntD ran its dark algorithm.
+ * That stopped being true when the two themes were reconciled, and the sentence
+ * outlived it.)
  */
 
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
@@ -50,6 +52,139 @@
   --ok: #188a4f;
   --warn: #b8860b;
   --danger: #b42318;
+
+  /* ====================================================================
+     Extracted from the component stylesheets, each at the exact value that
+     stylesheet already used. Nothing below changes how the app looks; it
+     moves the values into one place so they can be changed in one place.
+
+     Every name describes the ROLE the colour plays, never the colour it
+     happens to be today — an appearance name becomes a lie the moment the
+     value changes, which is the entire point of having these.
+
+     Several groups are near-duplicates of each other: three blues, two
+     neutral ramps, two reds. That is real history — the surfaces were built
+     at different times against different palettes — and they are
+     deliberately NOT merged, because merging them would move pixels. The
+     consolidation list belongs to whoever changes the values.
+     ==================================================================== */
+
+  /* Rules, and the scrollbar drawn from the same family. Lighter than
+     --line, which is lighter than --line2. */
+  --line-faint: #eef1f5;
+  --scroll-thumb: #c7cedb;
+  --scroll-thumb-hover: #a9b3c4;
+
+  /* The surface and rule that carry --danger: the error boundary, and the
+     audit caveat that uses the same treatment. */
+  --danger-bg: #fdeaea;
+  --danger-line: #f0b4b4;
+  /* The rule that carries --warn over --l0bg: the stale-data notice. */
+  --warn-line: #e6cf94;
+
+  /* Hover ground for the primary button, and for the download link shaped
+     like one. */
+  --btn-primary-bg-hover: #cdeedb;
+
+  /* Supporting detail — the "+ N more" line, a hint, a rate readout. */
+  --meta-text: #64748b;
+
+  /* Secondary accent: a label or a link that must not compete with the
+     primary action. These are pale blues left over from when antd ran its
+     dark algorithm, and they now sit on white. Preserved exactly; the
+     contrast is a value question, not a structural one. */
+  --accent-soft: #7dd3fc;
+  --accent-soft-hover: #bae6fd;
+  --accent-pale: #bfdbfe;
+
+  /* The per-figure export control. Same dark-algorithm ancestry. */
+  --export-line: #34d399;
+  --export-line-hover: #6ee7b7;
+  --export-bg: #0e3a2f;
+  --export-bg-hover: #14523f;
+  --export-text: #a7f3d0;
+
+  /* Controls held deliberately quiet, drawn as white overlays because they
+     were once drawn on a dark ground. */
+  --overlay-bg: rgba(255, 255, 255, 0.06);
+  --overlay-line: rgba(255, 255, 255, 0.12);
+  --overlay-line-strong: rgba(255, 255, 255, 0.22);
+  --btn-muted-text-hover: #e2e8f0;
+  --link-muted-hover: #cbd5e1;
+
+  /* Live crawl telemetry. A console, so it keeps a dark ground of its own
+     inside an otherwise light app. */
+  --stream-bg: #0a0d14;
+  --stream-line: #1e293b;
+  --stream-text: #4dc986;
+  --stream-text-newest: #6ff0a6;
+  --stream-eta: #0e8296;
+  --stream-pulse: rgba(111, 240, 166, 0.6);
+  --stream-pulse-fade: rgba(111, 240, 166, 0);
+
+  /* Status. A second, brighter set than --ok/--warn/--danger above: the
+     Search Console and account surfaces were built against antd's status
+     palette rather than this file's. `-soft` is the lower-emphasis partner
+     of the base; `-ink` is text drawn on the matching `-bg`. */
+  --status-success: #52c41a;
+  --status-warning: #faad14;
+  --status-warning-soft: #ffc53d;
+  --status-warning-bg: #fffbe6;
+  --status-warning-ink: #ad6800;
+  --status-caution: #ff7a45;
+  --status-critical: #ff4d4f;
+  --status-critical-soft: #ff7875;
+  --status-critical-bg: #fff1f0;
+  --status-critical-line: #ffccc7;
+
+  /* Neutrals for those same surfaces — a second ramp beside --ink/--dim/
+     --faint and --line/--line2. */
+  --text-strong: #1f1f1f;
+  --text-secondary: #595959;
+  --text-muted: #8c8c8c;
+  --surface-sunken: #fafafa;
+  --surface-hover: #f5f5f5;
+  --hairline: #f0f0f0;
+  --hairline-strong: #d9d9d9;
+
+  /* Search Console accent: a third blue, one antd major version behind
+     --blue. */
+  --gsc-accent: #1890ff;
+  --gsc-accent-ink: #0050b3;
+  --gsc-info-bg: #e6f7ff;
+  --gsc-callout-bg: #f6f8fb;
+  --gsc-summary-bg: #f0f5ff;
+  --gsc-summary-line: #d6e4ff;
+
+  /* The integrated GSC report. This family alone is theme-switchable: the
+     component ships a `prefers-color-scheme: dark` block that reassigns six
+     of these (`GscIntegratedReport.module.css`). The values here are the
+     light ones, lifted from the `var(--x, fallback)` fallbacks the component
+     used to carry inline. Nothing outside that component should point at
+     them — it would follow the OS theme while the rest of the app does
+     not. */
+  --color-surface: #ffffff;
+  --color-bg: #f8f9fa;
+  --color-input-bg: #f8f9fa;
+  --color-border: #e0e4e8;
+  --color-text: #1a202c;
+  --color-text-muted: #64748b;
+  /* Not theme-switched, and not folded into --color-text-muted: the
+     placeholder was written with a different fallback from every other
+     reader of that variable, and resolved to #94a3b8 in both schemes.
+     Defining --color-text-muted here would have silently darkened it. */
+  --color-placeholder: #94a3b8;
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-shadow: rgba(0, 0, 0, 0.1);
+  --metric-good: #10b981;
+  --metric-warning: #f59e0b;
+  --metric-critical: #ef4444;
+
+  /* Crawl progress. antd's Progress builds its gradient in JS, so these two
+     are mirrored in `styles/tokens.ts` and held there by test. */
+  --progress-from: #00f2fe;
+  --progress-to: #4facfe;
 
   --sans: "Inter", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, monospace;
@@ -125,7 +260,7 @@
 }
 
 .rk-dash .rk-btn-primary:hover {
-  background: #cdeedb;
+  background: var(--btn-primary-bg-hover);
   border-color: var(--l3);
 }
 
@@ -1072,10 +1207,10 @@ svg.wires {
 .rk-boundary {
   margin: 10px;
   padding: 10px 12px;
-  border: 1px solid #f0b4b4;
+  border: 1px solid var(--danger-line);
   border-left-width: 3px;
   border-radius: 4px;
-  background: #fdeaea;
+  background: var(--danger-bg);
   color: var(--danger);
   font-size: 12px;
 }

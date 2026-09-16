@@ -11,8 +11,8 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  background: #f5f6f8;
-  color: #1d2635;
+  background: var(--bg);
+  color: var(--ink);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
@@ -24,26 +24,26 @@ body,
 }
 
 ::-webkit-scrollbar-track {
-  background: #eef1f5;
+  background: var(--line-faint);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c7cedb;
+  background: var(--scroll-thumb);
   border-radius: 5px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #a9b3c4;
+  background: var(--scroll-thumb-hover);
 }
 
 /* React Flow paints its own light background by default. */
 .react-flow__renderer,
 .react-flow__pane {
-  background: #f5f6f8;
+  background: var(--bg);
 }
 
 .react-flow__controls-button {
-  background: #ffffff;
-  border-bottom: 1px solid #e6e9ef;
-  fill: #5c6b83;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  fill: var(--dim);
 }

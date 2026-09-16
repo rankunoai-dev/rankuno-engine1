@@ -70,7 +70,7 @@ export function GscPerformanceSection({ pages }: Props) {
       {/* Index coverage gauge */}
       <div className="gsc-coverage">
         <div>
-          <div style={{ fontSize: "12px", color: "#8c8c8c", marginBottom: "4px" }}>
+          <div style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "4px" }}>
             Index Coverage
           </div>
           <div className="gsc-coverage-bar">
@@ -84,7 +84,7 @@ export function GscPerformanceSection({ pages }: Props) {
         </div>
         <div className="gsc-coverage-text">
           {coveragePct}%
-          <div style={{ fontSize: "11px", color: "#8c8c8c", marginTop: "2px" }}>
+          <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
             {metrics.indexed} of {metrics.indexed + metrics.notIndexed}
           </div>
         </div>
@@ -118,7 +118,7 @@ export function GscPerformanceSection({ pages }: Props) {
             <div key={page.url} className={`gsc-opp-item gsc-opp-item--${score.category}`}>
               <div>
                 <div className="gsc-opp-item-url">{new URL(page.url).pathname}</div>
-                <div style={{ fontSize: "11px", color: "#8c8c8c", marginTop: "2px" }}>
+                <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
                   {score.reason}
                 </div>
               </div>

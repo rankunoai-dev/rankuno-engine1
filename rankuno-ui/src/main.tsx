@@ -3,6 +3,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
+import { token } from "./styles/tokens";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root is missing from index.html");
@@ -19,29 +20,36 @@ ReactDOM.createRoot(root).render(
       stay readable inside it. Two themes, and a widening pile of code to
       reconcile them at the edges.
 
-      The tokens below are the design system's own variables, spelled out
-      because `ConfigProvider` takes values rather than `var()` references.
-      They must be kept in step with `:root` in `design-system.css`.
+      `ConfigProvider` takes values rather than `var()` references, so the
+      palette has to be spelled out a second time here. It used to be spelled
+      out as literals under a comment asking the next reader to keep them in
+      step with `:root` by hand. The values were in fact still correct; a
+      request is simply not a mechanism, and this is the one duplicate of the
+      palette that no reviewer can catch by reading either file alone.
+
+      `styles/tokens.ts` is the mirror, and `styles/tokens.test.ts` parses
+      `design-system.css` and fails if any value below stops matching the token
+      it is named by. The stylesheet remains the one place a colour is chosen.
     */}
     <ConfigProvider
       theme={{
         algorithm: theme.defaultAlgorithm,
         token: {
-          colorPrimary: "#1677ff",
-          colorInfo: "#1677ff",
-          colorBgBase: "#f5f6f8",
-          colorBgContainer: "#ffffff",
-          colorBgElevated: "#ffffff",
-          colorBorder: "#e6e9ef",
-          colorText: "#1d2635",
-          colorTextSecondary: "#5c6b83",
-          colorTextTertiary: "#98a4b8",
+          colorPrimary: token("--blue"),
+          colorInfo: token("--blue"),
+          colorBgBase: token("--bg"),
+          colorBgContainer: token("--panel"),
+          colorBgElevated: token("--panel"),
+          colorBorder: token("--line"),
+          colorText: token("--ink"),
+          colorTextSecondary: token("--dim"),
+          colorTextTertiary: token("--faint"),
           borderRadius: 8,
           fontSize: 13,
         },
         components: {
-          Tree: { nodeSelectedBg: "#e6f4ff", nodeHoverBg: "#f5f6f8" },
-          Drawer: { colorBgElevated: "#ffffff" },
+          Tree: { nodeSelectedBg: token("--blue-bg"), nodeHoverBg: token("--bg") },
+          Drawer: { colorBgElevated: token("--panel") },
         },
       }}
     >

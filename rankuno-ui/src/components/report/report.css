@@ -15,7 +15,7 @@
   top: 0;
   width: 190mm;
   font-family: "Inter", system-ui, sans-serif;
-  color: #1d2635;
+  color: var(--ink);
   font-size: 9pt;
   line-height: 1.45;
 }
@@ -25,7 +25,7 @@
   margin: 0 0 2mm;
 }
 .rep-sub {
-  color: #5c6b83;
+  color: var(--dim);
   font-size: 8.5pt;
   margin: 0 0 4mm;
 }
@@ -33,13 +33,13 @@
 .rk-report h2 {
   font-size: 11pt;
   margin: 6mm 0 2mm;
-  border-bottom: 1px solid #d3d9e3;
+  border-bottom: 1px solid var(--line2);
   padding-bottom: 1mm;
 }
 
 .rep-warn {
-  background: #fdf6de;
-  border-left: 3px solid #b8860b;
+  background: var(--l0bg);
+  border-left: 3px solid var(--warn);
   padding: 2mm 3mm;
   margin: 0 0 3mm;
   font-size: 8.5pt;
@@ -47,7 +47,7 @@
 
 .rep-note {
   font-size: 8.5pt;
-  color: #5c6b83;
+  color: var(--dim);
   margin: 0 0 3mm;
 }
 
@@ -59,7 +59,7 @@
 .rep-kpi th {
   text-align: left;
   font-weight: 500;
-  color: #5c6b83;
+  color: var(--dim);
   padding: 1.2mm 2mm 1.2mm 0;
   width: 22%;
 }
@@ -77,7 +77,7 @@
 }
 .rep-tree thead th {
   text-align: left;
-  border-bottom: 1px solid #1d2635;
+  border-bottom: 1px solid var(--ink);
   padding: 1mm 2mm 1mm 0;
   font-size: 7.5pt;
   text-transform: uppercase;
@@ -85,7 +85,7 @@
 }
 .rep-tree td {
   padding: 0.8mm 2mm 0.8mm 0;
-  border-bottom: 1px solid #eef1f5;
+  border-bottom: 1px solid var(--line-faint);
   vertical-align: top;
   word-break: break-word;
 }
@@ -98,19 +98,19 @@
   white-space: nowrap;
 }
 .rep-dim {
-  color: #98a4b8;
+  color: var(--faint);
 }
 .rep-flag {
-  color: #b8860b;
+  color: var(--warn);
   font-weight: 600;
 }
 
 .rep-foot {
   margin-top: 5mm;
   padding-top: 2mm;
-  border-top: 1px solid #d3d9e3;
+  border-top: 1px solid var(--line2);
   font-size: 7.5pt;
-  color: #98a4b8;
+  color: var(--faint);
 }
 
 @media print {
@@ -123,8 +123,8 @@
   #root {
     height: auto !important;
     overflow: visible !important;
-    background: #fff !important;
-    color: #1d2635 !important;
+    background: var(--panel) !important;
+    color: var(--ink) !important;
   }
 
   /* The app is a fixed-height flex shell with its own scrollers; printed as-is
