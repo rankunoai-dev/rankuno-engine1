@@ -4,7 +4,7 @@
   margin: 16px 0;
   padding: 16px;
   border: 1px solid var(--hairline);
-  border-radius: 4px;
+  border-radius: var(--radius);
   background: var(--surface-sunken);
 }
 
@@ -100,7 +100,7 @@
   display: flex;
   gap: 8px;
   padding: 8px 12px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   margin-bottom: 8px;
   background: var(--gsc-callout-bg);
@@ -139,7 +139,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   margin-bottom: 8px;
 }
@@ -160,7 +160,7 @@
   padding: 16px;
   background: var(--gsc-summary-bg);
   border: 1px solid var(--gsc-summary-line);
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 .gsc-summary-title {
@@ -208,14 +208,14 @@
   flex: 1;
   height: 8px;
   background: var(--hairline);
-  border-radius: 4px;
+  border-radius: var(--radius);
   overflow: hidden;
 }
 
 .gsc-coverage-fill {
   height: 100%;
   background: linear-gradient(90deg, var(--gsc-accent), var(--status-success));
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 .gsc-coverage-text {
@@ -232,7 +232,7 @@
 .gsc-alert-box {
   padding: 12px 16px;
   margin-bottom: 8px;
-  border-radius: 4px;
+  border-radius: var(--radius);
   border-left: 3px solid;
 }
 
@@ -273,7 +273,7 @@
   margin-bottom: 6px;
   background: var(--surface-sunken);
   border-left: 3px solid;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   display: flex;
   justify-content: space-between;
   font-size: 12px;

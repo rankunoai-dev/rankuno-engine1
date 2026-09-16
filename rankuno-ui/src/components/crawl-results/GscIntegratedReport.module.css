@@ -2,7 +2,7 @@
 
 .container {
   background: var(--color-surface);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 1.5rem;
   box-shadow: 0 1px 3px var(--color-shadow);
 }
@@ -34,11 +34,13 @@
   flex: 1;
   padding: 0.625rem 1rem;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 0.9rem;
   background: var(--color-input-bg);
   color: var(--color-text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Was a private system stack, so the one input on this screen rendered in a
+     different typeface from the rest of the app. */
+  font-family: var(--sans);
   transition: border-color 0.2s, background-color 0.2s;
 }
 
@@ -55,7 +57,7 @@
 .tableWrapper {
   overflow-x: auto;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius);
 }
 
 .table {
@@ -117,7 +119,7 @@
 .urlLink {
   color: var(--color-accent);
   text-decoration: none;
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-family: var(--mono);
   font-size: 0.8rem;
   transition: color 0.2s;
 }
@@ -148,7 +150,7 @@
 .tag {
   display: inline-block;
   padding: 0.25rem 0.5rem;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--color-bg);
   color: var(--color-text);
   font-size: 0.7rem;
@@ -221,6 +223,20 @@
  * with the rest of the palette; this component is the only one that follows the
  * OS scheme, so the dark half stays here with the selectors that switch it. The
  * literals below are token *definitions*, not a bypass of the token system.
+ *
+ * Five of the entries were added here, and only because the light values
+ * moved. A
+ * metric colour that clears 4.5:1 on #ffffff cannot also clear it on #0f172a —
+ * the two grounds are at opposite ends of the range — so darkening
+ * `--metric-*` and `--color-placeholder` for the light scheme would have made
+ * them unreadable here. These restore the values this block already implied.
+ * No new surface is themed and no new token is switched.
+ *
+ * `--color-accent` is the sixth and seventh, and they are a straight defect fix
+ * rather than a
+ * consequence: the URL link has been 2.83:1 on this ground since the block was
+ * written, and its hover 2.18:1, because both were chosen for white and never
+ * re-chosen here. `--metric-critical` is the same story at 3.89:1.
  */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
@@ -230,6 +246,12 @@
     --color-text: #f1f5f9;
     --color-text-muted: #94a3b8;
     --color-input-bg: #1e293b;
+    --color-placeholder: #94a3b8;
+    --metric-good: #10b981;
+    --metric-warning: #f59e0b;
+    --metric-critical: #f87171;
+    --color-accent: #60a5fa;
+    --color-accent-hover: #93c5fd;
   }
 }
 
@@ -240,4 +262,10 @@
   --color-text: #f1f5f9;
   --color-text-muted: #94a3b8;
   --color-input-bg: #1e293b;
+  --color-placeholder: #94a3b8;
+  --metric-good: #10b981;
+  --metric-warning: #f59e0b;
+  --metric-critical: #f87171;
+  --color-accent: #60a5fa;
+  --color-accent-hover: #93c5fd;
 }

@@ -13,7 +13,19 @@ body,
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Was a bare system stack, which meant everything rendered outside `.rk-dash`
+     — every antd modal, drawer, popconfirm and message — used a different
+     typeface from the app behind it. */
+  font-family: var(--sans);
+}
+
+/* The display face, on the two elements that are genuinely headings. Declared
+   unscoped and at element specificity so a component that sets its own family
+   still wins, and so headings inside antd overlays (which render outside
+   `.rk-dash`) are covered by the same rule. */
+h1,
+h2 {
+  font-family: var(--display);
 }
 
 /* The tree renders one long virtual list; a visible scrollbar makes it obvious
@@ -29,7 +41,7 @@ body,
 
 ::-webkit-scrollbar-thumb {
   background: var(--scroll-thumb);
-  border-radius: 5px;
+  border-radius: var(--radius);
 }
 
 ::-webkit-scrollbar-thumb:hover {

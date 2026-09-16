@@ -17,20 +17,20 @@
 }
 
 .tel-clock {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--mono);
   font-size: 13px;
   font-weight: 600;
 }
 
 .tel-rate {
   margin-left: auto;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--mono);
   font-size: 11px;
   color: var(--meta-text);
 }
 
 .tel-eta {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   color: var(--stream-eta);
   margin: 6px 0 2px;
@@ -47,10 +47,10 @@
   overflow-y: auto;
   background: var(--stream-bg);
   border: 1px solid var(--stream-line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 8px 10px;
   margin-bottom: 8px;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--mono);
   font-size: 10.5px;
   line-height: 1.75;
 }
@@ -71,8 +71,11 @@
   color: var(--stream-text-newest);
 }
 
+/* Inside the console, so it takes the console's own muted colour. It used to
+   take `--meta-text`, which is chosen against a white card and left this line
+   at 4.08:1 on near-black — the one line shown before any URL arrives. */
 .tel-idle {
-  color: var(--meta-text);
+  color: var(--stream-idle);
   opacity: 1;
 }
 

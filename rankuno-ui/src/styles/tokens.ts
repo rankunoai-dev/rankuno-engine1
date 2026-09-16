@@ -18,16 +18,30 @@
  */
 
 export const CSS_TOKENS = {
-  "--bg": "#f5f6f8",
+  "--bg": "#f5f5f6",
   "--panel": "#ffffff",
-  "--line": "#e6e9ef",
+  "--line": "#e6e6e6",
   "--ink": "#1d2635",
-  "--dim": "#5c6b83",
-  "--faint": "#98a4b8",
-  "--blue": "#1677ff",
-  "--blue-bg": "#e6f4ff",
-  "--progress-from": "#00f2fe",
-  "--progress-to": "#4facfe",
+  "--dim": "#595a5c",
+  "--faint": "#6e6e6e",
+  "--primary": "#df212a",
+  "--primary-hover": "#b3151d",
+  "--primary-bg": "#fdecec",
+  "--danger": "#b42318",
+  "--danger-bg": "#fdeaea",
+  "--danger-line": "#f0b4b4",
+  "--ok": "#14713f",
+  "--ok-bg": "#e8f5ec",
+  "--ok-line": "#a8d5b8",
+  "--warn": "#8a6300",
+  "--warn-bg": "#fffbe6",
+  "--warn-line": "#e6cf94",
+  "--progress-from": "#df212a",
+  "--progress-to": "#f37f5e",
+  // Not a colour, but the same problem: antd takes a font stack by value, and a
+  // second copy of it drifts exactly the way the palette did. The test below
+  // compares the raw declaration text, so this string is the stylesheet's.
+  "--sans": '"Montserrat", "Segoe UI", system-ui, -apple-system, sans-serif',
 } as const;
 
 export type CssTokenName = keyof typeof CSS_TOKENS;

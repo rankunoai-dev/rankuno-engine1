@@ -4,6 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Rankuno — Site Architecture Visualizer</title>
+    <!--
+      The brand faces, requested here rather than through an `@import` in
+      design-system.css so the fetch can start alongside the stylesheet instead
+      of after it.
+
+      rankuno.com's own tag asks for Montserrat 700 only, which is the display
+      weight; this UI is mostly 10-13px body text and needs 400/500/600 as well.
+      Asking for a weight that is not requested is what makes a browser
+      synthesise a fake bold, so the weights here are the weights the
+      stylesheets actually set. JetBrains Mono stays for the monospace token.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&family=Roboto+Slab:wght@700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    />
   </head>
   <body>
     <div id="root"></div>

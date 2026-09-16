@@ -35,8 +35,27 @@ ReactDOM.createRoot(root).render(
       theme={{
         algorithm: theme.defaultAlgorithm,
         token: {
-          colorPrimary: token("--blue"),
-          colorInfo: token("--blue"),
+          colorPrimary: token("--primary"),
+          // antd derives its own hover from `colorPrimary` by lightening it,
+          // which on a fill carrying white text moves the wrong way: #df212a is
+          // 4.79:1 under white and anything lighter drops below AA. Both states
+          // are pinned to darker shades instead.
+          colorPrimaryHover: token("--primary-hover"),
+          colorPrimaryActive: token("--primary-hover"),
+          colorInfo: token("--primary"),
+          // Seeds, and antd generates a ten-step ramp from each. The seeds have
+          // to be dark enough to pass as text, which makes the pale end of the
+          // generated ramp muddy rather than pale, so the three surfaces antd
+          // takes off that end are pinned instead of derived.
+          colorError: token("--danger"),
+          colorErrorBg: token("--danger-bg"),
+          colorErrorBorder: token("--danger-line"),
+          colorSuccess: token("--ok"),
+          colorSuccessBg: token("--ok-bg"),
+          colorSuccessBorder: token("--ok-line"),
+          colorWarning: token("--warn"),
+          colorWarningBg: token("--warn-bg"),
+          colorWarningBorder: token("--warn-line"),
           colorBgBase: token("--bg"),
           colorBgContainer: token("--panel"),
           colorBgElevated: token("--panel"),
@@ -44,11 +63,12 @@ ReactDOM.createRoot(root).render(
           colorText: token("--ink"),
           colorTextSecondary: token("--dim"),
           colorTextTertiary: token("--faint"),
-          borderRadius: 8,
+          borderRadius: 4,
+          fontFamily: token("--sans"),
           fontSize: 13,
         },
         components: {
-          Tree: { nodeSelectedBg: token("--blue-bg"), nodeHoverBg: token("--bg") },
+          Tree: { nodeSelectedBg: token("--primary-bg"), nodeHoverBg: token("--bg") },
           Drawer: { colorBgElevated: token("--panel") },
         },
       }}

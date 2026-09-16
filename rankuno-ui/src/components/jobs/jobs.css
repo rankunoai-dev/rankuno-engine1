@@ -82,6 +82,11 @@
   color: var(--dim);
 }
 
+.jb-status-detail {
+  font-size: 11px;
+  color: var(--dim);
+}
+
 .jb-progress {
   display: flex;
   flex-direction: column;
@@ -175,8 +180,8 @@
 }
 
 .jb-stat {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
+  border: 1px solid var(--overlay-line);
+  border-radius: var(--radius);
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
@@ -198,10 +203,10 @@
 /* The two numbers an analyst is actually looking for. Coloured because the
    other two are context and these are the finding. */
 .jb-stat-bad .jb-stat-v {
-  color: #ff7875;
+  color: var(--status-critical-soft);
 }
 .jb-stat-warn .jb-stat-v {
-  color: #ffc53d;
+  color: var(--status-warning-soft);
 }
 
 .jb-gap-h {
@@ -218,10 +223,10 @@
 .jb-stat-dl {
   margin-top: 6px;
   align-self: flex-start;
-  border: 1px solid #34d399;
-  border-radius: 4px;
-  background: #0e3a2f;
-  color: #a7f3d0;
+  border: 1px solid var(--export-line);
+  border-radius: var(--radius);
+  background: var(--export-bg);
+  color: var(--export-text);
   font-size: 10.5px;
   font-weight: 600;
   padding: 2px 8px;
@@ -230,8 +235,8 @@
 }
 
 .jb-stat-dl:hover {
-  background: #14523f;
-  border-color: #6ee7b7;
+  background: var(--export-bg-hover);
+  border-color: var(--export-line-hover);
 }
 
 /* Beside a section heading rather than inside a tile. */
@@ -263,12 +268,12 @@
   display: inline-block;
   margin-top: 14px;
   font-size: 12px;
-  color: #7dd3fc;
+  color: var(--accent-soft);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 .jb-download:hover {
-  color: #bae6fd;
+  color: var(--accent-soft-hover);
 }
 
 /* --- Search Console panel -------------------------------------------------
@@ -344,18 +349,19 @@
    browser saves the file and the app never holds a copy. */
 .perf-download {
   display: inline-block;
-  border: 1px solid var(--l3f);
-  border-radius: 6px;
-  background: var(--l3bg);
-  color: var(--l3);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  background: var(--primary);
+  color: #fff;
   font-size: 12px;
   font-weight: 600;
   padding: 4px 12px;
   text-decoration: none;
 }
 .perf-download:hover {
-  background: #cdeedb;
-  color: var(--l3);
+  background: var(--btn-primary-bg-hover);
+  border-color: var(--btn-primary-bg-hover);
+  color: #fff;
 }
 
 /* Section-level download. Same affordance as the whole-report button, sized to
@@ -389,25 +395,31 @@
 }
 
 /* The unmatched half, deliberately quieter: it is the diagnostic, not the
-   deliverable. */
+   deliverable. Now genuinely quieter, which it had not been: this rule and
+   `.jb-download-muted` below both asked for `var(--jb-dim)`, and nothing has
+   ever defined `--jb-dim`. The author meant the `.jb-dim` CLASS above, which
+   uses `var(--dim)`; a custom property that does not exist is invalid at
+   computed-value time, so `color` fell back to `inherit` and the muted control
+   came out the same colour as the text beside it. Resolved to `--dim`, the
+   value the class it was named after has always used. */
 .perf-download-muted {
   background: transparent;
-  border-color: rgba(255, 255, 255, 0.22);
-  color: var(--jb-dim);
+  border-color: var(--overlay-line-strong);
+  color: var(--dim);
 }
 .perf-download-muted:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: #e2e8f0;
+  background: var(--overlay-bg);
+  color: var(--btn-muted-text-hover);
 }
 
 /* The secondary download. Quieter, because the workbook is the one to hand
    somebody and the flat CSV is for feeding another tool. */
 .jb-download-muted {
   margin-left: 14px;
-  color: var(--jb-dim);
+  color: var(--dim);
 }
 .jb-download-muted:hover {
-  color: #cbd5e1;
+  color: var(--link-muted-hover);
 }
 
 /* Two ways to take the recommendations away: the workbook, which is the one to

@@ -12,19 +12,71 @@
  * outlived it.)
  */
 
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+/*
+ * Phase B of the rebrand sets the VALUES phase A centralised. The webfonts moved
+ * from an `@import` here to a `<link rel="preconnect">` pair in `index.html`:
+ * an `@import` inside a stylesheet cannot begin its own fetch until this file
+ * has itself downloaded and parsed, which serialises two round trips and shows
+ * the fallback stack for the whole of the second one.
+ */
 
 :root {
-  --bg: #f5f6f8;
+  /* Neutral ground. rankuno.com is a neutral grey ramp under a single red; the
+     previous ramp was blue-grey (#f5f6f8 / #5c6b83 / #98a4b8), which reads cool
+     against a warm red and made the brand look like a graft. */
+  --bg: #f5f5f6;
   --panel: #ffffff;
-  --line: #e6e9ef;
-  --line2: #d3d9e3;
+  --line: #e6e6e6;
+  --line2: #dcdcdc;
   --ink: #1d2635;
-  --dim: #5c6b83;
-  --faint: #98a4b8;
+  --dim: #595a5c;
+  /* Was #98a4b8 — 2.52:1 on white. It carries the counts, timestamps and
+     column headers, which is a great deal of the screen's actual information
+     to hold below the readable threshold. */
+  --faint: #6e6e6e;
 
-  --blue: #1677ff;
-  --blue-bg: #e6f4ff;
+  /* ── Brand ──────────────────────────────────────────────────────────────
+     `--primary` is a FILL and only a fill. White on it is 4.79:1 (AA); the
+     same red as text on `--bg` is 4.39:1, which is not. Red text therefore
+     has its own darker token, and the two are not interchangeable however
+     alike they look in a swatch.
+
+     `--primary-ink` is also held a shade off `--danger` on purpose. Two reds
+     that differ only in hue are indistinguishable (WCAG 1.4.1), so the load is
+     carried by form instead: a brand link is underlined, an error sits in a
+     bordered `--danger-bg` box, and the primary button is filled while the
+     destructive one is not. */
+  --primary: #df212a;
+  --primary-hover: #b3151d;
+  --primary-bg: #fdecec;
+  --primary-ink: #c01a22;
+
+  /* The brand's accent coral, #f37f5e, is deliberately NOT a token here. It is
+     2.62:1 on white, so it can only ever be a fill, and the UI has exactly one
+     fill for it — the crawl-progress gradient, which is `--progress-to` further
+     down. A `--coral` token would be an appearance name for a colour with one
+     role that already has a role name, which is the habit the header of this
+     block exists to prevent. Its darker, text-safe relatives are
+     `--status-caution` and `--primary-ink`.
+
+     The navigation rail is dark rather than red. White on #1d2635 is 15.21:1
+     against 4.79:1 for white on the brand red, and the rail is the one surface
+     that is on screen in every view; the red is spent on the active-item
+     indicator, where being the only saturated thing on a dark column is what
+     makes it findable. */
+  --rail-bg: #1d2635;
+  --rail-bg-hover: #2a3547;
+  --rail-line: #2f3b4f;
+  --rail-text: #c3cbd9;
+  --rail-text-strong: #ffffff;
+  --rail-active-bg: #df212a;
+  --rail-active-text: #ffffff;
+
+  /* rankuno.com rounds at 4px and almost nowhere else. `--radius-pill` is a
+     shape rather than a step on that scale, which is why it is not 4px. */
+  --radius: 4px;
+  --radius-sm: 3px;
+  --radius-pill: 999px;
 
   /* One ramp per navigation depth, plus OTHERS. `f` = fill, `bg` = chip
      background, `band` = swimlane background. */
@@ -49,9 +101,26 @@
   --othbg: #e9edf2;
   --othband: #e7ebf1;
 
-  --ok: #188a4f;
-  --warn: #b8860b;
+  /* Status. `--ok` and `--warn` happened to hold the same literals as `--l3`
+     and `--l0`; they are separate tokens and only the status ones move here.
+     Both were below 4.5:1 on white (4.39 and 3.58) and `--ok` was 3.8:1 on the
+     `--l3bg` chip it is most often drawn on. */
+  --ok: #14713f;
+  --warn: #8a6300;
   --danger: #b42318;
+
+  /* The tinted surface and rule that go with each of the three above.
+     antd needs these spelled out rather than derived. `ConfigProvider` treats
+     `colorSuccess`/`colorWarning`/`colorError` as SEED hues and generates a
+     ten-step ramp from each, taking the alert and tag backgrounds off the pale
+     end. Seeding it with a colour dark enough to pass as text produces a
+     desaturated ramp instead of a pale one: the "no header menu could be
+     parsed" banner came out on #c9c7b5, a mid khaki slab across the top of the
+     visualizer. `--danger-bg`/`--danger-line` already existed for the error
+     boundary and are reused; the other four are their missing counterparts. */
+  --ok-bg: #e8f5ec;
+  --ok-line: #a8d5b8;
+  --warn-bg: #fffbe6;
 
   /* ====================================================================
      Extracted from the component stylesheets, each at the exact value that
@@ -71,9 +140,9 @@
 
   /* Rules, and the scrollbar drawn from the same family. Lighter than
      --line, which is lighter than --line2. */
-  --line-faint: #eef1f5;
-  --scroll-thumb: #c7cedb;
-  --scroll-thumb-hover: #a9b3c4;
+  --line-faint: #eeeeee;
+  --scroll-thumb: #c9c9c9;
+  --scroll-thumb-hover: #a6a6a6;
 
   /* The surface and rule that carry --danger: the error boundary, and the
      audit caveat that uses the same treatment. */
@@ -83,34 +152,42 @@
   --warn-line: #e6cf94;
 
   /* Hover ground for the primary button, and for the download link shaped
-     like one. */
-  --btn-primary-bg-hover: #cdeedb;
+     like one. The primary button is a solid brand fill now, so its hover is a
+     darker fill rather than a paler one — white has to keep reading on it. */
+  --btn-primary-bg-hover: #b3151d;
 
   /* Supporting detail — the "+ N more" line, a hint, a rate readout. */
-  --meta-text: #64748b;
+  --meta-text: #6e6e6e;
 
-  /* Secondary accent: a label or a link that must not compete with the
-     primary action. These are pale blues left over from when antd ran its
-     dark algorithm, and they now sit on white. Preserved exactly; the
-     contrast is a value question, not a structural one. */
-  --accent-soft: #7dd3fc;
-  --accent-soft-hover: #bae6fd;
-  --accent-pale: #bfdbfe;
+  /* Secondary accent: a label or a link that must not compete with the primary
+     action. These were pale blues left over from when antd ran its dark
+     algorithm and were never re-chosen when the app went light, so they sat on
+     white at 1.42:1 and 1.67:1 — the audit card's whole "Action:" line was
+     effectively blank. The role is unchanged; only the values are readable. */
+  --accent-soft: #c01a22;
+  --accent-soft-hover: #8f1017;
+  --accent-pale: #333f52;
 
-  /* The per-figure export control. Same dark-algorithm ancestry. */
-  --export-line: #34d399;
-  --export-line-hover: #6ee7b7;
-  --export-bg: #0e3a2f;
-  --export-bg-hover: #14523f;
-  --export-text: #a7f3d0;
+  /* The per-figure export control. Same dark-algorithm ancestry: a dark green
+     slab on what is now a white card. Recast as the outlined secondary it
+     always meant to be, one step below the filled section download beside it,
+     so the two read as a hierarchy rather than as two unrelated buttons. */
+  --export-line: #8c8c8c;
+  --export-line-hover: #df212a;
+  --export-bg: #ffffff;
+  --export-bg-hover: #fdecec;
+  --export-text: #c01a22;
 
-  /* Controls held deliberately quiet, drawn as white overlays because they
-     were once drawn on a dark ground. */
-  --overlay-bg: rgba(255, 255, 255, 0.06);
-  --overlay-line: rgba(255, 255, 255, 0.12);
-  --overlay-line-strong: rgba(255, 255, 255, 0.22);
-  --btn-muted-text-hover: #e2e8f0;
-  --link-muted-hover: #cbd5e1;
+  /* Controls held deliberately quiet. These were white at 6-22% alpha because
+     they were once drawn on a dark ground; composited over white they resolved
+     to #fafafa, #fcfcfc and #f8f8f8, so the muted download button had a border
+     at 1.03:1 — a control with no edge at all. Quiet now means grey, not
+     absent. */
+  --overlay-bg: #f0f0f0;
+  --overlay-line: #dcdcdc;
+  --overlay-line-strong: #8c8c8c;
+  --btn-muted-text-hover: #1d2635;
+  --link-muted-hover: #8f1017;
 
   /* Live crawl telemetry. A console, so it keeps a dark ground of its own
      inside an otherwise light app. */
@@ -121,38 +198,55 @@
   --stream-eta: #0e8296;
   --stream-pulse: rgba(111, 240, 166, 0.6);
   --stream-pulse-fade: rgba(111, 240, 166, 0);
+  /* The "waiting for the first page…" line. It lives inside the console, so it
+     needs the console's ground: it used to borrow `--meta-text`, which is
+     chosen for a light surface and left this at 4.08:1 on near-black. */
+  --stream-idle: #8b97a8;
 
   /* Status. A second, brighter set than --ok/--warn/--danger above: the
      Search Console and account surfaces were built against antd's status
      palette rather than this file's. `-soft` is the lower-emphasis partner
-     of the base; `-ink` is text drawn on the matching `-bg`. */
-  --status-success: #52c41a;
-  --status-warning: #faad14;
-  --status-warning-soft: #ffc53d;
+     of the base; `-ink` is text drawn on the matching `-bg`.
+
+     Every one of these was antd's screen-bright value and every one of them is
+     drawn as TEXT somewhere — a GSC position, a gap count, an error line. On
+     white they ran from 1.9:1 to 3.2:1. Darkened to the point where each still
+     reads as its own hue but clears 4.5:1 on white, on `--surface-sunken` and
+     on its own tinted `-bg`. */
+  --status-success: #2e7d12;
+  --status-warning: #8c6100;
+  --status-warning-soft: #9a6f00;
   --status-warning-bg: #fffbe6;
-  --status-warning-ink: #ad6800;
-  --status-caution: #ff7a45;
-  --status-critical: #ff4d4f;
-  --status-critical-soft: #ff7875;
+  --status-warning-ink: #8c6300;
+  --status-caution: #a94f2b;
+  --status-critical: #b42318;
+  --status-critical-soft: #bd2b23;
   --status-critical-bg: #fff1f0;
-  --status-critical-line: #ffccc7;
+  --status-critical-line: #f0b4b4;
 
   /* Neutrals for those same surfaces — a second ramp beside --ink/--dim/
      --faint and --line/--line2. */
   --text-strong: #1f1f1f;
   --text-secondary: #595959;
-  --text-muted: #8c8c8c;
+  /* Was #8c8c8c — 3.36:1 on white and 3.09:1 on `--surface-sunken`, which is
+     where it is actually used. It labels every metric in the GSC cards. */
+  --text-muted: #6e6e6e;
   --surface-sunken: #fafafa;
-  --surface-hover: #f5f5f5;
-  --hairline: #f0f0f0;
-  --hairline-strong: #d9d9d9;
+  --surface-hover: #f2f2f2;
+  --hairline: #eeeeee;
+  --hairline-strong: #dcdcdc;
 
-  /* Search Console accent: a third blue, one antd major version behind
-     --blue. */
-  --gsc-accent: #1890ff;
+  /* Search Console accent. Deliberately NOT rebranded to red, and this is the
+     one place the brand is turned down on purpose: red is now the primary
+     action and, at `--danger`, the error. An informational callout drawn in the
+     same family as an error is a colour that means two things, which is the
+     failure mode WCAG 1.4.1 is about. The blue stays and marks "this is the
+     Search Console's data"; it is darkened from #1890ff, which was 3.24:1 on
+     white and titled every GSC panel. */
+  --gsc-accent: #0c66c4;
   --gsc-accent-ink: #0050b3;
   --gsc-info-bg: #e6f7ff;
-  --gsc-callout-bg: #f6f8fb;
+  --gsc-callout-bg: #f6f7f9;
   --gsc-summary-bg: #f0f5ff;
   --gsc-summary-line: #d6e4ff;
 
@@ -166,28 +260,38 @@
   --color-surface: #ffffff;
   --color-bg: #f8f9fa;
   --color-input-bg: #f8f9fa;
-  --color-border: #e0e4e8;
+  --color-border: #e0e0e0;
   --color-text: #1a202c;
   --color-text-muted: #64748b;
-  /* Not theme-switched, and not folded into --color-text-muted: the
-     placeholder was written with a different fallback from every other
-     reader of that variable, and resolved to #94a3b8 in both schemes.
-     Defining --color-text-muted here would have silently darkened it. */
-  --color-placeholder: #94a3b8;
+  /* Not folded into --color-text-muted: the placeholder was written with a
+     different fallback from every other reader of that variable and resolved
+     to #94a3b8 in both schemes, so defining --color-text-muted here would have
+     silently darkened it. The light value below is darkened deliberately —
+     #94a3b8 on the input's #f8f9fa ground is 2.44:1 — and the component's dark
+     block now restores #94a3b8 for the scheme where it was the right one. */
+  --color-placeholder: #6e6e6e;
   --color-accent: #2563eb;
   --color-accent-hover: #1d4ed8;
   --color-shadow: rgba(0, 0, 0, 0.1);
-  --metric-good: #10b981;
-  --metric-warning: #f59e0b;
-  --metric-critical: #ef4444;
+  /* These four are the light values of tokens the component also reassigns
+     under `prefers-color-scheme: dark`. Darkening them for the light scheme
+     necessarily breaks the dark one — no single value clears 4.5:1 against both
+     #ffffff and #0f172a — so the component's dark block gained a matching entry
+     for each. That is not new dark theming; it is the cost of touching a token
+     that was already theme-switchable. */
+  --metric-good: #0a7350;
+  --metric-warning: #8f5d06;
+  --metric-critical: #c0362f;
 
   /* Crawl progress. antd's Progress builds its gradient in JS, so these two
-     are mirrored in `styles/tokens.ts` and held there by test. */
-  --progress-from: #00f2fe;
-  --progress-to: #4facfe;
+     are mirrored in `styles/tokens.ts` and held there by test. Brand red into
+     the accent coral: a bar is a fill, which is the only thing coral may be. */
+  --progress-from: #df212a;
+  --progress-to: #f37f5e;
 
-  --sans: "Inter", system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --sans: "Montserrat", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --display: "Roboto Slab", Georgia, "Times New Roman", serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .rk-dash {
@@ -201,7 +305,32 @@
   overflow: hidden;
 }
 
-.rk-dash button {
+/*
+ * The reset for the app's OWN buttons, which are styled from scratch below.
+ *
+ * `:not([class*="ant-"])` is new, and it is the reason this phase's brand red
+ * reaches a button at all. The reset is specificity (0,1,1); antd 5 wraps its
+ * own hash in `:where()` precisely so that its rules stay at (0,1,0), so
+ * `.ant-btn-primary` lost to this and every antd button in the app rendered
+ * with no background, no border and inherited text. `type="primary"` was
+ * indistinguishable from a paragraph — "Add Account" on the GSC screen was a
+ * word, and `ConfigProvider`'s `colorPrimary` had nothing to paint.
+ *
+ * The comment below records three rounds of the app's own buttons going
+ * invisible to this same rule. antd's were a fourth, unnoticed because nobody
+ * compared them against an antd screenshot. The reset was only ever meant for
+ * hand-styled buttons, so it now says so.
+ *
+ * The `:where()` inside the `:not()` is load-bearing and not decoration.
+ * `:not()` takes the specificity of its argument, so a bare
+ * `:not([class*="ant-"])` would raise this rule to (0,2,1) and it would start
+ * beating `.rk-dash .rit` and `.rk-dash .rk-btn` at (0,2,0) — which is round
+ * five of the same bug, and it is what the first attempt at this actually did:
+ * the rail labels went dark-on-dark and the audit card's controls lost their
+ * borders again. `:where()` contributes zero, so this stays at (0,1,1), exactly
+ * where it was.
+ */
+.rk-dash button:not(:where([class*="ant-"])) {
   font-family: inherit;
   cursor: pointer;
   background: none;
@@ -227,7 +356,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border-radius: 5px;
+  border-radius: var(--radius);
   /* The design system's own tokens. These were literal dark colours while the
      audit cards and jobs table drew dark surfaces of their own; both are white
      now, so a dark button on them was the invisibility problem inverted. */
@@ -243,7 +372,7 @@
 
 .rk-dash .rk-btn:hover {
   background: var(--bg);
-  border-color: var(--blue);
+  border-color: var(--primary);
   color: var(--ink);
 }
 
@@ -252,16 +381,24 @@
   cursor: not-allowed;
 }
 
-/* One primary per group. The action the analyst came to this card to take. */
+/* One primary per group. The action the analyst came to this card to take.
+   Filled, and filled is the point: a destructive control is drawn outlined or
+   as bare text, so the two are told apart by shape before anyone has to judge
+   which of two reds they are looking at.
+
+   It used to borrow `--l3bg`/`--l3f`/`--l3` — the depth-3 hierarchy ramp — for
+   a green button. Those tokens are data and cannot be rebranded, so the borrow
+   had to be undone here rather than at the token. */
 .rk-dash .rk-btn-primary {
-  background: var(--l3bg);
-  border-color: var(--l3f);
-  color: var(--l3);
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
 }
 
 .rk-dash .rk-btn-primary:hover {
   background: var(--btn-primary-bg-hover);
-  border-color: var(--l3);
+  border-color: var(--btn-primary-bg-hover);
+  color: #fff;
 }
 
 .rk-dash .rk-btn-quiet {
@@ -278,44 +415,56 @@
 }
 
 .rk-dash :focus-visible {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
 /* ===== icon rail ===== */
+/* Dark, not red. The rail is the only surface present in every view, so it is
+   what makes the app look like itself; white on #1d2635 is 15.21:1 where white
+   on the brand red is 4.79:1, and the brief's requirement was maximum
+   legibility rather than maximum red. The red is spent on one thing — which
+   item is active — and is the only saturated colour in the column, which is
+   what makes it findable without reading. */
 .rail {
   width: 72px;
   flex: none;
-  background: var(--panel);
-  border-right: 1px solid var(--line);
+  background: var(--rail-bg);
+  border-right: 1px solid var(--rail-line);
   display: flex;
   flex-direction: column;
   align-items: center;
   padding: 12px 0;
   gap: 4px;
 }
+/* The brand wordmark is a white PNG on rankuno.com, which is why the rail has
+   to be dark for it at all. Wiring it up means committing a binary this change
+   has no way to fetch, so the existing 'R' stands in — on the dark ground and
+   in the brand red, so dropping the real mark in later is a one-line swap
+   rather than a re-layout. */
 .rail .mark {
   width: 34px;
   height: 34px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, var(--l2f), var(--l1f));
+  border-radius: var(--radius);
+  background: var(--primary);
   display: grid;
   place-items: center;
   color: #fff;
-  font-weight: 800;
-  font-size: 15px;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 17px;
   margin-bottom: 14px;
 }
 /* Scoped for the same reason as `.gn` above: `color` here loses to the reset. */
 .rk-dash .rit {
   width: 60px;
   padding: 9px 0 7px;
-  border-radius: 9px;
+  border-radius: var(--radius);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  color: var(--dim);
+  color: var(--rail-text);
   font-size: 10px;
   font-weight: 500;
 }
@@ -328,19 +477,28 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+/* Hover raises the label to full white as well as lifting the ground: at 10px
+   the ground alone is a subtle cue, and `.rit.on` below is declared later at
+   equal specificity, so the active item keeps its own treatment while hovered
+   rather than flickering between two. */
 .rit:hover {
-  background: var(--bg);
+  background: var(--rail-bg-hover);
+  color: var(--rail-text-strong);
 }
 .rit.on {
-  background: var(--blue-bg);
-  color: var(--blue);
+  background: var(--rail-active-bg);
+  color: var(--rail-active-text);
 }
 .rit:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
+/* A disabled item must not take the hover treatment above, colour included —
+   brightening the label of a control that cannot be used is the same lie as
+   giving it a hover ground. */
 .rit:disabled:hover {
   background: none;
+  color: var(--rail-text);
 }
 
 /* Running-crawl count. Anchored to the rail item, which needed a positioning
@@ -355,9 +513,12 @@
   min-width: 15px;
   height: 15px;
   padding: 0 4px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--ok);
-  color: #04150c;
+  /* Was near-black on a mid green. `--ok` darkened to clear 4.5:1 as text
+     elsewhere, and dark-on-dark would have taken the count with it; the badge
+     reads as a count, so the count is the part that has to survive. */
+  color: #fff;
   font-size: 9.5px;
   font-weight: 800;
   line-height: 15px;
@@ -453,12 +614,12 @@
   align-items: center;
   gap: 9px;
   padding: 4px 6px 4px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--blue);
-  background: var(--blue-bg);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--primary);
+  background: var(--primary-bg);
   font-family: var(--mono);
   font-size: 10.5px;
-  color: var(--blue);
+  color: var(--primary-ink);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -469,7 +630,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--blue);
+  background: var(--primary);
   flex: none;
   animation: bgpill-pulse 1.4s ease-in-out infinite;
 }
@@ -504,15 +665,15 @@
 /* A second and third crawl are counted rather than drawn. */
 .bgpill-more {
   padding: 0 5px;
-  border-radius: 7px;
-  background: var(--blue);
+  border-radius: var(--radius);
+  background: var(--primary);
   color: var(--panel);
   font-weight: 700;
 }
 .bgpill-cta {
   padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--blue);
+  border-radius: var(--radius-pill);
+  background: var(--primary);
   color: var(--panel);
   font-weight: 700;
 }
@@ -537,7 +698,7 @@
   font-size: 10.5px;
   color: var(--ok);
   background: var(--l3bg);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 4px 10px;
 }
 .perf.stale {
@@ -564,7 +725,7 @@
 .kpi {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 10px 14px;
 }
 .kpi .lab {
@@ -599,7 +760,7 @@
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -633,7 +794,7 @@
 .search input {
   width: 100%;
   border: 1px solid var(--line2);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 7px 10px 7px 30px;
   font: inherit;
   font-size: 12.5px;
@@ -655,7 +816,7 @@
   right: 0;
   background: var(--panel);
   border: 1px solid var(--line2);
-  border-radius: 9px;
+  border-radius: var(--radius);
   box-shadow: 0 10px 28px rgba(29, 38, 53, 0.16);
   max-height: 300px;
   overflow: auto;
@@ -710,7 +871,7 @@
 }
 .fchip {
   border: 1px solid var(--line2);
-  border-radius: 14px;
+  border-radius: var(--radius-pill);
   padding: 2px 9px;
   font-size: 10.5px;
   font-weight: 600;
@@ -723,7 +884,7 @@
 .fchip i {
   width: 7px;
   height: 7px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--line2);
 }
 .fchip.on {
@@ -740,8 +901,8 @@
 .fchip.on.f3 i { background: var(--l3f); }
 .fchip.on.fo { background: var(--othbg); color: var(--oth); }
 .fchip.on.fo i { background: var(--othf); }
-.fchip.on.fr { background: var(--blue-bg); color: var(--blue); }
-.fchip.on.fr i { background: var(--blue); }
+.fchip.on.fr { background: var(--primary-bg); color: var(--primary-ink); }
+.fchip.on.fr i { background: var(--primary); }
 
 /* ===== virtualized tree ===== */
 .vtree {
@@ -789,7 +950,7 @@
   font-size: 8.5px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   flex: none;
   color: #fff;
 }
@@ -813,7 +974,7 @@
 }
 .tlink:hover,
 .tlink:focus-visible {
-  color: var(--l1f);
+  color: var(--primary-ink);
   text-decoration: underline;
 }
 
@@ -827,7 +988,7 @@
   font-size: 8.5px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   flex: none;
   border: 1px solid currentColor;
   background: transparent;
@@ -852,7 +1013,7 @@
   margin-top: 5px;
   font-family: var(--mono);
   font-size: 10.5px;
-  color: #94a3b8;
+  color: var(--faint);
   overflow-wrap: anywhere;
 }
 /* Whole-branch expand/collapse. Held at opacity 0 rather than display:none so
@@ -872,7 +1033,7 @@
   opacity: 1;
 }
 .tbranch:hover {
-  color: var(--l1f);
+  color: var(--primary-ink);
 }
 
 .tcnt {
@@ -917,7 +1078,7 @@
   gap: 5px;
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: var(--radius-pill);
   padding: 2px 10px;
   cursor: pointer;
   font-weight: 600;
@@ -935,8 +1096,8 @@
   min-height: 280px;
   overflow: hidden;
   background:
-    radial-gradient(circle at 1px 1px, #e4e8ef 1px, transparent 0) 0 0 / 20px 20px,
-    #fbfcfe;
+    radial-gradient(circle at 1px 1px, #e3e3e4 1px, transparent 0) 0 0 / 20px 20px,
+    #fbfbfc;
   border-bottom: 1px solid var(--line);
 }
 .lanes {
@@ -948,7 +1109,7 @@
 }
 .lane {
   flex: 1;
-  border-radius: 8px;
+  border-radius: var(--radius);
   display: flex;
   /* `min-height` is animated too: the expanded lane is sized in JS from the
      number of card rows it holds, and without this it snaps while the others
@@ -967,7 +1128,7 @@
 .lane .tab {
   width: 30px;
   flex: none;
-  border-radius: 8px 0 0 8px;
+  border-radius: var(--radius) 0 0 var(--radius);
   display: grid;
   place-items: center;
   color: #fff;
@@ -980,7 +1141,7 @@
 }
 .lane .band {
   flex: 1;
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
 }
 .ln0 .tab { background: var(--l0f); color: #4d3703; }
 .ln0 .band { background: var(--l0band); }
@@ -1012,7 +1173,7 @@ svg.wires {
   opacity: 0.3;
 }
 .wire.hot {
-  stroke: var(--l1f);
+  stroke: var(--primary);
   stroke-width: 2;
   opacity: 1;
 }
@@ -1027,7 +1188,7 @@ svg.wires {
   transform: translate(-50%, -50%);
   background: #fff;
   border: 1.5px solid;
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 4px 9px;
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(29, 38, 53, 0.08);
@@ -1065,7 +1226,7 @@ svg.wires {
 .rk-dash .go { border-color: var(--othf); background: var(--othbg); }
 .gn.sel {
   box-shadow:
-    0 0 0 3px rgba(160, 110, 245, 0.35),
+    0 0 0 3px rgba(223, 33, 42, 0.35),
     0 2px 6px rgba(29, 38, 53, 0.12);
 }
 .gn.pager {
@@ -1084,7 +1245,7 @@ svg.wires {
   z-index: 4;
   background: #fff;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 5px 10px;
   font-family: var(--mono);
   font-size: 9.5px;
@@ -1167,7 +1328,7 @@ svg.wires {
   align-items: center;
   gap: 8px;
   padding: 3.5px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 11px;
   margin-bottom: 3px;
   background: var(--bg);
@@ -1184,7 +1345,7 @@ svg.wires {
   background: var(--l3bg);
 }
 .step.hit .res {
-  color: var(--l3);
+  color: var(--ok);
   font-weight: 600;
 }
 .step.unavailable b,
@@ -1209,7 +1370,7 @@ svg.wires {
   padding: 10px 12px;
   border: 1px solid var(--danger-line);
   border-left-width: 3px;
-  border-radius: 4px;
+  border-radius: var(--radius);
   background: var(--danger-bg);
   color: var(--danger);
   font-size: 12px;

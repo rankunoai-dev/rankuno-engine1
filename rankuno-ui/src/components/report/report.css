@@ -14,7 +14,7 @@
   left: -10000px;
   top: 0;
   width: 190mm;
-  font-family: "Inter", system-ui, sans-serif;
+  font-family: var(--sans);
   color: var(--ink);
   font-size: 9pt;
   line-height: 1.45;
@@ -64,7 +64,7 @@
   width: 22%;
 }
 .rep-kpi td {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--mono);
   font-weight: 600;
   padding: 1.2mm 4mm 1.2mm 0;
   width: 28%;
@@ -94,7 +94,7 @@
 .rep-tree td:nth-child(4),
 .rep-tree td:nth-child(5),
 .rep-tree td:nth-child(6) {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--mono);
   white-space: nowrap;
 }
 .rep-dim {
