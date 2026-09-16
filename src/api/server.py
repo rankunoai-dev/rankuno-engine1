@@ -70,12 +70,14 @@ from pydantic import Field, SecretStr, ValidationError
 
 from src.api.auth import build_auth_router, org_scoped_or_404, require_principal
 from src.api.deliverables_routes import build_deliverables_router
+from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password
 from src.core.config import Settings, get_settings
 from src.core.errors import UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.logger import get_logger
+from src.core.postgres_worker_dispatch_store import PostgresWorkerDispatchStore
 from src.core.process_supervisor import ProcessSupervisorUnavailableError, reconcile_orphans
 from src.core.rate_limiter import RateLimiterRegistry
 from src.core.schemas import GscAccountCredential, StrictModel, ToolMetadata
@@ -90,6 +92,8 @@ from src.core.state_store import (
     OrgConfigStore,
 )
 from src.core.url_safety import UrlSafetyPolicy
+from src.core.worker_auth import WorkerStore
+from src.core.worker_dispatch_store import WorkerDispatchStore
 from src.modules.seo.deliverables.rulebook_store import RulebookStore
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.schemas import (
@@ -854,6 +858,10 @@ class ApiState:
         operator_store: OperatorStore | None = None,
         session_secret: SecretStr | None = None,
         session_ttl_s: int | None = None,
+        worker_store: WorkerStore | None = None,
+        worker_dispatch_store: WorkerDispatchStore | None = None,
+        dispatch_signing_secret: SecretStr | None = None,
+        bundle_encryption_secret: SecretStr | None = None,
     ) -> None:
         """Build the shared state.
 
@@ -886,6 +894,18 @@ class ApiState:
                 elsewhere.
             session_ttl_s: Session token lifetime. Defaults to
                 `Settings.auth_session_ttl_s`.
+            worker_store: Worker daemon identity persistence (ADR 0015
+                condition 2). Defaults to `Settings.worker_store`.
+            worker_dispatch_store: The persistent dual-approval-gate and job
+                queue store (ADR 0015 condition 5). Defaults to a
+                `PostgresWorkerDispatchStore` — never an in-process
+                fallback, per that module's own "never fail open" design.
+            dispatch_signing_secret: HMAC key dispatch assignment artifacts
+                are signed and verified against (ADR 0015 conditions 3(b)
+                and 4). Defaults to `Settings.dispatch_signing_secret`.
+            bundle_encryption_secret: Symmetric key for at-rest bundle
+                encryption (ADR 0015 condition 11). Defaults to
+                `Settings.bundle_encryption_secret`.
         """
         self.store = store
         self.url_policy = url_policy
@@ -899,6 +919,14 @@ class ApiState:
         self.operator_store = operator_store or get_settings().operator_store
         self.session_secret = session_secret or get_settings().session_secret
         self.session_ttl_s = session_ttl_s or get_settings().auth_session_ttl_s
+        self.worker_store = worker_store or get_settings().worker_store
+        self.worker_dispatch_store = worker_dispatch_store or PostgresWorkerDispatchStore()
+        self.dispatch_signing_secret = (
+            dispatch_signing_secret or get_settings().dispatch_signing_secret
+        )
+        self.bundle_encryption_secret = (
+            bundle_encryption_secret or get_settings().bundle_encryption_secret
+        )
         # A separate registry from `base_tool.py`'s module-global one
         # (ADR 0016 condition 7): scoped to this `ApiState` so a test creating
         # a fresh app per case cannot leak a bucket into the next one, and
@@ -1237,6 +1265,10 @@ def create_app(
     sf_token_store: PreviewTokenStore | None = None,
     operator_store: OperatorStore | None = None,
     session_secret: SecretStr | None = None,
+    worker_store: WorkerStore | None = None,
+    worker_dispatch_store: WorkerDispatchStore | None = None,
+    dispatch_signing_secret: SecretStr | None = None,
+    bundle_encryption_secret: SecretStr | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -1275,6 +1307,18 @@ def create_app(
             `Settings.session_secret`. Passing one explicitly is how a test
             mints a token with `issue_session_token` that this app will then
             accept.
+        worker_store: Worker daemon identity persistence (ADR 0015 condition
+            2). Defaults to `Settings.worker_store`.
+        worker_dispatch_store: The persistent dual-approval-gate and job
+            queue store (ADR 0015 condition 5). Defaults to a
+            `PostgresWorkerDispatchStore`. Tests inject a fake
+            psycopg-shaped connection factory rather than overriding this
+            directly — see `tests/core/test_postgres_worker_dispatch_store.py`.
+        dispatch_signing_secret: HMAC key for dispatch assignment artifacts
+            (ADR 0015 conditions 3(b)/4). Defaults to
+            `Settings.dispatch_signing_secret`.
+        bundle_encryption_secret: At-rest bundle encryption key (ADR 0015
+            condition 11). Defaults to `Settings.bundle_encryption_secret`.
 
     Returns:
         The configured application.
@@ -1312,6 +1356,10 @@ def create_app(
         sf_token_store=sf_token_store,
         operator_store=resolved_operator_store,
         session_secret=session_secret,
+        worker_store=worker_store,
+        worker_dispatch_store=worker_dispatch_store,
+        dispatch_signing_secret=dispatch_signing_secret,
+        bundle_encryption_secret=bundle_encryption_secret,
     )
 
     @asynccontextmanager
@@ -1387,6 +1435,7 @@ def create_app(
     # router follows the same shape for the same reason.
     app.include_router(build_deliverables_router(state), prefix=API_PREFIX)
     app.include_router(build_auth_router(state), prefix=API_PREFIX)
+    app.include_router(build_worker_router(state), prefix=API_PREFIX)
 
     # The endpoints close over `state` rather than receiving it through
     # `Depends`. With `from __future__ import annotations` every annotation is a

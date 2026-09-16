@@ -18,9 +18,15 @@ the same reasoning `deliverables_routes.py` gives):
   `from __future__ import annotations` turns every annotation into a string
   FastAPI resolves against the *module* namespace, where a factory-local
   alias would be invisible.
+* `require_worker_principal` — ADR 0015 condition 1's equivalent for a
+  desktop worker daemon rather than a human operator: turns a request's
+  `Authorization` header into a verified `WorkerPrincipal`, or a `401`.
+  Every worker-facing dispatch route (`src/api/worker_routes.py`) calls this
+  instead of trusting a `worker_id` the request merely claims (condition 2).
 
-`src/core/auth.py` holds the identity and token primitives this module
-verifies against; nothing here duplicates that logic.
+`src/core/auth.py` holds the human-operator identity and token primitives
+this module verifies against; `src/core/worker_auth.py` holds the parallel
+worker-credential primitives. Nothing here duplicates either.
 """
 
 from __future__ import annotations
@@ -42,10 +48,17 @@ from src.core.auth import (
 )
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.core.worker_auth import (
+    WorkerAuthenticationError,
+    WorkerPrincipal,
+    verify_worker_credential,
+)
 
 if TYPE_CHECKING:
     from src.api.server import ApiState
     from src.core.state_store import JobRecord
+    from src.core.worker_auth import Worker, WorkerStore
+    from src.core.worker_dispatch_schemas import WorkerJob
     from src.modules.seo.deliverables.rulebook_store import RulebookRecord
 
 __all__ = [
@@ -54,6 +67,7 @@ __all__ = [
     "build_auth_router",
     "org_scoped_or_404",
     "require_principal",
+    "require_worker_principal",
 ]
 
 _logger = get_logger("api.auth")
@@ -104,8 +118,70 @@ def require_principal(authorization: str | None, *, session_secret: SecretStr) -
         ) from exc
 
 
+def require_worker_principal(
+    authorization: str | None, *, worker_store: WorkerStore
+) -> WorkerPrincipal:
+    """Verify this request's worker credential and return its principal.
+
+    ADR 0015 condition 1: every worker-facing dispatch route goes through
+    this — never a bare header a request merely asserts. Condition 2's
+    distinct-credential-type requirement is why this is a separate function
+    from `require_principal` rather than a shared one: a worker credential
+    is a static long-lived secret (`<worker_id>:<secret>`), never a signed,
+    expiring session token — the two are not interchangeable, and a route
+    that accidentally accepted either would blur ADR 0016's two-credential
+    design back together.
+
+    Args:
+        authorization: The raw `Authorization` header value, or `None`.
+        worker_store: Where registered workers live.
+
+    Returns:
+        The verified `WorkerPrincipal` — `worker_id`/`org_id` here are
+        ground truth for the rest of the request, never a value the
+        request body or a path parameter merely claims.
+
+    Raises:
+        HTTPException: `401` if the header is missing, malformed, or the
+            credential fails verification for any reason.
+    """
+    if not authorization:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail="missing Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header must be 'Bearer <worker_id>:<secret>'",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    worker_id, separator, secret = token.partition(":")
+    if not separator or not worker_id or not secret:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header must be 'Bearer <worker_id>:<secret>'",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        return verify_worker_credential(worker_id, secret, store=worker_store)
+    except WorkerAuthenticationError as exc:
+        _logger.warning("worker_credential_rejected", extra={"reason": str(exc)})
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail="invalid worker credential",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+
 def org_scoped_or_404(
-    *, record: JobRecord | RulebookRecord, record_id: str, org_id: str, kind: str
+    *,
+    record: JobRecord | RulebookRecord | Worker | WorkerJob,
+    record_id: str,
+    org_id: str,
+    kind: str,
 ) -> None:
     """Raise the shared `403` for a record that exists but belongs to another org.
 

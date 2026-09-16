@@ -62,9 +62,40 @@ src/
 │   ├── _process_orphans.py      # Startup reconciliation: named-Job-Object
 │   │                            # reopen, Toolhelp32 tree-walk fallback,
 │   │                            # PID+start-time matching before any kill
-│   └── _win32_bindings.py       # Deferred pywin32 import (load_win32()) so
-│                                # importing process_supervisor.py never
-│                                # requires Windows -- only calling it does
+│   ├── _win32_bindings.py       # Deferred pywin32 import (load_win32()) so
+│   │                            # importing process_supervisor.py never
+│   │                            # requires Windows -- only calling it does
+│   ├── worker_auth.py           # Worker daemon identity (ADR 0015 condition 2).
+│   │                            # Worker/WorkerPrincipal/DiskWorkerStore, mirroring
+│   │                            # auth.py's Operator/Principal/DiskOperatorStore
+│   │                            # shape exactly -- a distinct credential type, not
+│   │                            # a substitute for ADR 0016's session tokens
+│   ├── worker_dispatch_schemas.py   # WorkerJobKind (closed StrEnum, one member:
+│   │                            # SCREAMING_FROG_CRAWL), WorkerJobEnvelope
+│   │                            # (job_id/seed_url/template_name/correlation_id,
+│   │                            # nothing else), WorkerJob, DispatchAssignmentClaims
+│   ├── worker_dispatch_signing.py   # Gate (b): issue_dispatch_assignment /
+│   │                            # verify_dispatch_assignment -- HMAC-signed,
+│   │                            # self-contained, identity-bound artifact the
+│   │                            # worker independently verifies before its own
+│   │                            # GuardrailEngine.authorize() call runs
+│   ├── worker_dispatch_store.py     # WorkerDispatchStore Protocol + shared errors
+│   │                            # + row-mapping helper for gate (a) and the job
+│   │                            # queue (ADR 0015 condition 5)
+│   ├── postgres_worker_dispatch_store.py  # The one WorkerDispatchStore
+│   │                            # implementation. No in-process fallback --
+│   │                            # a store outage raises DispatchStoreUnavailableError,
+│   │                            # never silently approves (the opposite failure
+│   │                            # PostgresJobStore's disk fallback is allowed to make)
+│   ├── worker_bundle_crypto.py      # At-rest bundle encryption (ADR 0015
+│   │                            # condition 11): stdlib-only HMAC-SHA256
+│   │                            # encrypt-then-MAC, chosen to avoid a new
+│   │                            # dependency this cycle -- not a claim that
+│   │                            # hand-rolled crypto is generally preferable
+│   └── worker_consumed_ledger.py    # The worker daemon's own disk-backed record
+│                                # of job ids already run -- the worker-side half
+│                                # of gate (b)'s single-use guarantee across a
+│                                # daemon restart
 ├── api/                         # Local HTTP API (ADR 0008). Outermost layer;
 │   │                            # nothing below imports from it.
 │   ├── server.py                # Implements no crawl-safety control of its own —
@@ -91,7 +122,7 @@ src/
 │   │                            # build_auth_router() for POST /auth/login.
 │   │                            # Wraps core/auth.py; no route here has its own
 │   │                            # RiskClass — a login is not a BaseTool.run()
-│   └── deliverables_routes.py   # Workbook build/download HTTP surface (cycle
+│   ├── deliverables_routes.py   # Workbook build/download HTTP surface (cycle
 │                                # 0087). A separate router, not routes on
 │                                # server.py, included via app.include_router();
 │                                # imports ApiState only under TYPE_CHECKING so
@@ -105,6 +136,21 @@ src/
 │                                # the 500k-page ceiling. Every record carries
 │                                # org_id; every read enforces record.org_id ==
 │                                # org_id, the same shape get_job/get_result use
+│   └── worker_routes.py         # ADR 0015 cloud-side worker-dispatch HTTP
+│                                # surface. Same separate-router shape as
+│                                # deliverables_routes.py. POST/GET /workers
+│                                # (human-authenticated registration/listing);
+│                                # POST /workers/{id}/dispatch/preview|dispatch
+│                                # (gate a, worker-bound); GET
+│                                # /workers/dispatch/poll (worker-authenticated
+│                                # claim + gate-b artifact issuance); POST
+│                                # /workers/jobs/{id}/upload|failed (worker-
+│                                # authenticated, IDOR-checked against the
+│                                # claiming worker's own identity, not just its
+│                                # org — a job pinned to worker A is
+│                                # unclaimable by worker B even inside the same
+│                                # org); GET /workers/jobs[/{id}] (human-
+│                                # authenticated, org-scoped read)
 ├── integrations/                # External API wrappers
 │   ├── base_client.py           # Quota, retry, credential handling for all connectors
 │   ├── http_fetcher.py          # The ONLY outbound web fetcher. Enforces SSRF,
@@ -116,7 +162,14 @@ src/
 │   │                            # retry loop so a revoked token fails once
 │   ├── gsc_property_validator.py# Property URL validation before any query
 │   ├── gsc_schemas.py           # GscOAuthToken (SecretStr), metrics rows, errors
-│   └── llm_client.py            # Provider-agnostic LLM interface + spend metering
+│   ├── llm_client.py            # Provider-agnostic LLM interface + spend metering
+│   └── worker_cloud_client.py   # ADR 0015: the worker daemon's one outbound
+│                                # connection, to its own cloud API. poll()/
+│                                # upload_bundle()/report_failure() over httpx,
+│                                # under BaseAPIClient's standard rate limiting
+│                                # and audit logging. No circuit breaker for
+│                                # this channel (condition 10, accepted gap) —
+│                                # the daemon's own bounded backoff substitutes
 └── modules/                     # Domain engines
     ├── seo/
     │   └── page_classifier/     # Phase 1 engine
@@ -231,8 +284,24 @@ src/
     │   │   │                         # "Licence Status:" line + free-tier cap
     │   │   ├── preview_tokens.py     # Preview -> confirm token exchange that
     │   │   │                         # supplies HITL approval (condition 8)
-    │   │   └── tool.py               # ScreamingFrogControlTool: the governed
-    │   │                             # entry point
+    │   │   ├── tool.py               # ScreamingFrogControlTool: the governed
+    │   │   │                         # entry point
+    │   │   ├── upload_manifest.py    # ADR 0015 condition 9: untrusted-upload
+    │   │   │                         # validation for the worker->cloud bundle
+    │   │   │                         # path. ALLOWED_BUNDLE_FILENAMES derived
+    │   │   │                         # mechanically from export_manifest.py's
+    │   │   │                         # own naming transform; zip-slip/size-cap/
+    │   │   │                         # encrypted-member defense; an unlisted
+    │   │   │                         # member rejects the whole upload
+    │   │   └── worker_daemon.py      # ADR 0015: the worker daemon's whole
+    │   │                             # lifetime. reconcile_orphans() at startup
+    │   │                             # (condition 12), closed-enum dispatch
+    │   │                             # (condition 7), gate (b)'s
+    │   │                             # make_approval_callback wired into
+    │   │                             # GuardrailEngine exactly like
+    │   │                             # preview_tokens.py's local pattern,
+    │   │                             # condition-8 envelope re-validation, and
+    │   │                             # condition-10 bounded backoff
     │   └── performance/         # GSC + GA4 joined onto a crawl. Pure domain:
     │       │                    # no I/O, no settings. Ingestion belongs in
     │       │                    # integrations/, persistence in the job store.
@@ -258,6 +327,7 @@ src/
 | :--- | :--- |
 | `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
 | The React UI for `modules/seo/screaming_frog_control/` (ADR 0013) | The API surface (`preview`/confirm/templates) is implemented; no confirmation-modal UI consumes it yet — an operator would call it directly today |
+| A cloud dashboard or worker-management screen for ADR 0015's worker dispatch | Explicitly out of scope this cycle. The full HTTP surface (`api/worker_routes.py`) and the worker daemon are implemented and tested; an operator registers a worker, previews/confirms a dispatch, and reads job status by calling the API directly today |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
@@ -331,6 +401,8 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0012](adr/0012-gsc-account-profiles.md) | Named Search Console profiles as `GSC_ACCOUNTS__<name>__*` env keys; a crawl selects one by name; the API publishes names only, never credentials; unknown name is refused, never defaulted |
 | [0013](adr/0013-screaming-frog-cli-process-governance-exception.md) | Governance exception lifting ADR 0011 §3's ban on driving Screaming Frog via CLI, conditional on 8 binding security requirements (real Windows Job Object, independent PID+start-time ledger, same-process design, `UrlSafetyPolicy` seed-URL gate, explicit CLI field mapping, named license-failure error, `RiskClass.WRITE`/`MANDATORY_HITL`). Status: APPROVED. Conditions 1–3 implemented [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md); conditions 4–8 implemented (build-log entry pending — docs-scribe) as `modules/seo/screaming_frog_control/`. No React UI consumes the preview/confirm API yet |
 | [0014](adr/0014-native-title-h1-meta-description-extraction.md) | Extract title/H1/meta description natively at fetch time (`content_signals.py`, `html.parser`, no new dependency), hooked into the one `SiteGraph.record_fetch` method both sync and async discovery share. 13 of 17 `PAGE_TITLES`/`META_DESCRIPTION`/`H1` catalogue ids move to `MEASURED`; the 4 pixel-width ids stay `NOT_MEASURED` by design fallback — no verified glyph-width table available, and a live font-rendering substitute would be non-deterministic across machines. [build-log 0096](build-log/0096-twenty-nine-measured-eighty-one-not.md) |
+| [0015](adr/0015-cloud-local-desktop-worker-architecture.md) | Self-hosted-runner pattern for `RiskClass.WRITE` Screaming Frog dispatch: a cloud API queues a job for one pinned worker daemon; the daemon polls, never accepts an inbound connection. 14 binding conditions, chief among them a **dual** approval gate — cloud-side preview/confirm (gate a, Postgres-backed, worker-bound) plus a worker-independently-verified signed assignment (gate b, never a bare boolean) — and per-worker credentials distinct from ADR 0016's session tokens. Status: APPROVED. Implemented (build-log entry pending — docs-scribe) as `core/worker_auth.py`, `core/worker_dispatch_signing.py`, `core/worker_dispatch_store.py`/`core/postgres_worker_dispatch_store.py`, `core/worker_bundle_crypto.py`, `api/worker_routes.py`, `modules/seo/screaming_frog_control/upload_manifest.py`/`worker_daemon.py`, `integrations/worker_cloud_client.py`. No React UI (cloud dashboard or worker-management screen) this cycle |
+| [0016](adr/0016-cloud-api-authentication.md) | Session-token authentication and an org-ownership retrofit for `src/api/server.py`, closing a CRITICAL unauthenticated-GSC-credential-access finding and a HIGH cross-tenant job-access finding across 14 routes. Status: APPROVED. Implemented as `core/auth.py`/`api/auth.py` (`Principal`/`Operator`, PBKDF2 password hashing, self-contained HMAC-SHA256 session tokens, `require_principal`, `org_scoped_or_404`, `POST /auth/login`) [build-log 0097](build-log/0097-the-header-that-verified-nothing.md) |
 
 ---
 

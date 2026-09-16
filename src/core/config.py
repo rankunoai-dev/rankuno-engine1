@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from src.core.auth import OperatorStore
     from src.core.schemas import GscAccountCredential
     from src.core.state_store import OrgConfigStore
+    from src.core.worker_auth import WorkerStore
 
 __all__ = [
     "DEFAULT_ORG_ID",
@@ -359,6 +360,120 @@ class Settings(BaseSettings):
         description="Org the bootstrap operator belongs to. Defaults to 'default'.",
     )
 
+    # -- Worker daemon dispatch (ADR 0015) ------------------------------------
+    worker_store_path: Path = Field(
+        default=REPO_ROOT / ".workers",
+        description=(
+            "Directory holding workers.json (ADR 0015 condition 2). Same "
+            "single-process caveat as `auth_operator_store_path` — worker "
+            "*identity* is not the piece condition 5 requires on Postgres; "
+            "the dispatch preview/confirm gate and job queue are."
+        ),
+    )
+    worker_dispatch_signing_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "HMAC-SHA256 key shared by the cloud API and every worker "
+            "daemon to sign/verify dispatch assignment artifacts (ADR 0015 "
+            "conditions 3(b) and 4). Required in production. Unset "
+            "elsewhere generates one random per-process key, matching "
+            "`auth_session_secret`'s own posture — a restart invalidates "
+            "any artifact minted before it."
+        ),
+    )
+    worker_bundle_encryption_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Symmetric key for at-rest encryption of uploaded Screaming "
+            "Frog bundles (ADR 0015 condition 11; see "
+            "`src.core.worker_bundle_crypto`). Required in production."
+        ),
+    )
+    worker_dispatch_assignment_ttl_s: float = Field(
+        default=300.0,
+        gt=0.0,
+        description=(
+            "How long a signed dispatch assignment (ADR 0015 condition "
+            "3(b)) stays valid after a worker claims a job — long enough "
+            "to receive the poll response and start the tool, short enough "
+            "to bound a leaked artifact's replay window."
+        ),
+    )
+    worker_dispatch_preview_ttl_s: float = Field(
+        default=120.0,
+        gt=0.0,
+        description="Cloud-side gate (a) preview token lifetime (ADR 0015 condition 3(a)).",
+    )
+    worker_id: str | None = Field(
+        default=None,
+        description=(
+            "This desktop worker's own registered identity (ADR 0015 "
+            "condition 2). Set on the worker daemon's own machine, never "
+            "on the cloud API process."
+        ),
+    )
+    worker_org_id: str | None = Field(
+        default=None,
+        description=(
+            "This worker's own org, provisioned out of band alongside "
+            "worker_id/worker_credential when the worker was registered. "
+            "Verified independently against a claimed dispatch assignment's "
+            "`org_id` (condition 3(b)) so the worker's identity-binding "
+            "check does not rely solely on a value the cloud process "
+            "itself asserts — defense in depth against condition 4's own "
+            "named limit (signing does not defend a compromised signer)."
+        ),
+    )
+    worker_credential: SecretStr | None = Field(
+        default=None,
+        description=(
+            "This worker's long-lived bearer credential, minted once by "
+            "`POST /workers` and provisioned here out of band (ADR 0015 "
+            "condition 2). Read only by the worker daemon, never by the "
+            "cloud API, which stores only a hash."
+        ),
+    )
+    worker_cloud_api_base_url: str | None = Field(
+        default=None,
+        description="Base URL of the cloud API this worker daemon polls, e.g. https://api.example.com.",
+    )
+    worker_poll_interval_s: float = Field(
+        default=15.0,
+        gt=0.0,
+        description=(
+            "Steady-state delay between poll calls when idle (ADR 0015 "
+            "§2's own '10-15s while idle' example). Bounded exponential "
+            "backoff (condition 10) grows this on a poll/dispatch/upload "
+            "failure; this is the floor it resets to on success."
+        ),
+    )
+    worker_poll_max_backoff_s: float = Field(
+        default=300.0,
+        gt=0.0,
+        description="Ceiling for condition 10's bounded exponential backoff on repeated failures.",
+    )
+    worker_upload_max_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        gt=0,
+        description="Size cap on one uploaded bundle (ADR 0015 condition 9).",
+    )
+    worker_bundle_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="Automatic-expiry retention window for uploaded bundles (ADR 0015 §11).",
+    )
+    worker_consumed_jobs_path: Path = Field(
+        default=REPO_ROOT / ".worker_consumed_jobs.json",
+        description=(
+            "The worker daemon's own local record of job ids it has already "
+            "run, checked before honouring a dispatch assignment a second "
+            "time — the worker-side half of ADR 0015 Step 5 answer 4's "
+            "idempotency requirement, and part of what makes gate (b) "
+            "(condition 3(b)) 'single-use' in practice across a daemon "
+            "restart, not merely within one process's lifetime."
+        ),
+    )
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
@@ -411,9 +526,28 @@ class Settings(BaseSettings):
                     "where invalidating every session on restart is an acceptable cost."
                 )
                 raise ConfigurationError(msg)
+            if self.worker_dispatch_signing_secret is None:
+                msg = (
+                    "WORKER_DISPATCH_SIGNING_SECRET must be set in production (ADR "
+                    "0015 condition 4). A process-local random key is permitted only "
+                    "outside production, where invalidating outstanding dispatch "
+                    "assignments on restart is an acceptable cost."
+                )
+                raise ConfigurationError(msg)
+            if self.worker_bundle_encryption_secret is None:
+                msg = (
+                    "WORKER_BUNDLE_ENCRYPTION_SECRET must be set in production (ADR "
+                    "0015 condition 11). A process-local random key is permitted only "
+                    "outside production, where uploaded bundles becoming unreadable "
+                    "across a restart is an acceptable cost."
+                )
+                raise ConfigurationError(msg)
         self._org_config_store: OrgConfigStore | None = None
         self._operator_store: OperatorStore | None = None
+        self._worker_store: WorkerStore | None = None
         self._session_secret: SecretStr | None = None
+        self._dispatch_signing_secret: SecretStr | None = None
+        self._bundle_encryption_secret: SecretStr | None = None
 
     def gsc_account_names(self) -> tuple[str, ...]:
         """Profile names from `.env.local` only, sorted. Names, never secrets.
@@ -593,6 +727,57 @@ class Settings(BaseSettings):
 
             self._operator_store = DiskOperatorStore(self.auth_operator_store_path)
         return self._operator_store
+
+    @property
+    def worker_store(self) -> WorkerStore:
+        """Get the worker daemon identity store, creating it on first access (ADR 0015).
+
+        Returns:
+            The `WorkerStore` for this deployment.
+        """
+        if self._worker_store is None:
+            from src.core.worker_auth import DiskWorkerStore
+
+            self._worker_store = DiskWorkerStore(self.worker_store_path)
+        return self._worker_store
+
+    @property
+    def dispatch_signing_secret(self) -> SecretStr:
+        """The shared HMAC key for ADR 0015 dispatch assignment artifacts.
+
+        Required in production (`model_post_init` already refuses to boot
+        without one there). Elsewhere, generated once per process and
+        cached, matching `session_secret`'s own reasoning exactly: every
+        artifact a process issues (or, on the worker side, verifies) must
+        stay checkable for as long as that process runs.
+        """
+        if self._dispatch_signing_secret is not None:
+            return self._dispatch_signing_secret
+        if self.worker_dispatch_signing_secret is not None:
+            self._dispatch_signing_secret = self.worker_dispatch_signing_secret
+            return self._dispatch_signing_secret
+        if self.environment is Environment.PRODUCTION:
+            msg = "WORKER_DISPATCH_SIGNING_SECRET must be set in production (ADR 0015)."
+            raise ConfigurationError(msg)
+        self._dispatch_signing_secret = SecretStr(secrets.token_hex(32))
+        return self._dispatch_signing_secret
+
+    @property
+    def bundle_encryption_secret(self) -> SecretStr:
+        """The symmetric key for ADR 0015 condition 11's at-rest encryption.
+
+        Same generate-once-and-cache posture as `dispatch_signing_secret`.
+        """
+        if self._bundle_encryption_secret is not None:
+            return self._bundle_encryption_secret
+        if self.worker_bundle_encryption_secret is not None:
+            self._bundle_encryption_secret = self.worker_bundle_encryption_secret
+            return self._bundle_encryption_secret
+        if self.environment is Environment.PRODUCTION:
+            msg = "WORKER_BUNDLE_ENCRYPTION_SECRET must be set in production (ADR 0015)."
+            raise ConfigurationError(msg)
+        self._bundle_encryption_secret = SecretStr(secrets.token_hex(32))
+        return self._bundle_encryption_secret
 
     @property
     def session_secret(self) -> SecretStr:
