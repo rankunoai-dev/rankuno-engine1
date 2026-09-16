@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -44,7 +43,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
 from pydantic import Field, ValidationError
 
-from src.api.auth import org_scoped_or_404
+from src.api.auth import org_scoped_or_404, require_principal
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.core.state_store import JobNotFoundError, JobRecord
@@ -68,7 +67,6 @@ __all__ = ["build_deliverables_router"]
 
 _logger = get_logger("api.deliverables")
 
-_ORG_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9_-]{1,64}$")
 _XLSX_MEDIA_TYPE: Final[str] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 DELIVERABLE_TOOL_NAME: Final[str] = "seo.deliverables.workbook"
 DELIVERABLE_FACET_ID: Final[str] = "seo.deliverables"
@@ -98,30 +96,6 @@ class DeliverableBuildRequest(StrictModel):
         description="Id of a previously uploaded rulebook to theme pages with. "
         "Omitted means no theming, matching `build_deliverable.py` without --rulebook.",
     )
-
-
-def _org_id(x_org_id: str | None) -> str:
-    """Resolve and validate the `X-Org-Id` header, same rule `create_job` used.
-
-    Known gap, recorded rather than silently carried forward: ADR 0016
-    ("Cloud API Authentication & Authorization") retrofits `server.py`'s
-    job-family and GSC-account routes so `org_id` is derived from a verified
-    session principal instead of this client-asserted header, but its own
-    route enumeration does not name this module's routes. They inherit
-    `org_scoped_or_404` from `src/api/auth.py` (condition 2's shared
-    ownership check now covers rulebooks and deliverables too), but org
-    *derivation* here is unchanged — an authenticated caller could still set
-    `X-Org-Id` to another org's id and this header would still be trusted.
-    Handed off rather than fixed inline, per CLAUDE.md's scope discipline:
-    the ADR that approved this change did not cover these routes.
-    """
-    org_id = x_org_id or "default"
-    if not _ORG_ID_RE.fullmatch(org_id):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail=f"invalid org_id '{org_id}': must match ^[a-z0-9_-]{{1,64}}$",
-        )
-    return org_id
 
 
 def _resolve_rulebook(state: ApiState, rulebook_id: str | None, org_id: str) -> Path | None:
@@ -240,7 +214,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
     async def upload_rulebook(
         request: Request,
         label: str = Query(default="", max_length=MAX_RULEBOOK_LABEL_LENGTH),
-        x_org_id: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> RulebookRecord:
         """Store a client's URL-pattern rulebook `.xlsx` for reuse across builds.
 
@@ -252,7 +226,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             HTTPException: `400` if the body is empty, oversized, or not a
                 readable rulebook workbook.
         """
-        org_id = _org_id(x_org_id)
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
         body = await request.body()
         if not body.strip():
             raise HTTPException(
@@ -271,19 +245,21 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
         return record
 
     @router.get("/deliverables/rulebooks", response_model=list[RulebookRecord])
-    def list_rulebooks(x_org_id: str | None = Header(default=None)) -> list[RulebookRecord]:
+    def list_rulebooks(authorization: str | None = Header(default=None)) -> list[RulebookRecord]:
         """Every rulebook this organization uploaded, newest first."""
-        org_id = _org_id(x_org_id)
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
         return [r for r in state.rulebook_store.list_all() if r.org_id == org_id]
 
     @router.delete("/deliverables/rulebooks/{rulebook_id}", status_code=status.HTTP_204_NO_CONTENT)
-    def delete_rulebook(rulebook_id: str, x_org_id: str | None = Header(default=None)) -> Response:
+    def delete_rulebook(
+        rulebook_id: str, authorization: str | None = Header(default=None)
+    ) -> Response:
         """Remove an uploaded rulebook.
 
         Raises:
             HTTPException: `404` if unknown, `403` if another org owns it.
         """
-        org_id = _org_id(x_org_id)
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
         try:
             record = state.rulebook_store.get(rulebook_id)
         except RulebookNotFoundError as exc:
@@ -302,7 +278,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
     async def build_from_job(
         job_id: str,
         payload: DeliverableBuildRequest | None = None,
-        x_org_id: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> DeliverableAccepted:
         """Build a workbook from an already-finished crawl job.
 
@@ -316,7 +292,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
                 result predates the current output contract, `429` if the
                 deliverable concurrency guard is saturated.
         """
-        org_id = _org_id(x_org_id)
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
         body = payload if payload is not None else DeliverableBuildRequest()
         try:
             crawl_record = state.store.get(job_id)
@@ -362,7 +338,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
     async def build_from_screaming_frog(
         request: Request,
         rulebook_id: str | None = Query(default=None),
-        x_org_id: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> DeliverableAccepted:
         """Build a workbook from an uploaded Screaming Frog export bundle.
 
@@ -379,7 +355,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             HTTPException: `400` if the body is empty or oversized, `429` if
                 the deliverable concurrency guard is saturated.
         """
-        org_id = _org_id(x_org_id)
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
         body = await request.body()
         if not body.strip():
             raise HTTPException(
@@ -430,21 +406,21 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             raise
 
     @router.get("/deliverables", response_model=list[JobRecord])
-    def list_deliverables(x_org_id: str | None = Header(default=None)) -> list[JobRecord]:
+    def list_deliverables(authorization: str | None = Header(default=None)) -> list[JobRecord]:
         """Every deliverable build for the organization, newest first."""
-        org_id = _org_id(x_org_id)
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
         return [r for r in state.deliverable_store.list_jobs() if r.org_id == org_id]
 
     @router.get("/deliverables/{deliverable_id}", response_model=JobRecord)
     def get_deliverable(
-        deliverable_id: str, x_org_id: str | None = Header(default=None)
+        deliverable_id: str, authorization: str | None = Header(default=None)
     ) -> JobRecord:
         """One deliverable build's status.
 
         Raises:
             HTTPException: `404` if unknown, `403` if another org owns it.
         """
-        org_id = _org_id(x_org_id)
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
         try:
             record = state.deliverable_store.get(deliverable_id)
         except JobNotFoundError as exc:
@@ -458,7 +434,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
 
     @router.get("/deliverables/{deliverable_id}/download")
     def download_deliverable(
-        deliverable_id: str, x_org_id: str | None = Header(default=None)
+        deliverable_id: str, authorization: str | None = Header(default=None)
     ) -> Response:
         """The finished workbook.
 
@@ -474,7 +450,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             HTTPException: `404` if unknown or the file is missing, `403` if
                 another org owns it, `409` if the build has not finished.
         """
-        org_id = _org_id(x_org_id)
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
         try:
             record = state.deliverable_store.get(deliverable_id)
         except JobNotFoundError as exc:

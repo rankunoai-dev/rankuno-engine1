@@ -145,7 +145,7 @@ def poll_deliverable(client, deliverable_id: str, org_id: str = "org-a") -> dict
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         body = client.get(
-            f"{API_PREFIX}/deliverables/{deliverable_id}", headers={"X-Org-Id": org_id}
+            f"{API_PREFIX}/deliverables/{deliverable_id}", headers=auth_headers(org_id)
         ).json()
         if body["status"] in ("succeeded", "partial", "failed"):
             return body
@@ -158,7 +158,7 @@ class TestRulebookUpload:
         response = client.post(
             f"{API_PREFIX}/deliverables/rulebooks?label=English",
             content=write_rulebook_bytes(),
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         )
         assert response.status_code == 201, response.text
         body = response.json()
@@ -167,13 +167,13 @@ class TestRulebookUpload:
         assert body["rule_count"] == 1
 
         listed = client.get(
-            f"{API_PREFIX}/deliverables/rulebooks", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/rulebooks", headers=auth_headers("org-a")
         ).json()
         assert [r["id"] for r in listed] == [body["id"]]
 
     def test_an_empty_body_is_400(self, client):
         response = client.post(
-            f"{API_PREFIX}/deliverables/rulebooks", content=b"", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/rulebooks", content=b"", headers=auth_headers("org-a")
         )
         assert response.status_code == 400
 
@@ -181,7 +181,7 @@ class TestRulebookUpload:
         response = client.post(
             f"{API_PREFIX}/deliverables/rulebooks",
             content=b"not a workbook",
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         )
         assert response.status_code == 400
 
@@ -189,10 +189,10 @@ class TestRulebookUpload:
         client.post(
             f"{API_PREFIX}/deliverables/rulebooks",
             content=write_rulebook_bytes(),
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         )
         listed_b = client.get(
-            f"{API_PREFIX}/deliverables/rulebooks", headers={"X-Org-Id": "org-b"}
+            f"{API_PREFIX}/deliverables/rulebooks", headers=auth_headers("org-b")
         ).json()
         assert listed_b == []
 
@@ -200,17 +200,17 @@ class TestRulebookUpload:
         created = client.post(
             f"{API_PREFIX}/deliverables/rulebooks",
             content=write_rulebook_bytes(),
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         ).json()
 
         response = client.delete(
-            f"{API_PREFIX}/deliverables/rulebooks/{created['id']}", headers={"X-Org-Id": "org-b"}
+            f"{API_PREFIX}/deliverables/rulebooks/{created['id']}", headers=auth_headers("org-b")
         )
         assert response.status_code == 403
 
     def test_deleting_an_unknown_rulebook_is_404(self, client):
         response = client.delete(
-            f"{API_PREFIX}/deliverables/rulebooks/nope", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/rulebooks/nope", headers=auth_headers("org-a")
         )
         assert response.status_code == 404
 
@@ -218,35 +218,35 @@ class TestRulebookUpload:
         created = client.post(
             f"{API_PREFIX}/deliverables/rulebooks",
             content=write_rulebook_bytes(),
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         ).json()
 
         response = client.delete(
-            f"{API_PREFIX}/deliverables/rulebooks/{created['id']}", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/rulebooks/{created['id']}", headers=auth_headers("org-a")
         )
         assert response.status_code == 204
         listed = client.get(
-            f"{API_PREFIX}/deliverables/rulebooks", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/rulebooks", headers=auth_headers("org-a")
         ).json()
         assert listed == []
 
 
 class TestBuildFromJob:
     def test_an_unknown_source_job_is_404(self, client):
-        response = client.post(f"{API_PREFIX}/jobs/nope/deliverable", headers={"X-Org-Id": "org-a"})
+        response = client.post(f"{API_PREFIX}/jobs/nope/deliverable", headers=auth_headers("org-a"))
         assert response.status_code == 404
 
     def test_another_orgs_source_job_is_403(self, client, crawl_store):
         job_id = finished_crawl_job(crawl_store, org_id="org-a")
         response = client.post(
-            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers={"X-Org-Id": "org-b"}
+            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers=auth_headers("org-b")
         )
         assert response.status_code == 403
 
     def test_an_unfinished_source_job_is_409(self, client, crawl_store):
         record = crawl_store.create("seo.page_classifier", {"base_url": SAFE_URL}, org_id="org-a")
         response = client.post(
-            f"{API_PREFIX}/jobs/{record.id}/deliverable", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/jobs/{record.id}/deliverable", headers=auth_headers("org-a")
         )
         assert response.status_code == 409
 
@@ -254,7 +254,7 @@ class TestBuildFromJob:
         job_id = finished_crawl_job(crawl_store)
 
         accepted = client.post(
-            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers=auth_headers("org-a")
         )
         assert accepted.status_code == 202, accepted.text
         deliverable_id = accepted.json()["id"]
@@ -264,7 +264,7 @@ class TestBuildFromJob:
         assert status_body["has_result"] is True
 
         download = client.get(
-            f"{API_PREFIX}/deliverables/{deliverable_id}/download", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/{deliverable_id}/download", headers=auth_headers("org-a")
         )
         assert download.status_code == 200
         assert download.headers["content-type"].startswith(
@@ -280,7 +280,7 @@ class TestBuildFromJob:
         response = client.post(
             f"{API_PREFIX}/jobs/{job_id}/deliverable",
             json={"rulebook_id": "nope"},
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         )
         assert response.status_code == 404
 
@@ -289,13 +289,13 @@ class TestBuildFromJob:
         rulebook = client.post(
             f"{API_PREFIX}/deliverables/rulebooks",
             content=write_rulebook_bytes(),
-            headers={"X-Org-Id": "org-b"},
+            headers=auth_headers("org-b"),
         ).json()
 
         response = client.post(
             f"{API_PREFIX}/jobs/{job_id}/deliverable",
             json={"rulebook_id": rulebook["id"]},
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         )
         assert response.status_code == 403
 
@@ -303,54 +303,54 @@ class TestBuildFromJob:
 class TestReadingAndDownloading:
     def test_an_unknown_deliverable_is_404(self, client):
         assert (
-            client.get(f"{API_PREFIX}/deliverables/nope", headers={"X-Org-Id": "org-a"}).status_code
+            client.get(f"{API_PREFIX}/deliverables/nope", headers=auth_headers("org-a")).status_code
             == 404
         )
 
     def test_another_orgs_deliverable_status_is_403(self, client, crawl_store):
         job_id = finished_crawl_job(crawl_store, org_id="org-a")
         accepted = client.post(
-            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers=auth_headers("org-a")
         ).json()
         poll_deliverable(client, accepted["id"])
 
         response = client.get(
-            f"{API_PREFIX}/deliverables/{accepted['id']}", headers={"X-Org-Id": "org-b"}
+            f"{API_PREFIX}/deliverables/{accepted['id']}", headers=auth_headers("org-b")
         )
         assert response.status_code == 403
 
     def test_another_orgs_deliverable_download_is_403(self, client, crawl_store):
         job_id = finished_crawl_job(crawl_store, org_id="org-a")
         accepted = client.post(
-            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers=auth_headers("org-a")
         ).json()
         poll_deliverable(client, accepted["id"])
 
         response = client.get(
-            f"{API_PREFIX}/deliverables/{accepted['id']}/download", headers={"X-Org-Id": "org-b"}
+            f"{API_PREFIX}/deliverables/{accepted['id']}/download", headers=auth_headers("org-b")
         )
         assert response.status_code == 403
 
     def test_downloading_before_the_build_finishes_is_409(self, client, crawl_store):
         job_id = finished_crawl_job(crawl_store)
         accepted = client.post(
-            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers=auth_headers("org-a")
         ).json()
 
         response = client.get(
-            f"{API_PREFIX}/deliverables/{accepted['id']}/download", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/{accepted['id']}/download", headers=auth_headers("org-a")
         )
         assert response.status_code in (409, 200)  # 200 only if the fast build already finished
 
     def test_the_list_is_org_scoped(self, client, crawl_store):
         job_id = finished_crawl_job(crawl_store, org_id="org-a")
         accepted = client.post(
-            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers=auth_headers("org-a")
         ).json()
         poll_deliverable(client, accepted["id"])
 
-        listed_a = client.get(f"{API_PREFIX}/deliverables", headers={"X-Org-Id": "org-a"}).json()
-        listed_b = client.get(f"{API_PREFIX}/deliverables", headers={"X-Org-Id": "org-b"}).json()
+        listed_a = client.get(f"{API_PREFIX}/deliverables", headers=auth_headers("org-a")).json()
+        listed_b = client.get(f"{API_PREFIX}/deliverables", headers=auth_headers("org-b")).json()
         assert [d["id"] for d in listed_a] == [accepted["id"]]
         assert listed_b == []
 
@@ -365,7 +365,7 @@ class TestReadingAndDownloading:
         """
         job_id = finished_crawl_job(crawl_store)
         accepted = client.post(
-            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/jobs/{job_id}/deliverable", headers=auth_headers("org-a")
         ).json()
         poll_deliverable(client, accepted["id"])
 
@@ -375,7 +375,7 @@ class TestReadingAndDownloading:
         )
 
         response = client.get(
-            f"{API_PREFIX}/deliverables/{accepted['id']}/download", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/{accepted['id']}/download", headers=auth_headers("org-a")
         )
         assert response.status_code == 404
 
@@ -385,7 +385,7 @@ class TestBuildFromScreamingFrog:
         response = client.post(
             f"{API_PREFIX}/deliverables/from-screaming-frog",
             content=b"",
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         )
         assert response.status_code == 400
 
@@ -393,7 +393,7 @@ class TestBuildFromScreamingFrog:
         accepted = client.post(
             f"{API_PREFIX}/deliverables/from-screaming-frog",
             content=b"not a zip at all",
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         )
         assert accepted.status_code == 202, accepted.text
 
@@ -405,7 +405,7 @@ class TestBuildFromScreamingFrog:
         accepted = client.post(
             f"{API_PREFIX}/deliverables/from-screaming-frog",
             content=write_sf_bundle_bytes(),
-            headers={"X-Org-Id": "org-a"},
+            headers=auth_headers("org-a"),
         )
         assert accepted.status_code == 202, accepted.text
         deliverable_id = accepted.json()["id"]
@@ -414,6 +414,6 @@ class TestBuildFromScreamingFrog:
         assert status_body["status"] == "succeeded"
 
         download = client.get(
-            f"{API_PREFIX}/deliverables/{deliverable_id}/download", headers={"X-Org-Id": "org-a"}
+            f"{API_PREFIX}/deliverables/{deliverable_id}/download", headers=auth_headers("org-a")
         )
         assert download.status_code == 200

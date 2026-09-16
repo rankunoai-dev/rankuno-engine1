@@ -1792,7 +1792,7 @@ class TestFacetAccessControl:
             f"{API_PREFIX}/jobs",
             json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
             params={"facet_id": "seo.health_engine"},
-            headers={"X-Org-Id": "team-a"},
+            headers=auth_headers("team-a"),
         )
         assert response.status_code == 403
         assert "does not have access" in response.json()["detail"]
