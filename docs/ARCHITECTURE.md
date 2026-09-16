@@ -325,7 +325,6 @@ src/
 
 | Path | Purpose |
 | :--- | :--- |
-| `core/circuit_breaker.py` | Upstream `CLOSED → OPEN → HALF-OPEN` state machine |
 | The React UI for `modules/seo/screaming_frog_control/` (ADR 0013) | The API surface (`preview`/confirm/templates) is implemented; no confirmation-modal UI consumes it yet — an operator would call it directly today |
 | A cloud dashboard or worker-management screen for ADR 0015's worker dispatch | Explicitly out of scope this cycle. The full HTTP surface (`api/worker_routes.py`) and the worker daemon are implemented and tested; an operator registers a worker, previews/confirms a dispatch, and reads job status by calling the API directly today |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
@@ -345,6 +344,17 @@ src/
 > rulebook CRUD routes, and `GET /deliverables/{id}/download` — async, job-
 > gated and org-scoped. No web UI page calls it yet; that remains open, tracked
 > as a handoff to `ui-engineer`, not as a gap in the API itself.
+>
+> A fourth row, `core/circuit_breaker.py`, was removed in cycle 0098: the file
+> exists (`CLOSED`/`OPEN`/`HALF_OPEN`, 5-failure threshold, 30s recovery
+> timeout) and is wired into both `core/postgres_store.py` (Postgres
+> connection resilience, cycle 0084) and `integrations/gsc_token_manager.py`
+> (OAuth token-refresh calls, since 2026-09-12 — predating ADR 0015's own
+> Context section, which first corrected CLAUDE.md §8's "does not exist"
+> framing but under-described the primitive as scoped to Postgres only).
+> Nothing wires it, or any circuit breaker, to the ADR 0015 worker-dispatch
+> HTTP channel specifically — that remains an accepted v1 gap (ADR 0015
+> condition 10), distinct from the file not existing at all.
 
 > **Pipeline status**: `base_tool.py` implements 7 of the specified 10 steps. Idempotency
 > key validation, circuit breaker checks, and state checkpointing are **not** implemented.
@@ -401,7 +411,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0012](adr/0012-gsc-account-profiles.md) | Named Search Console profiles as `GSC_ACCOUNTS__<name>__*` env keys; a crawl selects one by name; the API publishes names only, never credentials; unknown name is refused, never defaulted |
 | [0013](adr/0013-screaming-frog-cli-process-governance-exception.md) | Governance exception lifting ADR 0011 §3's ban on driving Screaming Frog via CLI, conditional on 8 binding security requirements (real Windows Job Object, independent PID+start-time ledger, same-process design, `UrlSafetyPolicy` seed-URL gate, explicit CLI field mapping, named license-failure error, `RiskClass.WRITE`/`MANDATORY_HITL`). Status: APPROVED. Conditions 1–3 implemented [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md); conditions 4–8 implemented (build-log entry pending — docs-scribe) as `modules/seo/screaming_frog_control/`. No React UI consumes the preview/confirm API yet |
 | [0014](adr/0014-native-title-h1-meta-description-extraction.md) | Extract title/H1/meta description natively at fetch time (`content_signals.py`, `html.parser`, no new dependency), hooked into the one `SiteGraph.record_fetch` method both sync and async discovery share. 13 of 17 `PAGE_TITLES`/`META_DESCRIPTION`/`H1` catalogue ids move to `MEASURED`; the 4 pixel-width ids stay `NOT_MEASURED` by design fallback — no verified glyph-width table available, and a live font-rendering substitute would be non-deterministic across machines. [build-log 0096](build-log/0096-twenty-nine-measured-eighty-one-not.md) |
-| [0015](adr/0015-cloud-local-desktop-worker-architecture.md) | Self-hosted-runner pattern for `RiskClass.WRITE` Screaming Frog dispatch: a cloud API queues a job for one pinned worker daemon; the daemon polls, never accepts an inbound connection. 14 binding conditions, chief among them a **dual** approval gate — cloud-side preview/confirm (gate a, Postgres-backed, worker-bound) plus a worker-independently-verified signed assignment (gate b, never a bare boolean) — and per-worker credentials distinct from ADR 0016's session tokens. Status: APPROVED. Implemented (build-log entry pending — docs-scribe) as `core/worker_auth.py`, `core/worker_dispatch_signing.py`, `core/worker_dispatch_store.py`/`core/postgres_worker_dispatch_store.py`, `core/worker_bundle_crypto.py`, `api/worker_routes.py`, `modules/seo/screaming_frog_control/upload_manifest.py`/`worker_daemon.py`, `integrations/worker_cloud_client.py`. No React UI (cloud dashboard or worker-management screen) this cycle |
+| [0015](adr/0015-cloud-local-desktop-worker-architecture.md) | Self-hosted-runner pattern for `RiskClass.WRITE` Screaming Frog dispatch: a cloud API queues a job for one pinned worker daemon; the daemon polls, never accepts an inbound connection. 14 binding conditions, chief among them a **dual** approval gate — cloud-side preview/confirm (gate a, Postgres-backed, worker-bound) plus a worker-independently-verified signed assignment (gate b, never a bare boolean) — and per-worker credentials distinct from ADR 0016's session tokens. Status: APPROVED. Implemented as `core/worker_auth.py`, `core/worker_dispatch_signing.py`, `core/worker_dispatch_store.py`/`core/postgres_worker_dispatch_store.py`, `core/worker_bundle_crypto.py`, `api/worker_routes.py`, `modules/seo/screaming_frog_control/upload_manifest.py`/`worker_daemon.py`, `integrations/worker_cloud_client.py` [build-log 0098](build-log/0098-expires-at-is-not-deletion.md). No React UI (cloud dashboard or worker-management screen) this cycle; uploaded-bundle "automatic expiry" (condition 11) is read-time filtering only, no purge job exists yet |
 | [0016](adr/0016-cloud-api-authentication.md) | Session-token authentication and an org-ownership retrofit for `src/api/server.py`, closing a CRITICAL unauthenticated-GSC-credential-access finding and a HIGH cross-tenant job-access finding across 14 routes. Status: APPROVED. Implemented as `core/auth.py`/`api/auth.py` (`Principal`/`Operator`, PBKDF2 password hashing, self-contained HMAC-SHA256 session tokens, `require_principal`, `org_scoped_or_404`, `POST /auth/login`) [build-log 0097](build-log/0097-the-header-that-verified-nothing.md) |
 
 ---
