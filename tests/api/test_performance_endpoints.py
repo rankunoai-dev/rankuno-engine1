@@ -32,6 +32,8 @@ from src.modules.seo.page_classifier.schemas import (
 from src.modules.seo.page_classifier.tool import CrawlSummary, PageClassificationOutput
 from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
 
+from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
+
 PUBLIC_IP = "93.184.216.34"
 
 PAGES_CSV = (
@@ -73,8 +75,12 @@ def store(tmp_path) -> DiskJobStore:
 
 @pytest.fixture
 def client(store):
-    app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda _h: [PUBLIC_IP]))
-    with TestClient(app) as test_client:
+    app = create_app(
+        store=store,
+        url_policy=UrlSafetyPolicy(resolver=lambda _h: [PUBLIC_IP]),
+        session_secret=TEST_SESSION_SECRET,
+    )
+    with TestClient(app, headers=auth_headers()) as test_client:
         yield test_client
 
 

@@ -340,3 +340,74 @@ def test_names_for_org_survives_an_unreadable_store():
 def test_default_org_id_matches_the_stores_auto_created_org():
     """If these ever disagree, UI-added accounts resolve against an empty org."""
     assert DEFAULT_ORG_ID == "default"
+
+
+# --- ADR 0016: session_secret / operator_store ------------------------------
+
+
+def test_session_secret_is_generated_when_unset(tmp_path):
+    """Development gets a usable key with zero configuration."""
+    settings = Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl")
+    assert settings.session_secret.get_secret_value()
+
+
+def test_session_secret_is_cached_on_the_instance(tmp_path):
+    """Every token this process issues must stay verifiable by this process.
+
+    A fresh key per call would make the very first token fail its own
+    verification a moment later.
+    """
+    settings = Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl")
+    first = settings.session_secret.get_secret_value()
+    second = settings.session_secret.get_secret_value()
+    assert first == second
+
+
+def test_session_secret_uses_the_configured_value_when_set(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        audit_log_path=tmp_path / "a.jsonl",
+        auth_session_secret=SecretStr("a-configured-signing-key"),
+    )
+    assert settings.session_secret.get_secret_value() == "a-configured-signing-key"
+
+
+def test_session_secret_property_refuses_a_missing_key_in_production(tmp_path):
+    """The lazy property's own guard, exercised directly.
+
+    `model_post_init` already refuses to *construct* a production `Settings`
+    with no key (covered below); this reaches the property's independent
+    check by building outside production and then reassigning both fields
+    after the fact, the only way to observe it as a defence in depth rather
+    than dead code.
+    """
+    settings = Settings(
+        _env_file=None,
+        audit_log_path=tmp_path / "a.jsonl",
+        auth_session_secret=SecretStr("a-configured-signing-key"),
+    )
+    settings.auth_session_secret = None
+    settings.environment = Environment.PRODUCTION
+    with pytest.raises(ConfigurationError):
+        _ = settings.session_secret
+
+
+def test_production_boot_refuses_a_missing_session_secret(tmp_path):
+    """The construction-time guard, not only the lazy property."""
+    with pytest.raises(ConfigurationError):
+        Settings(
+            _env_file=None,
+            audit_log_path=tmp_path / "a.jsonl",
+            environment=Environment.PRODUCTION,
+        )
+
+
+def test_operator_store_is_constructed_lazily(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        audit_log_path=tmp_path / "a.jsonl",
+        auth_operator_store_path=tmp_path / "operators",
+    )
+    store = settings.operator_store
+    assert store is settings.operator_store, "must be cached, not rebuilt per access"
+    assert (tmp_path / "operators").is_dir()

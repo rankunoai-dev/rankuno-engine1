@@ -9,14 +9,17 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 from src.api.server import create_app
+from src.core.schemas import OrgConfig
 from src.core.state_store import DiskJobStore
+
+from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
 
 
 @pytest.fixture
 def client() -> TestClient:
     """Create a test client for the API."""
-    app = create_app(DiskJobStore(".jobs"))
-    return TestClient(app)
+    app = create_app(DiskJobStore(".jobs"), session_secret=TEST_SESSION_SECRET)
+    return TestClient(app, headers=auth_headers())
 
 
 class TestIdempotencyKeyDeduplication:
@@ -125,7 +128,15 @@ class TestIdempotencyKeyDeduplication:
         assert job1_id != job2_id
 
     def test_idempotency_key_per_org(self, client: TestClient) -> None:
-        """Same Idempotency-Key for different orgs should create different jobs."""
+        """Same Idempotency-Key for different orgs should create different jobs.
+
+        Org comes from the verified session token now (ADR 0016 condition 4),
+        never from a header — `create_job` no longer reads `X-Org-Id` at all,
+        so this authenticates as two different orgs via two different tokens
+        instead. Both orgs must exist in this fixture's (real, unmocked)
+        org config store before a job can be admitted, so this seeds them
+        directly rather than relying on `default` being auto-created.
+        """
         payload = {
             "base_url": "https://example.com",
             "max_depth": 2,
@@ -133,25 +144,27 @@ class TestIdempotencyKeyDeduplication:
             "respect_robots": True,
             "llm_spend_cap_usd": 0.0,
         }
+        org_store = client.app.state.api.org_config_store
+        for org_id in ("org1", "org2"):
+            try:
+                org_store.get(org_id)
+            except KeyError:
+                org_store.create(OrgConfig(org_id=org_id, display_name=org_id))
 
         response1 = client.post(
             "/api/v1/jobs",
             json=payload,
-            headers={
-                "Idempotency-Key": "test-key-005",
-                "x-org-id": "org1",
-            },
+            headers={"Idempotency-Key": "test-key-005", **auth_headers(org_id="org1")},
         )
+        assert response1.status_code == 202, response1.text
         job1_id = response1.json()["id"]
 
         response2 = client.post(
             "/api/v1/jobs",
             json=payload,
-            headers={
-                "Idempotency-Key": "test-key-005",
-                "x-org-id": "org2",
-            },
+            headers={"Idempotency-Key": "test-key-005", **auth_headers(org_id="org2")},
         )
+        assert response2.status_code == 202, response2.text
         job2_id = response2.json()["id"]
 
         # Should create different jobs for different orgs

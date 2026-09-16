@@ -254,7 +254,11 @@ GET    /api/v1/deliverables/{id}/download
 Every endpoint is org-scoped: `X-Org-Id` (defaulting to `default`) is checked
 on every read the same way `GET /jobs/{id}` and `GET /jobs/{id}/result`
 already check it — a `403` for a record another org owns, never a silent
-empty response. Workbook builds run on a worker thread behind their own
+empty response. **Not yet migrated to ADR 0016's authenticated org
+derivation** — this header remains client-asserted here, unlike the
+job-family and GSC-account routes in `server.py`; a known gap recorded at
+`_org_id()`'s docstring in `deliverables_routes.py`, not a silent omission.
+Workbook builds run on a worker thread behind their own
 concurrency guard on `ApiState` (default 3 at once, independent of the crawl
 `FacetRouter`) — `build_workbook` alone measures up to 26.3s at the 500k-page
 ceiling, so nothing here may block a request handler on it. There is still no
@@ -268,10 +272,36 @@ as a handoff to `ui-engineer`.
 cd rankuno-ui; npm run dev                          # http://localhost:5173
 ```
 
-The server binds loopback deliberately: there is no authentication and it fetches
-arbitrary URLs on request ([ADR 0008](docs/adr/0008-local-api-layer-and-job-store.md)).
-Started without it, the UI falls back to bundled fixtures and says so on screen —
+The server binds loopback deliberately: it still fetches arbitrary URLs on
+request, and on a routable interface that remains an open proxy regardless of
+login ([ADR 0008](docs/adr/0008-local-api-layer-and-job-store.md)). Started
+without it, the UI falls back to bundled fixtures and says so on screen —
 fixture data is indistinguishable from crawl output otherwise.
+
+Almost every route now requires a bearer session token
+([ADR 0016](docs/adr/0016-cloud-api-authentication.md)):
+
+```powershell
+# Provision the first operator (offline, interactive — never over HTTP)
+.\.venv\Scripts\python.exe scripts\create_operator.py --operator-id alice --org-id default
+
+# Exchange credentials for a session token
+curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"operator_id": "alice", "password": "..."}'
+# -> {"token": "...", "token_type": "bearer", "org_id": "default", "expires_at": "..."}
+
+curl -s http://127.0.0.1:8000/api/v1/jobs -H "Authorization: Bearer <token>"
+```
+
+`org_id` is now derived from the token's verified claim everywhere — never
+from the `X-Org-Id` header or a URL path segment. This closed a critical,
+previously-unauthenticated IDOR on the three `/orgs/{org_id}/gsc-accounts`
+routes and retrofitted an org-ownership check onto fourteen job-family routes
+that had none. Authentication does not change what `GuardrailEngine` requires
+for a `RiskClass.WRITE`/`FINANCIAL` action — a logged-in operator can be
+correctly identified as the actor requesting a write, not skip HITL approval
+for one.
 
 Job records persist under `.jobs/`, so crawls survive a restart. A crawl
 interrupted mid-run is marked `failed` rather than resumed: there is no

@@ -24,6 +24,8 @@ from src.modules.seo.screaming_frog_control.schemas import LicenceStatus, Scream
 from src.modules.seo.screaming_frog_control.template_registry import TemplateRegistry
 from src.modules.seo.screaming_frog_control.tool import SCREAMING_FROG_LICENCE_ERROR
 
+from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
+
 PUBLIC_IP = "93.184.216.34"
 SAFE_URL = "https://e.com/"
 
@@ -117,8 +119,9 @@ def client(store, mock_org_store, sf_templates):
         url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
         sf_template_registry=sf_templates,
         sf_token_store=PreviewTokenStore(),
+        session_secret=TEST_SESSION_SECRET,
     )
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=auth_headers()) as test_client:
         yield test_client
 
 
@@ -157,8 +160,9 @@ class TestListTemplates:
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             sf_template_registry=TemplateRegistry(tmp_path / "empty"),
+            session_secret=TEST_SESSION_SECRET,
         )
-        with TestClient(app) as isolated_client:
+        with TestClient(app, headers=auth_headers()) as isolated_client:
             response = isolated_client.get(f"{API_PREFIX}/screaming-frog/templates")
         assert response.json()["templates"] == []
 

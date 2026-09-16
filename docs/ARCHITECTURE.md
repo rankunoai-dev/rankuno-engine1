@@ -39,6 +39,14 @@ src/
 │   ├── retry.py                 # Exponential backoff with jitter (tenacity)
 │   ├── url_safety.py            # SSRF guard: private-range blocker, scheme allowlist
 │   ├── robots.py                # robots.txt & crawl-delay parsing (RFC 9309)
+│   ├── auth.py                  # Operator identity + session tokens (ADR 0016).
+│   │                            # Principal/Operator StrictModels, PBKDF2 password
+│   │                            # hashing, self-contained HMAC-SHA256 bearer
+│   │                            # tokens (issue_session_token/verify_session_token),
+│   │                            # DiskOperatorStore. No FastAPI import — HTTP glue
+│   │                            # is api/auth.py, not here. Governs *who* is
+│   │                            # calling; GuardrailEngine still governs *what a
+│   │                            # WRITE/FINANCIAL action may do*, unchanged
 │   ├── state_store.py           # Durable background-job records. Domain-agnostic:
 │   │                            # opaque request/result mappings, atomic writes
 │   ├── process_supervisor.py    # Windows Job Object process supervision (ADR
@@ -59,12 +67,30 @@ src/
 │                                # requires Windows -- only calling it does
 ├── api/                         # Local HTTP API (ADR 0008). Outermost layer;
 │   │                            # nothing below imports from it.
-│   ├── server.py                # Implements no safety control of its own — all
-│   │                            # inherited from BaseTool.run(). Binds 127.0.0.1.
+│   ├── server.py                # Implements no crawl-safety control of its own —
+│   │                            # SSRF/robots/politeness are all inherited from
+│   │                            # BaseTool.run(). Binds 127.0.0.1 regardless —
+│   │                            # ADR 0016 authenticates *who* is calling, not
+│   │                            # *what* a crawl may fetch, so this stays an open
+│   │                            # proxy on a routable interface either way.
 │   │                            # Runs at most MAX_CONCURRENT_CRAWLS jobs (default
 │   │                            # 5) — the RAM bound; the rest get 429
 │   │                            # GET /api/v1/gsc/accounts lists profile names;
 │   │                            # admission refuses an unknown gsc_account (400)
+│   │                            # Almost every route requires a bearer session
+│   │                            # token (ADR 0016); org_id is derived from its
+│   │                            # verified claim, never from X-Org-Id or a URL
+│   │                            # path segment. Closed the CRITICAL IDOR on
+│   │                            # /orgs/{org_id}/gsc-accounts and retrofitted an
+│   │                            # ownership check onto 14 job-family routes that
+│   │                            # had none, via api/auth.py's org_scoped_or_404
+│   ├── auth.py                  # ADR 0016 HTTP glue: require_principal() (bearer
+│   │                            # token -> Principal or 401), org_scoped_or_404()
+│   │                            # (the one shared ownership check server.py and
+│   │                            # deliverables_routes.py both use), and
+│   │                            # build_auth_router() for POST /auth/login.
+│   │                            # Wraps core/auth.py; no route here has its own
+│   │                            # RiskClass — a login is not a BaseTool.run()
 │   └── deliverables_routes.py   # Workbook build/download HTTP surface (cycle
 │                                # 0087). A separate router, not routes on
 │                                # server.py, included via app.include_router();

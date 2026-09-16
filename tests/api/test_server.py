@@ -48,6 +48,8 @@ from src.modules.seo.page_classifier.tool import (
 )
 from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
 
+from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
+
 PUBLIC_IP = "93.184.216.34"
 SAFE_URL = "https://e.com/"
 
@@ -116,8 +118,9 @@ def client(store, mock_org_store):
     app = create_app(
         store=store,
         url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+        session_secret=TEST_SESSION_SECRET,
     )
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=auth_headers()) as test_client:
         yield test_client
 
 
@@ -216,6 +219,7 @@ class TestConcurrencyCap:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
         # Try to occupy page_classifier's slots (limit is 3 in Phase 1)
@@ -223,7 +227,7 @@ class TestConcurrencyCap:
         assert state.try_reserve("occupier2", "seo.page_classifier") is True
         assert state.try_reserve("occupier3", "seo.page_classifier") is True
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = post_job(client)
         assert response.status_code == 429
 
@@ -244,13 +248,14 @@ class TestConcurrencyCap:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
         state.try_reserve("occupier1", "seo.page_classifier")
         state.try_reserve("occupier2", "seo.page_classifier")
         state.try_reserve("occupier3", "seo.page_classifier")
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             assert post_job(client).status_code == 429
 
         assert store.list_jobs() == []
@@ -259,13 +264,14 @@ class TestConcurrencyCap:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
         state.try_reserve("occupier1", "seo.page_classifier")
         state.try_reserve("occupier2", "seo.page_classifier")
         state.try_reserve("occupier3", "seo.page_classifier")
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             assert post_job(client).status_code == 429
 
         state.release("occupier1", "seo.page_classifier")
@@ -275,7 +281,7 @@ class TestConcurrencyCap:
 
     def test_reserving_is_atomic(self, store, mock_org_store):
         """Check-then-reserve in two steps would let both callers through."""
-        app = create_app(store=store)
+        app = create_app(store=store, session_secret=TEST_SESSION_SECRET)
         state = app.state.api
         # Page classifier has 3 slots, so all 3 should succeed
         assert state.try_reserve("j0", "seo.page_classifier") is True
@@ -284,7 +290,7 @@ class TestConcurrencyCap:
         assert state.try_reserve("j3", "seo.page_classifier") is False
 
     def test_releasing_frees_a_slot(self, store, mock_org_store):
-        app = create_app(store=store)
+        app = create_app(store=store, session_secret=TEST_SESSION_SECRET)
         state = app.state.api
         # Fill all 3 page_classifier slots
         state.try_reserve("a", "seo.page_classifier")
@@ -296,7 +302,7 @@ class TestConcurrencyCap:
 
     def test_releasing_an_unknown_job_is_harmless(self, store, mock_org_store):
         """`_dispatch` releases in a `finally`; a double release must not raise."""
-        state = create_app(store=store).state.api
+        state = create_app(store=store, session_secret=TEST_SESSION_SECRET).state.api
         state.release("never-reserved", "seo.page_classifier")
         assert state.active_count == 0
 
@@ -318,7 +324,7 @@ class TestConcurrencyCapFromSettings:
 
     def test_default_cap_is_five(self, store, monkeypatch, org_store):
         self._use_settings(monkeypatch, org_store)
-        app = create_app(store=store)
+        app = create_app(store=store, session_secret=TEST_SESSION_SECRET)
         assert app.state.api.max_concurrent_jobs == 5
         assert server_module.DEFAULT_MAX_CONCURRENT_JOBS == 5
 
@@ -327,12 +333,13 @@ class TestConcurrencyCapFromSettings:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
         assert state.try_reserve("first") is True
         assert state.try_reserve("second") is True
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = post_job(client)
             health = client.get(f"{API_PREFIX}/health").json()
 
@@ -343,7 +350,7 @@ class TestConcurrencyCapFromSettings:
     def test_explicit_kwarg_wins_over_settings(self, store, monkeypatch, org_store):
         """A test pinning the cap must not depend on what the environment says."""
         self._use_settings(monkeypatch, org_store, max_concurrent_crawls=8)
-        app = create_app(store=store, max_concurrent_jobs=1)
+        app = create_app(store=store, max_concurrent_jobs=1, session_secret=TEST_SESSION_SECRET)
         state = app.state.api
         assert state.max_concurrent_jobs == 1
         assert state.try_reserve("a") is True
@@ -492,8 +499,8 @@ class TestStartupRecovery:
         job_id = store.create("seo.page_classifier", {"base_url": SAFE_URL}).id
         store.mark_running(job_id)
 
-        app = create_app(store=store)
-        with TestClient(app):
+        app = create_app(store=store, session_secret=TEST_SESSION_SECRET)
+        with TestClient(app, headers=auth_headers()):
             # Recovery runs on a fire-and-forget daemon thread so startup does
             # not block on a large job store; entering the client context only
             # runs the lifespan up to its `yield`, not the thread. Wait for the
@@ -987,6 +994,7 @@ class TestCancel:
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             max_concurrent_jobs=1,
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
         record = store.create("tool", {"base_url": "https://e.com/"}, label="stuck")
@@ -1000,7 +1008,7 @@ class TestCancel:
         # when the `with` block below starts, so `mark_running` has to wait for
         # it to finish first — otherwise it can race the recovery thread's scan
         # and get failed out from under the test as a false orphan.
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             assert state.recovery_done.wait(timeout=5), "recovery did not finish in time"
             store.mark_running(record.id)
             state.try_reserve(record.id)
@@ -1018,10 +1026,14 @@ class TestCancel:
         that read like a clean stop would be a lie told in the one place an
         operator goes when they already distrust the system.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = store.create("tool", {"base_url": "https://e.com/"}, label="stuck")
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             # Same race as test_cancelling_frees_the_slot: wait for the
             # background orphan recovery to finish before marking the job
             # RUNNING, or recovery may fail it out from under the test.
@@ -1033,19 +1045,27 @@ class TestCancel:
 
     def test_a_finished_job_cannot_be_cancelled(self, store):
         """409 rather than rewriting history. A finished crawl is the evidence."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = store.create("tool", {"base_url": "https://e.com/"}, label="done")
         store.finish(record.id, {"pages": []})
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(f"{API_PREFIX}/jobs/{record.id}/cancel")
 
         assert response.status_code == 409
         assert store.get(record.id).status is JobStatus.SUCCEEDED
 
     def test_cancelling_an_unknown_job_is_404(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             assert client.post(f"{API_PREFIX}/jobs/nope/cancel").status_code == 404
 
 
@@ -1098,8 +1118,12 @@ class TestReparseEndpoint:
 
     def test_reparsing_creates_a_new_job_and_keeps_the_original(self, store):
         """The original is the evidence of what the site was when crawled."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             source = self._finished(store, client)
             response = client.post(f"{API_PREFIX}/jobs/{source.id}/reparse")
 
@@ -1111,8 +1135,12 @@ class TestReparseEndpoint:
         assert store.get(source.id).status is JobStatus.SUCCEEDED
 
     def test_the_menu_is_re_parsed_when_a_homepage_was_kept(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             source = self._finished(store, client)
             store.write_homepage(
                 source.id,
@@ -1127,16 +1155,24 @@ class TestReparseEndpoint:
 
     def test_reparsing_without_a_homepage_keeps_the_stored_menu(self, store):
         """The normal case for every crawl older than the sidecar."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             source = self._finished(store, client)
             body = client.post(f"{API_PREFIX}/jobs/{source.id}/reparse").json()
 
         assert store.read_result(body["id"])["navigation"]["roots"] == []
 
     def test_reparsing_a_job_with_no_result_is_404(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
             assert client.post(f"{API_PREFIX}/jobs/{record.id}/reparse").status_code == 404
 
@@ -1201,8 +1237,12 @@ class TestScreamingFrogEndpoint:
 
     def test_a_missed_page_is_merged_into_a_new_job(self, store):
         """The original stays put: the comparison is the point of running this."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             source = self._finished(store)
             response = self._post(
                 client, source.id, '"https://e.com/b/",200,text/html,Indexable,,,3,5'
@@ -1220,8 +1260,12 @@ class TestScreamingFrogEndpoint:
 
     def test_nothing_to_merge_creates_no_job(self, store):
         """A report-only run must not litter `.jobs/` with duplicates."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             source = self._finished(store)
             before = len(store.list_jobs())
             response = self._post(
@@ -1235,8 +1279,12 @@ class TestScreamingFrogEndpoint:
         assert after == before
 
     def test_noise_is_reported_but_never_merged(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             source = self._finished(store)
             response = self._post(
                 client,
@@ -1251,8 +1299,12 @@ class TestScreamingFrogEndpoint:
         assert body["frog_reasons"]["MEDIA_URL"] == 1
 
     def test_an_empty_body_is_rejected(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             source = self._finished(store)
             response = client.post(
                 f"{API_PREFIX}/jobs/{source.id}/{self.PATH}",
@@ -1262,8 +1314,12 @@ class TestScreamingFrogEndpoint:
         assert response.status_code == 400
 
     def test_an_unknown_job_is_404(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             response = self._post(
                 client, "nope", '"https://e.com/b/",200,text/html,Indexable,,,3,5'
             )
@@ -1271,8 +1327,12 @@ class TestScreamingFrogEndpoint:
 
     def test_a_byte_order_mark_does_not_blind_the_parser(self, store):
         """Screaming Frog writes a BOM; without `utf-8-sig` the export reads as empty."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             source = self._finished(store)
             payload = "\n".join((self.HEADER, '"https://e.com/b/",200,text/html,Indexable,,,3,5'))
             response = client.post(
@@ -1309,20 +1369,28 @@ class TestReconciliationIsKept:
 
     def test_the_endpoint_returns_the_saved_lists_not_just_counts(self, store):
         """The counts are the headline; the addresses are the work."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
         store.write_reconciliation(
             record.id,
             {"summary": {"in_both": 2}, "missed_pages": ["https://e.com/x"], "orphans": []},
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation").json()
         assert body["missed_pages"] == ["https://e.com/x"]
 
     def test_an_uncross_checked_job_is_404(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation")
         assert response.status_code == 404
 
@@ -1358,9 +1426,13 @@ class TestReconciliationDownload:
 
         Two files would make the reader do a join to answer it.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
 
         assert "https://e.com/x,screaming_frog_only,MISSED_PAGE" in body
@@ -1368,16 +1440,24 @@ class TestReconciliationDownload:
 
     def test_the_counts_ride_along(self, store):
         """Without them a reader treats the gap lists as the whole site."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
         assert "2,summary,in_both," in body
 
     def test_reasons_are_glossed_for_a_reader_who_is_not_an_engineer(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
         assert "no internal link reaches it" in body
 
@@ -1390,9 +1470,13 @@ class TestReconciliationDownload:
         pages the crawl actually missed sat below sixteen thousand differences
         that need no action.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
 
         assert response.status_code == 200
@@ -1414,9 +1498,13 @@ class TestReconciliationDownload:
         rows, and `MEDIA_URL` in 16,162 — the same two values, over and over,
         occupying the two columns beside the only one that varies.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
         book = load_workbook(io.BytesIO(response.content))
         assert [cell.value for cell in book["Orphans"][1]] == ["url"]
@@ -1430,9 +1518,13 @@ class TestReconciliationDownload:
         it. The two call for opposite fixes, so each heading's download is that
         half — still one sheet per reason, not a flat list.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             frog = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=frog")
             engine = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=engine")
 
@@ -1443,9 +1535,13 @@ class TestReconciliationDownload:
 
     def test_a_one_sided_workbook_is_named_for_the_half_it_holds(self, store):
         """Two downloads from one cross-check must not collide in Downloads."""
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=engine")
         assert "rankuno-only" in response.headers["content-disposition"]
 
@@ -1455,9 +1551,13 @@ class TestReconciliationDownload:
         A workbook listing reasons whose sheets it does not contain sends the
         reader looking for tabs that are not there.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=engine")
         text = " ".join(
             " ".join(str(cell) for cell in row if cell is not None)
@@ -1474,9 +1574,13 @@ class TestReconciliationDownload:
         Treating it as "both" hands someone twice the report they asked for, and
         nothing on screen would say so.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx?side=both")
         assert response.status_code == 422
 
@@ -1487,9 +1591,13 @@ class TestReconciliationDownload:
         strip says `Media files` without saying that it is 16,162 URLs the
         engine refused on purpose.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
         rows = list(
             load_workbook(io.BytesIO(response.content))["Summary"].iter_rows(values_only=True)
@@ -1507,9 +1615,13 @@ class TestReconciliationDownload:
         after the first row is appended — openpyxl accepts the assignment and
         discards it. The first version of this endpoint did exactly that.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
 
         book = load_workbook(io.BytesIO(response.content))
@@ -1525,7 +1637,11 @@ class TestReconciliationDownload:
         opens the workbook finds every file tab in one place — and the Orphans
         sheet no longer holds the PDFs.
         """
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
         store.write_reconciliation(
             record.id,
@@ -1545,7 +1661,7 @@ class TestReconciliationDownload:
                 ],
             },
         )
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
         book = load_workbook(io.BytesIO(response.content))
         assert book.sheetnames == [
@@ -1575,22 +1691,34 @@ class TestReconciliationDownload:
             assert reason.value in GAP_MEANINGS, reason
 
     def test_the_workbook_needs_a_saved_cross_check(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
-        with TestClient(app) as client:
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
             assert client.get(f"{API_PREFIX}/jobs/nope/reconciliation.xlsx").status_code == 404
 
     def test_it_downloads_as_a_named_file(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = self._saved(store)
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv")
         assert response.headers["content-disposition"].startswith("attachment;")
         assert "2026-08-20.csv" in response.headers["content-disposition"]
 
     def test_a_job_never_cross_checked_is_404(self, store):
-        app = create_app(store=store, url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]))
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
         record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             assert (
                 client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").status_code == 404
             )
@@ -1664,7 +1792,7 @@ class TestFacetAccessControl:
             f"{API_PREFIX}/jobs",
             json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
             params={"facet_id": "seo.health_engine"},
-            headers={"X-Org-Id": "team-a"},
+            headers=auth_headers("team-a"),
         )
         assert response.status_code == 403
         assert "does not have access" in response.json()["detail"]
@@ -1693,6 +1821,7 @@ class TestPerFacetConcurrency:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
 
@@ -1704,7 +1833,7 @@ class TestPerFacetConcurrency:
 
         # Next job on page_classifier should be refused
         stub_tool.result = StubResult(ok=False, error="test")
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(
                 f"{API_PREFIX}/jobs",
                 json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
@@ -1718,6 +1847,7 @@ class TestPerFacetConcurrency:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
 
@@ -1728,7 +1858,7 @@ class TestPerFacetConcurrency:
 
         # page_classifier is full, but health_engine (2-slot limit) should accept
         stub_tool.result = StubResult(ok=True, data={})
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(
                 f"{API_PREFIX}/jobs",
                 json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
@@ -1743,6 +1873,7 @@ class TestPerFacetConcurrency:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
 
@@ -1751,7 +1882,7 @@ class TestPerFacetConcurrency:
         state.try_reserve("job2", "seo.theme_classification")
 
         stub_tool.result = StubResult(ok=False, error="test")
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(
                 f"{API_PREFIX}/jobs",
                 json={"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
@@ -1786,11 +1917,12 @@ class TestFacetSlotReturn:
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             max_concurrent_jobs=5,
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
         stub_tool.result = StubResult(ok=False, error="stopped")
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             for _ in range(6):
                 run_job(client, store)  # asserts 202 and waits for a terminal status
             # The release runs on the event loop after the worker thread has
@@ -1805,7 +1937,9 @@ class TestFacetSlotReturn:
 
     def test_rekey_moves_the_facet_claim_with_the_global_one(self, store, mock_org_store):
         """The provisional id must leave the per-facet set, not only `_active`."""
-        state = create_app(store=store, max_concurrent_jobs=1).state.api
+        state = create_app(
+            store=store, max_concurrent_jobs=1, session_secret=TEST_SESSION_SECRET
+        ).state.api
         assert state.try_reserve("pending:1", self.FACET) is True
 
         state.rekey("pending:1", "real-1", self.FACET)
@@ -1824,11 +1958,12 @@ class TestFacetSlotReturn:
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             max_concurrent_jobs=1,
+            session_secret=TEST_SESSION_SECRET,
         )
         state = app.state.api
         record = store.create("tool", {"base_url": SAFE_URL}, label="stuck")
 
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             # Same race as TestCancel: wait for orphan recovery before marking
             # the job RUNNING, or recovery fails it out from under the test.
             assert state.recovery_done.wait(timeout=5), "recovery did not finish in time"
@@ -1860,6 +1995,7 @@ class TestBackwardCompatibility:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
 
         # Create original job on health_engine
@@ -1871,7 +2007,7 @@ class TestBackwardCompatibility:
         store.finish(original.id, {"base_url": SAFE_URL})
 
         # Retry should run under same facet
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(f"{API_PREFIX}/jobs/{original.id}/retry")
         assert response.status_code == 202
 
@@ -1886,6 +2022,7 @@ class TestBackwardCompatibility:
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
         )
 
         # Create original job on theme_classification
@@ -1905,7 +2042,7 @@ class TestBackwardCompatibility:
         )
 
         # Resume should run under same facet
-        with TestClient(app) as client:
+        with TestClient(app, headers=auth_headers()) as client:
             response = client.post(f"{API_PREFIX}/jobs/{original.id}/resume")
         assert response.status_code == 202
 
