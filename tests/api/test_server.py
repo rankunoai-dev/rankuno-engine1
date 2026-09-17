@@ -214,12 +214,19 @@ class TestAdmissionControl:
 
 
 class TestConcurrencyCap:
+    # `max_concurrent_jobs=3` is pinned explicitly throughout this class rather
+    # than left to the settings default: `max_concurrent_crawls` defaults to 5
+    # (`DEFAULT_MAX_CONCURRENT_JOBS`), and the facet router now takes that value
+    # through unchanged (server.py ApiState.__init__) instead of silently
+    # discarding it for a hardcoded 3 whenever it happened to equal the
+    # default. These tests exercise a 3-slot cap, so they must ask for one.
     def test_excess_jobs_are_refused_with_429(self, store, mock_org_store):
         """Each in-flight crawl holds its whole graph in memory."""
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             session_secret=TEST_SESSION_SECRET,
+            max_concurrent_jobs=3,
         )
         state = app.state.api
         # Try to occupy page_classifier's slots (limit is 3 in Phase 1)
@@ -249,6 +256,7 @@ class TestConcurrencyCap:
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             session_secret=TEST_SESSION_SECRET,
+            max_concurrent_jobs=3,
         )
         state = app.state.api
         state.try_reserve("occupier1", "seo.page_classifier")
@@ -265,6 +273,7 @@ class TestConcurrencyCap:
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             session_secret=TEST_SESSION_SECRET,
+            max_concurrent_jobs=3,
         )
         state = app.state.api
         state.try_reserve("occupier1", "seo.page_classifier")
@@ -281,7 +290,7 @@ class TestConcurrencyCap:
 
     def test_reserving_is_atomic(self, store, mock_org_store):
         """Check-then-reserve in two steps would let both callers through."""
-        app = create_app(store=store, session_secret=TEST_SESSION_SECRET)
+        app = create_app(store=store, session_secret=TEST_SESSION_SECRET, max_concurrent_jobs=3)
         state = app.state.api
         # Page classifier has 3 slots, so all 3 should succeed
         assert state.try_reserve("j0", "seo.page_classifier") is True
@@ -290,7 +299,7 @@ class TestConcurrencyCap:
         assert state.try_reserve("j3", "seo.page_classifier") is False
 
     def test_releasing_frees_a_slot(self, store, mock_org_store):
-        app = create_app(store=store, session_secret=TEST_SESSION_SECRET)
+        app = create_app(store=store, session_secret=TEST_SESSION_SECRET, max_concurrent_jobs=3)
         state = app.state.api
         # Fill all 3 page_classifier slots
         state.try_reserve("a", "seo.page_classifier")
@@ -367,7 +376,65 @@ class TestJobLifecycle:
         """The UI must be able to say the crawl is incomplete."""
         stub_tool.result = StubResult(ok=True, data=_fake_output(truncated=True))
         job_id = run_job(client, store)
-        assert store.get(job_id).status is JobStatus.PARTIAL
+        record = store.get(job_id)
+        assert record.status is JobStatus.PARTIAL
+        assert record.error is None, "a ceiling-only PARTIAL carries no stall/abort reason"
+
+    def test_a_stalled_crawl_never_reaches_succeeded(self, client, store, stub_tool):
+        """`stopped_reason` alone, with `truncated=False`, must not read as complete.
+
+        `discovery.py`'s own contract distinguishes the two: `truncated` is a
+        planned stop at the page ceiling, `stopped_reason` is an abandoned crawl
+        (`CrawlStalledError`, or a generic exception `async_discovery` swallowed).
+        The server previously consulted `truncated` alone, so a crawl that
+        stalled before ever reaching the ceiling was reported `SUCCEEDED`.
+        """
+        reason = (
+            "no page completed in 30s with 4 requests in flight — the target stopped responding"
+        )
+        stub_tool.result = StubResult(
+            ok=True, data=_fake_output(truncated=False, stopped_reason=reason)
+        )
+        job_id = run_job(client, store)
+        record = store.get(job_id)
+        assert record.status is JobStatus.PARTIAL
+        assert record.error == reason
+
+    def test_an_aborted_crawl_never_reaches_succeeded(self, client, store, stub_tool):
+        """A generic exception swallowed in `adiscover_site` is the same case.
+
+        Distinguishable from the stall by message shape alone (`ExceptionType:
+        message` vs the stall's own wording) — both are `stopped_reason`.
+        """
+        reason = "ConnectionResetError: connection reset by peer"
+        stub_tool.result = StubResult(
+            ok=True, data=_fake_output(truncated=False, stopped_reason=reason)
+        )
+        job_id = run_job(client, store)
+        record = store.get(job_id)
+        assert record.status is JobStatus.PARTIAL
+        assert record.error == reason
+
+    def test_ceiling_and_stall_together_drop_neither_signal(self, client, store, stub_tool):
+        """`truncated=True` and `stopped_reason` set at once must both survive.
+
+        The crawl can hit its page ceiling and then stall on what was already
+        in flight. Both signals must reach the record rather than one silently
+        overwriting the other.
+        """
+        reason = (
+            "no page completed in 30s with 2 requests in flight — the target stopped responding"
+        )
+        stub_tool.result = StubResult(
+            ok=True, data=_fake_output(truncated=True, stopped_reason=reason)
+        )
+        job_id = run_job(client, store)
+        record = store.get(job_id)
+        assert record.status is JobStatus.PARTIAL
+        assert record.error == reason
+        result = client.get(f"{API_PREFIX}/jobs/{job_id}/result").json()
+        assert result["discovery"]["truncated"] is True
+        assert result["discovery"]["stopped_reason"] == reason
 
     def test_a_tool_failure_reaches_failed_with_a_reason(self, client, store, stub_tool):
         stub_tool.result = StubResult(ok=False, error="robots.txt disallowed /")
@@ -510,7 +577,7 @@ class TestStartupRecovery:
         assert store.get(job_id).status is JobStatus.FAILED
 
 
-def _fake_output(*, truncated: bool) -> PageClassificationOutput:
+def _fake_output(*, truncated: bool, stopped_reason: str | None = None) -> PageClassificationOutput:
     """An empty but genuine `PageClassificationOutput`.
 
     A real instance rather than a stand-in, because the server type-checks what
@@ -521,7 +588,9 @@ def _fake_output(*, truncated: bool) -> PageClassificationOutput:
         base_url=SAFE_URL,
         site_profile=SiteProfile(),
         weight_profile=WeightProfileReport.for_site(SiteProfile()),
-        discovery=DiscoveryReport(base_url=SAFE_URL, truncated=truncated),
+        discovery=DiscoveryReport(
+            base_url=SAFE_URL, truncated=truncated, stopped_reason=stopped_reason
+        ),
         summary=CrawlSummary(),
     )
 
@@ -1818,15 +1887,19 @@ class TestPerFacetConcurrency:
 
     def test_page_classifier_has_its_own_concurrency_cap(self, store, stub_tool, mock_org_store):
         """Each facet gets independent concurrency slot management."""
+        # Cap pinned explicitly to 3 rather than relying on the default: the
+        # default (`max_concurrent_crawls=5`) now passes straight through to
+        # the facet router (server.py ApiState.__init__), so this test must
+        # request the cap it exercises instead of assuming one.
         app = create_app(
             store=store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             session_secret=TEST_SESSION_SECRET,
+            max_concurrent_jobs=3,
         )
         state = app.state.api
 
         # Occupy page_classifier's cap by manually reserving slots
-        # Phase 1 hardcodes page_classifier limit to 3
         assert state.try_reserve("job1", "seo.page_classifier") is True
         assert state.try_reserve("job2", "seo.page_classifier") is True
         assert state.try_reserve("job3", "seo.page_classifier") is True
@@ -1973,6 +2046,42 @@ class TestFacetSlotReturn:
             assert client.post(f"{API_PREFIX}/jobs/{record.id}/cancel").status_code == 200
 
         assert state.try_reserve("next", record.facet_id) is True
+
+
+class TestFacetRouterCapWiring:
+    """`ApiState` must hand `max_concurrent_jobs` to `FacetRouter` unchanged.
+
+    Regression coverage for a backwards ternary in `ApiState.__init__` that
+    discarded the configured cap whenever it equaled
+    `DEFAULT_MAX_CONCURRENT_JOBS` (5) and silently substituted 3 — which meant
+    every default startup disagreed with itself: the health endpoint and the
+    admission check both enforced 5, but the page_classifier facet enforced 3.
+    """
+
+    @pytest.mark.parametrize("cap", [1, 3, server_module.DEFAULT_MAX_CONCURRENT_JOBS, 7, 10])
+    def test_facet_cap_always_matches_the_configured_value(self, store, org_store, cap):
+        """No value — including one equal to the default — is special-cased."""
+        state = server_module.ApiState(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            org_config_store=org_store,
+            max_concurrent_jobs=cap,
+        )
+        page_classifier_cap = state.facet_router.get_facet_config(
+            "seo.page_classifier"
+        ).max_concurrent
+        assert page_classifier_cap == cap
+
+    def test_health_endpoint_agrees_with_facet_cap_on_default_startup(self, client):
+        """Default startup (`max_concurrent_jobs` unset).
+
+        Health and the facet router must report the same number, not 5 and 3.
+        """
+        state = client.app.state.api
+        body = client.get(f"{API_PREFIX}/health").json()
+        facet_cap = state.facet_router.get_facet_config("seo.page_classifier").max_concurrent
+        assert body["max_concurrent_jobs"] == facet_cap
+        assert body["max_concurrent_jobs"] == server_module.DEFAULT_MAX_CONCURRENT_JOBS
 
 
 class TestBackwardCompatibility:

@@ -27,9 +27,7 @@ enforced, diagnosed live against the running server this session.
 
 ```python
 self.facet_router = FacetRouter(
-    max_concurrent=max_concurrent_jobs
-    if max_concurrent_jobs != DEFAULT_MAX_CONCURRENT_JOBS
-    else 3
+    max_concurrent=max_concurrent_jobs if max_concurrent_jobs != DEFAULT_MAX_CONCURRENT_JOBS else 3
 )
 ```
 
@@ -122,10 +120,10 @@ Read against `try_reserve` (`server.py:753-780`), that check happens in two
 stages — a global check first, a facet check second:
 
 ```python
-if len(self._active) >= self.max_concurrent_jobs:   # global: 5
+if len(self._active) >= self.max_concurrent_jobs:  # global: 5
     return False
 ...
-if len(active) >= facet_config.max_concurrent:        # facet: 3 or 2
+if len(active) >= facet_config.max_concurrent:  # facet: 3 or 2
     return False
 ```
 

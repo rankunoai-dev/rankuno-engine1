@@ -317,10 +317,16 @@ class TestConcurrencyIsolation:
 
     def test_org_a_at_capacity_does_not_block_org_b(self, job_store):
         """Test that Org A hitting concurrency cap doesn't block Org B."""
+        # Cap pinned explicitly to 3: the settings default (5, equal to
+        # DEFAULT_MAX_CONCURRENT_JOBS) now passes straight through to the
+        # facet router (server.py ApiState.__init__) instead of being
+        # silently replaced with a hardcoded 3, so a test exercising a
+        # 3-slot cap must ask for one rather than assume the default gives it.
         app = create_app(
             store=job_store,
             url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
             session_secret=TEST_SESSION_SECRET,
+            max_concurrent_jobs=3,
         )
         state = app.state.api
 
