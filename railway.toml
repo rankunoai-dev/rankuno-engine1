@@ -6,7 +6,7 @@ builder = "dockerfile"
 dockerfile = "Dockerfile"
 
 [deploy]
-startCommand = "sh -c 'alembic upgrade head && uvicorn src.api.server:app --host 0.0.0.0 --port 8000 & celery -A src.core.celery_config.app worker --loglevel=info'"
+startCommand = "sh -c 'alembic upgrade head && uvicorn src.api.server:app --host 0.0.0.0 --port 8000 & celery -A src.workers.job_executor worker --loglevel=info & wait'"
 numReplicas = 1
 
 [env]

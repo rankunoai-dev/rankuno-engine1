@@ -42,4 +42,5 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Run migrations and start services
 CMD ["sh", "-c", "alembic upgrade head && \
     uvicorn src.api.server:app --host 0.0.0.0 --port 8000 & \
-    celery -A src.core.celery_config.app worker --loglevel=info"]
+    celery -A src.workers.job_executor worker --loglevel=info & \
+    wait"]
