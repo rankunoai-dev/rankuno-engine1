@@ -75,14 +75,7 @@ class PostgresJobStore(JobStore):
         import psycopg
 
         settings = get_postgres_settings()
-        password = (
-            settings.postgres_password.get_secret_value() if settings.postgres_password else ""
-        )
-        connection_string = (
-            f"postgresql://{settings.postgres_user}:{password}@"
-            f"{settings.postgres_host}:{settings.postgres_port}/"
-            f"{settings.postgres_database}"
-        )
+        connection_string = settings.get_connection_string()
         return psycopg.connect(connection_string)
 
     def create(
@@ -347,12 +340,17 @@ class PostgresJobStore(JobStore):
         return self.fallback_store.mark_failed(job_id, error)
 
     def finish(
-        self, job_id: str, result: Mapping[str, object], *, partial: bool = False
+        self,
+        job_id: str,
+        result: Mapping[str, object],
+        *,
+        partial: bool = False,
+        error: str | None = None,
     ) -> JobRecord:
         """Finish job with result. Falls back to disk store if needed."""
         if self.circuit_breaker.is_open():
-            return self.fallback_store.finish(job_id, result, partial=partial)
-        return self.fallback_store.finish(job_id, result, partial=partial)
+            return self.fallback_store.finish(job_id, result, partial=partial, error=error)
+        return self.fallback_store.finish(job_id, result, partial=partial, error=error)
 
     def read_result(self, job_id: str) -> Mapping[str, object]:
         """Read job result. Falls back to disk store if needed."""

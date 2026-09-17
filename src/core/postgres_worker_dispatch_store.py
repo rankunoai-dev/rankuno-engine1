@@ -90,14 +90,7 @@ class PostgresWorkerDispatchStore:
         import psycopg
 
         settings = get_postgres_settings()
-        password = (
-            settings.postgres_password.get_secret_value() if settings.postgres_password else ""
-        )
-        connection_string = (
-            f"postgresql://{settings.postgres_user}:{password}@"
-            f"{settings.postgres_host}:{settings.postgres_port}/"
-            f"{settings.postgres_database}"
-        )
+        connection_string = settings.get_connection_string()
         return psycopg.connect(connection_string)
 
     def _connect(self) -> Connection:

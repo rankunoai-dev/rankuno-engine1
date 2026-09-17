@@ -62,26 +62,23 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # Read connection string from environment or config
-    url = os.getenv(
-        "DATABASE_URL",
-        config.get_main_option("sqlalchemy.url"),
+    url = (
+        os.getenv("DATABASE_URL")
+        or os.getenv("POSTGRES_URL")
+        or os.getenv("DATABASE_PRIVATE_URL")
+        or config.get_main_option("sqlalchemy.url")
     )
 
-    # Build the connection string from settings if using PostgreSQL config
-    if "://" not in url or url == "driver://user:pass@localhost/dbname":
-        from src.core.config import get_settings
+    if "://" not in url or url == "driver://user:pass@localhost/dbname" or "localhost" in url:
+        from src.core.postgres_config import get_postgres_settings
 
-        settings = get_settings()
-        if settings.postgres_password:
-            password = settings.postgres_password.get_secret_value()
-        else:
-            password = ""
-        url = (
-            f"postgresql+psycopg://{settings.postgres_user}:{password}@"
-            f"{settings.postgres_host}:{settings.postgres_port}/"
-            f"{settings.postgres_database}"
-        )
+        settings = get_postgres_settings()
+        url = settings.get_connection_string()
+
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif url.startswith("postgresql://") and not url.startswith("postgresql+psycopg://"):
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
 
     configuration = config.get_section(config.config_ini_section)
     configuration["sqlalchemy.url"] = url

@@ -60,6 +60,39 @@ class PostgresSettings(BaseSettings):
         default=None,
         description="PostgreSQL user password.",
     )
+    database_url: SecretStr | None = Field(
+        default=None,
+        description="Full PostgreSQL database connection URL (e.g. from Railway/Heroku/Neon).",
+    )
+
+    def get_connection_string(self) -> str:
+        """Return the PostgreSQL connection string.
+
+        Prefers database_url or DATABASE_URL/POSTGRES_URL environment variables
+        if set, normalizing postgres:// to postgresql://. Otherwise constructs the URL
+        from individual host/port/user/password fields.
+        """
+        import os
+
+        raw_url = (
+            self.database_url.get_secret_value()
+            if self.database_url
+            else os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or os.getenv("DATABASE_PRIVATE_URL")
+        )
+
+        if raw_url:
+            if raw_url.startswith("postgres://"):
+                return raw_url.replace("postgres://", "postgresql://", 1)
+            return raw_url
+
+        password = (
+            self.postgres_password.get_secret_value() if self.postgres_password else ""
+        )
+        return (
+            f"postgresql://{self.postgres_user}:{password}@"
+            f"{self.postgres_host}:{self.postgres_port}/"
+            f"{self.postgres_database}"
+        )
 
 
 @lru_cache(maxsize=1)
