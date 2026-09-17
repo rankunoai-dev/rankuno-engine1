@@ -84,6 +84,20 @@ export function NavigationRail(): JSX.Element {
         Audit
       </button>
 
+      <button
+        className={`rit${view === "gsc-accounts" ? " on" : ""}`}
+        type="button"
+        onClick={() => setView("gsc-accounts")}
+        {...(view === "gsc-accounts" ? { "aria-current": "page" as const } : {})}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="8" r="3" />
+          <path d="M12 14c-3.31 0-5 1.67-5 5v2h10v-2c0-3.33-1.69-5-5-5z" />
+          <path d="M19 2l.47 1.41L21 3.88l-1.42.47L19 6l-.47-1.41L17 3.88l1.42-.47L19 2z" />
+        </svg>
+        GSC Accounts
+      </button>
+
       {/* Only shown once there is a session to end — `token` is `null` in
           offline/fixture mode, which never went through `/auth/login` and
           has no server-side identity for this to sign out of. */}

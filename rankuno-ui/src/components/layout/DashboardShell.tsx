@@ -14,9 +14,11 @@ import { CrawlReport } from "../report/CrawlReport";
 import { AuditView } from "../audit/AuditView";
 import { CrawlJobsView } from "../jobs/CrawlJobsView";
 import { CrawlNotifier } from "../jobs/CrawlNotifier";
+import { GscAccountsView } from "../gsc/GscAccountsView";
 import { HeaderBar } from "./HeaderBar";
 import { LiveCrawlModal } from "./LiveCrawlModal";
 import { NavigationRail } from "./NavigationRail";
+import { useAuthStore } from "../../store/useAuthStore";
 import { useUiStore } from "../../store/useUiStore";
 import { useState } from "react";
 
@@ -39,6 +41,10 @@ export function DashboardShell(): JSX.Element {
   const status = useCrawlStore((state) => state.status);
   const error = useCrawlStore((state) => state.error);
   const view = useUiStore((state) => state.view);
+  // `null` only in offline/fixture mode, which never logged in — `GscAccountsView`
+  // itself falls back to `"default"` for that case, the same org its own
+  // component-local prop default already named before this store existed.
+  const authOrgId = useAuthStore((state) => state.orgId);
 
   const loadCheckpoint = useCrawlStore((state) => state.loadCheckpoint);
   const setModel = useDashboardStore((state) => state.setModel);
@@ -120,6 +126,11 @@ export function DashboardShell(): JSX.Element {
               <AuditView />
             </ErrorBoundary>
           )}
+          {view === "gsc-accounts" && (
+            <ErrorBoundary label="GSC Accounts">
+              <GscAccountsView orgId={authOrgId ?? undefined} />
+            </ErrorBoundary>
+          )}
 
           {view === "visualizer" && active?.synthetic && (
             <Alert
@@ -140,6 +151,22 @@ export function DashboardShell(): JSX.Element {
                   ? `0 pages fetched — ${discovery.fetch_failures} requests were refused. Classifications rest on URL string patterns alone.`
                   : "0 pages fetched over the network. Classifications rest on URL string patterns alone."
               }
+            />
+          )}
+
+          {/* Distinct from "no sitemap exists" (`sitemaps_fetched === 0` with
+              `sitemaps_blocked === false`), which is the ordinary, unremarkable
+              shape of most sites and gets no banner at all. This fires only
+              when every sitemap attempt this crawl made — the two hardcoded
+              probes, anything `robots.txt` named, and anything the homepage
+              named — was refused. States what happened; no retry or identity
+              change was attempted and none is offered here. */}
+          {view === "visualizer" && discovery?.sitemaps_blocked && (
+            <Alert
+              type="warning"
+              banner
+              showIcon
+              message={`Sitemap access blocked — every sitemap request this crawl made was refused (${discovery.sitemap_fetch_attempts} attempt${discovery.sitemap_fetch_attempts === 1 ? "" : "s"}). Discovery continued from the page's own links instead. If this site should be crawlable, ask the site owner to allow this crawler.`}
             />
           )}
 
