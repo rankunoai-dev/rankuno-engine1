@@ -19,6 +19,19 @@ interface Props {
   onClose: () => void;
 }
 
+type SpeedChoice = "polite" | "standard" | "turbo" | "custom";
+
+/**
+ * Mirrors `MAX_CONCURRENCY` in `async_discovery.py` (re-exported through
+ * `tool.py`'s `concurrency: int = Field(..., le=MAX_CONCURRENCY)`). The
+ * InputNumber ceiling is a UX convenience; the Pydantic bound is what
+ * actually enforces it server-side.
+ */
+const MAX_CONCURRENCY = 200;
+
+/** Polite's concurrency, reused as the custom field's seed value. */
+const POLITE_CONCURRENCY = CRAWL_SPEEDS.find((option) => option.key === "polite")?.concurrency ?? 5;
+
 /** Form fields the operator controls. The rest of the payload uses defaults. */
 interface FormValues {
   base_url: string;
@@ -29,7 +42,11 @@ interface FormValues {
   gsc_account: string;
   max_pages: number | null;
   max_depth: number | null;
-  speed: "polite" | "standard" | "turbo";
+  speed: SpeedChoice;
+  /** Only read when `speed === "custom"`. */
+  custom_rate: number | null;
+  /** Only read when `speed === "custom"`. */
+  custom_concurrency: number | null;
   crawl_dom: boolean;
   respect_robots: boolean;
   browser_headers: boolean;
@@ -51,9 +68,15 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [ignoreRobots, setIgnoreRobots] = useState(false);
   const [browserMode, setBrowserMode] = useState(false);
-  const [speed, setSpeed] = useState<"polite" | "standard" | "turbo">("polite");
+  const [speed, setSpeed] = useState<SpeedChoice>("polite");
   const [accounts, setAccounts] = useState<string[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
+  // Drive the soft custom-rate warning below without duplicating the
+  // engine's own live ETA (`JobTelemetry.eta_seconds`) — this is a rough,
+  // single-host lower bound to flag an obviously slow combination, not an
+  // estimate.
+  const watchedMaxPages = Form.useWatch("max_pages", form);
+  const watchedCustomRate = Form.useWatch("custom_rate", form);
 
   // Fetched on every open, not once: a profile is added by editing
   // `.env.local` and restarting the engine, and the modal outlives both. If
@@ -86,14 +109,23 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
 
   async function submit(): Promise<void> {
     const values = await form.validateFields();
-    const preset = CRAWL_SPEEDS.find((option) => option.key === values.speed) ?? CRAWL_SPEEDS[0]!;
-    const { speed: _speed, ...rest } = values;
+    const { speed: _speed, custom_rate: _customRate, custom_concurrency: _customConcurrency, ...rest } = values;
+
+    // Custom mode reads its own independent inputs; the three fixed presets
+    // still read their bundled rate/concurrency pair unchanged.
+    const [rateLimitRps, concurrency] =
+      values.speed === "custom"
+        ? [values.custom_rate ?? DEFAULT_CRAWL_REQUEST.rate_limit_rps, values.custom_concurrency ?? DEFAULT_CRAWL_REQUEST.concurrency]
+        : (() => {
+            const preset = CRAWL_SPEEDS.find((option) => option.key === values.speed) ?? CRAWL_SPEEDS[0]!;
+            return [preset.rate_limit_rps, preset.concurrency];
+          })();
 
     const request: PageClassificationInput = {
       ...DEFAULT_CRAWL_REQUEST,
       ...rest,
-      rate_limit_rps: preset.rate_limit_rps,
-      concurrency: preset.concurrency,
+      rate_limit_rps: rateLimitRps,
+      concurrency,
       max_pages: values.max_pages ?? null,
       max_depth: values.max_depth ?? null,
       user_agent: values.user_agent?.trim() || DEFAULT_CRAWL_REQUEST.user_agent,
@@ -121,7 +153,13 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
       title="Start a live crawl"
       okText="Start crawl"
       confirmLoading={submitting}
-      onOk={() => void submit()}
+      onOk={() => {
+        // A failed `form.validateFields()` already renders its error inline
+        // via antd's own Form store — the caller has nothing further to do
+        // with the rejection, so it is swallowed here rather than left
+        // unhandled.
+        submit().catch(() => {});
+      }}
       onCancel={onClose}
       destroyOnClose
       width={520}
@@ -137,6 +175,13 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           max_pages: DEFAULT_CRAWL_REQUEST.max_pages,
           max_depth: null,
           speed: "polite",
+          custom_rate: null,
+          // Seeded to Polite's concurrency so the field never carries over a
+          // value implied by whichever preset was previously selected — it
+          // is already correct the first time the operator switches to
+          // "custom", and their own edits after that are preserved because
+          // antd keeps a Form.Item's value even while it is unmounted.
+          custom_concurrency: POLITE_CONCURRENCY,
           crawl_dom: true,
           respect_robots: true,
           browser_headers: false,
@@ -218,16 +263,58 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
         <Form.Item name="speed" label="Crawl speed">
           <Segmented
             block
-            options={CRAWL_SPEEDS.map((option) => ({
-              label: option.label,
-              value: option.key,
-            }))}
+            options={[
+              ...CRAWL_SPEEDS.map((option) => ({
+                label: option.label,
+                value: option.key,
+              })),
+              { label: "Custom", value: "custom" },
+            ]}
           />
         </Form.Item>
 
-        <Typography.Paragraph type="secondary" style={{ fontSize: 11, marginTop: -12 }}>
-          {CRAWL_SPEEDS.find((option) => option.key === speed)?.detail}
-          {". "}
+        {speed === "custom" ? (
+          <div style={{ display: "flex", gap: 12, marginTop: -12, marginBottom: 8 }}>
+            <Form.Item
+              name="custom_rate"
+              label="Requests per second"
+              style={{ flex: 1, marginBottom: 0 }}
+              rules={[
+                { required: true, message: "Enter a requests-per-second value." },
+                {
+                  type: "number",
+                  min: 0.05,
+                  max: 25,
+                  message: "Must be between 0.05 and 25 requests per second.",
+                },
+              ]}
+            >
+              <InputNumber min={0.05} max={25} step={0.05} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item
+              name="custom_concurrency"
+              label="Concurrency"
+              style={{ flex: 1, marginBottom: 0 }}
+              rules={[
+                { required: true, message: "Enter a concurrency value." },
+                {
+                  type: "number",
+                  min: 1,
+                  max: MAX_CONCURRENCY,
+                  message: `Must be between 1 and ${MAX_CONCURRENCY}.`,
+                },
+              ]}
+            >
+              <InputNumber min={1} max={MAX_CONCURRENCY} style={{ width: "100%" }} />
+            </Form.Item>
+          </div>
+        ) : (
+          <Typography.Paragraph type="secondary" style={{ fontSize: 11, marginTop: -12 }}>
+            {CRAWL_SPEEDS.find((option) => option.key === speed)?.detail}
+          </Typography.Paragraph>
+        )}
+
+        <Typography.Paragraph type="secondary" style={{ fontSize: 11, marginTop: speed === "custom" ? 0 : -12 }}>
           A declared Crawl-delay always wins: a site asking to be crawled slowly
           is never sped up by this setting.
         </Typography.Paragraph>
@@ -241,6 +328,20 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
             description="Appropriate for a site you own or have written permission to crawl at this rate. On anything else, Standard or Polite is the right choice."
           />
         )}
+
+        {speed === "custom" &&
+          watchedCustomRate != null &&
+          watchedCustomRate > 0 &&
+          watchedMaxPages != null &&
+          watchedMaxPages / watchedCustomRate > 21_600 && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="This rate and page ceiling could take well over 6 hours."
+              description="A rough single-host floor (page ceiling ÷ rate), not an estimate — it ignores multi-host fan-out and can only get slower from here. This is advisory only and does not block starting the crawl. Once running, the header shows the engine's own live ETA, which is the number to trust."
+            />
+          )}
 
         <Form.Item
           name="max_depth"

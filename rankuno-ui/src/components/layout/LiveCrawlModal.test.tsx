@@ -116,3 +116,90 @@ describe("LiveCrawlModal account picker", () => {
     expect(request.gsc_account).toBeNull();
   });
 });
+
+/**
+ * The fourth "Custom" crawl speed.
+ *
+ * The rule under test: presets keep reading their own bundled
+ * rate/concurrency pair unchanged, while "custom" reads two independent
+ * operator-entered values instead — with its own bounds, its own seeded
+ * concurrency default, and a non-blocking slow-crawl advisory.
+ */
+describe("LiveCrawlModal custom speed", () => {
+  function fillBaseUrl(): void {
+    fireEvent.change(screen.getByPlaceholderText("https://www.example.com/"), {
+      target: { value: "https://e.com/" },
+    });
+  }
+
+  function selectCustom(): void {
+    fireEvent.click(screen.getByText("Custom"));
+  }
+
+  it("reveals independent rate and concurrency inputs seeded with Polite's concurrency", () => {
+    mount(adapter());
+    selectCustom();
+
+    const rateInput = screen.getByRole("spinbutton", { name: "Requests per second" });
+    const concurrencyInput = screen.getByRole("spinbutton", { name: "Concurrency" });
+    expect(rateInput).toHaveValue("");
+    expect(concurrencyInput).toHaveValue("5");
+  });
+
+  it("blocks submission on a blank custom rate", async () => {
+    const startCrawl = mount(adapter());
+    fillBaseUrl();
+    selectCustom();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start crawl" }));
+    expect(await screen.findByText("Enter a requests-per-second value.")).toBeInTheDocument();
+    expect(startCrawl).not.toHaveBeenCalled();
+  });
+
+  it("submits the custom rate and concurrency instead of a preset's", async () => {
+    const startCrawl = mount(adapter());
+    fillBaseUrl();
+    selectCustom();
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Requests per second" }), {
+      target: { value: "0.2" },
+    });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Concurrency" }), {
+      target: { value: "8" },
+    });
+
+    const request = await submit(startCrawl);
+    expect(request.rate_limit_rps).toBe(0.2);
+    expect(request.concurrency).toBe(8);
+  });
+
+  it("still submits a preset's own rate and concurrency when custom is never selected", async () => {
+    const startCrawl = mount(adapter());
+    fillBaseUrl();
+    fireEvent.click(screen.getByText("Standard"));
+
+    const request = await submit(startCrawl);
+    expect(request.rate_limit_rps).toBe(10);
+    expect(request.concurrency).toBe(20);
+  });
+
+  it("warns, without blocking, when a slow custom rate implies a very long crawl", async () => {
+    const startCrawl = mount(adapter());
+    fillBaseUrl();
+    selectCustom();
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Requests per second" }), {
+      target: { value: "0.05" },
+    });
+    fireEvent.change(screen.getByLabelText("Page ceiling"), { target: { value: "5000" } });
+
+    expect(
+      await screen.findByText("This rate and page ceiling could take well over 6 hours."),
+    ).toBeInTheDocument();
+
+    // Advisory only: submission still succeeds.
+    const request = await submit(startCrawl);
+    expect(request.rate_limit_rps).toBe(0.05);
+    expect(startCrawl).toHaveBeenCalledTimes(1);
+  });
+});
