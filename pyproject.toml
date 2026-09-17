@@ -54,6 +54,7 @@ dev = [
 api = [
     "fastapi>=0.110.0,<1.0.0",
     "uvicorn>=0.28.0,<1.0.0",
+    "alembic>=1.13.0,<2.0.0",
 ]
 seo = [
     # httpx moved to core dependencies above; listing it here too would let the
