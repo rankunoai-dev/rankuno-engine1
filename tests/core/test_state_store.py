@@ -83,6 +83,29 @@ class TestLifecycle:
         assert record.is_terminal is True
         assert store.read_result(job_id) == RESULT
 
+    def test_a_partial_finish_can_carry_why_it_stopped(self, store):
+        """A stalled/aborted `PARTIAL` must say so, cheaply, at the record level.
+
+        `error` was documented as `FAILED`-only; a crawl that stopped early for
+        a reason other than the page ceiling needs the same field, so the job
+        list can tell the two `PARTIAL` causes apart without reading the full
+        result blob.
+        """
+        job_id = store.create(TOOL, REQUEST).id
+        record = store.finish(job_id, RESULT, partial=True, error="the target stopped responding")
+        assert record.status is JobStatus.PARTIAL
+        assert record.error == "the target stopped responding"
+
+    def test_a_ceiling_only_partial_carries_no_error(self, store):
+        """The common case — `partial` with no `error` — must stay silent.
+
+        Otherwise every truncated crawl, the normal outcome of a page ceiling,
+        would read as though something had gone wrong.
+        """
+        job_id = store.create(TOOL, REQUEST).id
+        record = store.finish(job_id, RESULT, partial=True)
+        assert record.error is None
+
     def test_failure_records_a_reason(self, store):
         record = store.mark_failed(store.create(TOOL, REQUEST).id, "robots.txt disallowed")
         assert record.status is JobStatus.FAILED

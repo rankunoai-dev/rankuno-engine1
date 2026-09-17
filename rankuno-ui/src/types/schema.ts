@@ -241,6 +241,9 @@ export interface DiscoveryReport {
   dom_only: number;
   orphans: number;
   sitemaps_fetched: number;
+  sitemap_fetch_attempts: number;
+  sitemaps_blocked: boolean;
+  sitemap_offhost_skipped: number;
   pages_fetched: number;
   fetch_failures: number;
   fetch_outcomes: Record<string, number>;

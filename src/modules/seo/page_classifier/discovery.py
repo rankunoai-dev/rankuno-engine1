@@ -34,11 +34,14 @@ looks complete is worse than one that says it stopped.
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter, deque
 from collections.abc import Callable, Iterator, Mapping
 
+import httpx
 from pydantic import Field
 
+from src.core.errors import IntegrationError, UnsafeUrlError
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.integrations.http_fetcher import FetchResult, HttpFetcher
@@ -46,6 +49,7 @@ from src.modules.seo.page_classifier.breadcrumb_parser import extract_breadcrumb
 from src.modules.seo.page_classifier.content_signals import extract_content_signals
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
+    extract_sitemap_links,
     parse_link_header,
     parse_shopify_records,
     parse_sitemap,
@@ -68,12 +72,16 @@ from src.modules.seo.page_classifier.url_rules import (
     is_malformed_url,
     is_spider_trap,
     normalize_url,
+    registrable_domain,
+    safe_split,
+    site_host,
 )
 from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
 
 __all__ = [
     "ABSOLUTE_MAX_PAGES",
     "DEFAULT_MAX_PAGES",
+    "MAX_SITEMAP_FETCH_ATTEMPTS",
     "CheckpointSink",
     "ProgressSink",
     "SHOPIFY_ENDPOINTS",
@@ -138,6 +146,20 @@ it is 10,000 — comfortably past the point where the node budget binds instead.
 A ceiling is required because pagination termination depends on the remote
 server behaving: one that ignores `page` and serves the same response forever
 would otherwise loop until the crawl was killed."""
+
+MAX_SITEMAP_FETCH_ATTEMPTS = 100
+"""Ceiling on sitemap-FILE fetch attempts per crawl, combined across all three
+seed sources — hardcoded probes, `robots.txt` `Sitemap:` lines and the
+homepage's `<link rel="sitemap">` — and every nested `<sitemapindex>` child
+they lead to.
+
+Before this cycle the loop had no cap at all beyond same-URL dedup: a hostile
+or merely degenerate sitemap index could queue an unbounded number of fetches,
+and a hostile `robots.txt` could now name many more seeds than the two
+hardcoded probes ever did. HighRadius, the largest real site audited so far,
+publishes nine grouped sitemaps under one index — 100 is generous headroom
+above anything observed while still bounding the loop (Step 5 security audit,
+this cycle)."""
 
 
 CheckpointSink = Callable[["SiteGraph"], None]
@@ -292,6 +314,35 @@ class DiscoveryReport(StrictModel):
     dom_only: int = Field(default=0, ge=0)
     orphans: int = Field(default=0, ge=0)
     sitemaps_fetched: int = Field(default=0, ge=0)
+    sitemap_fetch_attempts: int = Field(default=0, ge=0)
+    """Sitemap-FILE fetch attempts across all three seed sources — hardcoded
+    probes, `robots.txt` `Sitemap:` lines, and the homepage's
+    `<link rel="sitemap">` — combined and capped at `MAX_SITEMAP_FETCH_ATTEMPTS`.
+
+    Distinct from `sitemaps_fetched`, which counts only the attempts that
+    parsed as a real sitemap document; this counts every URL the crawl asked
+    for, whatever answered. Feeds `sitemaps_blocked`."""
+    sitemaps_blocked: bool = False
+    """True when at least one sitemap-file attempt was made and **every** one
+    of them was refused — `401`, `403`, `407`, `429` or `5xx`.
+
+    Deliberately reuses `is_refusal`'s definition rather than "any non-2xx":
+    a plain `404` on the two hardcoded probes is the routine shape of a site
+    that simply has no sitemap, and counting it here would raise this flag on
+    nearly every sitemap-less site — exactly the false alarm this field exists
+    to prevent. `False` when nothing was ever attempted; that is the separate
+    "no sitemap was ever named" case, visible instead as
+    `sitemap_fetch_attempts == 0`."""
+    sitemap_offhost_skipped: int = Field(default=0, ge=0)
+    """`robots.txt`- or homepage-declared sitemap URLs that named a host
+    outside the crawl's own registrable domain, and were therefore never
+    fetched — never even counted toward `sitemap_fetch_attempts`.
+
+    A hostile `robots.txt` can otherwise name a third-party sitemap and turn
+    this unattended `RiskClass.READ` crawl into a request generator against a
+    host the operator never asked to crawl. This counter is how that refusal
+    stays visible instead of a silent drop (Step 5 security audit, this
+    cycle)."""
     pages_fetched: int = Field(default=0, ge=0)
     fetch_failures: int = Field(default=0, ge=0)
     fetch_outcomes: Mapping[str, int] = Field(default_factory=dict)
@@ -445,6 +496,16 @@ class SiteGraph:
         A large number here is a finding about the *client's site*, not about
         the crawl: it means a template emits relative hrefs that resolve one
         level deeper every time they are followed. Worth reporting to them."""
+        self.sitemap_fetch_attempts = 0
+        """Sitemap-file fetch attempts, combined across all three seed
+        sources and capped at `MAX_SITEMAP_FETCH_ATTEMPTS`. See
+        `DiscoveryReport.sitemap_fetch_attempts`."""
+        self.sitemap_refused_attempts = 0
+        """Of `sitemap_fetch_attempts`, how many the server refused —
+        `is_refusal`, which excludes `404`. See `DiscoveryReport.sitemaps_blocked`."""
+        self.sitemap_offhost_skipped = 0
+        """Declared sitemap URLs dropped by the registrable-host filter,
+        never fetched. See `DiscoveryReport.sitemap_offhost_skipped`."""
 
     def __len__(self) -> int:
         """Node count."""
@@ -777,6 +838,12 @@ class SiteGraph:
             traps_skipped=self.traps_skipped,
             loop_urls_skipped=self.loop_urls_skipped,
             malformed_skipped=self.malformed_skipped,
+            sitemap_fetch_attempts=self.sitemap_fetch_attempts,
+            sitemaps_blocked=(
+                self.sitemap_fetch_attempts > 0
+                and self.sitemap_refused_attempts == self.sitemap_fetch_attempts
+            ),
+            sitemap_offhost_skipped=self.sitemap_offhost_skipped,
             truncated=self.truncated,
             stopped_reason=self.stopped_reason,
         )
@@ -862,21 +929,117 @@ def discover_site(
     return graph, report
 
 
-def _discover_from_sitemaps(fetcher: HttpFetcher, base_url: str, graph: SiteGraph) -> int:
-    """Path A — walk the sitemap index and every child sitemap."""
+def _registrable_host(url: str) -> str:
+    """Registrable domain of a URL's host, or `""` if the URL will not parse.
+
+    The empty string never equals a real registrable domain, so an
+    unparseable candidate is filtered out rather than let through by an
+    accidental match on two empty strings.
+    """
+    parts = safe_split(url)
+    if parts is None:
+        return ""
+    return registrable_domain(site_host(parts.netloc))
+
+
+def _filter_same_host_sitemaps(
+    candidates: tuple[str, ...], base_registrable: str, graph: SiteGraph, *, source: str
+) -> list[str]:
+    """Keep only declared sitemap URLs sharing the crawl's own registrable host.
+
+    Hardcoded probes never need this — they are built from `base_url` itself —
+    but `robots.txt` `Sitemap:` lines and homepage `<link rel="sitemap">`
+    targets are attacker- or at least third-party-influenced input. Without
+    this filter, a hostile `robots.txt` naming an off-site sitemap would turn
+    an unattended `RiskClass.READ` crawl into a request generator against a
+    host the operator never asked to crawl. Anything filtered here is counted
+    on the graph and never fetched — see `DiscoveryReport.sitemap_offhost_skipped`.
+    """
+    kept: list[str] = []
+    for candidate in candidates:
+        if base_registrable and _registrable_host(candidate) == base_registrable:
+            kept.append(candidate)
+        else:
+            graph.sitemap_offhost_skipped += 1
+            _logger.info("sitemap_offhost_skipped", extra={"source": source, "url": candidate})
+    return kept
+
+
+def _homepage_sitemap_links(fetcher: HttpFetcher, base_url: str) -> tuple[str, ...]:
+    """Fetch the homepage once and parse `<link rel="sitemap">` off it.
+
+    A dedicated, unledgered probe — like the `robots.txt` fetch it typically
+    piggybacks on (both are cached per host by `HttpFetcher`), its own outcome
+    is not a discovery finding, only a source of more candidate URLs. A
+    blocked or non-HTML homepage yields no candidates, which reads identically
+    to a homepage that names none — both are silently absorbed into the "no
+    sitemap declared here" case rather than counted toward
+    `DiscoveryReport.sitemaps_blocked`, which is reserved for sitemap-*file*
+    attempts specifically.
+    """
+    try:
+        result = fetcher.fetch(base_url)
+    except Exception as exc:  # noqa: BLE001 - one bad fetch must not stop discovery
+        _logger.debug("homepage_sitemap_probe_failed", extra={"url": base_url, "error": str(exc)})
+        return ()
+    if not result.ok or not result.is_html:
+        return ()
+    return extract_sitemap_links(result.body, result.final_url or base_url)
+
+
+def _sitemap_seeds(fetcher: HttpFetcher, base_url: str, graph: SiteGraph) -> list[str]:
+    """Merge the three seed sources, in the order they are queued.
+
+    1. Hardcoded probes — always tried, built from `base_url` itself so the
+       registrable-host filter does not apply to them.
+    2. `robots.txt` `Sitemap:` lines — already parsed and cached by
+       `HttpFetcher.robots_for`, so this issues no fetch beyond the one every
+       crawl already makes on its first request to the host.
+    3. `<link rel="sitemap">` on the homepage — one dedicated fetch, since
+       Path A runs before the DOM crawl would otherwise retrieve it.
+
+    Sources 2 and 3 are passed through `_filter_same_host_sitemaps` before
+    being queued; anything filtered out is never fetched.
+    """
     root = base_url.rstrip("/")
-    pending = deque([f"{root}/sitemap_index.xml", f"{root}/sitemap.xml"])
+    base_registrable = _registrable_host(base_url)
+
+    seeds = [f"{root}/sitemap_index.xml", f"{root}/sitemap.xml"]
+    robots = fetcher.robots_for(base_url)
+    seeds.extend(
+        _filter_same_host_sitemaps(robots.sitemaps, base_registrable, graph, source="robots")
+    )
+    homepage_links = _homepage_sitemap_links(fetcher, base_url)
+    seeds.extend(
+        _filter_same_host_sitemaps(homepage_links, base_registrable, graph, source="homepage")
+    )
+    return seeds
+
+
+def _discover_from_sitemaps(fetcher: HttpFetcher, base_url: str, graph: SiteGraph) -> int:
+    """Path A — merge three seed sources and walk every sitemap file found.
+
+    The combined loop — seeds plus every nested `<sitemapindex>` child they
+    lead to — is capped at `MAX_SITEMAP_FETCH_ATTEMPTS`; see its docstring for
+    why the cap exists and how the number was chosen.
+    """
+    pending = deque(_sitemap_seeds(fetcher, base_url, graph))
     visited: set[str] = set()
     parsed_count = 0
+    attempts = 0
+    refused = 0
 
-    while pending:
+    while pending and attempts < MAX_SITEMAP_FETCH_ATTEMPTS:
         sitemap_url = pending.popleft()
         if sitemap_url in visited:
             continue
         visited.add(sitemap_url)
+        attempts += 1
 
-        body = _safe_body(fetcher, sitemap_url, graph)
+        body, was_refused = _safe_body(fetcher, sitemap_url, graph)
         if body is None:
+            if was_refused:
+                refused += 1
             continue
 
         document = parse_sitemap(body, source_name=sitemap_url.rsplit("/", 1)[-1])
@@ -891,6 +1054,14 @@ def _discover_from_sitemaps(fetcher: HttpFetcher, base_url: str, graph: SiteGrap
         for location in document.locations:
             graph.add(location, sitemap=True, sitemap_source=document.source_name)
 
+    if pending:
+        _logger.warning(
+            "sitemap_fetch_ceiling_reached",
+            extra={"base_url": base_url, "ceiling": MAX_SITEMAP_FETCH_ATTEMPTS},
+        )
+
+    graph.sitemap_fetch_attempts += attempts
+    graph.sitemap_refused_attempts += refused
     return parsed_count
 
 
@@ -960,7 +1131,10 @@ def _paginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> Iterator
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
             _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
             graph.fetch_failures += 1
-            graph.record_outcome(OUTCOME_TRANSPORT)
+            if isinstance(exc, UnsafeUrlError):
+                graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
+            else:
+                graph.record_outcome(OUTCOME_TRANSPORT)
             return
         if not result.ok:
             graph.record_outcome(outcome_for(result.status_code))
@@ -1089,6 +1263,10 @@ OUTCOME_SERVER_ERROR = "server_error"
 OUTCOME_OTHER_STATUS = "other_status"
 OUTCOME_NOT_HTML = "not_html"
 OUTCOME_TRANSPORT = "transport_error"
+OUTCOME_GUARDRAIL_REFUSED = "guardrail_refused"
+OUTCOME_TRANSPORT_TIMEOUT = "transport_timeout"
+OUTCOME_TRANSPORT_REFUSED = "transport_refused"
+OUTCOME_TRANSPORT_DEADLINE = "transport_deadline"
 
 OUTCOME_MEANINGS: Mapping[str, str] = {
     OUTCOME_OK: "Fetched and read as HTML.",
@@ -1097,7 +1275,23 @@ OUTCOME_MEANINGS: Mapping[str, str] = {
     OUTCOME_SERVER_ERROR: "5xx — the server broke rather than answered.",
     OUTCOME_OTHER_STATUS: "Answered with a status that is neither success nor one of the above.",
     OUTCOME_NOT_HTML: "Answered 200 with something that is not a page.",
-    OUTCOME_TRANSPORT: "No answer at all — timeout, DNS or connection failure.",
+    OUTCOME_TRANSPORT: (
+        "No answer at all — timeout, DNS or connection failure. Now the explicit "
+        "residual/fallback bucket for a transport failure that is none of the three "
+        "transport_* outcomes below (e.g. too many redirects); the async path "
+        "classifies into those when it can."
+    ),
+    OUTCOME_GUARDRAIL_REFUSED: "The SSRF guard refused the connection — not a network failure.",
+    OUTCOME_TRANSPORT_TIMEOUT: (
+        "httpx's own connect/read/write/pool timeout fired and retries were exhausted."
+    ),
+    OUTCOME_TRANSPORT_REFUSED: (
+        "httpx.ConnectError — the host refused or dropped the connection outright; not retried."
+    ),
+    OUTCOME_TRANSPORT_DEADLINE: (
+        "Our own REQUEST_DEADLINE_S fired — the response dribbled data without ever "
+        "completing (the tarpit shape) or otherwise ran past the whole-request budget."
+    ),
 }
 """Plain-language gloss per outcome, for a report handed to somebody else."""
 
@@ -1121,6 +1315,33 @@ def outcome_for(status_code: int) -> str:
     return OUTCOME_OTHER_STATUS
 
 
+def _transport_outcome_for(exc: BaseException) -> str:
+    """Classify a fetch-layer exception into one of the `transport_*` outcomes.
+
+    `HttpFetcher.afetch()` wraps whatever a retry-exhausted attempt raised into
+    an `IntegrationError` via `raise IntegrationError(...) from exc`, so the
+    original httpx exception survives on `__cause__` — that covers the
+    `TimeoutException` (retries exhausted) and `ConnectError` (never retried)
+    cases.
+
+    The one exception this module raises that is *not* wrapped that way is its
+    own `REQUEST_DEADLINE_S`: that bound is `asyncio.wait_for()` around the
+    whole `afetch()` call, one layer above `afetch()` itself, so it cancels the
+    call outright and reaches the caller as a bare `TimeoutError` — never
+    routed through `afetch()`'s own exception handling, so never wrapped in an
+    `IntegrationError`. Both shapes are handled here: unwrap `__cause__` when
+    there is one, otherwise classify the exception itself.
+    """
+    cause = exc.__cause__ if isinstance(exc, IntegrationError) else exc
+    if isinstance(cause, httpx.TimeoutException):
+        return OUTCOME_TRANSPORT_TIMEOUT
+    if isinstance(cause, httpx.ConnectError):
+        return OUTCOME_TRANSPORT_REFUSED
+    if isinstance(cause, asyncio.TimeoutError) and not isinstance(cause, httpx.TimeoutException):
+        return OUTCOME_TRANSPORT_DEADLINE
+    return OUTCOME_TRANSPORT
+
+
 def is_refusal(status_code: int) -> bool:
     """Whether a status means the server *declined* rather than lacked the page.
 
@@ -1135,27 +1356,38 @@ def is_refusal(status_code: int) -> bool:
     return status_code in {401, 403, 407, 429} or status_code >= 500
 
 
-def _safe_body(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | None:
+def _safe_body(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> tuple[str | None, bool]:
     """Fetch a URL, returning `None` for any failure or non-2xx.
 
     Refusals are counted on the graph rather than only logged at debug level.
     A crawl that is refused everywhere must be able to say so; silently
     discarding every 403 is what let a fully blocked site report success.
+
+    Returns:
+        `(body, refused)`. `body` is `None` unless the fetch succeeded with a
+        2xx status. `refused` is `is_refusal(status_code)` for a completed
+        non-2xx response, and `False` for a `404` or a transport failure —
+        sitemap discovery needs "declined" told apart from "not there" and
+        "no answer at all" to compute `DiscoveryReport.sitemaps_blocked`.
     """
     try:
         result = fetcher.fetch(url)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
-        graph.record_outcome(OUTCOME_TRANSPORT)
-        return None
+        if isinstance(exc, UnsafeUrlError):
+            graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
+        else:
+            graph.record_outcome(OUTCOME_TRANSPORT)
+        return None, False
     if not result.ok:
         graph.record_outcome(outcome_for(result.status_code))
-        if is_refusal(result.status_code):
+        refused = is_refusal(result.status_code)
+        if refused:
             graph.fetch_failures += 1
-        return None
+        return None, refused
     graph.record_outcome(OUTCOME_OK)
-    return result.body
+    return result.body, False
 
 
 def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | None:
@@ -1171,7 +1403,10 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
-        graph.record_outcome(OUTCOME_TRANSPORT)
+        if isinstance(exc, UnsafeUrlError):
+            graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
+        else:
+            graph.record_outcome(OUTCOME_TRANSPORT)
         return None
     # Recorded before any bail, because this is where the fetcher's own answer
     # is still in scope. One line further on it is a bare string and the

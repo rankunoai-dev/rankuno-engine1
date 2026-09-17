@@ -52,6 +52,17 @@ export interface CrawlJobSummary {
    * recovery.
    */
   recoverable?: boolean;
+  /**
+   * Why a `partial` crawl stopped early, when it was a stall or an aborted
+   * crawl rather than the page ceiling — mirrors `JobRecord.error` on the
+   * server, which carries `DiscoveryReport.stopped_reason` verbatim.
+   *
+   * Absent or `null` for every other status, and for a `partial` that simply
+   * hit its ceiling: that case is the common one and needs no explanation.
+   * Present here, on the summary, rather than requiring a fetch of the full
+   * (possibly 16 MB) result — the job list must stay cheap.
+   */
+  stoppedReason?: string | null;
 }
 
 /** Progress of a running job. */

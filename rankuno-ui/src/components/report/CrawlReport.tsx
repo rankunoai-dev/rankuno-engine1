@@ -98,6 +98,15 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
       {/* Every caveat the screen carries is repeated here. A PDF outlives the
           session it came from and will be read by someone who never saw the
           banners. */}
+      {discovery.sitemaps_blocked && (
+        <p className="rep-warn">
+          Sitemap access blocked — every sitemap request this crawl made was
+          refused ({count(discovery.sitemap_fetch_attempts)} attempt
+          {discovery.sitemap_fetch_attempts === 1 ? "" : "s"}). Discovery
+          continued from the page's own links instead. If this site should be
+          crawlable, ask the site owner to allow this crawler.
+        </p>
+      )}
       {discovery.stopped_reason && (
         <p className="rep-warn">
           Crawl stopped early — {discovery.stopped_reason}. The pages below are

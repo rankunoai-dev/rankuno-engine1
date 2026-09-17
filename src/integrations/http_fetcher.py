@@ -59,9 +59,10 @@ from src.core.rate_limiter import (
     AsyncTokenBucket,
     RateLimiterRegistry,
 )
+from src.core.retry import TRANSIENT_ERRORS
 from src.core.robots import DEFAULT_USER_AGENT, RobotsTxt, parse_robots_txt
 from src.core.schemas import StrictModel
-from src.core.url_safety import SafeUrl, UrlSafetyPolicy
+from src.core.url_safety import SafeUrl, UrlSafetyPolicy, describe_ip_block
 from src.integrations.base_client import BaseAPIClient
 
 BROWSER_USER_AGENT = (
@@ -107,6 +108,7 @@ __all__ = [
     "CONNECT_TIMEOUT_S",
     "DEFAULT_MAX_CONNECTIONS",
     "DEFAULT_MAX_REDIRECTS",
+    "FETCH_RETRY_ON",
     "MAX_CONNECTIONS",
     "POOL_TIMEOUT_S",
     "FetchResult",
@@ -148,6 +150,22 @@ DEFAULT_MAX_REDIRECTS = 5
 
 DEFAULT_MAX_BODY_BYTES = 5 * 1024 * 1024
 """Response body ceiling. A 2 GB response would take out a 512 MB worker."""
+
+FETCH_RETRY_ON: tuple[type[BaseException], ...] = TRANSIENT_ERRORS + (httpx.TimeoutException,)
+"""Retryable exceptions for `afetch()`, scoped to the fetch path only.
+
+`httpx.TimeoutException` covers `ConnectTimeout`, `ReadTimeout`, `WriteTimeout`
+and `PoolTimeout` uniformly — they share this one base. Added here rather than
+to `core.retry.TRANSIENT_ERRORS` because that set is shared by every
+`BaseAPIClient` subclass; a fetch-specific addition has no business widening
+retry behaviour for, say, the Search Console client.
+
+`httpx.ConnectError` is deliberately excluded — zero retries, capped at
+`CONNECT_TIMEOUT_S=5s`. A connect-level failure is either persistent (a retry
+will not fix it) or a plausible signal the host is actively defending itself;
+retrying it at the same budget as a merely-slow-but-alive timeout is the wrong
+default.
+"""
 
 _ROBOTS_PATH = "/robots.txt"
 
@@ -389,7 +407,9 @@ class HttpFetcher(BaseAPIClient):
         from src.core.retry import with_async_retries
 
         try:
-            return await with_async_retries(lambda: self._afetch_chain(url))
+            return await with_async_retries(
+                lambda: self._afetch_chain(url), retry_on=FETCH_RETRY_ON
+            )
         except (UnsafeUrlError, RobotsDisallowedError, IntegrationError):
             raise
         except Exception as exc:
@@ -479,6 +499,43 @@ class HttpFetcher(BaseAPIClient):
         path = httpx.URL(safe.url).raw_path.decode() or "/"
         if not robots.can_fetch(path, self._user_agent):
             raise RobotsDisallowedError(safe.url, self._user_agent)
+
+    def robots_for(self, base_url: str) -> RobotsTxt:
+        """Return the cached robots.txt governing `base_url`'s host.
+
+        A public window onto the cache `fetch()` already populates and keys by
+        host, added so a caller that only wants the parsed `Sitemap:` lines —
+        sitemap discovery, see `src.modules.seo.page_classifier.discovery` —
+        does not have to open a second fetch path to get them. CLAUDE.md
+        permits an outbound call only from inside a `BaseAPIClient` subclass;
+        this keeps that call here rather than duplicated in a caller.
+
+        Args:
+            base_url: Any URL on the host whose robots.txt is wanted. Only the
+                host is used.
+
+        Returns:
+            The parsed robots.txt — fetched and cached on first use exactly as
+            `fetch()` does, empty (permits everything) if it is unreachable.
+            Never raises for an unreachable or malformed robots.txt.
+
+        Raises:
+            UnsafeUrlError: If `base_url` itself fails SSRF validation.
+            RuntimeError: If called from inside a running event loop — use
+                `arobots_for()` there instead.
+        """
+        self._guard_event_loop()
+        safe = self._policy.validate(base_url)
+        return self._robots_for_sync(safe)
+
+    async def arobots_for(self, base_url: str) -> RobotsTxt:
+        """Async twin of `robots_for()`. See its docstring.
+
+        Raises:
+            UnsafeUrlError: If `base_url` itself fails SSRF validation.
+        """
+        safe = self._policy.validate(base_url)
+        return await self._robots_for_async(safe)
 
     def _robots_for_sync(self, safe: SafeUrl) -> RobotsTxt:
         """Return cached robots rules for a host, fetching them once."""
@@ -629,18 +686,49 @@ class HttpFetcher(BaseAPIClient):
         return str(httpx.URL(safe.url).join(location))
 
     def _verify_peer(self, response: httpx.Response, safe: SafeUrl) -> None:
-        """Refuse a response served from an address that was never validated.
+        """Refuse a response served from a peer that classifies as unsafe.
 
         Detection after connect, not prevention — see the module docstring.
+
+        An exact match against `safe.resolved_ips` is the common case and needs
+        no further check. A mismatch alone is not evidence of an attack: a CDN
+        or load balancer legitimately answers from any of several published edge
+        addresses, and which one a given connection lands on can differ between
+        the validation lookup and the transport's own independent lookup a
+        moment later. So a mismatch is refused only when the connected peer
+        itself classifies as unsafe — private, loopback, link-local, reserved,
+        etc. — using the same `describe_ip_block` classification already applied
+        pre-connect, in `UrlSafetyPolicy._validate_addresses`, to every resolved
+        address. That is the one outcome this guard exists to prevent: a
+        hostname rebound to an internal address after a public one was
+        validated. A mismatch onto another public address is address rotation,
+        not rebinding, and is not refused.
         """
         peer = self._peer_address(response)
         if peer is None or peer in safe.resolved_ips:
             return
+
+        reason = describe_ip_block(peer)
+        if reason is None:
+            # Public peer absent from the validation snapshot: benign rotation
+            # (CDN edge pool, DNS failover to another public address). The
+            # connection reached a public target; nothing unsafe happened.
+            _logger.info(
+                "peer_address_rotation",
+                extra={"host": safe.host, "connected": peer, "validated": safe.resolved_ips},
+            )
+            return
+
         _logger.warning(
             "dns_rebinding_suspected",
-            extra={"host": safe.host, "connected": peer, "validated": safe.resolved_ips},
+            extra={
+                "host": safe.host,
+                "connected": peer,
+                "validated": safe.resolved_ips,
+                "reason": reason,
+            },
         )
-        raise UnsafeUrlError(safe.url, f"connected to unvalidated address {peer}")
+        raise UnsafeUrlError(safe.url, f"connected to unvalidated address {peer} — {reason}")
 
     @staticmethod
     def _peer_address(response: httpx.Response) -> str | None:

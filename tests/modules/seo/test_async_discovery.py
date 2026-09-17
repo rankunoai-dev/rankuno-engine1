@@ -193,6 +193,13 @@ class TestEquivalenceWithSerialPath:
         _, concurrent = run_async(settings)
         assert concurrent.orphans == serial.orphans
 
+    def test_agrees_on_sitemap_fetch_attempts(self, settings):
+        """Both paths probe the same combined seed set, so the count must match."""
+        _, serial = discover_site(build_fetcher(settings), "https://e.com")
+        _, concurrent = run_async(settings)
+        assert concurrent.sitemap_fetch_attempts == serial.sitemap_fetch_attempts
+        assert concurrent.sitemaps_blocked == serial.sitemaps_blocked
+
 
 class TestConcurrentBehaviour:
     def test_finds_pages_the_sitemap_omits(self, settings):
@@ -219,6 +226,129 @@ class TestConcurrentBehaviour:
     def test_respects_the_depth_ceiling(self, settings):
         _, report = run_async(settings, max_depth=0)
         assert report.pages_fetched == 1
+
+
+class TestAsyncSitemapSeedSources:
+    """The async twin of `test_discovery.TestSitemapSeedSources`."""
+
+    def test_a_robots_declared_sitemap_is_fetched(self, settings):
+        routes = {
+            "/robots.txt": httpx.Response(
+                200, text="User-agent: *\nDisallow:\nSitemap: https://e.com/extra-sitemap.xml\n"
+            ),
+            "/extra-sitemap.xml": xml(
+                '<?xml version="1.0"?>'
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<url><loc>https://e.com/declared-by-robots/</loc></url></urlset>"
+            ),
+        }
+        graph, _ = run_async(settings, routes, crawl_dom=False)
+        urls = {node.url for node in graph.nodes}
+        assert "https://e.com/declared-by-robots/" in urls
+
+    def test_a_homepage_declared_sitemap_is_fetched(self, settings):
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": html('<link rel="sitemap" href="/homepage-sitemap.xml">'),
+            "/homepage-sitemap.xml": xml(
+                '<?xml version="1.0"?>'
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<url><loc>https://e.com/declared-by-homepage/</loc></url></urlset>"
+            ),
+        }
+        graph, _ = run_async(settings, routes, crawl_dom=False)
+        urls = {node.url for node in graph.nodes}
+        assert "https://e.com/declared-by-homepage/" in urls
+
+    def test_a_cross_host_robots_sitemap_is_skipped_not_fetched(self, settings):
+        hits: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            hits.append(str(request.url))
+            if request.url.path == "/robots.txt":
+                return httpx.Response(
+                    200,
+                    text=("User-agent: *\nDisallow:\nSitemap: https://evil.example/sitemap.xml\n"),
+                )
+            return httpx.Response(404, text="not found")
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            async_transport=httpx.MockTransport(handler),
+        )
+
+        async def scenario() -> DiscoveryReport:
+            async with fetcher:
+                _, report = await adiscover_site(fetcher, "https://e.com", crawl_dom=False)
+                return report
+
+        report = asyncio.run(scenario())
+        assert not any("evil.example" in hit for hit in hits)
+        assert report.sitemap_offhost_skipped == 1
+
+    def test_the_ceiling_binds_on_the_async_path_too(self, settings):
+        from src.modules.seo.page_classifier.discovery import MAX_SITEMAP_FETCH_ATTEMPTS
+
+        child_count = MAX_SITEMAP_FETCH_ATTEMPTS + 20
+        children = "".join(
+            f"<sitemap><loc>https://e.com/child-{i}.xml</loc></sitemap>" for i in range(child_count)
+        )
+        index = (
+            '<?xml version="1.0"?><sitemapindex '
+            f'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{children}</sitemapindex>'
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(200, text=ROBOTS)
+            if request.url.path == "/sitemap_index.xml":
+                return xml(index)
+            if request.url.path.startswith("/child-"):
+                return xml(
+                    '<?xml version="1.0"?>'
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                    f"<url><loc>https://e.com{request.url.path}</loc></url></urlset>"
+                )
+            return httpx.Response(404)
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            async_transport=httpx.MockTransport(handler),
+        )
+
+        async def scenario() -> DiscoveryReport:
+            async with fetcher:
+                _, report = await adiscover_site(
+                    fetcher, "https://e.com", crawl_dom=False, max_pages=10_000
+                )
+                return report
+
+        report = asyncio.run(scenario())
+        assert report.sitemap_fetch_attempts == MAX_SITEMAP_FETCH_ATTEMPTS
+
+    def test_every_sitemap_attempt_refused_marks_blocked(self, settings):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(200, text=ROBOTS)
+            if request.url.path in {"/sitemap_index.xml", "/sitemap.xml"}:
+                return httpx.Response(403, text="denied")
+            return httpx.Response(404)
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            async_transport=httpx.MockTransport(handler),
+        )
+
+        async def scenario() -> DiscoveryReport:
+            async with fetcher:
+                _, report = await adiscover_site(fetcher, "https://e.com", crawl_dom=False)
+                return report
+
+        report = asyncio.run(scenario())
+        assert report.sitemaps_blocked is True
 
 
 class TestUnlimitedDepth:
@@ -344,6 +474,56 @@ class TestSafetyIsNotRelaxed:
         routes["/"] = html('<html><body><a href="/shop?color=red">Filter</a></body></html>')
         _, report = run_async(settings, routes)
         assert report.pages_fetched == 1, "only the root; the facet is classified unfetched"
+
+
+class TestGuardrailRefusalOutcome:
+    """A security refusal must not be indistinguishable from a network failure.
+
+    Async twin of `test_discovery.TestGuardrailRefusalOutcome` — behavioural
+    equivalence between the two paths is this module's central claim, and that
+    includes how a `UnsafeUrlError` refusal is bucketed in the report.
+    """
+
+    def test_an_unsafe_redirect_is_bucketed_separately_from_transport_errors(self, settings):
+        """`UnsafeUrlError` lands in its own outcome, not `transport_error`."""
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": html('<html><a href="/bait">bait</a><a href="/bait2">bait2</a></html>'),
+            # A redirect to link-local metadata address — the SSRF guard refuses
+            # this, matching `TestSafetyIsNotRelaxed.test_ssrf_guard_still_applies`.
+            "/bait": httpx.Response(302, headers={"location": "http://169.254.169.254/"}),
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/bait2":
+                # An ordinary transport failure, unrelated to the SSRF guard.
+                raise httpx.ConnectError("boom", request=request)
+            return routes.get(request.url.path, httpx.Response(404, text="nope"))
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+            async_transport=httpx.MockTransport(handler),
+        )
+
+        async def scenario() -> DiscoveryReport:
+            async with fetcher:
+                _, report = await adiscover_site(fetcher, "https://e.com", max_pages=20)
+                return report
+
+        report = asyncio.run(scenario())
+
+        outcomes = report.fetch_outcomes
+        assert outcomes.get("guardrail_refused", 0) == 1
+        # The plain transport failure on /bait2 is an `httpx.ConnectError`,
+        # which the fetch-specific classifier now buckets as
+        # `transport_refused` rather than the generic `transport_error`
+        # fallback — see `discovery._transport_outcome_for`. It must still be
+        # distinct from `guardrail_refused`, which is the property this test
+        # guards.
+        assert outcomes.get("transport_refused", 0) == 1
+        assert outcomes.get("transport_error", 0) == 0
 
 
 class TestProgressReporting:

@@ -46,16 +46,19 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import TypeVar
 
+from src.core.errors import UnsafeUrlError
 from src.core.logger import get_logger
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.discovery import (
     DEFAULT_DOM_RESERVE_FRACTION,
     DEFAULT_MAX_PAGES,
     MAX_CMS_PAGES,
+    MAX_SITEMAP_FETCH_ATTEMPTS,
+    OUTCOME_GUARDRAIL_REFUSED,
     OUTCOME_NOT_HTML,
     OUTCOME_OK,
     OUTCOME_SERVER_ERROR,
-    OUTCOME_TRANSPORT,
+    OUTCOME_TRANSPORT_REFUSED,
     SHOPIFY_ENDPOINTS,
     WORDPRESS_ENDPOINTS,
     CheckpointSink,
@@ -63,12 +66,16 @@ from src.modules.seo.page_classifier.discovery import (
     ProgressSink,
     SiteGraph,
     _checkpoint,
+    _filter_same_host_sitemaps,
     _notify,
+    _registrable_host,
+    _transport_outcome_for,
     is_refusal,
     outcome_for,
 )
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
+    extract_sitemap_links,
     parse_link_header,
     parse_shopify_records,
     parse_sitemap,
@@ -98,21 +105,43 @@ the network, and a 512 MB worker starts to matter."""
 
 ResultT = TypeVar("ResultT")
 
-REQUEST_DEADLINE_S = 20.0
-"""Total wall-clock a single page fetch may take.
+REQUEST_DEADLINE_S = 200.0
+"""Total wall-clock a single page fetch — across every retry — may take.
 
 httpx has no equivalent setting. Its read timeout measures the gap between
 bytes, so a server sending one byte every few seconds resets it forever — the
 request never times out and the worker never comes back. This bounds the whole
 request, which is the only thing that defeats that.
+
+Must exceed `HttpFetcher.afetch()`'s own worst case or this deadline fires
+before httpx's retry policy ever gets to run, turning a transient timeout into
+a hard failure on the first attempt. Worst-case math, assuming the default
+`default_max_retries = 3` (4 total attempts) and `FETCH_RETRY_ON` retrying
+every httpx timeout:
+
+    4 attempts x 45s httpx phase budget (CONNECT_TIMEOUT_S=5 + POOL_TIMEOUT_S=10
+    + default_timeout_s=30, each maxed out sequentially in one attempt)
+    = 180s
+    + ~7s cumulative exponential-jitter backoff across 3 inter-attempt waits
+    ~= 187s
+    + 13s margin
+    = 200s
+
+Raising `default_max_retries` without re-deriving this constant reopens the
+exact conflict this fix resolves: the deadline would again fire mid-retry.
 """
 
-STALL_TIMEOUT_S = 30.0
+STALL_TIMEOUT_S = 210.0
 """How long a crawl may make no progress at all before it is abandoned.
 
 The last line of defence, above the per-request deadline. If every in-flight
 request is stuck, the crawl stops and returns what it has rather than hanging —
 a partial result an operator can read beats a job that never finishes.
+
+Kept at `REQUEST_DEADLINE_S + 10`, the same margin it held before: a legitimate
+single fetch can validly take the whole deadline, so this must be strictly
+above it or the stall watchdog would fire on ordinary slow pages rather than on
+a genuinely wedged crawl.
 """
 
 
@@ -160,6 +189,15 @@ class _LoadGovernor:
     return values, which cannot distinguish "500" from "200 but not HTML". The
     attribution of one error to one completing task is approximate under
     concurrency; a control loop does not need better than that.
+
+    The trigger is `OUTCOME_SERVER_ERROR + OUTCOME_TRANSPORT_REFUSED` — 5xx and
+    `httpx.ConnectError` both read as "we may be causing this": a host actively
+    refusing connections is the same shape of complaint as one answering with
+    5xx. `OUTCOME_TRANSPORT_TIMEOUT` and `OUTCOME_TRANSPORT_DEADLINE` are
+    deliberately excluded: a slow-but-alive host is not necessarily evidence
+    that our own concurrency is the cause, and narrowing on it risks throttling
+    a crawl against a host that is just naturally slow — working against the
+    goal of maximising legitimate page coverage.
     """
 
     def __init__(self, ceiling: int, graph: SiteGraph | None = None) -> None:
@@ -169,9 +207,22 @@ class _LoadGovernor:
         self._in_flight = 0
         self._clean = 0
         self._graph = graph
-        self._seen = graph.fetch_outcomes[OUTCOME_SERVER_ERROR] if graph else 0
+        self._seen = self._narrowing_signal(graph) if graph else 0
         self._low_water = self._ceiling
         self._condition = asyncio.Condition()
+
+    @staticmethod
+    def _narrowing_signal(graph: SiteGraph) -> int:
+        """Combined count of the outcomes that narrow the cap.
+
+        Summed fresh on every call rather than tracked incrementally, matching
+        the same read-from-the-ledger approach `OUTCOME_SERVER_ERROR` already
+        used — the ledger is the one source of truth for both counters.
+        """
+        return (
+            graph.fetch_outcomes[OUTCOME_SERVER_ERROR]
+            + graph.fetch_outcomes[OUTCOME_TRANSPORT_REFUSED]
+        )
 
     @property
     def low_water(self) -> int:
@@ -189,7 +240,7 @@ class _LoadGovernor:
         async with self._condition:
             self._in_flight -= 1
             if self._graph is not None:
-                errors = self._graph.fetch_outcomes[OUTCOME_SERVER_ERROR]
+                errors = self._narrowing_signal(self._graph)
                 if errors > self._seen:
                     self._seen = errors
                     self._clean = 0
@@ -279,27 +330,35 @@ async def _gather_bounded(
     return results
 
 
-async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> str | None:
+async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str | None, bool]:
     """Fetch a URL, returning `None` for any failure or non-2xx.
 
     Refusals are counted on the graph, matching the serial path. Behavioural
     equivalence is the central claim of this module, and a report that differed
     between the two paths would break it.
+
+    Returns:
+        `(body, refused)` — see `discovery._safe_body`, whose contract this
+        mirrors exactly so sitemap discovery reads one signal from either path.
     """
     try:
         result = await asyncio.wait_for(fetcher.afetch(url), timeout=REQUEST_DEADLINE_S)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
-        graph.record_outcome(OUTCOME_TRANSPORT)
-        return None
+        if isinstance(exc, UnsafeUrlError):
+            graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
+        else:
+            graph.record_outcome(_transport_outcome_for(exc))
+        return None, False
     if not result.ok:
         graph.record_outcome(outcome_for(result.status_code))
-        if is_refusal(result.status_code):
+        refused = is_refusal(result.status_code)
+        if refused:
             graph.fetch_failures += 1
-        return None
+        return None, refused
     graph.record_outcome(OUTCOME_OK)
-    return result.body
+    return result.body, False
 
 
 async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str, str] | None:
@@ -316,7 +375,10 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
-        graph.record_outcome(OUTCOME_TRANSPORT)
+        if isinstance(exc, UnsafeUrlError):
+            graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
+        else:
+            graph.record_outcome(_transport_outcome_for(exc))
         return None
     # Both crawl paths must record the same facts. Behavioural equivalence
     # between them is this module's central claim, and a redirect chain present
@@ -429,6 +491,35 @@ async def adiscover_site(
     return graph, report
 
 
+async def _ahomepage_sitemap_links(fetcher: HttpFetcher, base_url: str) -> tuple[str, ...]:
+    """Async twin of `discovery._homepage_sitemap_links`. See its docstring."""
+    try:
+        result = await asyncio.wait_for(fetcher.afetch(base_url), timeout=REQUEST_DEADLINE_S)
+    except Exception as exc:  # noqa: BLE001 - one bad fetch must not stop discovery
+        _logger.debug("homepage_sitemap_probe_failed", extra={"url": base_url, "error": str(exc)})
+        return ()
+    if not result.ok or not result.is_html:
+        return ()
+    return extract_sitemap_links(result.body, result.final_url or base_url)
+
+
+async def _asitemap_seeds(fetcher: HttpFetcher, base_url: str, graph: SiteGraph) -> list[str]:
+    """Async twin of `discovery._sitemap_seeds`. See its docstring."""
+    root = base_url.rstrip("/")
+    base_registrable = _registrable_host(base_url)
+
+    seeds = [f"{root}/sitemap_index.xml", f"{root}/sitemap.xml"]
+    robots = await fetcher.arobots_for(base_url)
+    seeds.extend(
+        _filter_same_host_sitemaps(robots.sitemaps, base_registrable, graph, source="robots")
+    )
+    homepage_links = await _ahomepage_sitemap_links(fetcher, base_url)
+    seeds.extend(
+        _filter_same_host_sitemaps(homepage_links, base_registrable, graph, source="homepage")
+    )
+    return seeds
+
+
 async def _asitemaps(
     fetcher: HttpFetcher,
     base_url: str,
@@ -441,27 +532,48 @@ async def _asitemaps(
 
     Large sites publish dozens of grouped sitemaps; HighRadius has nine. Serial
     fetching of those alone costs seconds before a single page is retrieved.
+
+    The combined loop — merged seeds plus every nested `<sitemapindex>` child —
+    is capped at `MAX_SITEMAP_FETCH_ATTEMPTS` total attempts, matching the
+    serial path; see `discovery.MAX_SITEMAP_FETCH_ATTEMPTS`.
     """
-    root = base_url.rstrip("/")
     parsed = 0
+    attempts = 0
+    refused = 0
     visited: set[str] = set()
-    pending = [f"{root}/sitemap_index.xml", f"{root}/sitemap.xml"]
+    pending = await _asitemap_seeds(fetcher, base_url, graph)
 
     while pending:
+        remaining = MAX_SITEMAP_FETCH_ATTEMPTS - attempts
+        if remaining <= 0:
+            _logger.warning(
+                "sitemap_fetch_ceiling_reached",
+                extra={"base_url": base_url, "ceiling": MAX_SITEMAP_FETCH_ATTEMPTS},
+            )
+            break
+
         batch = [url for url in pending if url not in visited]
         visited.update(batch)
         if not batch:
             break
+        if len(batch) > remaining:
+            batch = batch[:remaining]
+        attempts += len(batch)
 
-        bodies = await _gather_bounded(
+        results = await _gather_bounded(
             [_factory(_abody, graph, fetcher, url) for url in batch],
             concurrency,
             graph=graph,
         )
 
         next_round: list[str] = []
-        for url, body in zip(batch, bodies, strict=True):
+        for url, item in zip(batch, results, strict=True):
+            if item is None:
+                continue
+            body, was_refused = item
             if body is None:
+                if was_refused:
+                    refused += 1
                 continue
             document = parse_sitemap(body, source_name=url.rsplit("/", 1)[-1])
             if document.kind.name == "UNKNOWN":
@@ -479,6 +591,8 @@ async def _asitemaps(
         _notify(on_progress, graph, 0, [])
         pending = next_round
 
+    graph.sitemap_fetch_attempts += attempts
+    graph.sitemap_refused_attempts += refused
     return parsed
 
 
@@ -530,11 +644,14 @@ async def _apaginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> A
         if url is None:
             return
         try:
-            result = await fetcher.afetch(url)
+            result = await asyncio.wait_for(fetcher.afetch(url), timeout=REQUEST_DEADLINE_S)
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
             _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
             graph.fetch_failures += 1
-            graph.record_outcome(OUTCOME_TRANSPORT)
+            if isinstance(exc, UnsafeUrlError):
+                graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
+            else:
+                graph.record_outcome(_transport_outcome_for(exc))
             return
         if not result.ok:
             graph.record_outcome(outcome_for(result.status_code))

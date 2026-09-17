@@ -187,6 +187,9 @@ export class HttpAdapter implements CrawlDataAdapter {
       crawledAt: record.started_at ?? record.created_at,
       hasCheckpoint: record.has_checkpoint,
       recoverable: record.has_checkpoint && !record.has_result,
+      // Only meaningful on `partial`: `record.error` is also set for `failed`,
+      // where the job list already renders it through the ordinary error path.
+      stoppedReason: record.status === "partial" ? record.error : null,
     };
   }
 

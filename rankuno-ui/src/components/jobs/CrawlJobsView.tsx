@@ -13,6 +13,7 @@ import { formatCrawlTime } from "../../lib/time";
 import type { LiveJob } from "../../store/useCrawlStore";
 import { isLive, useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
+import { token } from "../../styles/tokens";
 import { PerformancePanel } from "./PerformancePanel";
 import { ReconcilePanel } from "./ReconcilePanel";
 import { UrlTicker } from "../telemetry/UrlTicker";
@@ -116,6 +117,7 @@ export function CrawlJobsView(): JSX.Element {
       render: (_value, row) => (
         <div className="jb-status">
           <Tag color={STATUS_COLOUR[row.status]}>{row.status.toUpperCase()}</Tag>
+          {statusDetail(row) && <span className="jb-status-detail">{statusDetail(row)}</span>}
           {row.live && (
             <span className="jb-clock">
               {formatClock(elapsedSeconds(row.live.startedAt, row.live.endedAt, now))}
@@ -221,7 +223,11 @@ function ProgressCell({ row }: { row: JobRow }): JSX.Element {
         percent={done ? 100 : percent}
         size="small"
         status={row.status === "failed" ? "exception" : done ? "normal" : "active"}
-        strokeColor={done ? undefined : { "0%": "#00f2fe", "100%": "#4facfe" }}
+        strokeColor={
+          /* antd builds the gradient in JS, so this is one of the two
+             places that needs a token's value rather than a `var()`. */
+          done ? undefined : { "0%": token("--progress-from"), "100%": token("--progress-to") }
+        }
         showInfo={false}
       />
       <div className="jb-numbers">
@@ -248,6 +254,22 @@ function ProgressCell({ row }: { row: JobRow }): JSX.Element {
       </div>
     </div>
   );
+}
+
+/**
+ * A short label distinguishing what one `status` tag alone cannot.
+ *
+ * `partial` covers two causes discovery.py's own contract keeps separate: a
+ * page ceiling, a planned stop, and a stall or aborted crawl —
+ * `stoppedReason` on the summary, sourced from `JobRecord.error`. Read
+ * cheaply off the row already on screen; no per-row result fetch.
+ */
+function statusDetail(row: JobRow): string | null {
+  if (row.status === "partial") {
+    return row.summary?.stoppedReason ? "stalled/aborted" : "hit page ceiling";
+  }
+  if (row.status === "succeeded") return "finished";
+  return null;
 }
 
 /** The ETA phrase, or an honest statement of why there is not one yet. */

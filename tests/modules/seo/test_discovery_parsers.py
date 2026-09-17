@@ -10,6 +10,7 @@ import pytest
 from src.modules.seo.page_classifier.discovery_parsers import (
     SitemapKind,
     extract_page_links,
+    extract_sitemap_links,
     parse_shopify_records,
     parse_sitemap,
     parse_wordpress_records,
@@ -228,6 +229,56 @@ class TestLinkExtraction:
 
     def test_rejects_non_http_schemes(self):
         assert extract_page_links('<a href="ftp://e.com/f">x</a>', "https://e.com/") == ()
+
+
+class TestSitemapLinkExtraction:
+    """`<link rel="sitemap">` — the homepage-declared seed source."""
+
+    def test_finds_a_declared_sitemap(self):
+        html = '<head><link rel="sitemap" href="/custom-sitemap.xml"></head>'
+        assert extract_sitemap_links(html, "https://e.com/") == (
+            "https://e.com/custom-sitemap.xml",
+        )
+
+    def test_resolves_a_relative_href(self):
+        html = '<link rel="sitemap" href="sitemap-2.xml">'
+        assert extract_sitemap_links(html, "https://e.com/blog/") == (
+            "https://e.com/blog/sitemap-2.xml",
+        )
+
+    def test_ignores_links_with_a_different_rel(self):
+        html = '<link rel="stylesheet" href="/site.css">'
+        assert extract_sitemap_links(html, "https://e.com/") == ()
+
+    def test_ignores_anchors_and_other_tags(self):
+        html = '<a rel="sitemap" href="/not-a-link-tag.xml">Sitemap</a>'
+        assert extract_sitemap_links(html, "https://e.com/") == ()
+
+    def test_deduplicates(self):
+        html = '<link rel="sitemap" href="/sitemap.xml"><link rel="sitemap" href="/sitemap.xml">'
+        assert extract_sitemap_links(html, "https://e.com/") == ("https://e.com/sitemap.xml",)
+
+    def test_rejects_non_http_schemes(self):
+        html = '<link rel="sitemap" href="ftp://e.com/sitemap.xml">'
+        assert extract_sitemap_links(html, "https://e.com/") == ()
+
+    def test_malformed_markup_does_not_raise(self):
+        html = '<link rel="sitemap" href=/x.xml unclosed'
+        assert isinstance(extract_sitemap_links(html, "https://e.com/"), tuple)
+
+    def test_empty_html_yields_nothing(self):
+        assert extract_sitemap_links("", "https://e.com/") == ()
+
+    def test_a_cross_host_href_is_still_extracted(self):
+        """Parsing does not filter by host — that is the caller's job.
+
+        `discovery._filter_same_host_sitemaps` applies the registrable-host
+        check; this function only reports what the page declared.
+        """
+        html = '<link rel="sitemap" href="https://third-party.example/sitemap.xml">'
+        assert extract_sitemap_links(html, "https://e.com/") == (
+            "https://third-party.example/sitemap.xml",
+        )
 
 
 class TestWordPressRecords:

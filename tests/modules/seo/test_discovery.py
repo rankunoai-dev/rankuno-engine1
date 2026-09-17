@@ -550,6 +550,100 @@ class TestBlockedSite:
         assert report.fetch_failures == 0
 
 
+class TestGuardrailRefusalOutcome:
+    """A security refusal must not be indistinguishable from a network failure.
+
+    Observed live: job 0f69b80025874d30b57f54de33b8f705 (infosys.com) bucketed
+    3,597 of 3,960 `transport_error` entries that were actually the SSRF guard
+    (`UnsafeUrlError`) refusing a redirect to an unvalidated address — not a
+    timeout, DNS failure or connection reset. Diagnosing that took manual
+    correlation with raw application logs. This is the regression guard for it.
+    """
+
+    def test_an_unsafe_redirect_is_bucketed_separately_from_transport_errors(self, settings):
+        """`UnsafeUrlError` lands in its own outcome, not `transport_error`."""
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": httpx.Response(
+                200,
+                text='<html><a href="/bait">bait</a><a href="/bait2">bait2</a></html>',
+                headers={"content-type": "text/html"},
+            ),
+            # A redirect to link-local metadata address — the SSRF guard refuses
+            # this, the same as `test_refuses_a_redirect_to_an_internal_address`
+            # in `tests/integrations/test_http_fetcher.py`.
+            "/bait": httpx.Response(302, headers={"location": "http://169.254.169.254/"}),
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/bait2":
+                # An ordinary transport failure, unrelated to the SSRF guard.
+                raise httpx.ConnectError("boom", request=request)
+            return routes.get(request.url.path, httpx.Response(404, text="nope"))
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", max_pages=20)
+
+        outcomes = report.fetch_outcomes
+        assert outcomes.get("guardrail_refused", 0) == 1
+        # The plain transport failure on /bait2 must still land in the
+        # unchanged, pre-existing bucket — this is purely additive.
+        assert outcomes.get("transport_error", 0) == 1
+        assert set(outcomes) <= set(OUTCOME_MEANINGS)
+
+    def test_a_post_connect_rebinding_refusal_is_bucketed_the_same_way(self, settings):
+        """A refusal raised by `_verify_peer` must land in the same bucket.
+
+        `_verify_peer` refuses after connect, when the peer classifies as
+        unsafe — this must bucket the same as the pre-connect redirect refusal
+        above. Both are `UnsafeUrlError`; the discovery layer must not
+        distinguish which check inside the fetcher raised it.
+        """
+
+        class _RebindingStream:
+            """A peer that answered from a private address.
+
+            Not the one `UrlSafetyPolicy` validated for this host.
+            """
+
+            @staticmethod
+            def get_extra_info(name: str) -> tuple[str, int] | None:
+                return ("127.0.0.1", 443) if name == "server_addr" else None
+
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": httpx.Response(
+                200,
+                text='<html><a href="/rebind">rebind</a></html>',
+                headers={"content-type": "text/html"},
+            ),
+            "/rebind": httpx.Response(
+                200,
+                text="ok",
+                headers={"content-type": "text/html"},
+                extensions={"network_stream": _RebindingStream()},
+            ),
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return routes.get(request.url.path, httpx.Response(404, text="nope"))
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", max_pages=10)
+
+        outcomes = report.fetch_outcomes
+        assert outcomes.get("guardrail_refused", 0) == 1
+        assert set(outcomes) <= set(OUTCOME_MEANINGS)
+
+
 # A WordPress index pointing at both a page sitemap and an attachment sitemap.
 # The attachment sitemap is what put every uploaded image into the graph.
 MEDIA_INDEX = """<?xml version="1.0"?>
@@ -641,6 +735,187 @@ class TestNonPageFiltering:
         # index + two children
         assert report.sitemaps_fetched == 3
         assert report.from_sitemap == 2
+
+
+class TestSitemapSeedSources:
+    """The three sources Path A now merges: probes, robots.txt, homepage."""
+
+    def test_a_robots_declared_sitemap_is_fetched(self, settings):
+        routes = {
+            "/robots.txt": httpx.Response(
+                200, text="User-agent: *\nDisallow:\nSitemap: https://e.com/extra-sitemap.xml\n"
+            ),
+            "/extra-sitemap.xml": xml(
+                '<?xml version="1.0"?>'
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<url><loc>https://e.com/declared-by-robots/</loc></url></urlset>"
+            ),
+        }
+        graph, report = discover_site(
+            site_fetcher(routes, settings), "https://e.com", crawl_dom=False
+        )
+        urls = {node.url for node in graph.nodes}
+        assert "https://e.com/declared-by-robots/" in urls
+        assert report.sitemap_fetch_attempts == 3  # two probes + the declared file
+
+    def test_a_homepage_declared_sitemap_is_fetched(self, settings):
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": html('<link rel="sitemap" href="/homepage-sitemap.xml">'),
+            "/homepage-sitemap.xml": xml(
+                '<?xml version="1.0"?>'
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<url><loc>https://e.com/declared-by-homepage/</loc></url></urlset>"
+            ),
+        }
+        graph, _ = discover_site(site_fetcher(routes, settings), "https://e.com", crawl_dom=False)
+        urls = {node.url for node in graph.nodes}
+        assert "https://e.com/declared-by-homepage/" in urls
+
+    def test_a_cross_host_robots_sitemap_is_skipped_not_fetched(self, settings):
+        hits: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            hits.append(str(request.url))
+            if request.url.path == "/robots.txt":
+                return httpx.Response(
+                    200,
+                    text=("User-agent: *\nDisallow:\nSitemap: https://evil.example/sitemap.xml\n"),
+                )
+            return httpx.Response(404, text="not found")
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", crawl_dom=False)
+
+        assert not any("evil.example" in hit for hit in hits), (
+            "a cross-host Sitemap: directive must never be fetched"
+        )
+        assert report.sitemap_offhost_skipped == 1
+
+    def test_a_cross_host_homepage_link_is_skipped_not_fetched(self, settings):
+        hits: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            hits.append(str(request.url))
+            if request.url.path == "/robots.txt":
+                return httpx.Response(200, text=ROBOTS)
+            if request.url.path == "/":
+                return html('<link rel="sitemap" href="https://evil.example/sitemap.xml">')
+            return httpx.Response(404, text="not found")
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", crawl_dom=False)
+
+        assert not any("evil.example" in hit for hit in hits)
+        assert report.sitemap_offhost_skipped == 1
+
+    def test_a_www_declared_sitemap_is_not_treated_as_cross_host(self, settings):
+        """`www.e.com` and `e.com` share a registrable domain."""
+        routes = {
+            "/robots.txt": httpx.Response(
+                200,
+                text="User-agent: *\nDisallow:\nSitemap: https://www.e.com/sitemap-www.xml\n",
+            ),
+            "/sitemap-www.xml": xml(
+                '<?xml version="1.0"?>'
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<url><loc>https://e.com/via-www/</loc></url></urlset>"
+            ),
+        }
+        graph, report = discover_site(
+            site_fetcher(routes, settings), "https://e.com", crawl_dom=False
+        )
+        urls = {node.url for node in graph.nodes}
+        assert "https://e.com/via-www/" in urls
+        assert report.sitemap_offhost_skipped == 0
+
+
+class TestSitemapFetchCeiling:
+    def test_a_hostile_sitemap_index_is_capped(self, settings):
+        """A sitemap index with far more children than the ceiling stays bounded."""
+        from src.modules.seo.page_classifier.discovery import MAX_SITEMAP_FETCH_ATTEMPTS
+
+        child_count = MAX_SITEMAP_FETCH_ATTEMPTS + 20
+        children = "".join(
+            f"<sitemap><loc>https://e.com/child-{i}.xml</loc></sitemap>" for i in range(child_count)
+        )
+        index = (
+            '<?xml version="1.0"?><sitemapindex '
+            f'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{children}</sitemapindex>'
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(200, text=ROBOTS)
+            if request.url.path == "/sitemap_index.xml":
+                return xml(index)
+            if request.url.path.startswith("/child-"):
+                return xml(
+                    '<?xml version="1.0"?>'
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                    f"<url><loc>https://e.com{request.url.path}</loc></url></urlset>"
+                )
+            return httpx.Response(404)
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", crawl_dom=False, max_pages=10_000)
+
+        assert report.sitemap_fetch_attempts == MAX_SITEMAP_FETCH_ATTEMPTS
+
+
+class TestSitemapsBlocked:
+    """`sitemaps_blocked` — refused everywhere, told apart from "no sitemap"."""
+
+    def test_every_sitemap_attempt_refused_marks_blocked(self, settings):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(200, text=ROBOTS)
+            if request.url.path in {"/sitemap_index.xml", "/sitemap.xml"}:
+                return httpx.Response(403, text="denied")
+            return httpx.Response(404)
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", crawl_dom=False)
+        assert report.sitemaps_blocked is True
+        assert report.sitemap_fetch_attempts == 2
+
+    def test_a_plain_404_is_not_reported_as_blocked(self, settings):
+        """The routine case: the site simply has no sitemap."""
+        _, report = discover_site(
+            site_fetcher({"/robots.txt": httpx.Response(200, text=ROBOTS)}, settings),
+            "https://e.com",
+            crawl_dom=False,
+        )
+        assert report.sitemaps_blocked is False
+        assert report.sitemap_fetch_attempts == 2
+
+    def test_at_least_one_success_means_not_blocked(self, settings):
+        _, report = discover_site(
+            site_fetcher(FULL_SITE, settings), "https://e.com", crawl_dom=False
+        )
+        assert report.sitemaps_blocked is False
+
+    def test_nothing_attempted_is_not_reported_as_blocked(self):
+        """Zero attempts means no source ever named a sitemap, not a block."""
+        graph = SiteGraph("https://e.com")
+        assert graph.report().sitemaps_blocked is False
+        assert graph.report().sitemap_fetch_attempts == 0
 
 
 class TestSpiderTrapRefusal:

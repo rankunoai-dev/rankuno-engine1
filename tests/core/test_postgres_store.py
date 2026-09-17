@@ -129,12 +129,19 @@ class TestPostgresJobStoreMethodDelegation:
         fallback.mark_failed.assert_called_once_with("job-id", "error message")
 
     def test_finish_delegates_to_fallback(self) -> None:
-        """finish() should delegate to fallback."""
+        """finish() should delegate to fallback, forwarding `error` too.
+
+        `error` was added to the `JobStore.finish()` contract so a `PARTIAL`
+        job can carry why it stopped early (a stall or an abort, as opposed to
+        a page ceiling) without a per-job fetch of the full result blob. A
+        store that dropped it here would silently lose that reason for every
+        job routed through this delegate.
+        """
         fallback = MagicMock()
         store = PostgresJobStore(fallback_store=fallback)
         result = {"key": "value"}
         store.finish("job-id", result)
-        fallback.finish.assert_called_once_with("job-id", result, partial=False)
+        fallback.finish.assert_called_once_with("job-id", result, partial=False, error=None)
 
     def test_read_result_delegates_to_fallback(self) -> None:
         """read_result() should delegate to fallback."""

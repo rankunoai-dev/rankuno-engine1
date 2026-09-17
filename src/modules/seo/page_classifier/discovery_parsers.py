@@ -49,6 +49,7 @@ __all__ = [
     "SitemapDocument",
     "SitemapKind",
     "extract_page_links",
+    "extract_sitemap_links",
     "parse_link_header",
     "parse_shopify_records",
     "parse_sitemap",
@@ -317,6 +318,78 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
         if not is_crawlable_url(absolute):
             continue
         found[absolute.split("#", 1)[0]] = None
+
+    return tuple(found)
+
+
+class _SitemapLinkCollector(HTMLParser):
+    """Collect `<link rel="sitemap" href="...">` targets from one document."""
+
+    def __init__(self) -> None:
+        """Start with no links collected."""
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Record a `<link rel="sitemap">` target."""
+        if tag != "link":
+            return
+        rel = ""
+        href = ""
+        for name, value in attrs:
+            lowered = name.lower()
+            if lowered == "rel" and value:
+                rel = value.strip().lower()
+            elif lowered == "href" and value:
+                href = value.strip()
+        if rel == "sitemap" and href:
+            self.hrefs.append(href)
+
+
+def extract_sitemap_links(html: str, base_url: str) -> tuple[str, ...]:
+    """Extract `<link rel="sitemap" href="...">` targets from a page.
+
+    The third of the three seed sources Path A now merges: some sites publish
+    a sitemap without naming it in `robots.txt`, and this `<link>` is the only
+    other place the ecosystem lets them declare one. Uses the same
+    `html.parser.HTMLParser` as `extract_page_links` rather than a hand-rolled
+    regular expression against raw markup.
+
+    Same-host filtering is deliberately **not** done here — this function only
+    parses. The caller (`discovery._discover_from_sitemaps` /
+    `async_discovery._asitemaps`) applies the registrable-host check, because
+    that check needs the crawl's own base URL and belongs beside the other
+    sitemap-source filtering rather than duplicated inside a pure parser.
+
+    Args:
+        html: Raw homepage HTML.
+        base_url: Absolute URL the HTML was fetched from, used to resolve a
+            relative `href`.
+
+    Returns:
+        Absolute URLs, de-duplicated and order-preserved.
+    """
+    if not html:
+        return ()
+
+    collector = _SitemapLinkCollector()
+    try:
+        collector.feed(html)
+        collector.close()
+    except Exception as exc:  # noqa: BLE001 - malformed markup must not abort discovery
+        _logger.debug("sitemap_link_extraction_partial", extra={"url": base_url, "error": str(exc)})
+
+    found: dict[str, None] = {}
+    for href in collector.hrefs:
+        try:
+            absolute = urljoin(base_url, href)
+        except ValueError as exc:
+            _logger.debug("sitemap_link_unparseable", extra={"href": href, "error": str(exc)})
+            continue
+        parts = safe_split(absolute)
+        if parts is None or parts.scheme not in {"http", "https"}:
+            continue
+        found[absolute] = None
 
     return tuple(found)
 

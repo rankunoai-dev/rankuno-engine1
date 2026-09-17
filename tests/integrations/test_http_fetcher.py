@@ -12,11 +12,13 @@ from typing import Any
 import httpx
 import pytest
 from src.core.errors import IntegrationError, RobotsDisallowedError, UnsafeUrlError
+from src.core.retry import with_async_retries
 from src.core.robots import DEFAULT_USER_AGENT, RobotsTxt, parse_robots_txt
-from src.core.url_safety import UrlSafetyPolicy
+from src.core.url_safety import SafeUrl, UrlSafetyPolicy
 from src.integrations.http_fetcher import (
     BROWSER_USER_AGENT,
     DEFAULT_MAX_CONNECTIONS,
+    FETCH_RETRY_ON,
     MAX_CONNECTIONS,
     FetchResult,
     HttpFetcher,
@@ -223,6 +225,65 @@ class TestRobotsEnforcement:
         )
         fetcher = make_fetcher(transport, settings, respect_robots=False)
         assert fetcher.fetch("https://e.com/page").body == "fetched"
+
+
+class TestRobotsAccessor:
+    """`robots_for()`/`arobots_for()` — the public window sitemap discovery reads."""
+
+    ROBOTS_WITH_SITEMAPS = (
+        "User-agent: *\nDisallow:\nSitemap: https://e.com/sitemap.xml\n"
+        "Sitemap: https://e.com/news-sitemap.xml\n"
+    )
+
+    def test_returns_the_sitemap_lines(self, settings):
+        transport = route_map({"/robots.txt": httpx.Response(200, text=self.ROBOTS_WITH_SITEMAPS)})
+        robots = make_fetcher(transport, settings).robots_for("https://e.com/anything")
+        assert robots.sitemaps == (
+            "https://e.com/sitemap.xml",
+            "https://e.com/news-sitemap.xml",
+        )
+
+    def test_reuses_the_cache_fetch_already_populated(self, settings):
+        """No second request: the accessor must not open a parallel fetch path."""
+        hits: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            hits.append(request.url.path)
+            return httpx.Response(200, text=self.ROBOTS_WITH_SITEMAPS)
+
+        fetcher = make_fetcher(httpx.MockTransport(handler), settings)
+        fetcher.fetch("https://e.com/page")  # populates the cache
+        fetcher.robots_for("https://e.com/other")
+        assert hits.count("/robots.txt") == 1
+
+    def test_an_unreachable_robots_yields_no_sitemaps(self, settings):
+        transport = route_map({"/robots.txt": httpx.Response(500)})
+        robots = make_fetcher(transport, settings).robots_for("https://e.com")
+        assert robots.sitemaps == ()
+
+    def test_async_accessor_returns_the_sitemap_lines(self, settings):
+        transport = route_map({"/robots.txt": httpx.Response(200, text=self.ROBOTS_WITH_SITEMAPS)})
+        fetcher = make_async_fetcher(transport, settings)
+
+        async def scenario() -> tuple[str, ...]:
+            async with fetcher:
+                robots = await fetcher.arobots_for("https://e.com/anything")
+                return robots.sitemaps
+
+        assert asyncio.run(scenario()) == (
+            "https://e.com/sitemap.xml",
+            "https://e.com/news-sitemap.xml",
+        )
+
+    def test_sync_accessor_refuses_to_run_inside_a_loop(self, settings):
+        transport = route_map({"/robots.txt": httpx.Response(200, text=ROBOTS_ALLOW_ALL)})
+        fetcher = make_fetcher(transport, settings)
+
+        async def scenario() -> None:
+            fetcher.robots_for("https://e.com")
+
+        with pytest.raises(RuntimeError, match="afetch"):
+            asyncio.run(scenario())
 
 
 class TestEventLoopSafety:
@@ -489,3 +550,143 @@ class TestConnectionPool:
             transport=httpx.MockTransport(lambda r: httpx.Response(200)),
         )
         assert fetcher._max_connections == MAX_CONNECTIONS
+
+
+class _StubNetworkStream:
+    """Duck-typed the same way `_peer_address` already treats its input."""
+
+    def __init__(self, peer_ip: str, port: int = 443) -> None:
+        self._peer_ip = peer_ip
+        self._port = port
+
+    def get_extra_info(self, name: str) -> tuple[str, int] | None:
+        if name == "server_addr":
+            return (self._peer_ip, self._port)
+        return None
+
+
+def _peer_response(peer_ip: str) -> httpx.Response:
+    """A response reporting a specific connected peer, no real socket involved."""
+    return httpx.Response(200, extensions={"network_stream": _StubNetworkStream(peer_ip)})
+
+
+def _safe_url(*resolved_ips: str, host: str = "e.com") -> SafeUrl:
+    return SafeUrl(
+        original=f"https://{host}/",
+        url=f"https://{host}/",
+        scheme="https",
+        host=host,
+        port=443,
+        resolved_ips=resolved_ips,
+    )
+
+
+class TestVerifyPeer:
+    """`_verify_peer` refuses a peer that classifies as unsafe.
+
+    Not merely one absent from the validation snapshot.
+
+    Observed live: job 0f69b80025874d30b57f54de33b8f705 (infosys.com) hit an
+    exact-match failure against a CDN's own address rotation — a public peer
+    that simply was not in the validated snapshot — and was refused as if it
+    were DNS rebinding. A mismatch is only evidence of an attack when the
+    connected peer itself classifies as unsafe (private, loopback, link-local,
+    reserved). See the docstring on `_verify_peer` itself.
+    """
+
+    @staticmethod
+    def _fetcher(settings) -> HttpFetcher:
+        """A fetcher whose transport is never actually exercised by these tests."""
+        return HttpFetcher(
+            settings=settings, transport=httpx.MockTransport(lambda r: httpx.Response(200))
+        )
+
+    def test_an_exact_match_takes_the_fast_path(self, settings, monkeypatch):
+        """The common case never needs to classify anything."""
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "src.integrations.http_fetcher.describe_ip_block",
+            lambda addr: calls.append(addr),
+        )
+        fetcher = self._fetcher(settings)
+        safe = _safe_url("93.184.216.1")
+
+        fetcher._verify_peer(_peer_response("93.184.216.1"), safe)
+
+        assert calls == []
+
+    def test_a_public_mismatch_is_rotation_not_rebinding(self, settings):
+        """A CDN edge answering from a public address absent from the snapshot is not refused.
+
+        This is the direct regression test for the diagnosed false positive
+        (job 0f69b80025874d30b57f54de33b8f705, infosys.com).
+        """
+        fetcher = self._fetcher(settings)
+        safe = _safe_url("93.184.216.1")
+
+        fetcher._verify_peer(_peer_response("93.184.216.9"), safe)  # must not raise
+
+    def test_a_multi_ip_cdn_pool_mismatch_is_not_refused(self, settings):
+        """Synthetic Akamai-style scenario: several validated addresses.
+
+        The connection lands on a public one outside that snapshot.
+        """
+        fetcher = self._fetcher(settings)
+        safe = _safe_url("23.1.1.1", "23.1.1.2")
+
+        fetcher._verify_peer(_peer_response("23.1.1.3"), safe)  # must not raise
+
+    def test_a_loopback_mismatch_is_refused_as_rebinding(self, settings):
+        """Zero behavior change for the attack this guard exists to catch."""
+        fetcher = self._fetcher(settings)
+        safe = _safe_url("93.184.216.1")
+
+        with pytest.raises(UnsafeUrlError) as exc_info:
+            fetcher._verify_peer(_peer_response("127.0.0.1"), safe)
+        assert "127.0.0.1" in str(exc_info.value)
+
+    def test_a_private_rfc1918_mismatch_is_refused_as_rebinding(self, settings):
+        """Zero behavior change for the attack this guard exists to catch."""
+        fetcher = self._fetcher(settings)
+        safe = _safe_url("93.184.216.1")
+
+        with pytest.raises(UnsafeUrlError) as exc_info:
+            fetcher._verify_peer(_peer_response("10.0.0.5"), safe)
+        assert "10.0.0.5" in str(exc_info.value)
+
+
+class TestNonRetryableExceptionsPropagateOnFirstAttempt:
+    """`FETCH_RETRY_ON` must never include a guardrail refusal.
+
+    `UnsafeUrlError` (the SSRF guard) and `RobotsDisallowedError` are decisions
+    already made before any socket opened — retrying either just re-asks a
+    question that has been answered, spending backoff time on a request that
+    cannot succeed. This locks in the exclusion directly against
+    `with_async_retries(..., retry_on=FETCH_RETRY_ON)`, the exact call
+    `afetch()` makes, so a future edit that widens `FETCH_RETRY_ON` to include
+    either type fails here rather than only being caught by inspection.
+    """
+
+    @pytest.mark.parametrize("exc_type", [UnsafeUrlError, RobotsDisallowedError])
+    def test_first_attempt_exception_propagates_unchanged(self, exc_type: type[Exception]) -> None:
+        calls = 0
+
+        def make_exc() -> Exception:
+            # Mirrors the real constructors closely enough to be a faithful
+            # stand-in for what `_prepare`/`_afetch_chain` actually raise.
+            if exc_type is UnsafeUrlError:
+                return UnsafeUrlError("https://blocked.example/", "private address")
+            return RobotsDisallowedError("https://blocked.example/", "RankunoBot")
+
+        async def fake_afetch_chain() -> FetchResult:
+            nonlocal calls
+            calls += 1
+            raise make_exc()
+
+        async def run() -> None:
+            with pytest.raises(exc_type):
+                await with_async_retries(fake_afetch_chain, retry_on=FETCH_RETRY_ON)
+
+        asyncio.run(run())
+
+        assert calls == 1

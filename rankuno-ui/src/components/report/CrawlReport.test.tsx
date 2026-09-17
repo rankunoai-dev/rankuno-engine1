@@ -90,10 +90,32 @@ describe("CrawlReport", () => {
     expect(screen.getByText(/No page was fetched/)).toBeInTheDocument();
   });
 
+  it("warns when every sitemap attempt was refused", () => {
+    renderReport(
+      crawl({
+        discovery: discovery({ sitemaps_blocked: true, sitemap_fetch_attempts: 2 }),
+      }),
+    );
+    expect(screen.getByText(/Sitemap access blocked/)).toBeInTheDocument();
+    expect(screen.getByText(/2 attempts/)).toBeInTheDocument();
+  });
+
+  it("stays silent about sitemaps when the site simply has none", () => {
+    /* The routine case — two 404s on the hardcoded probes — must not read as
+       an access problem. */
+    renderReport(
+      crawl({
+        discovery: discovery({ sitemaps_blocked: false, sitemap_fetch_attempts: 2 }),
+      }),
+    );
+    expect(screen.queryByText(/Sitemap access blocked/)).not.toBeInTheDocument();
+  });
+
   it("stays silent when there is nothing to warn about", () => {
     renderReport();
     expect(screen.queryByText(/Crawl stopped early/)).not.toBeInTheDocument();
     expect(screen.queryByText(/No page was fetched/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Sitemap access blocked/)).not.toBeInTheDocument();
   });
 
   it("prints sections rather than every leaf", () => {
