@@ -17,7 +17,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -106,7 +105,7 @@ def upgrade() -> None:
     )
     op.create_index("idx_jobs_org_id", "jobs", ["org_id"])
     op.create_index("idx_jobs_status", "jobs", ["status"])
-    op.create_index("idx_jobs_created_at", "jobs", ["created_at"], postgresql_using="DESC")
+    op.create_index("idx_jobs_created_at", "jobs", ["created_at"])
 
     # --- cost_ledger -------------------------------------------------------
     # Financial tracking: one row per job
