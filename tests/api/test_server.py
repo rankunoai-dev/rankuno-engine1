@@ -2159,3 +2159,44 @@ class TestBackwardCompatibility:
         jobs = store.list_jobs()
         resumed = [j for j in jobs if j.id != original.id][0]
         assert resumed.facet_id == "seo.theme_classification"
+
+
+class TestStaticUi:
+    def test_root_serves_ui_index_when_dist_exists(self, monkeypatch, tmp_path, store, mock_org_store):
+        dist_dir = tmp_path / "rankuno-ui" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.html").write_text("<html><body>Rankuno UI</body></html>", encoding="utf-8")
+        assets_dir = dist_dir / "assets"
+        assets_dir.mkdir()
+        (assets_dir / "main.js").write_text("console.log('ui');", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            res_root = client.get("/")
+            assert res_root.status_code == 200
+            assert "Rankuno UI" in res_root.text
+
+            res_login = client.get("/login")
+            assert res_login.status_code == 200
+            assert "Rankuno UI" in res_login.text
+
+            res_asset = client.get("/assets/main.js")
+            assert res_asset.status_code == 200
+            assert "console.log('ui');" in res_asset.text
+
+    def test_root_redirects_to_health_when_dist_absent(self, monkeypatch, tmp_path, store, mock_org_store):
+        monkeypatch.chdir(tmp_path)
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        with TestClient(app, headers=auth_headers(), follow_redirects=False) as client:
+            res = client.get("/")
+            assert res.status_code == 307
+            assert res.headers["location"] == f"{API_PREFIX}/health"

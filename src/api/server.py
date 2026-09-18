@@ -64,6 +64,8 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from pydantic import Field, SecretStr, ValidationError
@@ -1436,6 +1438,27 @@ def create_app(
     app.include_router(build_deliverables_router(state), prefix=API_PREFIX)
     app.include_router(build_auth_router(state), prefix=API_PREFIX)
     app.include_router(build_worker_router(state), prefix=API_PREFIX)
+
+    ui_dist_dir = Path("rankuno-ui/dist")
+    if not ui_dist_dir.is_absolute():
+        ui_dist_dir = Path.cwd() / ui_dist_dir
+
+    if ui_dist_dir.exists():
+        assets_dir = ui_dist_dir / "assets"
+        if assets_dir.exists():
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        @app.get("/", response_class=FileResponse)
+        @app.get("/login", response_class=FileResponse)
+        def serve_ui() -> FileResponse:
+            """Serve the React web UI single-page application entry point."""
+            return FileResponse(ui_dist_dir / "index.html")
+    else:
+
+        @app.get("/")
+        def serve_root_fallback() -> RedirectResponse:
+            """Fallback redirect when static UI build assets are absent."""
+            return RedirectResponse(url=f"{API_PREFIX}/health")
 
     # The endpoints close over `state` rather than receiving it through
     # `Depends`. With `from __future__ import annotations` every annotation is a

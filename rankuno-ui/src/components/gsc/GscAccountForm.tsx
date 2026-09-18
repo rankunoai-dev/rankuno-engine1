@@ -29,7 +29,13 @@ export function GscAccountForm({ open, orgId, onClose, onSuccess }: Props): JSX.
   const [submitting, setSubmitting] = useState(false);
 
   async function submit(): Promise<void> {
-    const values = await form.validateFields();
+    let values: FormValues;
+    try {
+      values = await form.validateFields();
+    } catch {
+      // Validation failed — errors are rendered in the form items by antd
+      return;
+    }
 
     setSubmitting(true);
     try {

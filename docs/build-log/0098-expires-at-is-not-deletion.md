@@ -217,7 +217,7 @@ see §6 on the `0086-a-pattern-is-not-a-verdict.md` link.
   `org_scoped_or_404`.
 - **README.md**, **docs/ARCHITECTURE.md** — the implementer's own diff also backfilled
   ADR 0016's missing row in the ARCHITECTURE.md ADR-index table (confirmed: line 405,
-  `[0016](adr/0016-cloud-api-authentication.md) | ... [build-log 0097]`), which had been
+  `[0016](../adr/0016-cloud-api-authentication.md) | ... [build-log 0097]`), which had been
   absent despite ADR 0016 already being two commits ahead at merge time.
 
 ## 3. Design decisions
