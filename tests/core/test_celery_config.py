@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import ssl
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from pydantic import SecretStr
 from src.core.celery_config import (
     _build_broker_url,
     _build_result_backend_url,
     get_celery_app,
 )
+from src.core.config import Environment, Settings
 
 
 class TestCeleryConfiguration:
@@ -123,3 +127,83 @@ class TestBrokerUrlBuilding:
         url = _build_result_backend_url(settings)
         assert "secret@" in url
         assert "redis.example.com:6380/1" in url
+
+
+class TestProductionTlsConfiguration:
+    """Regression tests for the rediss:// ssl_cert_reqs defect.
+
+    In production, celery_config switches both the broker and result
+    backend to rediss:// (TLS). Celery's Redis backend rejects a rediss://
+    URL that has no ssl_cert_reqs, and kombu's Redis transport silently
+    ignores a non-dict `broker_use_ssl` (leaving the broker connection
+    un-encrypted despite the rediss:// URL). Both require dict-based SSL
+    options, not a bare `True`.
+    """
+
+    def _production_settings(self, tmp_path: Path) -> Settings:
+        return Settings(
+            _env_file=None,
+            audit_log_path=tmp_path / "a.jsonl",
+            environment=Environment.PRODUCTION,
+            auth_session_secret=SecretStr("a" * 32),
+            worker_dispatch_signing_secret=SecretStr("b" * 32),
+            worker_bundle_encryption_secret=SecretStr("c" * 32),
+        )
+
+    @patch("src.core.celery_config.get_redis_client")
+    @patch("src.core.celery_config.get_settings")
+    def test_production_backend_construction_does_not_raise(
+        self, mock_get_settings: MagicMock, mock_get_redis: MagicMock, tmp_path: Path
+    ) -> None:
+        """Accessing app.backend in production must not raise ValueError.
+
+        Regression test: with the old code (`broker_use_ssl = True` and no
+        ssl_cert_reqs supplied anywhere), celery.backends.redis.RedisBackend
+        raises `ValueError: A rediss:// URL must have parameter
+        ssl_cert_reqs ...` the moment `app.backend` is first accessed.
+        """
+        mock_get_settings.return_value = self._production_settings(tmp_path)
+        mock_redis = MagicMock()
+        mock_redis.connection_pool.connection_kwargs = {
+            "host": "dummyhost",
+            "port": 6379,
+            "db": 0,
+            "password": "dummypass",
+        }
+        mock_get_redis.return_value = mock_redis
+
+        app = get_celery_app()
+
+        # Accessing .backend triggers lazy construction, which is where the
+        # old code raised ValueError.
+        assert app.backend is not None
+
+    @patch("src.core.celery_config.get_redis_client")
+    @patch("src.core.celery_config.get_settings")
+    def test_production_uses_dict_based_ssl_options(
+        self, mock_get_settings: MagicMock, mock_get_redis: MagicMock, tmp_path: Path
+    ) -> None:
+        """broker_use_ssl and redis_backend_use_ssl must be dicts, not bool.
+
+        Celery/kombu require dict-shaped SSL options for both the broker
+        and the result backend; a bare `True` is either rejected (backend)
+        or silently ignored (broker, degrading to plaintext despite
+        rediss://).
+        """
+        mock_get_settings.return_value = self._production_settings(tmp_path)
+        mock_redis = MagicMock()
+        mock_redis.connection_pool.connection_kwargs = {
+            "host": "dummyhost",
+            "port": 6379,
+            "db": 0,
+        }
+        mock_get_redis.return_value = mock_redis
+
+        app = get_celery_app()
+
+        assert isinstance(app.conf.broker_use_ssl, dict)
+        assert app.conf.broker_use_ssl["ssl_cert_reqs"] == ssl.CERT_NONE
+        assert isinstance(app.conf.redis_backend_use_ssl, dict)
+        assert app.conf.redis_backend_use_ssl["ssl_cert_reqs"] == ssl.CERT_NONE
+        assert app.conf.broker_url.startswith("rediss://")
+        assert app.conf.result_backend.startswith("rediss://")
