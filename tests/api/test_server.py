@@ -2200,3 +2200,7 @@ class TestStaticUi:
             res = client.get("/")
             assert res.status_code == 307
             assert res.headers["location"] == f"{API_PREFIX}/health"
+
+    def test_favicon_returns_204(self, client):
+        res = client.get("/favicon.ico")
+        assert res.status_code == 204

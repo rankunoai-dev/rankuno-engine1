@@ -1460,6 +1460,11 @@ def create_app(
             """Fallback redirect when static UI build assets are absent."""
             return RedirectResponse(url=f"{API_PREFIX}/health")
 
+    @app.get("/favicon.ico", status_code=status.HTTP_204_NO_CONTENT)
+    def favicon() -> Response:
+        """Silence browser favicon 404 log noise."""
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     # The endpoints close over `state` rather than receiving it through
     # `Depends`. With `from __future__ import annotations` every annotation is a
     # string, and FastAPI resolves those against the *module* namespace — a

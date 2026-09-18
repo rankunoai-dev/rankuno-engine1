@@ -44,8 +44,8 @@ PASSED: no drift detected across 176 markdown files.
 
 ## 2. What landed
 
-- **`src/api/server.py`**: Added static asset mounting (`/assets` -> `rankuno-ui/dist/assets` using `fastapi.staticfiles.StaticFiles`) and single-page application entry point routes (`GET /` and `GET /login` returning `rankuno-ui/dist/index.html` via `FileResponse`). If `rankuno-ui/dist` is not present, `GET /` gracefully falls back to a redirect (`307`) to `${API_PREFIX}/health`.
-- **`tests/api/test_server.py`**: Added `TestStaticUi` test suite covering index rendering at `/` and `/login`, static file delivery from `/assets`, and redirect fallback to `/api/v1/health` when assets are missing.
+- **`src/api/server.py`**: Added static asset mounting (`/assets` -> `rankuno-ui/dist/assets` using `fastapi.staticfiles.StaticFiles`), single-page application entry point routes (`GET /` and `GET /login` returning `rankuno-ui/dist/index.html` via `FileResponse`), and `GET /favicon.ico` returning `204 No Content` to silence browser tab icon 404 log noise. If `rankuno-ui/dist` is not present, `GET /` gracefully falls back to a redirect (`307`) to `${API_PREFIX}/health`.
+- **`tests/api/test_server.py`**: Added `TestStaticUi` test suite covering index rendering at `/` and `/login`, static file delivery from `/assets`, favicon 204 response, and redirect fallback to `/api/v1/health` when assets are missing.
 - **`.dockerignore`**: Modified ignore rules from `rankuno-ui` to `rankuno-ui/*` with `!rankuno-ui/dist` exception so pre-compiled frontend assets are included in production Docker containers while excluding `node_modules` and source code.
 - **`rankuno-ui/src/components/gsc/GscAccountForm.tsx`**: Wrapped `form.validateFields()` in `submit()` with a `try/catch` block to handle antd form validation rejections gracefully and prevent unhandled promise rejections during modal interaction and unit testing.
 
