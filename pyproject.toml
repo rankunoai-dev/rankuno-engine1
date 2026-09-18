@@ -55,6 +55,10 @@ api = [
     "fastapi>=0.110.0,<1.0.0",
     "uvicorn>=0.28.0,<1.0.0",
     "alembic>=1.13.0,<2.0.0",
+    "google-auth>=2.32,<3.0",
+    "google-api-python-client>=2.100,<3.0",
+    "requests>=2.32,<3.0",
+    "selectolax>=0.3.21",
 ]
 seo = [
     # httpx moved to core dependencies above; listing it here too would let the

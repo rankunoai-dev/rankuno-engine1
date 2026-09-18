@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml pyproject.toml
 COPY README.md README.md
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .[api]
+    pip install --no-cache-dir .[api,gsc,seo]
 
 # Stage 2: Runtime
 FROM python:3.12-slim

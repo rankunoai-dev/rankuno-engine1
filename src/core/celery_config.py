@@ -6,6 +6,8 @@ and TLS encryption for production deployments.
 
 from __future__ import annotations
 
+import ssl
+
 from celery import Celery
 
 from src.core.config import get_settings
@@ -81,11 +83,26 @@ def get_celery_app() -> Celery:
         },
     }
 
-    # TLS configuration (production only)
-    if settings.environment.value == "production":
-        app.conf.broker_use_ssl = True
-        app.conf.broker_url = broker_url.replace("redis://", "rediss://")
-        app.conf.result_backend = result_backend_url.replace("redis://", "rediss://")
+    # TLS configuration (production only or SSL rediss://)
+    if settings.environment.value == "production" or "rediss://" in broker_url:
+        redis_tls_options = {"ssl_cert_reqs": ssl.CERT_NONE}
+        app.conf.broker_use_ssl = redis_tls_options
+        app.conf.redis_backend_use_ssl = redis_tls_options
+
+        if broker_url.startswith("redis://"):
+            broker_url = broker_url.replace("redis://", "rediss://", 1)
+        if result_backend_url.startswith("redis://"):
+            result_backend_url = result_backend_url.replace("redis://", "rediss://", 1)
+
+        if "ssl_cert_reqs=" not in broker_url:
+            sep = "&" if "?" in broker_url else "?"
+            broker_url = f"{broker_url}{sep}ssl_cert_reqs=CERT_NONE"
+        if "ssl_cert_reqs=" not in result_backend_url:
+            sep = "&" if "?" in result_backend_url else "?"
+            result_backend_url = f"{result_backend_url}{sep}ssl_cert_reqs=CERT_NONE"
+
+        app.conf.broker_url = broker_url
+        app.conf.result_backend = result_backend_url
 
     _logger.info(
         "celery_initialized",
@@ -107,6 +124,12 @@ def _build_broker_url(redis_settings: dict) -> str:
     Returns:
         Redis broker URL (e.g., redis://localhost:6379/0).
     """
+    import os
+
+    raw_url = os.getenv("REDIS_URL") or os.getenv("REDIS_PRIVATE_URL")
+    if raw_url:
+        return raw_url
+
     host = redis_settings.get("host", "localhost")
     port = redis_settings.get("port", 6379)
     db = redis_settings.get("db", 0)
@@ -126,7 +149,12 @@ def _build_result_backend_url(redis_settings: dict) -> str:
     Returns:
         Redis result backend URL.
     """
-    # Use same settings as broker, but different DB for results
+    import os
+
+    raw_url = os.getenv("REDIS_URL") or os.getenv("REDIS_PRIVATE_URL")
+    if raw_url:
+        return raw_url
+
     host = redis_settings.get("host", "localhost")
     port = redis_settings.get("port", 6379)
     password = redis_settings.get("password")

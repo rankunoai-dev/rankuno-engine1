@@ -57,6 +57,10 @@ class RedisSettings(BaseSettings):
         default=None,
         description="Redis password (optional).",
     )
+    redis_url: SecretStr | None = Field(
+        default=None,
+        description="Full Redis connection URL (e.g. from Railway/Upstash).",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -73,7 +77,24 @@ def get_redis_client() -> redis.Redis:  # type: ignore
     Raises:
         redis.ConnectionError: If connection fails.
     """
+    import os
+
     settings = RedisSettings()
+    raw_url = (
+        settings.redis_url.get_secret_value()
+        if settings.redis_url
+        else os.getenv("REDIS_URL") or os.getenv("REDIS_PRIVATE_URL")
+    )
+
+    if raw_url:
+        return redis.Redis.from_url(
+            raw_url,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            health_check_interval=30,
+        )
+
     password = settings.redis_password.get_secret_value() if settings.redis_password else None
 
     return redis.Redis(
