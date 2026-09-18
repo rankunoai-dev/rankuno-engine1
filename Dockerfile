@@ -1,3 +1,18 @@
+# Stage 0: the React dashboard. `rankuno-ui/dist` is gitignored, so a build from
+# the repository has no dashboard unless it is built here. VITE_API_BASE is
+# relative so the browser calls the server that served the page, not its own
+# 127.0.0.1 (the UI's local-development default).
+FROM node:22-slim AS ui
+
+WORKDIR /ui
+
+COPY rankuno-ui/package.json rankuno-ui/package-lock.json ./
+RUN npm ci
+
+COPY rankuno-ui/ ./
+ENV VITE_API_BASE=/api/v1
+RUN npm run build
+
 # Stage 1: Builder
 FROM python:3.12-slim AS builder
 
@@ -29,6 +44,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application code
 COPY . .
+COPY --from=ui /ui/dist /app/rankuno-ui/dist
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD curl -fsS "http://localhost:${PORT:-8000}/api/v1/health" || exit 1

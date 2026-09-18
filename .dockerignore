@@ -23,8 +23,8 @@ deliverables
 .pytest_cache
 .mypy_cache
 .ruff_cache
-rankuno-ui/*
-!rankuno-ui/dist
+rankuno-ui/node_modules
+rankuno-ui/dist
 tests
 docs
 skills
