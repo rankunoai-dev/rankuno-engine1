@@ -30,17 +30,16 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code
 COPY . .
 
-# Health check for API server
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -fsS "http://localhost:${PORT:-8000}/api/v1/health" || exit 1
 
-# Environment
 ENV ENVIRONMENT=production
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Run migrations and start services
-CMD ["sh", "-c", "alembic upgrade head && \
-    uvicorn src.api.server:app --host 0.0.0.0 --port 8000 & \
-    celery -A src.workers.job_executor worker --loglevel=info & \
-    wait"]
+# The API runs crawls in-process. No Celery worker: its `execute_crawl` task is
+# a stub that marks a job succeeded without crawling, so running it alongside
+# the API would overwrite real results. `server.py` exposes a factory, not an
+# `app` attribute, hence `--factory`. `exec` makes uvicorn PID 1, so a crash
+# stops the container and the platform restarts it.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn --factory src.api.server:create_app --host 0.0.0.0 --port ${PORT:-8000}"]

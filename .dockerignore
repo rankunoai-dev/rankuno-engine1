@@ -1,0 +1,39 @@
+# Secrets and credentials: never baked into an image.
+.env
+.env.*
+!.env.example
+.orgs
+.operators
+
+# Runtime state from local runs: belongs on a volume, not in the image.
+.jobs
+.deliverable_jobs
+.deliverable_rulebooks
+.workers
+.process_ledger.json
+.worker_consumed_jobs.json
+logs
+deliverables
+
+# Not needed by the API at runtime.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+rankuno-ui
+tests
+docs
+skills
+Agent
+.claude
+.gemini
+.github
+*.pdf
+*.xlsx
+*.csv
+api.err
+api.out
+*verify_output*.txt
