@@ -52,7 +52,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from src.core.config import Settings, get_settings
-from src.core.errors import IntegrationError, UnsafeUrlError
+from src.core.errors import IntegrationError, UnsafeUrlError, WorkerCredentialRejectedError
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.logger import get_logger
 from src.core.process_supervisor import ProcessSupervisorUnavailableError, reconcile_orphans
@@ -120,14 +120,33 @@ def make_approval_callback(
     return _approval_callback
 
 
-def run_worker_daemon(
+def run_worker_daemon(  # noqa: C901, PLR0912 - one loop, every branch a named failure mode
     *,
     settings: Settings | None = None,
     max_iterations: int | None = None,
     sleep: Callable[[float], None] = time.sleep,
     cloud_client: WorkerCloudClient | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
-    """Reconcile orphans, then poll for and run jobs forever.
+    """Reconcile orphans, then poll for and run jobs until told to stop.
+
+    The four failure modes this loop is built around, all of them ordinary
+    on a machine under someone's desk:
+
+    * **The cloud is unreachable at startup.** Nothing here connects
+      eagerly; the first poll fails like any other and enters condition
+      10's bounded backoff. The daemon stays up.
+    * **The cloud goes away mid-run.** Identical path — a failed poll is a
+      failed poll whether it is the first or the thousandth.
+    * **The credential is invalid or has been revoked.** A
+      `WorkerCredentialRejectedError` ends the loop deliberately, with a
+      message naming the settings to check. Backing off and retrying a
+      `401` forever is a hot loop with extra steps, and it hides the one
+      failure a human has to act on.
+    * **Ctrl+C.** `should_stop` is checked between jobs, never during one,
+      so a shutdown requested mid-upload finishes that upload rather than
+      leaving a half-written bundle behind. `worker_daemon_cli` is what
+      wires a signal handler to it.
 
     Args:
         settings: Configuration override, primarily for tests. Defaults to
@@ -139,6 +158,8 @@ def run_worker_daemon(
             block the test suite.
         cloud_client: Injectable for tests. Defaults to a real
             `WorkerCloudClient`.
+        should_stop: Checked at the top of every cycle. Returning `True`
+            ends the loop cleanly.
 
     Raises:
         ConfigurationError: `Settings.worker_id`/`worker_org_id` are unset
@@ -158,11 +179,22 @@ def run_worker_daemon(
 
     poll_interval_s = settings.worker_poll_interval_s
     backoff_s = poll_interval_s
+    reported_templates: tuple[str, ...] | None = None
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
+        if should_stop is not None and should_stop():
+            _logger.info("worker_daemon_stopping", extra={"iterations": iterations})
+            return
         iterations += 1
+
         try:
+            reported_templates = _report_templates(client, templates, reported_templates)
             assignment = client.poll()
+        except WorkerCredentialRejectedError as exc:
+            _logger.error(  # noqa: TRY400 - the traceback adds nothing a human can act on
+                "worker_credential_rejected_stopping", extra={"error": str(exc)}
+            )
+            raise
         except IntegrationError as exc:
             _logger.warning("worker_poll_failed", extra={"error": str(exc), "backoff_s": backoff_s})
             sleep(backoff_s)
@@ -184,6 +216,26 @@ def run_worker_daemon(
             templates=templates,
             url_policy=url_policy,
         )
+
+
+def _report_templates(
+    client: WorkerCloudClient, templates: TemplateRegistry, reported: tuple[str, ...] | None
+) -> tuple[str, ...] | None:
+    """Send a heartbeat when this worker's local template set has changed.
+
+    Re-sent on change rather than on a timer, and `reported` stays `None`
+    until a heartbeat actually succeeds, so a startup heartbeat lost to an
+    unreachable cloud is retried on the next cycle instead of being
+    forgotten. A failure is raised to the caller, which already knows how to
+    tell a credential rejection from a transient outage — silently swallowing
+    it here would mean a worker whose templates never reach the dashboard and
+    no log line saying why.
+    """
+    current = tuple(t.name for t in templates.list_templates())
+    if current == reported:
+        return reported
+    client.heartbeat(current)
+    return current
 
 
 def _reconcile_at_startup(settings: Settings) -> None:

@@ -9,14 +9,20 @@ unknown worker id and a wrong secret are indistinguishable to the caller.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
+from pydantic import ValidationError
+from src.core.config import Settings
 from src.core.worker_auth import (
+    MAX_REPORTED_TEMPLATES,
     DiskWorkerStore,
     Worker,
     WorkerAuthenticationError,
     WorkerNotFoundError,
     mint_worker_secret,
     verify_worker_credential,
+    worker_is_online,
 )
 
 
@@ -183,3 +189,105 @@ def test_verify_worker_credential_against_disk_store(tmp_path):
     store.create(_worker())
     principal = verify_worker_credential("wkr-alice-desktop", "a-real-worker-secret", store=store)
     assert principal.org_id == "acme"
+
+
+# --- Liveness (the rule the dashboard is served rather than re-inventing) -------
+
+
+def test_a_worker_that_never_checked_in_is_offline():
+    """Registered is not running: `last_seen_at is None` is not "just now"."""
+    assert worker_is_online(_worker(), offline_after_s=60.0) is False
+
+
+def test_a_worker_seen_within_the_threshold_is_online():
+    worker = _worker().model_copy(update={"last_seen_at": datetime.now(UTC)})
+    assert worker_is_online(worker, offline_after_s=60.0) is True
+
+
+def test_a_worker_seen_longer_ago_than_the_threshold_is_offline():
+    worker = _worker().model_copy(
+        update={"last_seen_at": datetime.now(UTC) - timedelta(seconds=61)}
+    )
+    assert worker_is_online(worker, offline_after_s=60.0) is False
+
+
+def test_exactly_at_the_threshold_is_still_online():
+    """The boundary is inclusive, so a poll landing on the tick is not a flap."""
+    now = datetime.now(UTC)
+    worker = _worker().model_copy(update={"last_seen_at": now - timedelta(seconds=60)})
+    assert worker_is_online(worker, offline_after_s=60.0, now=now) is True
+
+
+def test_a_deactivated_worker_is_never_online_however_recently_it_polled():
+    worker = _worker().model_copy(update={"last_seen_at": datetime.now(UTC), "is_active": False})
+    assert worker_is_online(worker, offline_after_s=60.0) is False
+
+
+def test_the_default_offline_threshold_is_four_poll_intervals():
+    """Documented relationship, asserted so it cannot drift silently."""
+    settings = Settings(_env_file=None)
+    assert settings.worker_offline_after_s == 4 * settings.worker_poll_interval_s
+
+
+# --- DiskWorkerStore.touch ------------------------------------------------------
+
+
+def test_touch_records_last_seen_and_persists_it(tmp_path):
+    root = tmp_path / "workers"
+    store = DiskWorkerStore(root)
+    store.create(_worker())
+    seen = datetime.now(UTC)
+    store.touch("wkr-alice-desktop", seen_at=seen)
+
+    reopened = DiskWorkerStore(root)
+    assert reopened.get("wkr-alice-desktop").last_seen_at == seen
+
+
+def test_touch_replaces_templates_when_given_and_leaves_them_otherwise(tmp_path):
+    store = DiskWorkerStore(tmp_path / "workers")
+    store.create(_worker())
+    store.touch("wkr-alice-desktop", seen_at=datetime.now(UTC), template_names=("a-b", "c_d"))
+    store.touch("wkr-alice-desktop", seen_at=datetime.now(UTC))
+    assert store.get("wkr-alice-desktop").template_names == ("a-b", "c_d")
+
+
+def test_touch_refuses_a_template_name_that_could_become_a_path(tmp_path):
+    store = DiskWorkerStore(tmp_path / "workers")
+    store.create(_worker())
+    with pytest.raises(ValidationError):
+        store.touch(
+            "wkr-alice-desktop", seen_at=datetime.now(UTC), template_names=("../../etc/passwd",)
+        )
+
+
+def test_touch_refuses_more_templates_than_the_cap(tmp_path):
+    store = DiskWorkerStore(tmp_path / "workers")
+    store.create(_worker())
+    with pytest.raises(ValidationError):
+        store.touch(
+            "wkr-alice-desktop",
+            seen_at=datetime.now(UTC),
+            template_names=tuple(f"t{i}" for i in range(MAX_REPORTED_TEMPLATES + 1)),
+        )
+
+
+def test_touch_of_an_unknown_worker_raises_not_found(tmp_path):
+    store = DiskWorkerStore(tmp_path / "workers")
+    with pytest.raises(WorkerNotFoundError):
+        store.touch("wkr-ghost", seen_at=datetime.now(UTC))
+
+
+def test_the_selected_backend_follows_configuration(tmp_path):
+    """One setting decides; there is no try-postgres-then-fall-back path."""
+    from src.core.postgres_worker_store import PostgresWorkerStore
+
+    disk = Settings(_env_file=None, worker_store_backend="disk", worker_store_path=tmp_path / "w")
+    assert isinstance(disk.worker_store, DiskWorkerStore)
+
+    postgres = Settings(_env_file=None, worker_store_backend="postgres")
+    assert isinstance(postgres.worker_store, PostgresWorkerStore)
+
+
+def test_an_unknown_backend_name_is_refused_at_boot():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, worker_store_backend="sqlite")

@@ -8,15 +8,18 @@ condition 2) — a worker credential is long-lived (no login exchange, no
 short-TTL session) and identifies one specific machine holding the Screaming
 Frog licence seat, never a platform-wide shared secret.
 
-`Worker`/`WorkerPrincipal` mirror `Operator`/`Principal` deliberately, and
-`DiskWorkerStore` mirrors `DiskOperatorStore` byte-for-byte in its storage
-model: ADR 0016 already shipped `DiskOperatorStore` as production storage for
-human identity despite the same multi-cloud-replica caveat this module
-carries (a worker registered against one replica's disk file is invisible to
-another). That is a known, accepted limitation this module inherits rather
-than re-litigates — condition 5's *binding* Postgres requirement names the
-preview/confirm dispatch gate and the job queue specifically, not worker
-identity storage, and this module does not expand that scope.
+`Worker`/`WorkerPrincipal` mirror `Operator`/`Principal` deliberately.
+`DiskWorkerStore` is the single-workstation implementation of `WorkerStore`;
+`src.core.postgres_worker_store.PostgresWorkerStore` is the shared one, and
+`Settings.worker_store_backend` picks between them. That second
+implementation exists because the original caveat recorded here — "a worker
+registered against one replica's disk file is invisible to another" — turned
+out to be materially worse than "invisible to another replica" on a
+container host: the container filesystem is rebuilt on every deploy, so
+`workers.json` is *destroyed* on every redeploy, silently un-registering
+every desktop and forcing a fresh secret. Condition 5's binding Postgres
+requirement did name only the dispatch gate and the job queue; this is not
+that requirement, it is a durability defect found in operation.
 
 Password hashing is reused verbatim from `src/core/auth.py`: a worker secret
 is verified exactly like an operator password (PBKDF2-HMAC-SHA256 behind a
@@ -33,7 +36,7 @@ import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Annotated, Protocol
 
 from pydantic import Field
 
@@ -43,20 +46,40 @@ from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 
 __all__ = [
+    "MAX_REPORTED_TEMPLATES",
+    "TEMPLATE_NAME_PATTERN",
     "DiskWorkerStore",
     "Worker",
     "WorkerAuthenticationError",
     "WorkerNotFoundError",
     "WorkerPrincipal",
     "WorkerStore",
+    "WorkerStoreUnavailableError",
     "mint_worker_secret",
     "verify_worker_credential",
+    "worker_is_online",
 ]
 
 _logger = get_logger("core.worker_auth")
 
 _IDENTIFIER_PATTERN = r"^[a-z0-9_-]{1,64}$"
 """Same rule `Operator.operator_id`/`OrgConfig.org_id` already use."""
+
+TEMPLATE_NAME_PATTERN = r"^[a-z0-9_-]{1,128}$"
+"""Must stay identical to `screaming_frog_control.template_registry.
+TEMPLATE_NAME_PATTERN`, which is the rule that actually decides whether a
+name can become a path component. It is restated here rather than imported
+because `core` may not import from `modules` (CLAUDE.md §1.1); a test asserts
+the two literals agree, so a change to one that forgets the other fails
+loudly instead of opening a traversal hole in the worker-reported half."""
+
+MAX_REPORTED_TEMPLATES = 200
+"""Ceiling on how many template names one worker may report about itself.
+
+A worker is *untrusted input* on this path — it is a machine on someone's
+desk, not part of the trust boundary — so the number of names it can make
+the cloud store is bounded, the same way `upload_manifest.MAX_ZIP_MEMBERS`
+bounds what it can make the cloud unzip."""
 
 _SECRET_BYTES = 32
 """256 bits of entropy for a long-lived, network-facing bearer credential —
@@ -86,6 +109,17 @@ class WorkerNotFoundError(KeyError):
     """
 
 
+class WorkerStoreUnavailableError(RankunoError):
+    """The worker identity store could not be reached.
+
+    Deliberately *not* folded into `WorkerAuthenticationError`. The two mean
+    opposite things to a daemon: "your credential is wrong, stop" versus
+    "the database is down, come back later". Collapsing them would make a
+    routine Postgres blip look like a revoked credential and shut every
+    desktop worker down until a human restarted it.
+    """
+
+
 class Worker(StrictModel):
     """One registered desktop worker daemon.
 
@@ -102,6 +136,15 @@ class Worker(StrictModel):
         display_name: Operator-facing label (e.g. the desktop's hostname).
         is_active: Whether this worker may currently be dispatched to.
         created_at: When the worker was registered.
+        last_seen_at: When this worker last proved it was awake, by polling
+            or sending a heartbeat. `None` means it has never checked in —
+            registered, but its daemon has not started even once.
+        template_names: The `.seospiderconfig` names this worker reported it
+            holds *locally*. The cloud host does not have those files and
+            never did; the machine that runs Screaming Frog is the only
+            place they exist. Every name here passed
+            `TEMPLATE_NAME_PATTERN` before being stored — a worker is
+            untrusted input on this path.
     """
 
     worker_id: str = Field(pattern=_IDENTIFIER_PATTERN)
@@ -110,6 +153,10 @@ class Worker(StrictModel):
     display_name: str = Field(min_length=1, max_length=200)
     is_active: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    last_seen_at: datetime | None = None
+    template_names: tuple[Annotated[str, Field(pattern=TEMPLATE_NAME_PATTERN)], ...] = Field(
+        default=(), max_length=MAX_REPORTED_TEMPLATES
+    )
 
 
 class WorkerPrincipal(StrictModel):
@@ -154,6 +201,10 @@ def verify_worker_credential(worker_id: str, secret: str, *, store: WorkerStore)
         WorkerAuthenticationError: The worker is unknown, inactive, or the
             secret does not match. One message for all three (see module
             docstring).
+        WorkerStoreUnavailableError: The store could not be read at all.
+            Deliberately allowed to propagate rather than collapsed into
+            the line above: a daemon told "invalid credential" stops, and a
+            database outage must not stop every desktop in the fleet.
     """
     try:
         worker = store.get(worker_id)
@@ -169,12 +220,41 @@ def verify_worker_credential(worker_id: str, secret: str, *, store: WorkerStore)
     return WorkerPrincipal(worker_id=worker.worker_id, org_id=worker.org_id)
 
 
+def worker_is_online(
+    worker: Worker, *, offline_after_s: float, now: datetime | None = None
+) -> bool:
+    """Whether this worker has checked in recently enough to be dispatched to.
+
+    One rule, computed server-side and served to the dashboard, so the UI
+    never has to invent its own staleness threshold — two implementations of
+    "is that PC awake?" would eventually disagree, and the one in the browser
+    is the one nothing tests.
+
+    Args:
+        worker: The registered worker.
+        offline_after_s: How long since the last check-in counts as offline.
+            Callers pass `Settings.worker_offline_after_s`, whose default is
+            four times the default poll interval, so a single dropped poll
+            does not flip a healthy desktop to offline.
+        now: Override for tests. Defaults to the current UTC time.
+
+    Returns:
+        `False` for a worker that has never checked in at all — "registered"
+        is not "running", and offering Launch to a desktop whose daemon was
+        never started is the exact mistake this function exists to prevent.
+    """
+    if not worker.is_active or worker.last_seen_at is None:
+        return False
+    reference = now or datetime.now(UTC)
+    return (reference - worker.last_seen_at).total_seconds() <= offline_after_s
+
+
 class WorkerStore(Protocol):
     """The persistence seam for worker identity.
 
-    A Protocol, matching `OperatorStore`/`OrgConfigStore`/`JobStore`, so a
-    future shared implementation can replace `DiskWorkerStore` without the
-    API layer changing.
+    A Protocol, matching `OperatorStore`/`OrgConfigStore`/`JobStore`, so
+    `DiskWorkerStore` and `PostgresWorkerStore` are interchangeable behind
+    `Settings.worker_store_backend` without the API layer changing.
     """
 
     def create(self, worker: Worker) -> Worker:
@@ -190,11 +270,39 @@ class WorkerStore(Protocol):
 
         Raises:
             WorkerNotFoundError: If no such worker exists.
+            WorkerStoreUnavailableError: If the backing store is unreachable.
         """
         ...
 
     def list_workers(self, org_id: str | None = None) -> list[Worker]:
         """Every worker, sorted by id. Filtered to `org_id` when given."""
+        ...
+
+    def touch(
+        self,
+        worker_id: str,
+        *,
+        seen_at: datetime,
+        template_names: tuple[str, ...] | None = None,
+    ) -> Worker:
+        """Record that this worker is awake, and optionally what it holds.
+
+        Args:
+            worker_id: Which worker checked in. Always the *authenticated*
+                principal's id at every call site — never a value a request
+                merely claims.
+            seen_at: The check-in instant.
+            template_names: Validated template names to replace the stored
+                set with, or `None` to leave them untouched. A poll passes
+                `None`; only an explicit heartbeat reports templates.
+
+        Returns:
+            The updated worker.
+
+        Raises:
+            WorkerNotFoundError: If no such worker exists.
+            WorkerStoreUnavailableError: If the backing store is unreachable.
+        """
         ...
 
 
@@ -221,14 +329,12 @@ def _atomic_write(path: Path, payload: str) -> None:
 class DiskWorkerStore:
     """A `WorkerStore` backed by a single JSON file.
 
-    Single-process only, the same limitation `DiskOperatorStore` carries and
-    the same reason it is nonetheless the shipped implementation: worker
-    *identity* is not the piece ADR 0015 condition 5 requires on Postgres —
-    the dispatch preview/confirm gate and the job queue are (see
-    `src.core.postgres_worker_dispatch_store`). A worker registered on one
-    cloud replica being invisible to another is a real limitation of this
-    class; it is inherited from `DiskOperatorStore`'s already-accepted
-    posture, not introduced fresh here.
+    Single-process only, the same limitation `DiskOperatorStore` carries.
+    Appropriate for the local-workstation deployment ADR 0004 describes,
+    where the API and the worker are the same machine and the file lives on
+    a disk that survives a restart. **Not** appropriate for a container host
+    with an ephemeral filesystem — use `PostgresWorkerStore` there (see the
+    module docstring).
     """
 
     def __init__(self, root: Path | str) -> None:
@@ -295,3 +401,34 @@ class DiskWorkerStore:
         if org_id is not None:
             workers = [w for w in workers if w.org_id == org_id]
         return workers
+
+    def touch(
+        self,
+        worker_id: str,
+        *,
+        seen_at: datetime,
+        template_names: tuple[str, ...] | None = None,
+    ) -> Worker:
+        """Record a check-in, rewriting the whole file under the lock.
+
+        Raises:
+            WorkerNotFoundError: If no such worker exists.
+        """
+        with self._lock:
+            data = self._workers.get(worker_id)
+            if data is None:
+                msg = f"Worker '{worker_id}' not found"
+                raise WorkerNotFoundError(msg)
+            worker = Worker.model_validate(data)
+            update: dict[str, object] = {"last_seen_at": seen_at}
+            if template_names is not None:
+                update["template_names"] = template_names
+            worker = worker.model_copy(update=update)
+            # Re-validate rather than trusting `model_copy`: `StrictModel`
+            # sets `validate_assignment`, but `model_copy(update=...)` is
+            # documented to bypass validation entirely, and `template_names`
+            # is the one field here that originates outside this process.
+            worker = Worker.model_validate(worker.model_dump())
+            self._workers[worker_id] = json.loads(worker.model_dump_json())
+            self._save()
+        return worker

@@ -13,7 +13,11 @@ import httpx
 import pytest
 from pydantic import SecretStr
 from src.core.config import Environment, Settings
-from src.core.errors import ConfigurationError, IntegrationError
+from src.core.errors import (
+    ConfigurationError,
+    IntegrationError,
+    WorkerCredentialRejectedError,
+)
 from src.core.worker_dispatch_schemas import SignedDispatchAssignment, WorkerJobKind
 from src.core.worker_dispatch_signing import issue_dispatch_assignment
 from src.integrations.worker_cloud_client import WorkerCloudClient
@@ -156,3 +160,99 @@ def test_context_manager_closes_on_exit(tmp_path):
     settings = _settings(tmp_path)
     with WorkerCloudClient(settings, transport=route_map({})) as client:
         assert isinstance(client, WorkerCloudClient)
+
+
+# --- Heartbeat: templates live on this machine, not on the cloud host ----------
+
+
+def test_heartbeat_posts_the_local_template_names(tmp_path):
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(
+            200,
+            json={
+                "worker_id": "wkr-alice-desktop",
+                "last_seen_at": "2026-09-21T00:00:00Z",
+                "template_names": ["default-crawl"],
+            },
+        )
+
+    client = WorkerCloudClient(_settings(tmp_path), transport=httpx.MockTransport(handler))
+    client.heartbeat(("default-crawl",))
+
+    request = captured["request"]
+    assert request.url.path == "/api/v1/workers/heartbeat"
+    assert json.loads(request.content) == {"template_names": ["default-crawl"]}
+    assert request.headers["Authorization"] == "Bearer wkr-alice-desktop:worker-secret-value"
+
+
+# --- A refused credential is not a transient failure ----------------------------
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_a_refused_credential_is_raised_as_its_own_error_and_never_retried(tmp_path, code):
+    """`IntegrationError` is in TRANSIENT_ERRORS; a 401 retried is a hot loop."""
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(code, text="nope")
+
+    client = WorkerCloudClient(_settings(tmp_path), transport=httpx.MockTransport(handler))
+    with pytest.raises(WorkerCredentialRejectedError):
+        client.poll()
+    assert len(attempts) == 1
+
+
+def test_a_refused_credential_names_the_settings_to_check(tmp_path):
+    client = WorkerCloudClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(401, text="nope")),
+    )
+    with pytest.raises(WorkerCredentialRejectedError, match="WORKER_CREDENTIAL"):
+        client.poll()
+
+
+def test_a_refused_credential_never_echoes_the_secret(tmp_path):
+    client = WorkerCloudClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(401, text="nope")),
+    )
+    try:
+        client.poll()
+    except WorkerCredentialRejectedError as exc:
+        assert "worker-secret-value" not in str(exc)
+
+
+def test_a_server_side_outage_stays_an_integration_error(tmp_path):
+    """503 means the cloud's own store is down, not that this worker is wrong.
+
+    The distinction is what the daemon's loop acts on: an `IntegrationError`
+    enters condition 10's bounded backoff and the daemon stays up, where a
+    `WorkerCredentialRejectedError` ends it. The retry itself happens one
+    layer up, in the poll loop — `BaseAPIClient.call()` does not retry an
+    `httpx.HTTPStatusError`, which is pre-existing behaviour, not something
+    this change alters.
+    """
+    client = WorkerCloudClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(503, text="store unavailable")),
+    )
+    with pytest.raises(IntegrationError) as caught:
+        client.poll()
+    assert not isinstance(caught.value, WorkerCredentialRejectedError)
+
+
+def test_upload_and_report_failure_also_stop_on_a_refused_credential(tmp_path):
+    client = WorkerCloudClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(401, text="nope")),
+    )
+    with pytest.raises(WorkerCredentialRejectedError):
+        client.upload_bundle("job-1", b"PK\x03\x04")
+    with pytest.raises(WorkerCredentialRejectedError):
+        client.report_failure("job-1", "whatever")
+    with pytest.raises(WorkerCredentialRejectedError):
+        client.heartbeat(())

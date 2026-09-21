@@ -103,6 +103,25 @@ class WorkerDispatchStore(Protocol):
         """Every job for an org, newest first."""
         ...
 
+    def expire_stale_dispatched(self, *, org_id: str, older_than_s: float) -> int:
+        """Move long-abandoned `DISPATCHED` jobs to `FAILED`. Returns the count.
+
+        The bounded way out of the stuck-job trap: a daemon that dies after
+        claiming a job leaves it `DISPATCHED` forever, and the worker's own
+        single-use `ConsumedJobLedger` means the *same* job id can never run
+        again even if the daemon comes back.
+
+        Terminal `FAILED`, deliberately, rather than a requeue. Requeuing
+        would hand the same `job_id` back to a worker whose ledger has
+        already consumed it — it would be claimed and immediately skipped,
+        a loop that looks like progress and is not. It would also re-run a
+        crawl on an approval artifact the operator granted for an attempt
+        that already happened; a fresh run is a fresh preview/confirm, which
+        is the same rule ADR 0015 condition 3(a) applies to every other
+        dispatch.
+        """
+        ...
+
     def mark_uploaded(
         self, job_id: str, *, bundle_size_bytes: int, partial: bool = False
     ) -> WorkerJob:

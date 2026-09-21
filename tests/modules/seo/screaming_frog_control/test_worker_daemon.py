@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 from src.core.config import Environment, Settings
-from src.core.errors import ConfigurationError, IntegrationError
+from src.core.errors import (
+    ConfigurationError,
+    IntegrationError,
+    WorkerCredentialRejectedError,
+)
 from src.core.schemas import RiskClass, ToolMetadata
 from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_consumed_ledger import ConsumedJobLedger
@@ -91,6 +95,10 @@ class _FakeClient:
         self._poll_results = list(poll_results or [])
         self.failures: list[tuple[str, str]] = []
         self.uploads: list[tuple[str, bytes]] = []
+        self.heartbeats: list[tuple[str, ...]] = []
+
+    def heartbeat(self, template_names: tuple[str, ...]) -> None:
+        self.heartbeats.append(template_names)
 
     def poll(self) -> object:
         if not self._poll_results:
@@ -375,6 +383,9 @@ def test_upload_bundle_reports_failure_over_the_size_cap(tmp_path):
 
 def test_run_worker_daemon_backs_off_on_repeated_poll_failures(tmp_path):
     class _FailingClient:
+        def heartbeat(self, template_names) -> None:
+            return None
+
         def poll(self) -> object:
             raise IntegrationError("worker.cloud", "unreachable")
 
@@ -391,6 +402,9 @@ def test_run_worker_daemon_backs_off_on_repeated_poll_failures(tmp_path):
 
 def test_run_worker_daemon_resets_backoff_after_a_successful_empty_poll(tmp_path):
     class _AlwaysEmptyClient:
+        def heartbeat(self, template_names) -> None:
+            return None
+
         def poll(self) -> object:
             return None
 
@@ -409,3 +423,113 @@ def test_run_worker_daemon_requires_worker_identity(tmp_path):
     settings = _settings(tmp_path, worker_id=None)
     with pytest.raises(ConfigurationError):
         worker_daemon.run_worker_daemon(settings=settings, max_iterations=1, sleep=lambda s: None)
+
+
+# --- Lifecycle: heartbeat, shutdown, and a credential that will never work ------
+
+
+def test_the_daemon_reports_its_local_templates_before_polling(tmp_path):
+    """The cloud host has no .seospiderconfig files; this machine does."""
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "default-crawl.seospiderconfig").write_bytes(b"not-really-java")
+
+    client = _FakeClient()
+    worker_daemon.run_worker_daemon(
+        settings=_settings(tmp_path, screaming_frog_template_dir=templates),
+        max_iterations=1,
+        sleep=lambda s: None,
+        cloud_client=client,  # type: ignore[arg-type]
+    )
+    assert client.heartbeats == [("default-crawl",)]
+
+
+def test_an_unchanged_template_set_is_not_re_reported_every_cycle(tmp_path):
+    client = _FakeClient()
+    worker_daemon.run_worker_daemon(
+        settings=_settings(tmp_path),
+        max_iterations=4,
+        sleep=lambda s: None,
+        cloud_client=client,  # type: ignore[arg-type]
+    )
+    assert client.heartbeats == [()]
+
+
+def test_a_heartbeat_lost_to_an_unreachable_cloud_is_retried_next_cycle(tmp_path):
+    """`reported` must not advance on a failure, or the report is lost for good."""
+
+    class _FlakyHeartbeat(_FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def heartbeat(self, template_names: tuple[str, ...]) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise IntegrationError("worker.cloud", "unreachable")
+            super().heartbeat(template_names)
+
+    client = _FlakyHeartbeat()
+    worker_daemon.run_worker_daemon(
+        settings=_settings(tmp_path, worker_poll_interval_s=1.0),
+        max_iterations=2,
+        sleep=lambda s: None,
+        cloud_client=client,  # type: ignore[arg-type]
+    )
+    assert client.attempts == 2
+    assert client.heartbeats == [()]
+
+
+def test_a_rejected_credential_stops_the_daemon_instead_of_hot_looping(tmp_path):
+    """Backing off forever on a 401 hides the one failure a human must fix."""
+
+    class _RejectedClient(_FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.polls = 0
+
+        def poll(self) -> object:
+            self.polls += 1
+            raise WorkerCredentialRejectedError("the cloud API refused this credential")
+
+    client = _RejectedClient()
+    sleeps: list[float] = []
+    with pytest.raises(WorkerCredentialRejectedError):
+        worker_daemon.run_worker_daemon(
+            settings=_settings(tmp_path),
+            max_iterations=50,
+            sleep=sleeps.append,
+            cloud_client=client,  # type: ignore[arg-type]
+        )
+    assert client.polls == 1
+    assert sleeps == []  # no backoff, no retry: it would never succeed
+
+
+def test_should_stop_ends_the_loop_before_the_next_poll(tmp_path):
+    client = _FakeClient()
+    worker_daemon.run_worker_daemon(
+        settings=_settings(tmp_path),
+        max_iterations=10,
+        sleep=lambda s: None,
+        cloud_client=client,  # type: ignore[arg-type]
+        should_stop=lambda: True,
+    )
+    assert client.heartbeats == []  # stopped before it did anything at all
+
+
+def test_shutdown_requested_mid_run_finishes_the_cycle_it_is_in(tmp_path):
+    """Checked between jobs, never during one: no half-uploaded bundle."""
+    stop = [False]
+    client = _FakeClient()
+
+    def _sleep(_seconds: float) -> None:
+        stop[0] = True  # the operator presses Ctrl+C during the idle wait
+
+    worker_daemon.run_worker_daemon(
+        settings=_settings(tmp_path),
+        max_iterations=10,
+        sleep=_sleep,
+        cloud_client=client,  # type: ignore[arg-type]
+        should_stop=lambda: stop[0],
+    )
+    assert client.heartbeats == [()]  # exactly one cycle ran, and it ran fully

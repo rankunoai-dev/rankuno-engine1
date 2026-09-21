@@ -23,8 +23,11 @@ so what is under test here is the HTTP/auth/ownership layer, not the SQL.
 
 from __future__ import annotations
 
+import io
 import uuid
+import zipfile
 from datetime import UTC, datetime, timedelta
+from typing import NoReturn
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,7 +35,11 @@ from pydantic import SecretStr, ValidationError
 from src.api.server import API_PREFIX, create_app
 from src.core.state_store import DiskJobStore
 from src.core.url_safety import UrlSafetyPolicy
-from src.core.worker_auth import DiskWorkerStore
+from src.core.worker_auth import (
+    MAX_REPORTED_TEMPLATES,
+    DiskWorkerStore,
+    WorkerStoreUnavailableError,
+)
 from src.core.worker_dispatch_schemas import (
     DispatchPreviewToken,
     WorkerJob,
@@ -41,7 +48,10 @@ from src.core.worker_dispatch_schemas import (
     WorkerJobStatus,
 )
 from src.core.worker_dispatch_signing import verify_dispatch_assignment
-from src.core.worker_dispatch_store import DEFAULT_PREVIEW_TTL_S
+from src.core.worker_dispatch_store import (
+    DEFAULT_PREVIEW_TTL_S,
+    DispatchStoreUnavailableError,
+)
 
 from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
 
@@ -58,6 +68,7 @@ class _FakeWorkerDispatchStore:
         self._consumed_previews: set[str] = set()
         self._jobs: dict[str, WorkerJob] = {}
         self._uploads: dict[str, bytes] = {}
+        self._expired_uploads: set[str] = set()
 
     def mint_dispatch_preview(
         self,
@@ -178,7 +189,35 @@ class _FakeWorkerDispatchStore:
         self._uploads[job_id] = encrypted_bytes
 
     def read_upload(self, job_id, *, org_id) -> bytes | None:
+        job = self._jobs.get(job_id)
+        if job is None or job.org_id != org_id or job_id in self._expired_uploads:
+            # The Postgres implementation filters on org_id and expires_at in
+            # SQL. The fake must too, or the cross-org and expiry tests would
+            # be passing on the route's check alone and would not notice the
+            # store's own filter being dropped.
+            return None
         return self._uploads.get(job_id)
+
+    def expire_stale_dispatched(self, *, org_id, older_than_s) -> int:
+        cutoff = datetime.now(UTC) - timedelta(seconds=older_than_s)
+        swept = 0
+        for job_id, job in list(self._jobs.items()):
+            if (
+                job.org_id != org_id
+                or job.status is not WorkerJobStatus.DISPATCHED
+                or job.dispatched_at is None
+                or job.dispatched_at >= cutoff
+            ):
+                continue
+            self._jobs[job_id] = job.model_copy(
+                update={
+                    "status": WorkerJobStatus.FAILED,
+                    "error": "the worker stopped reporting after claiming this job",
+                    "finished_at": datetime.now(UTC),
+                }
+            )
+            swept += 1
+        return swept
 
 
 @pytest.fixture
@@ -207,15 +246,30 @@ def client(tmp_path, dispatch_store, worker_store) -> TestClient:
 
 
 def _register_worker(
-    client: TestClient, *, org_id: str = "default", name: str = "desktop-1"
+    client: TestClient, *, org_id: str = "default", name: str = "desktop-1", online: bool = True
 ) -> dict[str, str]:
+    """Register a worker and, by default, make it look like its daemon is up.
+
+    `online=True` issues one real poll, which is exactly what marks a worker
+    live: dispatch confirm now refuses an offline worker (409), so a test
+    fixture that registered a worker and never started its daemon would be
+    modelling a sleeping PC, not a working one. `online=False` is the
+    deliberate opposite, for the tests that assert the refusal.
+    """
     response = client.post(
         f"{API_PREFIX}/workers",
         json={"display_name": name},
         headers=auth_headers(org_id=org_id),
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    body: dict[str, str] = response.json()
+    if online:
+        poll = client.get(
+            f"{API_PREFIX}/workers/dispatch/poll",
+            headers=_worker_headers(body["worker_id"], body["worker_secret"]),
+        )
+        assert poll.status_code == 200, poll.text
+    return body
 
 
 def _worker_headers(worker_id: str, secret: str) -> dict[str, str]:
@@ -360,7 +414,7 @@ def test_preview_rejects_an_unsafe_seed_url(client):
 
 def test_dispatch_confirm_request_rejects_extra_fields():
     """ADR 0015 condition 8: no `extra_args`/`raw_command` ever."""
-    from src.api.worker_routes import DispatchConfirmRequest
+    from src.api.worker_schemas import DispatchConfirmRequest
 
     with pytest.raises(ValidationError, match="extra"):
         DispatchConfirmRequest.model_validate(
@@ -520,9 +574,6 @@ def test_report_failure_rejects_a_worker_claiming_another_workers_job(client):
 
 def test_upload_by_the_owning_worker_succeeds(client, dispatch_store):
     """The real happy path: a valid bundle is validated, encrypted, and stored."""
-    import io
-    import zipfile
-
     worker = _register_worker(client)
     job = _preview_and_confirm(client, worker_id=worker["worker_id"])
     client.get(
@@ -648,3 +699,463 @@ def test_list_worker_jobs_returns_the_orgs_jobs(client):
 def test_list_worker_jobs_requires_authentication(client):
     response = client.get(f"{API_PREFIX}/workers/jobs")
     assert response.status_code == 401
+
+
+# --- Liveness: the dashboard must not offer Launch to a sleeping PC -------------
+
+
+def test_a_registered_worker_that_never_polled_is_offline(client):
+    """Registered is not running. The distinction is the whole point."""
+    worker = _register_worker(client, online=False)
+
+    view = client.get(f"{API_PREFIX}/workers", headers=auth_headers()).json()
+    summary = next(w for w in view["workers"] if w["worker_id"] == worker["worker_id"])
+    assert summary["last_seen_at"] is None
+    assert summary["is_online"] is False
+    assert view["offline_after_s"] > 0
+
+
+def test_polling_marks_a_worker_online(client):
+    worker = _register_worker(client, online=False)
+    client.get(
+        f"{API_PREFIX}/workers/dispatch/poll",
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+
+    view = client.get(f"{API_PREFIX}/workers", headers=auth_headers()).json()
+    summary = next(w for w in view["workers"] if w["worker_id"] == worker["worker_id"])
+    assert summary["last_seen_at"] is not None
+    assert summary["is_online"] is True
+
+
+def test_a_worker_that_polled_long_ago_is_offline(client, worker_store):
+    worker = _register_worker(client)
+    worker_store.touch(worker["worker_id"], seen_at=datetime.now(UTC) - timedelta(days=1))
+
+    view = client.get(f"{API_PREFIX}/workers", headers=auth_headers()).json()
+    summary = next(w for w in view["workers"] if w["worker_id"] == worker["worker_id"])
+    assert summary["is_online"] is False
+
+
+def test_confirm_refuses_an_offline_worker_rather_than_queueing_into_a_void(client, worker_store):
+    worker = _register_worker(client)
+    preview = client.post(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
+        json={"seed_url": "https://e.com/", "correlation_id": "c1"},
+        headers=auth_headers(),
+    )
+    assert preview.status_code == 200
+    assert preview.json()["worker_online"] is True
+
+    # The PC goes to sleep between the preview and the confirm.
+    worker_store.touch(worker["worker_id"], seen_at=datetime.now(UTC) - timedelta(days=1))
+    confirm = client.post(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch",
+        json={
+            "token": preview.json()["token"],
+            "seed_url": "https://e.com/",
+            "correlation_id": "c1",
+        },
+        headers=auth_headers(),
+    )
+    assert confirm.status_code == 409
+    assert "offline" in confirm.json()["detail"]
+
+
+def test_preview_reports_liveness_so_the_modal_can_warn_first(client):
+    worker = _register_worker(client, online=False)
+    preview = client.post(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
+        json={"seed_url": "https://e.com/", "correlation_id": "c1"},
+        headers=auth_headers(),
+    )
+    assert preview.status_code == 200
+    assert preview.json()["worker_online"] is False
+    assert preview.json()["worker_last_seen_at"] is None
+
+
+# --- Heartbeat and per-worker templates ----------------------------------------
+
+
+def test_heartbeat_requires_worker_authentication(client):
+    response = client.post(f"{API_PREFIX}/workers/heartbeat", json={"template_names": []})
+    assert response.status_code == 401
+
+
+def test_heartbeat_records_templates_and_liveness(client):
+    worker = _register_worker(client, online=False)
+    response = client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={"template_names": ["default-crawl", "js_rendering"]},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["template_names"] == ["default-crawl", "js_rendering"]
+
+    templates = client.get(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/templates", headers=auth_headers()
+    )
+    assert templates.status_code == 200
+    assert templates.json()["templates"] == ["default-crawl", "js_rendering"]
+    assert templates.json()["reported_at"] is not None
+
+
+def test_heartbeat_rejects_a_template_name_that_could_become_a_path(client):
+    """A worker is untrusted input. Server-side validation, not politeness."""
+    worker = _register_worker(client)
+    response = client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={"template_names": ["../../etc/passwd"]},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 422
+
+
+def test_heartbeat_rejects_more_templates_than_the_cap(client):
+    worker = _register_worker(client)
+    response = client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={"template_names": [f"t{i}" for i in range(MAX_REPORTED_TEMPLATES + 1)]},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 422
+
+
+def test_polling_does_not_wipe_previously_reported_templates(client):
+    worker = _register_worker(client, online=False)
+    client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={"template_names": ["default-crawl"]},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    client.get(
+        f"{API_PREFIX}/workers/dispatch/poll",
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    templates = client.get(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/templates", headers=auth_headers()
+    )
+    assert templates.json()["templates"] == ["default-crawl"]
+
+
+def test_worker_templates_are_org_scoped(client):
+    worker = _register_worker(client, org_id="acme")
+    response = client.get(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/templates",
+        headers=auth_headers(org_id="globex"),
+    )
+    assert response.status_code == 403
+
+
+def test_worker_templates_requires_authentication(client):
+    worker = _register_worker(client)
+    response = client.get(f"{API_PREFIX}/workers/{worker['worker_id']}/templates")
+    assert response.status_code == 401
+
+
+# --- Bundle download: the reason any of this exists ------------------------------
+
+
+def _bundle_bytes(row: str = "https://e.com/") -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w") as archive:
+        archive.writestr("internal_all.csv", f"Address\n{row}\n")
+    return buffer.getvalue()
+
+
+def _finished_job(client: TestClient, *, org_id: str = "default") -> tuple[dict, dict]:
+    """Register a worker and run one job all the way to an uploaded bundle."""
+    worker = _register_worker(client, org_id=org_id)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"], org_id=org_id)
+    client.get(
+        f"{API_PREFIX}/workers/dispatch/poll",
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    upload = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/upload",
+        content=_bundle_bytes(),
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert upload.status_code == 200, upload.text
+    return worker, job
+
+
+def test_bundle_download_returns_the_decrypted_zip(client):
+    _, job = _finished_job(client)
+    response = client.get(f"{API_PREFIX}/workers/jobs/{job['id']}/bundle", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/zip"
+    assert job["id"] in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["internal_all.csv"]
+        assert b"https://e.com/" in archive.read("internal_all.csv")
+
+
+def test_bundle_download_never_crosses_an_org_boundary(client):
+    """An IDOR here leaks a customer's crawl of their own site."""
+    _, job = _finished_job(client, org_id="acme")
+
+    mine = client.get(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/bundle", headers=auth_headers(org_id="acme")
+    )
+    theirs = client.get(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/bundle", headers=auth_headers(org_id="globex")
+    )
+    assert mine.status_code == 200
+    assert theirs.status_code == 403
+    assert b"https://e.com/" not in theirs.content
+
+
+def test_bundle_download_requires_authentication(client):
+    _, job = _finished_job(client)
+    response = client.get(f"{API_PREFIX}/workers/jobs/{job['id']}/bundle")
+    assert response.status_code == 401
+
+
+def test_bundle_download_of_a_job_with_no_upload_is_404(client):
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+    response = client.get(f"{API_PREFIX}/workers/jobs/{job['id']}/bundle", headers=auth_headers())
+    assert response.status_code == 404
+
+
+def test_bundle_download_respects_the_retention_expiry(client, dispatch_store):
+    _, job = _finished_job(client)
+    dispatch_store._expired_uploads.add(job["id"])
+    response = client.get(f"{API_PREFIX}/workers/jobs/{job['id']}/bundle", headers=auth_headers())
+    assert response.status_code == 404
+    assert "expired" in response.json()["detail"]
+
+
+def test_bundle_download_fails_closed_when_the_blob_cannot_be_decrypted(client, dispatch_store):
+    """A rotated or missing key must never yield a partial or ciphertext body."""
+    _, job = _finished_job(client)
+    dispatch_store._uploads[job["id"]] = b"\x00" * 128  # right shape, wrong key
+
+    response = client.get(f"{API_PREFIX}/workers/jobs/{job['id']}/bundle", headers=auth_headers())
+    assert response.status_code == 500
+    assert "WORKER_BUNDLE_ENCRYPTION_SECRET" in response.json()["detail"]
+
+
+def test_bundle_download_of_an_unknown_job_is_404(client):
+    response = client.get(f"{API_PREFIX}/workers/jobs/nope/bundle", headers=auth_headers())
+    assert response.status_code == 404
+
+
+# --- The 100 MB cap, enforced before the body is buffered ------------------------
+
+
+def test_upload_refuses_an_oversized_content_length_before_reading_the_body(client):
+    """The declared length is refused outright - no 100 MB is ever received."""
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/upload",
+        content=b"x",
+        headers={
+            **_worker_headers(worker["worker_id"], worker["worker_secret"]),
+            "Content-Length": str(200 * 1024 * 1024),
+        },
+    )
+    assert response.status_code == 413
+    assert "MB limit" in response.json()["detail"]
+
+
+def test_default_upload_cap_is_100_mb():
+    from src.core.config import Settings
+
+    assert Settings(_env_file=None).worker_upload_max_bytes == 100 * 1024 * 1024
+
+
+# --- Stuck DISPATCHED jobs get a bounded way out ---------------------------------
+
+
+def test_a_job_abandoned_after_being_claimed_is_swept_to_failed(client, dispatch_store):
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+    client.get(
+        f"{API_PREFIX}/workers/dispatch/poll",
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    # The daemon dies here, long ago.
+    claimed = dispatch_store._jobs[job["id"]]
+    dispatch_store._jobs[job["id"]] = claimed.model_copy(
+        update={"dispatched_at": datetime.now(UTC) - timedelta(days=2)}
+    )
+
+    listed = client.get(f"{API_PREFIX}/workers/jobs", headers=auth_headers()).json()
+    assert listed["jobs"][0]["status"] == "failed"
+    assert "stopped reporting" in listed["jobs"][0]["error"]
+
+
+def test_a_freshly_claimed_job_is_not_swept(client):
+    worker = _register_worker(client)
+    _preview_and_confirm(client, worker_id=worker["worker_id"])
+    client.get(
+        f"{API_PREFIX}/workers/dispatch/poll",
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+
+    listed = client.get(f"{API_PREFIX}/workers/jobs", headers=auth_headers()).json()
+    assert listed["jobs"][0]["status"] == "dispatched"
+
+
+# --- Two daemons, one worker id; a double-clicked confirm ------------------------
+
+
+def test_two_daemons_sharing_one_worker_id_never_claim_the_same_job(client):
+    """Nothing stops an operator copying .env.local onto a second PC.
+
+    The queue must still hand one job to exactly one claimer. Both polls use
+    the same credential, so authentication cannot distinguish them - only the
+    atomic QUEUED -> DISPATCHED transition can.
+    """
+    worker = _register_worker(client)
+    _preview_and_confirm(client, worker_id=worker["worker_id"])
+    headers = _worker_headers(worker["worker_id"], worker["worker_secret"])
+
+    first = client.get(f"{API_PREFIX}/workers/dispatch/poll", headers=headers).json()
+    second = client.get(f"{API_PREFIX}/workers/dispatch/poll", headers=headers).json()
+    assert first["assignment"] is not None
+    assert second["assignment"] is None
+
+
+def test_a_double_clicked_confirm_queues_exactly_one_job(client):
+    """The dispatch token is single-use; the second click must not queue a twin."""
+    worker = _register_worker(client)
+    preview = client.post(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
+        json={"seed_url": "https://e.com/", "correlation_id": "c1"},
+        headers=auth_headers(),
+    ).json()
+    body = {"token": preview["token"], "seed_url": "https://e.com/", "correlation_id": "c1"}
+    first = client.post(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch", json=body, headers=auth_headers()
+    )
+    second = client.post(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch", json=body, headers=auth_headers()
+    )
+    assert first.status_code == 202
+    assert second.status_code == 403
+
+    listed = client.get(f"{API_PREFIX}/workers/jobs", headers=auth_headers()).json()
+    assert len(listed["jobs"]) == 1
+
+
+def test_an_upload_retried_after_a_network_drop_leaves_one_bundle(client, dispatch_store):
+    """Home broadband is flaky. A retry must replace, never duplicate."""
+    worker, job = _finished_job(client)
+    retry = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/upload",
+        content=_bundle_bytes(),
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert retry.status_code == 200
+    assert len(dispatch_store._uploads) == 1
+
+    download = client.get(f"{API_PREFIX}/workers/jobs/{job['id']}/bundle", headers=auth_headers())
+    with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+        assert archive.namelist() == ["internal_all.csv"]
+
+
+# --- Store outages fail closed, and never look like a revoked credential -------
+
+
+class _BrokenWorkerStore:
+    """Every `WorkerStore` method raises, as an unreachable Postgres would."""
+
+    def _boom(self, *_args: object, **_kwargs: object) -> NoReturn:
+        raise WorkerStoreUnavailableError("cannot reach the worker store: down")
+
+    create = get = list_workers = touch = _boom
+
+
+@pytest.fixture
+def broken_worker_client(tmp_path, dispatch_store) -> TestClient:
+    app = create_app(
+        store=DiskJobStore(tmp_path / "jobs"),
+        url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+        session_secret=TEST_SESSION_SECRET,
+        worker_store=_BrokenWorkerStore(),
+        worker_dispatch_store=dispatch_store,
+        dispatch_signing_secret=DISPATCH_SECRET,
+        bundle_encryption_secret=BUNDLE_SECRET,
+    )
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def test_registering_a_worker_when_the_store_is_down_is_503(broken_worker_client):
+    response = broken_worker_client.post(
+        f"{API_PREFIX}/workers", json={"display_name": "d"}, headers=auth_headers()
+    )
+    assert response.status_code == 503
+
+
+def test_listing_workers_when_the_store_is_down_is_503(broken_worker_client):
+    response = broken_worker_client.get(f"{API_PREFIX}/workers", headers=auth_headers())
+    assert response.status_code == 503
+
+
+def test_a_worker_facing_route_answers_503_not_401_when_the_store_is_down(broken_worker_client):
+    """A 401 would tell every healthy daemon its credential had been revoked."""
+    for path in ("/workers/dispatch/poll",):
+        response = broken_worker_client.get(
+            f"{API_PREFIX}{path}", headers=_worker_headers("wkr-alice", "secret")
+        )
+        assert response.status_code == 503, path
+
+    heartbeat = broken_worker_client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={"template_names": []},
+        headers=_worker_headers("wkr-alice", "secret"),
+    )
+    assert heartbeat.status_code == 503
+
+
+def test_reading_worker_templates_when_the_store_is_down_is_503(broken_worker_client):
+    response = broken_worker_client.get(
+        f"{API_PREFIX}/workers/wkr-alice/templates", headers=auth_headers()
+    )
+    assert response.status_code == 503
+
+
+class _BrokenDispatchStore(_FakeWorkerDispatchStore):
+    """Reads succeed; everything that touches the queue fails closed."""
+
+    def expire_stale_dispatched(self, *, org_id, older_than_s) -> int:
+        raise DispatchStoreUnavailableError("postgres is down")
+
+    def read_upload(self, job_id, *, org_id) -> bytes | None:
+        raise DispatchStoreUnavailableError("postgres is down")
+
+
+@pytest.fixture
+def broken_dispatch_client(tmp_path, worker_store) -> TestClient:
+    app = create_app(
+        store=DiskJobStore(tmp_path / "jobs"),
+        url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+        session_secret=TEST_SESSION_SECRET,
+        worker_store=worker_store,
+        worker_dispatch_store=_BrokenDispatchStore(),
+        dispatch_signing_secret=DISPATCH_SECRET,
+        bundle_encryption_secret=BUNDLE_SECRET,
+    )
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def test_listing_jobs_when_the_dispatch_store_is_down_is_503(broken_dispatch_client):
+    response = broken_dispatch_client.get(f"{API_PREFIX}/workers/jobs", headers=auth_headers())
+    assert response.status_code == 503
+
+
+def test_polling_when_the_dispatch_store_is_down_is_503(broken_dispatch_client):
+    worker = broken_dispatch_client.post(
+        f"{API_PREFIX}/workers", json={"display_name": "d"}, headers=auth_headers()
+    ).json()
+    response = broken_dispatch_client.get(
+        f"{API_PREFIX}/workers/dispatch/poll",
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 503

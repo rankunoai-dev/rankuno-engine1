@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from src.core.config import Settings
+from src.core.errors import WorkerCredentialRejectedError
 from src.core.logger import get_logger
 from src.core.worker_dispatch_schemas import SignedDispatchAssignment
 from src.integrations.base_client import BaseAPIClient
@@ -37,6 +38,26 @@ _logger = get_logger("integrations.worker_cloud_client")
 
 _REQUEST_TIMEOUT_S = 30.0
 """Generous relative to a poll/upload call, small relative to a crawl."""
+
+_CREDENTIAL_REJECTED_STATUSES = frozenset({401, 403})
+"""Statuses that mean "this credential will never work", not "try later".
+
+Raised as a `WorkerCredentialRejectedError` so `BaseAPIClient.call()`
+propagates it unwrapped and `with_retries` does not treat it as transient.
+`503` is deliberately *not* here: that is what the cloud answers when its
+own worker store is unreachable, and retrying it is exactly right."""
+
+
+def _raise_for_credential(response: httpx.Response, operation: str) -> None:
+    """Turn a `401`/`403` into the one error that stops the daemon."""
+    if response.status_code in _CREDENTIAL_REJECTED_STATUSES:
+        msg = (
+            f"the cloud API refused this worker's credential on {operation} "
+            f"(HTTP {response.status_code}). Check WORKER_ID and WORKER_CREDENTIAL "
+            f"against the values from POST /api/v1/workers; the worker may also "
+            f"have been deactivated or lost to a redeploy of a disk-backed store."
+        )
+        raise WorkerCredentialRejectedError(msg)
 
 
 class WorkerCloudClient(BaseAPIClient):
@@ -104,6 +125,7 @@ class WorkerCloudClient(BaseAPIClient):
             response = self._client.get(
                 "/api/v1/workers/dispatch/poll", headers=self._auth_headers()
             )
+            _raise_for_credential(response, "poll")
             response.raise_for_status()
             payload: dict[str, Any] = response.json()
             raw_assignment = payload.get("assignment")
@@ -130,9 +152,36 @@ class WorkerCloudClient(BaseAPIClient):
                 content=archive_bytes,
                 headers={**self._auth_headers(), "Content-Type": "application/zip"},
             )
+            _raise_for_credential(response, "upload_bundle")
             response.raise_for_status()
 
         self.call("upload_bundle", _do)
+
+    def heartbeat(self, template_names: tuple[str, ...]) -> None:
+        """Tell the cloud this worker is awake and which templates it holds.
+
+        The poll call already records last-seen, so this exists for the
+        second half: `.seospiderconfig` files live only on the machine that
+        runs Screaming Frog, and the cloud cannot list a directory it does
+        not have. Reporting them is what lets the dashboard show a dropdown
+        for *this* desktop.
+
+        Args:
+            template_names: Names from the local `TemplateRegistry`. The
+                cloud re-validates every one against its own pattern before
+                storing it — this client makes no claim to be trusted.
+        """
+
+        def _do() -> None:
+            response = self._client.post(
+                "/api/v1/workers/heartbeat",
+                json={"template_names": list(template_names)},
+                headers=self._auth_headers(),
+            )
+            _raise_for_credential(response, "heartbeat")
+            response.raise_for_status()
+
+        self.call("heartbeat", _do)
 
     def report_failure(self, job_id: str, error: str) -> None:
         """Tell the cloud a claimed job could not be completed."""
@@ -143,6 +192,7 @@ class WorkerCloudClient(BaseAPIClient):
                 json={"error": error},
                 headers=self._auth_headers(),
             )
+            _raise_for_credential(response, "report_failure")
             response.raise_for_status()
 
         self.call("report_failure", _do)

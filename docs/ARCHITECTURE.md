@@ -66,10 +66,21 @@ src/
 │   │                            # importing process_supervisor.py never
 │   │                            # requires Windows -- only calling it does
 │   ├── worker_auth.py           # Worker daemon identity (ADR 0015 condition 2).
-│   │                            # Worker/WorkerPrincipal/DiskWorkerStore, mirroring
-│   │                            # auth.py's Operator/Principal/DiskOperatorStore
+│   │                            # Worker/WorkerPrincipal/WorkerStore, mirroring
+│   │                            # auth.py's Operator/Principal/OperatorStore
 │   │                            # shape exactly -- a distinct credential type, not
-│   │                            # a substitute for ADR 0016's session tokens
+│   │                            # a substitute for ADR 0016's session tokens.
+│   │                            # Also holds liveness (last_seen_at +
+│   │                            # worker_is_online) and the worker-reported
+│   │                            # template names, and TEMPLATE_NAME_PATTERN,
+│   │                            # restated from template_registry.py because core
+│   │                            # may not import modules (a test asserts they agree)
+│   ├── postgres_worker_store.py # The durable WorkerStore. DiskWorkerStore is
+│   │                            # correct for a workstation and destructive on a
+│   │                            # container host, where the filesystem is rebuilt
+│   │                            # on every deploy; WORKER_STORE_BACKEND selects.
+│   │                            # No fallback between them -- a silent one would
+│   │                            # answer 401 to a whole fleet on a Postgres blip
 │   ├── worker_dispatch_schemas.py   # WorkerJobKind (closed StrEnum, one member:
 │   │                            # SCREAMING_FROG_CRAWL), WorkerJobEnvelope
 │   │                            # (job_id/seed_url/template_name/correlation_id,
@@ -136,21 +147,51 @@ src/
 │                                # the 500k-page ceiling. Every record carries
 │                                # org_id; every read enforces record.org_id ==
 │                                # org_id, the same shape get_job/get_result use
-│   └── worker_routes.py         # ADR 0015 cloud-side worker-dispatch HTTP
-│                                # surface. Same separate-router shape as
-│                                # deliverables_routes.py. POST/GET /workers
-│                                # (human-authenticated registration/listing);
-│                                # POST /workers/{id}/dispatch/preview|dispatch
-│                                # (gate a, worker-bound); GET
-│                                # /workers/dispatch/poll (worker-authenticated
-│                                # claim + gate-b artifact issuance); POST
-│                                # /workers/jobs/{id}/upload|failed (worker-
-│                                # authenticated, IDOR-checked against the
-│                                # claiming worker's own identity, not just its
-│                                # org — a job pinned to worker A is
-│                                # unclaimable by worker B even inside the same
-│                                # org); GET /workers/jobs[/{id}] (human-
-│                                # authenticated, org-scoped read)
+│   ├── worker_routes.py         # ADR 0015 cloud-side worker-dispatch HTTP
+│   │                            # surface, worker-authenticated half:
+│   │                            # POST /workers/heartbeat, GET
+│   │                            # /workers/dispatch/poll, POST
+│   │                            # /workers/jobs/{id}/upload|failed. Composes
+│   │                            # the dashboard router below, so server.py
+│   │                            # still mounts exactly one router
+│   ├── worker_dashboard_routes.py   # The human-authenticated half, split on
+│   │                            # the authentication boundary rather than an
+│   │                            # arbitrary line count. POST/GET /workers
+│   │                            # (human-authenticated registration/listing;
+│   │                            # the listing carries last_seen_at, a server-
+│   │                            # computed is_online, and offline_after_s, so
+│   │                            # the UI never invents its own staleness rule);
+│   │                            # POST /workers/heartbeat (worker-authenticated
+│   │                            # check-in reporting this machine's local
+│   │                            # .seospiderconfig names -- untrusted input,
+│   │                            # pattern- and count-checked server-side);
+│   │                            # GET /workers/{id}/templates (per-worker
+│   │                            # dropdown source; the API host has no template
+│   │                            # directory of its own on a cloud deployment);
+│   │                            # POST /workers/{id}/dispatch/preview|dispatch
+│   │                            # (gate a, worker-bound; confirm returns 409
+│   │                            # rather than queueing for an offline worker);
+│   │                            # GET /workers/dispatch/poll (worker-
+│   │                            # authenticated claim + gate-b artifact
+│   │                            # issuance; also records last-seen and sweeps
+│   │                            # abandoned DISPATCHED jobs); POST
+│   │                            # /workers/jobs/{id}/upload|failed (worker-
+│   │                            # authenticated, IDOR-checked against the
+│   │                            # claiming worker's own identity, not just its
+│   │                            # org — a job pinned to worker A is
+│   │                            # unclaimable by worker B even inside the same
+│   │                            # org; upload is size-capped before the body is
+│   │                            # buffered); GET /workers/jobs[/{id}] (human-
+│   │                            # authenticated, org-scoped read) and GET
+│   │                            # /workers/jobs/{id}/bundle (human-
+│   │                            # authenticated, org-scoped, decrypt-then-
+│   │                            # stream download; fails closed if the at-rest
+│   │                            # key is absent or rotated)
+│   └── worker_route_helpers.py  # The ownership, liveness and body-size checks
+│                                # those routes perform before doing any work.
+│                                # read_capped_body refuses an over-cap
+│                                # Content-Length before reading a byte and
+│                                # abandons a chunked body mid-stream
 ├── integrations/                # External API wrappers
 │   ├── base_client.py           # Quota, retry, credential handling for all connectors
 │   ├── http_fetcher.py          # The ONLY outbound web fetcher. Enforces SSRF,
@@ -293,6 +334,15 @@ src/
     │   │   │                         # own naming transform; zip-slip/size-cap/
     │   │   │                         # encrypted-member defense; an unlisted
     │   │   │                         # member rejects the whole upload
+    │   │   ├── worker_daemon_cli.py  # The process an operator actually starts:
+    │   │   │                         # the `rankuno-worker` console script and
+    │   │   │                         # scripts/run_worker_daemon.py. Reads the
+    │   │   │                         # cloud URL/worker id/secret from Settings
+    │   │   │                         # (never an argument), names missing
+    │   │   │                         # settings on --check, routes SIGINT/SIGTERM
+    │   │   │                         # into a between-jobs stop flag, and exits
+    │   │   │                         # 3 (not 0, not a restart loop) when the
+    │   │   │                         # cloud refuses the credential
     │   │   └── worker_daemon.py      # ADR 0015: the worker daemon's whole
     │   │                             # lifetime. reconcile_orphans() at startup
     │   │                             # (condition 12), closed-enum dispatch
@@ -326,7 +376,10 @@ src/
 | Path | Purpose |
 | :--- | :--- |
 | The React UI for `modules/seo/screaming_frog_control/` (ADR 0013) | The API surface (`preview`/confirm/templates) is implemented; no confirmation-modal UI consumes it yet — an operator would call it directly today |
-| A cloud dashboard or worker-management screen for ADR 0015's worker dispatch | Explicitly out of scope this cycle. The full HTTP surface (`api/worker_routes.py`) and the worker daemon are implemented and tested; an operator registers a worker, previews/confirms a dispatch, and reads job status by calling the API directly today |
+| A cloud dashboard or worker-management screen for ADR 0015's worker dispatch | The backend the UI needs is complete (`api/worker_routes.py`, including liveness, per-worker templates and bundle download); the React screens themselves belong to a separate task and do not exist yet |
+| A purge job for expired uploaded bundles | Still read-time filtering only (`read_upload` checks `expires_at`). Nothing deletes the row, so storage grows without bound — unchanged from build-log 0098 |
+| A migration of existing disk-backed worker registrations into Postgres | Impossible by construction: the `workers.json` it would read lives on a container filesystem that has already been rebuilt. Switching `WORKER_STORE_BACKEND` to `postgres` requires re-registering each desktop once (see `alembic/versions/0003_worker_identity_table.py`) |
+| Any Postgres SQL in `postgres_worker_store.py` or migration 0003 verified against a real database | `psycopg` is not installed in the local venv and no server is reachable from it. Both are covered only by an in-memory fake cursor, which cannot validate SQL syntax or `COALESCE`/`ON CONFLICT` semantics |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |

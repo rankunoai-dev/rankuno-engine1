@@ -10,10 +10,12 @@ the domain records they map to or from (`Worker`, `WorkerJob`, ...) live in
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import Field
 
 from src.core.schemas import StrictModel
+from src.core.worker_auth import MAX_REPORTED_TEMPLATES, TEMPLATE_NAME_PATTERN
 from src.core.worker_dispatch_schemas import (
     SignedDispatchAssignment,
     WorkerJobEnvelope,
@@ -26,6 +28,8 @@ __all__ = [
     "DispatchPreviewResponse",
     "PollResponse",
     "WorkerFailureReport",
+    "WorkerHeartbeatRequest",
+    "WorkerHeartbeatResponse",
     "WorkerJobAccepted",
     "WorkerJobListView",
     "WorkerJobView",
@@ -33,7 +37,19 @@ __all__ = [
     "WorkerRegisterRequest",
     "WorkerRegisterResponse",
     "WorkerSummary",
+    "WorkerTemplatesView",
 ]
+
+TemplateName = Annotated[str, Field(pattern=TEMPLATE_NAME_PATTERN)]
+"""A worker-reported template name, constrained at the HTTP boundary.
+
+The first of two independent checks. A worker daemon is a machine on
+someone's desk, not part of the trust boundary, so what it says about itself
+is untrusted input: the name is validated here before it is stored and
+validated again by `Worker.template_names` before it is persisted. Either
+alone would be enough today; together they mean a future caller that builds
+a `Worker` without going through this request model still cannot store a
+name that could become a path component."""
 
 
 class WorkerRegisterRequest(StrictModel):
@@ -55,19 +71,78 @@ class WorkerRegisterResponse(StrictModel):
 
 
 class WorkerSummary(StrictModel):
-    """One registered worker, without its secret hash."""
+    """One registered worker, without its secret hash.
+
+    Attributes:
+        last_seen_at: The raw fact — when this worker last polled or sent a
+            heartbeat. `None` means never.
+        is_online: The server's verdict on that fact, using
+            `Settings.worker_offline_after_s`. Served rather than left to
+            the browser so there is exactly one staleness rule in the
+            system; a dashboard that invented its own would be the copy
+            nothing tests.
+        template_names: What this worker reported it holds locally. Empty
+            until its daemon sends a heartbeat — the API host has no
+            `.seospiderconfig` files of its own and never did.
+    """
 
     worker_id: str
     org_id: str
     display_name: str
     is_active: bool
     created_at: datetime
+    last_seen_at: datetime | None = None
+    is_online: bool = False
+    template_names: list[str] = Field(default_factory=list)
 
 
 class WorkerListView(StrictModel):
-    """Every worker registered for the caller's org."""
+    """Every worker registered for the caller's org.
+
+    Attributes:
+        offline_after_s: The threshold behind `WorkerSummary.is_online`,
+            published so a dashboard can explain the verdict ("last seen
+            4 minutes ago, offline after 60s") instead of re-deriving it.
+    """
 
     workers: list[WorkerSummary]
+    offline_after_s: float
+
+
+class WorkerHeartbeatRequest(StrictModel):
+    """What `POST /workers/heartbeat` accepts.
+
+    Carries no `worker_id`: the authenticated credential is the only source
+    of that value (ADR 0015 condition 2's IDOR rule). A worker can only ever
+    describe itself.
+    """
+
+    template_names: list[TemplateName] = Field(
+        default_factory=list, max_length=MAX_REPORTED_TEMPLATES
+    )
+
+
+class WorkerHeartbeatResponse(StrictModel):
+    """Confirmation of a check-in, and what the cloud now believes."""
+
+    worker_id: str
+    last_seen_at: datetime
+    template_names: list[str]
+
+
+class WorkerTemplatesView(StrictModel):
+    """One worker's locally available Screaming Frog templates.
+
+    Attributes:
+        reported_at: When the worker last told the cloud anything at all.
+            `None` means it never has, which is why `templates` may be empty
+            for a machine that in fact holds several — absence of a report
+            is not a report of absence, and a dropdown should say so.
+    """
+
+    worker_id: str
+    templates: list[str]
+    reported_at: datetime | None = None
 
 
 class DispatchPreviewRequest(StrictModel):
@@ -92,6 +167,12 @@ class DispatchPreviewResponse(StrictModel):
     seed_url: str
     template_name: str | None = None
     correlation_id: str
+    worker_online: bool = False
+    worker_last_seen_at: datetime | None = None
+    """Carried on the preview, not just the confirm, so the confirmation
+    modal can warn *before* the operator commits rather than after: confirm
+    refuses an offline worker outright, and a 409 at that point is a worse
+    way to learn the PC is asleep than a line in the dialog."""
 
 
 class DispatchConfirmRequest(StrictModel):

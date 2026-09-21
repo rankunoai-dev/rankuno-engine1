@@ -51,6 +51,7 @@ from src.core.schemas import StrictModel
 from src.core.worker_auth import (
     WorkerAuthenticationError,
     WorkerPrincipal,
+    WorkerStoreUnavailableError,
     verify_worker_credential,
 )
 
@@ -143,7 +144,10 @@ def require_worker_principal(
 
     Raises:
         HTTPException: `401` if the header is missing, malformed, or the
-            credential fails verification for any reason.
+            credential fails verification; `503` if the worker store could
+            not be read at all. The two must not be collapsed: a daemon
+            told `401` is supposed to stop, and a Postgres blip answering
+            `401` would stop the whole fleet until a human restarted it.
     """
     if not authorization:
         raise HTTPException(
@@ -167,6 +171,14 @@ def require_worker_principal(
         )
     try:
         return verify_worker_credential(worker_id, secret, store=worker_store)
+    except WorkerStoreUnavailableError as exc:
+        _logger.error(  # noqa: TRY400 - the cause is infrastructure, not this frame
+            "worker_store_unavailable_during_auth", extra={"error": str(exc)}
+        )
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"worker store unavailable: {exc}",
+        ) from exc
     except WorkerAuthenticationError as exc:
         _logger.warning("worker_credential_rejected", extra={"reason": str(exc)})
         raise HTTPException(

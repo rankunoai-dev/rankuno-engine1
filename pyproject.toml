@@ -91,6 +91,12 @@ pywin32 = [
     "pywin32>=306; sys_platform=='win32'",
 ]
 
+# The only console script this package declares. `run_worker_daemon` had no
+# caller anywhere outside its own module and tests (ADR 0015): the loop was
+# correct and unreachable, so nothing could start a desktop worker.
+[project.scripts]
+rankuno-worker = "src.modules.seo.screaming_frog_control.worker_daemon_cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 

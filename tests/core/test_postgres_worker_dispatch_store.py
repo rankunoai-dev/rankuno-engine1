@@ -49,6 +49,7 @@ class _FakeCursor:
     def __init__(self, db: dict[str, dict[str, dict[str, object]]]) -> None:
         self._db = db
         self._result: object = None
+        self.rowcount = 0
 
     def __enter__(self) -> _FakeCursor:
         return self
@@ -70,6 +71,8 @@ class _FakeCursor:
             self._store_upload(params)
         elif q.startswith("SELECT encrypted_bytes FROM worker_job_uploads"):
             self._read_upload(params)
+        elif q.startswith("UPDATE worker_jobs SET status = %s, error = %s"):
+            self._expire_stale(params)
         elif q.startswith("UPDATE worker_jobs SET"):
             self._transition(q, params)
         elif q.startswith("SELECT") and "FROM worker_jobs WHERE id = %s" in q:
@@ -200,6 +203,25 @@ class _FakeCursor:
         elif "error = %s" in q:
             row["error"] = extra[0]
         self._result = tuple(row[c] for c in _COLUMNS)
+
+    def _expire_stale(self, params: tuple[object, ...]) -> None:
+        failed, error, updated_at, finished_at, org_id, dispatched, cutoff = params
+        swept = 0
+        for row in self._db["worker_jobs"].values():
+            if (
+                row["org_id"] != org_id
+                or row["status"] != dispatched
+                or row["dispatched_at"] is None
+                or row["dispatched_at"] >= cutoff  # type: ignore[operator]
+            ):
+                continue
+            row["status"] = failed
+            row["error"] = error
+            row["updated_at"] = updated_at
+            row["finished_at"] = finished_at
+            swept += 1
+        self.rowcount = swept
+        self._result = None
 
     def _store_upload(self, params: tuple[object, ...]) -> None:
         job_id, org_id, worker_id, encrypted_bytes, size_bytes, expires_at = params
@@ -508,3 +530,61 @@ def test_claim_next_job_fails_closed_on_a_store_outage():
     broken_store = PostgresWorkerDispatchStore(connection_factory=_broken_factory)
     with pytest.raises(DispatchStoreUnavailableError):
         broken_store.claim_next_job(worker_id="wkr-1", org_id="acme")
+
+
+# --- expire_stale_dispatched: the bounded way out of a wedged job ---------------
+
+
+def _dispatched_job(store: PostgresWorkerDispatchStore, db, *, age_s: float) -> str:
+    """Queue a job, claim it, then backdate the claim by `age_s`."""
+    token = store.mint_dispatch_preview(
+        org_id="acme",
+        worker_id="wkr-alice",
+        seed_url="https://example.com/",
+        template_name=None,
+        correlation_id="corr-1",
+    )
+    job = store.confirm_dispatch(
+        token.token,
+        org_id="acme",
+        worker_id="wkr-alice",
+        seed_url="https://example.com/",
+        template_name=None,
+        correlation_id="corr-1",
+    )
+    assert job is not None
+    claimed = store.claim_next_job(worker_id="wkr-alice", org_id="acme")
+    assert claimed is not None
+    db["worker_jobs"][claimed.id]["dispatched_at"] = datetime.now(UTC) - timedelta(seconds=age_s)
+    return claimed.id
+
+
+def test_a_job_abandoned_in_dispatched_is_swept_to_failed(store, db):
+    job_id = _dispatched_job(store, db, age_s=10_000)
+    assert store.expire_stale_dispatched(org_id="acme", older_than_s=3600) == 1
+    swept = store.get_job(job_id)
+    assert swept.status is WorkerJobStatus.FAILED
+    assert swept.error is not None
+    assert "stopped reporting" in swept.error
+    assert swept.finished_at is not None
+
+
+def test_a_recently_dispatched_job_is_left_alone(store, db):
+    job_id = _dispatched_job(store, db, age_s=5)
+    assert store.expire_stale_dispatched(org_id="acme", older_than_s=3600) == 0
+    assert store.get_job(job_id).status is WorkerJobStatus.DISPATCHED
+
+
+def test_the_sweep_never_touches_another_orgs_jobs(store, db):
+    job_id = _dispatched_job(store, db, age_s=10_000)
+    assert store.expire_stale_dispatched(org_id="globex", older_than_s=3600) == 0
+    assert store.get_job(job_id).status is WorkerJobStatus.DISPATCHED
+
+
+def test_the_sweep_fails_closed_when_postgres_is_unreachable():
+    def _broken_factory() -> NoReturn:
+        raise ConnectionError("database unreachable")
+
+    broken = PostgresWorkerDispatchStore(connection_factory=_broken_factory)
+    with pytest.raises(DispatchStoreUnavailableError):
+        broken.expire_stale_dispatched(org_id="acme", older_than_s=3600)

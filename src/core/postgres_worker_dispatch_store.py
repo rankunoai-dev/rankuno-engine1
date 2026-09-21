@@ -310,6 +310,56 @@ class PostgresWorkerDispatchStore:
             conn.close()
         return [row_to_job(row) for row in rows]
 
+    def expire_stale_dispatched(self, *, org_id: str, older_than_s: float) -> int:
+        """Sweep abandoned `DISPATCHED` jobs for one org to `FAILED`.
+
+        Scoped to a single org and driven by a request rather than a
+        background thread: the API process here is a web worker, and adding
+        a sweeper thread to it would multiply by replica count the same way
+        `CLAUDE.md` §8 already records for the rate limiter. The two callers
+        — a worker's poll and the dashboard's job list — between them cover
+        both the "daemon alive, one job wedged" and "daemon dead, nobody
+        polling" cases.
+
+        See `WorkerDispatchStore.expire_stale_dispatched` for why the
+        terminal state is `FAILED` and not a requeue.
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=older_than_s)
+        now = datetime.now(UTC)
+        error = (
+            f"the worker stopped reporting after claiming this job; no result "
+            f"arrived within {int(older_than_s)}s. Start the worker daemon and "
+            f"launch the crawl again."
+        )
+        conn = self._connect()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE worker_jobs SET status = %s, error = %s, "
+                    "updated_at = %s, finished_at = %s "
+                    "WHERE org_id = %s AND status = %s AND dispatched_at IS NOT NULL "
+                    "AND dispatched_at < %s",
+                    (
+                        WorkerJobStatus.FAILED.value,
+                        error,
+                        now,
+                        now,
+                        org_id,
+                        WorkerJobStatus.DISPATCHED.value,
+                        cutoff,
+                    ),
+                )
+                swept = cur.rowcount
+        except Exception as exc:  # noqa: BLE001
+            raise DispatchStoreUnavailableError(f"cannot expire stale jobs: {exc}") from exc
+        finally:
+            conn.close()
+        if swept:
+            _logger.warning(
+                "worker_jobs_expired_stale_dispatch", extra={"org": org_id, "count": swept}
+            )
+        return int(swept)
+
     _TRANSITION_FIELDS = frozenset({"bundle_size_bytes", "error"})
     """Closed set of column names `_transition` may assign, so the dynamic
     `SET` clause below is built only from names this class itself passes —

@@ -38,6 +38,7 @@ __all__ = [
     "GscAccountProfile",
     "ResolvedGscCredentials",
     "Settings",
+    "WorkerStoreBackend",
     "get_settings",
     "reset_settings_cache",
 ]
@@ -107,6 +108,19 @@ class Environment(StrEnum):
     DEVELOPMENT = "development"
     STAGING = "staging"
     PRODUCTION = "production"
+
+
+class WorkerStoreBackend(StrEnum):
+    """Where ADR 0015 worker identity is persisted.
+
+    A closed enum rather than a free string so a typo in
+    `WORKER_STORE_BACKEND` fails at boot with the valid options named,
+    instead of silently falling back to the disk store whose ephemerality is
+    the defect this setting exists to fix.
+    """
+
+    DISK = "disk"
+    POSTGRES = "postgres"
 
 
 class Settings(BaseSettings):
@@ -361,13 +375,51 @@ class Settings(BaseSettings):
     )
 
     # -- Worker daemon dispatch (ADR 0015) ------------------------------------
+    worker_store_backend: WorkerStoreBackend = Field(
+        default=WorkerStoreBackend.DISK,
+        description=(
+            "Where registered desktop workers live. 'disk' is workers.json "
+            "under WORKER_STORE_PATH — correct for the ADR 0004 local "
+            "workstation. 'postgres' is the `workers` table from alembic "
+            "revision 003 and is REQUIRED on any container host: a "
+            "container filesystem is rebuilt on every deploy, so 'disk' "
+            "there destroys every registration on every redeploy. Switching "
+            "to 'postgres' requires re-registering each worker once; there "
+            "is no data migration, because the file it would have read is "
+            "already gone (see the 0003 migration's docstring)."
+        ),
+    )
     worker_store_path: Path = Field(
         default=REPO_ROOT / ".workers",
         description=(
-            "Directory holding workers.json (ADR 0015 condition 2). Same "
-            "single-process caveat as `auth_operator_store_path` — worker "
-            "*identity* is not the piece condition 5 requires on Postgres; "
-            "the dispatch preview/confirm gate and job queue are."
+            "Directory holding workers.json, used when WORKER_STORE_BACKEND "
+            "is 'disk'. Same single-process caveat as "
+            "`auth_operator_store_path`."
+        ),
+    )
+    worker_offline_after_s: float = Field(
+        default=60.0,
+        gt=0.0,
+        description=(
+            "How long after a worker's last poll or heartbeat the dashboard "
+            "should call it offline, and after which a dispatch confirm is "
+            "refused rather than queued into a void. Four times the default "
+            "WORKER_POLL_INTERVAL_S, so one dropped poll (or one slow "
+            "retry) does not flip a healthy desktop offline; raise this in "
+            "step with the poll interval, never below it."
+        ),
+    )
+    worker_dispatch_timeout_s: float = Field(
+        default=10_800.0,
+        gt=0.0,
+        description=(
+            "How long a job may sit in DISPATCHED before it is swept to "
+            "FAILED. A daemon that dies after claiming a job would "
+            "otherwise leave it DISPATCHED forever, and its own single-use "
+            "ledger stops it re-running. Default is "
+            "SCREAMING_FROG_MAX_RUNTIME_S (7200s) plus an hour of upload "
+            "and retry slack, so a legitimately long crawl is never swept "
+            "out from under itself."
         ),
     )
     worker_dispatch_signing_secret: SecretStr | None = Field(
@@ -453,9 +505,15 @@ class Settings(BaseSettings):
         description="Ceiling for condition 10's bounded exponential backoff on repeated failures.",
     )
     worker_upload_max_bytes: int = Field(
-        default=50 * 1024 * 1024,
+        default=100 * 1024 * 1024,
         gt=0,
-        description="Size cap on one uploaded bundle (ADR 0015 condition 9).",
+        description=(
+            "Size cap on one uploaded bundle (ADR 0015 condition 9), 100 MB "
+            "by default. Enforced on the server before the body is buffered "
+            "— a declared Content-Length over the cap is refused outright, "
+            "and a chunked body is abandoned the moment it crosses it — and "
+            "again on the worker before it ever starts the upload."
+        ),
     )
     worker_bundle_retention_days: int = Field(
         default=30,
@@ -732,13 +790,24 @@ class Settings(BaseSettings):
     def worker_store(self) -> WorkerStore:
         """Get the worker daemon identity store, creating it on first access (ADR 0015).
 
+        The one place `worker_store_backend` is read. Deliberately not a
+        try-Postgres-then-fall-back-to-disk arrangement: a silent fallback
+        would answer `401 invalid worker credential` to a fleet of correctly
+        configured daemons the moment Postgres hiccuped, which is precisely
+        the confusing failure this setting was added to end.
+
         Returns:
             The `WorkerStore` for this deployment.
         """
         if self._worker_store is None:
-            from src.core.worker_auth import DiskWorkerStore
+            if self.worker_store_backend is WorkerStoreBackend.POSTGRES:
+                from src.core.postgres_worker_store import PostgresWorkerStore
 
-            self._worker_store = DiskWorkerStore(self.worker_store_path)
+                self._worker_store = PostgresWorkerStore()
+            else:
+                from src.core.worker_auth import DiskWorkerStore
+
+                self._worker_store = DiskWorkerStore(self.worker_store_path)
         return self._worker_store
 
     @property

@@ -23,6 +23,7 @@ __all__ = [
     "RobotsDisallowedError",
     "ToolExecutionError",
     "UnsafeUrlError",
+    "WorkerCredentialRejectedError",
 ]
 
 
@@ -119,6 +120,19 @@ class RobotsDisallowedError(GuardrailViolationError):
         self.url = url
         self.user_agent = user_agent
         super().__init__(f"robots.txt disallows '{url}' for user-agent '{user_agent}'.")
+
+
+class WorkerCredentialRejectedError(GuardrailViolationError):
+    """The cloud API refused this worker daemon's own credential (ADR 0015).
+
+    A `GuardrailViolationError`, not an `IntegrationError`, for the reason
+    `BaseAPIClient.call()`'s own docstring gives: `IntegrationError` is in
+    `retry.TRANSIENT_ERRORS`, so a credential that has been revoked or
+    mistyped would be retried, then backed off, then retried forever — a
+    daemon hot-looping against a `401` it can never satisfy. A refused
+    credential must stay refused, propagate unwrapped through `call()`, and
+    stop the daemon with a message an operator can act on.
+    """
 
 
 class IntegrationError(RankunoError):
