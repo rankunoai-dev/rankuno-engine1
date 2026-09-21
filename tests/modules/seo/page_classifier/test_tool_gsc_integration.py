@@ -75,7 +75,7 @@ class TestGscEnrichmentSuccess:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched_pages = tool._enrich_with_gsc((sample_page,), payload)
+            enriched_pages, _report = tool._enrich_with_gsc((sample_page,), payload)
 
         assert len(enriched_pages) == 1
         page = enriched_pages[0]
@@ -103,7 +103,7 @@ class TestGscEnrichmentSuccess:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched_pages = tool._enrich_with_gsc((sample_page,), payload)
+            enriched_pages, _report = tool._enrich_with_gsc((sample_page,), payload)
 
         assert len(enriched_pages) == 1
         page = enriched_pages[0]
@@ -123,7 +123,7 @@ class TestGscEnrichmentDisabled:
             gsc_property_url=None,
         )
 
-        enriched_pages = tool._enrich_with_gsc((sample_page,), payload)
+        enriched_pages, _report = tool._enrich_with_gsc((sample_page,), payload)
 
         assert len(enriched_pages) == 1
         assert enriched_pages[0] is sample_page  # Same object
@@ -145,7 +145,7 @@ class TestGscEnrichmentErrorHandling:
             mock_instance.fetch_analytics.side_effect = RuntimeError("Network error")
             mock_client.return_value = mock_instance
 
-            enriched_pages = tool._enrich_with_gsc((sample_page,), payload)
+            enriched_pages, _report = tool._enrich_with_gsc((sample_page,), payload)
 
         # Pages returned unchanged
         assert len(enriched_pages) == 1
@@ -180,7 +180,7 @@ class TestGscEnrichmentErrorHandling:
                 )
                 mock_agg.return_value = mock_agg_instance
 
-                enriched_pages = tool._enrich_with_gsc((sample_page,), payload)
+                enriched_pages, _report = tool._enrich_with_gsc((sample_page,), payload)
 
         # Pages returned unchanged due to validation error
         assert len(enriched_pages) == 1
@@ -255,7 +255,7 @@ class TestGscEnrichmentMultiplePages:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched_pages = tool._enrich_with_gsc((page1, page2), payload)
+            enriched_pages, _report = tool._enrich_with_gsc((page1, page2), payload)
 
         assert len(enriched_pages) == 2
 
@@ -306,7 +306,7 @@ class TestGscEnrichmentAggregation:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched_pages = tool._enrich_with_gsc((sample_page,), payload)
+            enriched_pages, _report = tool._enrich_with_gsc((sample_page,), payload)
 
         assert len(enriched_pages) == 1
         page = enriched_pages[0]

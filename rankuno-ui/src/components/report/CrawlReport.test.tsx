@@ -111,6 +111,49 @@ describe("CrawlReport", () => {
     expect(screen.queryByText(/Sitemap access blocked/)).not.toBeInTheDocument();
   });
 
+  it("explains why Search Console metrics are missing", () => {
+    /* The reason this field exists: enrichment degrades silently so a GSC
+       outage never fails a crawl, which makes all four outcomes look like a
+       crawl that never wanted metrics. */
+    renderReport(
+      crawl({
+        gsc: {
+          status: "not_requested",
+          pages_matched: 0,
+          pages_crawled: 1,
+          unmatched_gsc_urls: 0,
+          account: "acme",
+          property_url: null,
+          reason: "",
+        },
+      }),
+    );
+    expect(screen.getByText(/No Search Console metrics/)).toBeInTheDocument();
+    expect(screen.getByText(/property URL/)).toBeInTheDocument();
+  });
+
+  it("renders a result stored before the enrichment outcome existed", () => {
+    /* Older results are on disk and still loaded. The prop type says `gsc` is
+       present; reality is that the key is simply absent, and a component that
+       assumed otherwise would blank the dashboard exactly as `media_skipped`
+       did in cycle 0021. */
+    const result = crawl();
+    const stored = { ...result } as Record<string, unknown>;
+    delete stored.gsc;
+
+    const model = buildDashModel(result, "path");
+    expect(() =>
+      render(
+        <CrawlReport
+          model={model}
+          result={stored as unknown as ReturnType<typeof crawl>}
+          generatedAt={AT}
+        />,
+      ),
+    ).not.toThrow();
+    expect(screen.queryByText(/No Search Console metrics/)).not.toBeInTheDocument();
+  });
+
   it("stays silent when there is nothing to warn about", () => {
     renderReport();
     expect(screen.queryByText(/Crawl stopped early/)).not.toBeInTheDocument();

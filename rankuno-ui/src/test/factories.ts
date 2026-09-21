@@ -137,6 +137,10 @@ export function crawl(
       nav_entries: 0,
       groups: [],
     },
+    // `null` by default: the fixture describes a crawl that says nothing about
+    // Search Console, which is also the shape of every result stored before the
+    // engine recorded an outcome. A test that wants an outcome states it.
+    gsc: null,
     ...overrides,
     pages,
   };

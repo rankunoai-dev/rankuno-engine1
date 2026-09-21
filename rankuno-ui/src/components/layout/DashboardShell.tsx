@@ -1,6 +1,7 @@
 import { Alert, Button } from "antd";
 import { useEffect, useMemo } from "react";
 import { buildDashModel, EMPTY_MODEL } from "../../lib/dashboardModel";
+import { gscWarningFor, gscWarningTone } from "../../lib/gscEnrichment";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useDashboardStore } from "../../store/useDashboardStore";
@@ -66,6 +67,9 @@ export function DashboardShell(): JSX.Element {
 
   const active = jobs.find((job) => job.id === activeJobId);
   const discovery = result?.discovery;
+  // Empty string when enrichment matched pages, and for any result stored
+  // before the engine recorded an outcome — both mean "nothing to say here".
+  const gscWarning = gscWarningFor(result);
   const navParsed = (result?.navigation?.roots.length ?? 0) > 0;
 
   return (
@@ -180,6 +184,15 @@ export function DashboardShell(): JSX.Element {
               showIcon
               message={`Crawl stopped early — ${discovery.stopped_reason}. Showing the ${discovery.total_urls.toLocaleString()} URLs found before it stopped; this is not the whole site, and how much is missing is unknown.`}
             />
+          )}
+
+          {/* The GSC columns go blank on four different outcomes and look
+              identical on all four, because enrichment degrades silently so a
+              Search Console problem never fails a crawl. This is the only
+              place an operator can learn which one happened — and, for the
+              blank property URL, that the cause is an input they can fill in. */}
+          {view === "visualizer" && gscWarning && (
+            <Alert type={gscWarningTone(result?.gsc)} banner showIcon message={gscWarning} />
           )}
 
           {view === "visualizer" && discovery?.truncated && (

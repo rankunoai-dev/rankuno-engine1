@@ -122,7 +122,7 @@ class TestGscE2eSuccessPaths:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(minimal_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(minimal_crawl), payload)
 
         assert len(enriched) == 1
         page = enriched[0]
@@ -156,7 +156,7 @@ class TestGscE2eSuccessPaths:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         assert len(enriched) == 10
 
@@ -191,7 +191,7 @@ class TestGscE2eSuccessPaths:
             mock_client.return_value = mock_instance
 
             start = time.time()
-            enriched = tool._enrich_with_gsc(tuple(large_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(large_crawl), payload)
             elapsed = time.time() - start
 
         assert len(enriched) == 100
@@ -215,7 +215,7 @@ class TestGscE2eErrorHandling:
             mock_instance.fetch_analytics.side_effect = Exception("403 Forbidden")
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         # All pages returned unchanged
         assert len(enriched) == 10
@@ -234,7 +234,7 @@ class TestGscE2eErrorHandling:
             mock_instance.fetch_analytics.side_effect = Exception("429 Quota Exceeded")
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         assert len(enriched) == 10
         for page in enriched:
@@ -252,7 +252,7 @@ class TestGscE2eErrorHandling:
             mock_instance.fetch_analytics.side_effect = TimeoutError("Request timeout")
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         assert len(enriched) == 10
         for page in enriched:
@@ -285,7 +285,7 @@ class TestGscE2eErrorHandling:
                 )
                 mock_agg.return_value = mock_agg_instance
 
-                enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+                enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         assert len(enriched) == 10
         for page in enriched:
@@ -313,7 +313,7 @@ class TestGscE2eEdgeCases:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         assert len(enriched) == 10
         for page in enriched:
@@ -344,7 +344,7 @@ class TestGscE2eEdgeCases:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         # Count enriched vs unmatched
         enriched_count = sum(1 for p in enriched if p.gsc_clicks is not None)
@@ -381,7 +381,7 @@ class TestGscE2eEdgeCases:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         # Find shoes product page (should be index 1)
         shoes_page = enriched[1]
@@ -416,7 +416,7 @@ class TestGscE2eDataIntegrity:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
 
         # URLs unchanged
         enriched_urls = [p.url for p in enriched]
@@ -453,7 +453,7 @@ class TestGscE2eDataIntegrity:
             mock_instance.fetch_analytics.return_value = response
             mock_client.return_value = mock_instance
 
-            enriched = tool._enrich_with_gsc(tuple(pages), payload)
+            enriched, _report = tool._enrich_with_gsc(tuple(pages), payload)
 
         # Both pages returned
         assert len(enriched) == 2
@@ -529,3 +529,143 @@ class TestGscAccountSelection:
 
         with pytest.raises(pydantic.ValidationError):
             PageClassificationInput(base_url="https://example.com", gsc_account=bad)
+
+
+class TestGscEnrichmentReporting:
+    """Every outcome is stated on the result, not only in a server log.
+
+    Enrichment never fails a crawl, by design, so all four outcomes produce the
+    same-looking result: pages with `gsc_* = None`. These tests pin the field
+    the dashboard reads to tell them apart — in particular `not_requested`,
+    which used to return on the first line with no log line at all.
+    """
+
+    @staticmethod
+    def _response(*metrics: GscPageMetrics) -> GscAnalyticsResponse:
+        return GscAnalyticsResponse(
+            property_url="https://example.com",
+            start_date="2026-01-01",
+            end_date="2026-12-31",
+            rows=list(metrics),
+        )
+
+    def test_reports_not_requested_when_no_property_url_was_given(self, tool, medium_crawl):
+        """The common confusing case: an account picked, the property left blank."""
+        payload = PageClassificationInput(
+            base_url="https://example.com",
+            gsc_account="acme",
+        )
+
+        pages, report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+
+        assert pages == tuple(medium_crawl)
+        assert report.status == "not_requested"
+        assert report.pages_crawled == 10
+        assert report.pages_matched == 0
+        # The account name is safe to carry and is what the operator recognises.
+        assert report.account == "acme"
+        assert report.property_url is None
+
+    def test_reports_how_many_pages_matched_on_success(self, tool, medium_crawl):
+        """`matched of crawled` is the number that shows the right property ran."""
+        payload = PageClassificationInput(
+            base_url="https://example.com",
+            gsc_property_url="https://example.com",
+        )
+        response = self._response(
+            create_metric("https://example.com/", clicks=100),
+            create_metric("https://example.com/products/shoes", clicks=50),
+            create_metric("https://elsewhere.example/ghost", clicks=5),
+        )
+
+        with patch("src.modules.seo.page_classifier.tool.GscApiClient") as mock_client:
+            mock_client.return_value.fetch_analytics.return_value = response
+            _pages, report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+
+        assert report.status == "succeeded"
+        assert report.pages_matched == 2
+        assert report.pages_crawled == 10
+        assert report.unmatched_gsc_urls == 1
+        assert report.property_url == "https://example.com"
+
+    def test_reports_a_property_that_does_not_cover_the_crawl(self, tool, medium_crawl):
+        """The mismatch is named, because the fix is to re-run with the right property."""
+        payload = PageClassificationInput(
+            base_url="https://example.com",
+            gsc_property_url="https://other.com",
+        )
+        response = self._response(create_metric("https://other.com/"))
+
+        with patch("src.modules.seo.page_classifier.tool.GscApiClient") as mock_client:
+            mock_client.return_value.fetch_analytics.return_value = response
+            _pages, report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+
+        assert report.status == "property_mismatch"
+        assert report.pages_matched == 0
+        # Composed by the property validator from the two URLs it was handed.
+        assert "other.com" in report.reason
+
+    def test_reports_a_failure_by_exception_class_only(self, tool, medium_crawl):
+        """The crawl still succeeds, and the reason carries no exception text.
+
+        A transport error's message can quote the request that carried the
+        refresh token, and this string is rendered in a browser.
+        """
+        payload = PageClassificationInput(
+            base_url="https://example.com",
+            gsc_property_url="https://example.com",
+        )
+        leaked = "refresh_token=1//0gREDACTED"  # noqa: S105 - the point is that it must not appear
+
+        with patch("src.modules.seo.page_classifier.tool.GscApiClient") as mock_client:
+            mock_client.return_value.fetch_analytics.side_effect = TimeoutError(leaked)
+            pages, report = tool._enrich_with_gsc(tuple(medium_crawl), payload)
+
+        assert pages == tuple(medium_crawl)
+        assert report.status == "failed"
+        assert report.reason == "TimeoutError"
+        assert leaked not in report.model_dump_json()
+
+    def test_a_crawl_result_carries_the_outcome(self, tool):
+        """The report reaches `PageClassificationOutput`, which is what the UI reads."""
+        from src.modules.seo.page_classifier.tool import (
+            GscEnrichmentReport,
+            PageClassificationOutput,
+        )
+
+        output = PageClassificationOutput.model_validate(
+            {
+                "base_url": "https://example.com/",
+                "site_profile": {},
+                "weight_profile": {
+                    "profile_name": "default",
+                    "detected_profile_name": "default",
+                },
+                "discovery": {"base_url": "https://example.com/"},
+                "summary": {},
+                "gsc": {"status": "not_requested", "pages_crawled": 10},
+            }
+        )
+
+        assert output.gsc == GscEnrichmentReport(status="not_requested", pages_crawled=10)
+
+    def test_a_result_stored_before_the_field_existed_still_loads(self):
+        """Older results are on disk and still re-read; a required field would refuse them."""
+        from src.modules.seo.page_classifier.tool import PageClassificationOutput
+
+        output = PageClassificationOutput.model_validate(
+            {
+                "base_url": "https://example.com/",
+                "site_profile": {},
+                "weight_profile": {
+                    "profile_name": "default",
+                    "detected_profile_name": "default",
+                },
+                "discovery": {"base_url": "https://example.com/"},
+                "summary": {},
+            }
+        )
+
+        # `None`, not a defaulted "not_requested": an old crawl cannot say which
+        # of the four outcomes it had, and claiming one would be a fabrication.
+        assert output.gsc is None

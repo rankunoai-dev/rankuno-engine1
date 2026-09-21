@@ -325,6 +325,17 @@ export interface CrawlSummary {
   llm_spend_usd: number;
 }
 
+/** Whether Search Console metrics were fetched, and why they were not. */
+export interface GscEnrichmentReport {
+  status: "not_requested" | "succeeded" | "property_mismatch" | "failed";
+  pages_matched: number;
+  pages_crawled: number;
+  unmatched_gsc_urls: number;
+  account: string | null;
+  property_url: string | null;
+  reason: string;
+}
+
 /** What to crawl, and the limits that apply to it. */
 export interface PageClassificationInput {
   base_url: string;
@@ -357,4 +368,5 @@ export interface PageClassificationOutput {
   pages: FullPageIntelligenceProfile[];
   navigation: NavigationTree;
   nav_coverage: NavCoverageReport;
+  gsc: GscEnrichmentReport | null;
 }

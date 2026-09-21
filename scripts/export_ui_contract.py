@@ -72,6 +72,7 @@ from src.modules.seo.page_classifier.schemas import (  # noqa: E402
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord  # noqa: E402
 from src.modules.seo.page_classifier.tool import (  # noqa: E402
     CrawlSummary,
+    GscEnrichmentReport,
     PageClassificationInput,
     PageClassificationOutput,
 )
@@ -119,6 +120,7 @@ MODELS: tuple[type[BaseModel], ...] = (
     NavCoverageReport,
     JobTelemetry,
     CrawlSummary,
+    GscEnrichmentReport,
     PageClassificationInput,
     PageClassificationOutput,
 )

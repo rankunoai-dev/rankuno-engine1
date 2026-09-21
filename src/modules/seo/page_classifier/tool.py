@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, ClassVar, Protocol, runtime_checkable
+from typing import Annotated, ClassVar, Literal, Protocol, runtime_checkable
 
 from pydantic import Field
 
@@ -89,6 +89,8 @@ from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileRe
 
 __all__ = [
     "CrawlSummary",
+    "GscEnrichmentReport",
+    "GscEnrichmentStatus",
     "LlmPageClassifier",
     "PageClassificationInput",
     "PageClassificationOutput",
@@ -287,6 +289,53 @@ class CrawlSummary(StrictModel):
     llm_spend_usd: float = Field(default=0.0, ge=0.0)
 
 
+GscEnrichmentStatus = Literal["not_requested", "succeeded", "property_mismatch", "failed"]
+"""What Search Console enrichment did. A `Literal` rather than an enum, matching
+`TrailSource`: it is a closed set read by the UI, not a governance enum."""
+
+
+class GscEnrichmentReport(StrictModel):
+    """Whether Search Console metrics were fetched, and why they were not.
+
+    Enrichment is deliberately silent in every failure path — a Search Console
+    outage must never fail a crawl — so until this existed the four outcomes
+    below were indistinguishable to anyone reading a finished crawl. Every page
+    simply carried `gsc_* = None`, exactly as it does when no enrichment was
+    ever asked for, and the only record was a server log line the operator
+    could not see. `not_requested` is the common case and the confusing one:
+    picking a GSC account but leaving the property URL blank skipped enrichment
+    without so much as a log line.
+
+    Nothing here may carry a credential. `reason` is rendered in a browser, so
+    it holds only an explanation the engine composed itself — the property
+    validator's verdict, or an exception's *class name*. Never an exception's
+    text: a transport error can quote the request that carried the refresh
+    token, which is why the failure path logs `type(exc).__name__` alone.
+
+    Attributes:
+        status: Which of the four outcomes occurred.
+        pages_matched: Crawled pages that came back with metrics attached.
+        pages_crawled: Pages offered to enrichment, so `pages_matched` has a
+            denominator. Match rate is the number that tells an operator
+            whether the right property was queried.
+        unmatched_gsc_urls: URLs Search Console reported that the crawl never
+            found. High counts point at a property covering more than this site.
+        account: Which named account profile was used; `None` is the default.
+            A name, never a credential (see `PageClassificationInput`).
+        property_url: The property queried, as the operator entered it.
+        reason: Safe-to-render detail, or empty. The validator's explanation for
+            `property_mismatch`, the exception class name for `failed`.
+    """
+
+    status: GscEnrichmentStatus = "not_requested"
+    pages_matched: int = Field(default=0, ge=0)
+    pages_crawled: int = Field(default=0, ge=0)
+    unmatched_gsc_urls: int = Field(default=0, ge=0)
+    account: str | None = None
+    property_url: str | None = None
+    reason: str = ""
+
+
 class PageClassificationOutput(StrictModel):
     """Everything one crawl job produced.
 
@@ -306,6 +355,11 @@ class PageClassificationOutput(StrictModel):
             rather than assumed: menu coverage varies enormously between sites,
             and a consumer showing a navigation tree needs to know whether it
             describes the site or a corner of it.
+        gsc: What Search Console enrichment did, or `None` on a result stored
+            before this field existed. Optional for exactly that reason: older
+            results are still on disk and still re-read, and a required field
+            would refuse to load them. `None` means "this crawl cannot say",
+            which is not the same claim as `not_requested`.
     """
 
     base_url: str
@@ -316,6 +370,7 @@ class PageClassificationOutput(StrictModel):
     pages: tuple[FullPageIntelligenceProfile, ...] = ()
     navigation: NavigationTree = NavigationTree()
     nav_coverage: NavCoverageReport = NavCoverageReport()
+    gsc: GscEnrichmentReport | None = None
 
 
 class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificationOutput]):
@@ -450,7 +505,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             evidence = graph.to_page_evidence()
             pages = self._classify_all(evidence, site_profile, payload)
             navigation, nav_coverage, pages = self._apply_navigation(graph, payload.base_url, pages)
-            pages = self._enrich_with_gsc(pages, payload)
+            pages, gsc = self._enrich_with_gsc(pages, payload)
             pages = self._enrich_with_navigation_context(pages)
         finally:
             if owns_fetcher:
@@ -464,6 +519,9 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 "pages": summary.pages_classified,
                 "escalation_rate": round(summary.escalation_rate, 5),
                 "unknown": summary.unknown_pages,
+                # Named here too, so one line says whether this crawl carries
+                # Search Console metrics and, if not, why not.
+                "gsc": gsc.status,
             },
         )
 
@@ -476,6 +534,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             pages=pages,
             navigation=navigation,
             nav_coverage=nav_coverage,
+            gsc=gsc,
         )
 
     def _apply_navigation(
@@ -504,21 +563,42 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         self,
         pages: tuple[FullPageIntelligenceProfile, ...],
         payload: PageClassificationInput,
-    ) -> tuple[FullPageIntelligenceProfile, ...]:
+    ) -> tuple[tuple[FullPageIntelligenceProfile, ...], GscEnrichmentReport]:
         """Optionally enrich pages with GSC metrics (Phase 6).
 
         If gsc_property_url is provided, fetch metrics and aggregate to pages.
         On error, log warning and return pages unchanged (graceful degradation).
+
+        Returns the outcome alongside the pages rather than only logging it.
+        Every path here leaves the crawl succeeding — which is the correct
+        behaviour and stays — so the outcome is the *only* thing distinguishing
+        a crawl whose metrics failed to arrive from one that never wanted them.
+        It is returned rather than stored on the tool because a tool instance
+        outlives a job and per-job state on it would leak between crawls.
 
         Args:
             pages: Classified pages.
             payload: Crawl parameters including optional gsc_property_url.
 
         Returns:
-            Pages with gsc_* fields populated, or unchanged if no property URL.
+            Pages with gsc_* fields populated — or unchanged on any failure —
+            and the report describing which of those happened.
         """
+        crawled = len(pages)
         if not payload.gsc_property_url:
-            return pages
+            # Logged, where it previously was not. An operator who picked an
+            # account and left the property URL blank got silence from both the
+            # result and the log, and no way to tell this from a crawl that
+            # asked for no enrichment at all.
+            _logger.info(
+                "gsc_enrichment_not_requested",
+                extra={"account": payload.gsc_account, "base_url": payload.base_url},
+            )
+            return pages, GscEnrichmentReport(
+                status="not_requested",
+                pages_crawled=crawled,
+                account=payload.gsc_account,
+            )
 
         # A rolling year, not a fixed one. The window was hardcoded to calendar
         # 2026, which would have returned nothing at all from 2027 onwards.
@@ -545,7 +625,15 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                     "gsc_validation_failed",
                     extra={"error": result.validation_error},
                 )
-                return pages
+                # The validator composes this string itself, from the two URLs
+                # it was given. Safe to render; it never sees a credential.
+                return pages, GscEnrichmentReport(
+                    status="property_mismatch",
+                    pages_crawled=crawled,
+                    account=payload.gsc_account,
+                    property_url=payload.gsc_property_url,
+                    reason=result.validation_error,
+                )
 
             # Map enriched pages back (maintaining order and unmatched pages)
             enriched_by_url = {p.page.url: p for p in result.matched_pages}
@@ -567,16 +655,24 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 else:
                     enriched_pages.append(page)
 
+            matched = len([p for p in enriched_pages if p.gsc_clicks is not None])
             _logger.info(
                 "gsc_enrichment_complete",
                 extra={
                     "account": payload.gsc_account,
-                    "matched": len([p for p in enriched_pages if p.gsc_clicks is not None]),
+                    "matched": matched,
                     "unmatched_gsc": len(result.unmatched_gsc_urls),
                 },
             )
 
-            return tuple(enriched_pages)
+            return tuple(enriched_pages), GscEnrichmentReport(
+                status="succeeded",
+                pages_matched=matched,
+                pages_crawled=crawled,
+                unmatched_gsc_urls=len(result.unmatched_gsc_urls),
+                account=payload.gsc_account,
+                property_url=payload.gsc_property_url,
+            )
 
         except Exception as exc:  # noqa: BLE001 - GSC failure must not fail the crawl
             _logger.warning(
@@ -586,7 +682,15 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 # text can quote the request that carried the refresh token.
                 extra={"account": payload.gsc_account, "error": type(exc).__name__},
             )
-            return pages
+            return pages, GscEnrichmentReport(
+                status="failed",
+                pages_crawled=crawled,
+                account=payload.gsc_account,
+                property_url=payload.gsc_property_url,
+                # The class name only, for the same reason the log line carries
+                # nothing more. This string reaches a browser.
+                reason=type(exc).__name__,
+            )
 
     def _enrich_with_navigation_context(
         self,

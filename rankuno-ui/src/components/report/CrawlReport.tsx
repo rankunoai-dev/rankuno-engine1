@@ -1,5 +1,6 @@
 import type { PageClassificationOutput } from "../../types/schema";
 import { OTHERS_LANE, LEVEL_BADGE, type DashModel } from "../../lib/dashboardModel";
+import { gscWarningFor } from "../../lib/gscEnrichment";
 import { GscPerformanceSection } from "../gsc/GscPerformanceSection";
 import "./report.css";
 
@@ -85,6 +86,9 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
   // an apology for a broken report rather than a statement of scope.
   const deeper = model.nodes.length - sections;
   const truncated = sections - rows.length;
+  // Empty unless enrichment has something to explain, and empty for any result
+  // stored before the engine recorded an outcome at all.
+  const gscWarning = gscWarningFor(result);
 
   return (
     <div className="rk-report" aria-hidden="true">
@@ -126,6 +130,10 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
           string patterns alone.
         </p>
       )}
+      {/* Why the Search Console figures below are blank. Enrichment degrades
+          silently by design, so without this the reader cannot tell a crawl
+          whose metrics failed to arrive from one that never asked for any. */}
+      {gscWarning && <p className="rep-warn">{gscWarning}</p>}
 
       <table className="rep-kpi">
         <tbody>
