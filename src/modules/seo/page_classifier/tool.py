@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, ClassVar, Protocol, runtime_checkable
 
 from pydantic import Field
@@ -519,12 +520,16 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         if not payload.gsc_property_url:
             return pages
 
+        # A rolling year, not a fixed one. The window was hardcoded to calendar
+        # 2026, which would have returned nothing at all from 2027 onwards.
+        today = datetime.now(UTC).date()
+
         try:
             client = GscApiClient(account=payload.gsc_account, org_id=self._org_id)
             response = client.fetch_analytics(
                 property_url=payload.gsc_property_url,
-                start_date="2026-01-01",
-                end_date="2026-12-31",
+                start_date=(today - timedelta(days=365)).isoformat(),
+                end_date=today.isoformat(),
             )
 
             aggregator = GscMetricsAggregator()
