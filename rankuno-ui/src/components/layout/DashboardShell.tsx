@@ -16,6 +16,8 @@ import { AuditView } from "../audit/AuditView";
 import { CrawlJobsView } from "../jobs/CrawlJobsView";
 import { CrawlNotifier } from "../jobs/CrawlNotifier";
 import { GscAccountsView } from "../gsc/GscAccountsView";
+import { LaunchView } from "../screaming-frog/LaunchView";
+import { ScreamingFrogView } from "../screaming-frog/ScreamingFrogView";
 import { HeaderBar } from "./HeaderBar";
 import { LiveCrawlModal } from "./LiveCrawlModal";
 import { NavigationRail } from "./NavigationRail";
@@ -42,6 +44,13 @@ export function DashboardShell(): JSX.Element {
   const status = useCrawlStore((state) => state.status);
   const error = useCrawlStore((state) => state.error);
   const view = useUiStore((state) => state.view);
+  const setView = useUiStore((state) => state.setView);
+  // Fixture mode implements neither. Both launch cards say so rather than
+  // hiding, so "the engine is not running" is readable from the first screen.
+  const canStartEngineCrawl = useCrawlStore((state) => state.adapter?.startJob !== undefined);
+  const canDispatchScreamingFrog = useCrawlStore(
+    (state) => state.adapter?.previewDispatch !== undefined,
+  );
   // `null` only in offline/fixture mode, which never logged in — `GscAccountsView`
   // itself falls back to `"default"` for that case, the same org its own
   // component-local prop default already named before this store existed.
@@ -117,6 +126,27 @@ export function DashboardShell(): JSX.Element {
             />
           )}
 
+          {/* The opening screen. Boundaried like the others: it reads the
+              adapter's capabilities, and a shell that blanks entirely would
+              leave no way back to any other view. */}
+          {view === "launch" && (
+            <ErrorBoundary label="The launch screen">
+              <LaunchView
+                onEngineCrawl={() => setCrawlOpen(true)}
+                onScreamingFrog={() => setView("screaming-frog")}
+                canStartEngineCrawl={canStartEngineCrawl}
+                canDispatchScreamingFrog={canDispatchScreamingFrog}
+              />
+            </ErrorBoundary>
+          )}
+          {/* A different job system from `CrawlJobsView` below — its own view
+              rather than a tab inside that one, so the two are never read as
+              rows of the same table. */}
+          {view === "screaming-frog" && (
+            <ErrorBoundary label="The Screaming Frog launcher">
+              <ScreamingFrogView />
+            </ErrorBoundary>
+          )}
           {/* Everything below describes the *loaded result*, so it belongs to
               the visualizer. The error banner above stays on both, because a
               rejected submission has no job row to be reported against. */}

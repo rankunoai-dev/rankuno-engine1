@@ -1,0 +1,381 @@
+/*
+ * Launch screen and Screaming Frog dispatch.
+ *
+ * Every value here is a design-system token. The two crawlers are deliberately
+ * given the *same* visual weight on the launch screen — neither is the
+ * fallback — while the Screaming Frog view keeps its own accent on anything
+ * that belongs to the operator's own machine rather than the server, because
+ * the one thing a reader must not do is mistake a dispatch for an engine crawl.
+ */
+
+.sfl-wrap {
+  padding: 24px;
+  overflow: auto;
+  height: 100%;
+  max-width: 1040px;
+}
+
+.sfl-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.sfl-sub {
+  margin: 0 0 20px;
+  font-size: 12.5px;
+  color: var(--dim);
+  max-width: 68ch;
+}
+
+/* Two equal columns that become one on a narrow window. `auto-fit` rather
+   than a media query: the cards collapse at whatever width they stop fitting,
+   including inside a split pane the viewport knows nothing about. */
+.sfl-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.sfl-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.sfl-card:hover {
+  border-color: var(--line2);
+  box-shadow: 0 1px 6px var(--color-shadow);
+}
+
+/* Keyboard parity with the hover state above: the card lifts when the control
+   inside it is focused, so a keyboard user sees the same grouping a mouse user
+   gets. `:focus-within`, not `:focus` — the card itself is not focusable. */
+.sfl-card:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 1px 6px var(--color-shadow);
+}
+
+.sfl-card h3 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.sfl-where {
+  align-self: flex-start;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--dim);
+  background: var(--overlay-bg);
+  border: 1px solid var(--overlay-line);
+  border-radius: var(--radius-pill);
+  padding: 1px 8px;
+}
+
+.sfl-card p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--dim);
+}
+
+.sfl-points {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+
+.sfl-actions {
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.sfl-foot {
+  margin: 20px 0 0;
+  font-size: 11.5px;
+  color: var(--faint);
+  max-width: 68ch;
+}
+
+/* ---- Screaming Frog dispatch view ---- */
+
+.sfd-wrap {
+  padding: 18px 20px 24px;
+  overflow: auto;
+  height: 100%;
+}
+
+.sfd-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.sfd-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.sfd-sub {
+  margin: 0 0 16px;
+  font-size: 12px;
+  color: var(--dim);
+  max-width: 78ch;
+  line-height: 1.55;
+}
+
+.sfd-card {
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  margin-bottom: 18px;
+  max-width: 720px;
+}
+
+.sfd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 14px;
+}
+
+.sfd-field > label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.sfd-hint {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.sfd-invalid {
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.sfd-launch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* The reason a disabled control is disabled, rendered as text rather than
+   hidden in a tooltip: a disabled button does not receive hover on touch, and
+   a blocked launch that explains nothing is the state operators report. */
+.sfd-blocked {
+  font-size: 11.5px;
+  color: var(--warn);
+}
+
+.sfd-explain {
+  max-width: 78ch;
+}
+
+.sfd-explain h3 {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.sfd-explain p {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+
+.sfd-code {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--overlay-bg);
+  border: 1px solid var(--overlay-line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin: 0 0 10px;
+}
+
+/* Inline code inside the prose only. Scoped through `p` on purpose: a bare
+   `.sfd-explain code` would be (0,1,1) and would out-specify `.sfd-code` at
+   (0,1,0), repainting the block snippet with the inline treatment — the exact
+   specificity accident this file's neighbours have been bitten by before. The
+   block is a direct child of the card, never inside a paragraph. */
+.sfd-explain p code,
+.sfc-normalized code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--overlay-bg);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  word-break: break-all;
+}
+
+/* ---- Dispatched jobs ---- */
+
+.sfj-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.sfj-head h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.sfj-note {
+  font-size: 11.5px;
+  color: var(--dim);
+  margin-right: auto;
+}
+
+.sfj-target {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sfj-url {
+  font-size: 12.5px;
+  font-weight: 600;
+  word-break: break-all;
+  color: var(--ink);
+}
+
+.sfj-sub {
+  font-size: 10.5px;
+  color: var(--dim);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.sfj-status {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+
+.sfj-detail {
+  font-size: 10.5px;
+  color: var(--dim);
+  line-height: 1.45;
+}
+
+.sfj-clock {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.sfj-error {
+  font-size: 11.5px;
+  color: var(--danger);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.sfj-noretry {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--warn);
+}
+
+.sfj-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ---- Confirmation dialog ---- */
+
+.sfc-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 0 0 12px;
+  font-size: 12.5px;
+}
+
+.sfc-rows dt {
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.sfc-rows dd {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.sfc-none {
+  font-family: var(--sans);
+  color: var(--dim);
+  font-style: italic;
+}
+
+.sfc-countdown {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.sfc-countdown strong {
+  font-family: var(--mono);
+  color: var(--ink);
+}
+
+.sfc-normalized {
+  font-size: 11.5px;
+  color: var(--dim);
+  line-height: 1.5;
+  margin: 0 0 12px;
+}
+
+@media (max-width: 860px) {
+  .sfl-wrap,
+  .sfd-wrap {
+    padding: 16px;
+  }
+
+  .sfc-rows {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .sfc-rows dd {
+    margin-bottom: 8px;
+  }
+}

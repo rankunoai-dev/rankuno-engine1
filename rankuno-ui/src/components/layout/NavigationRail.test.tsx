@@ -39,8 +39,12 @@ describe("NavigationRail", () => {
   it("renders all navigation buttons", () => {
     render(<NavigationRail />);
 
+    expect(screen.getByRole("button", { name: /launch/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /visualizer/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /crawl jobs/i })).toBeInTheDocument();
+    // Its own destination. Screaming Frog dispatches are a separate job system
+    // from `Crawl jobs`, and the rail is where that separation is first seen.
+    expect(screen.getByRole("button", { name: /screaming frog/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /audit/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /gsc accounts/i })).toBeInTheDocument();
   });

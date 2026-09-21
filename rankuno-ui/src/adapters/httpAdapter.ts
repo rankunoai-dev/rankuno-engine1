@@ -6,12 +6,19 @@ import type {
 import type {
   CrawlDataAdapter,
   CrawlJobSummary,
+  DispatchConfirmRequest,
+  DispatchPreview,
+  DispatchPreviewRequest,
   PerformanceSummary,
   ReconciliationSummary,
   SavedPerformance,
   SavedReconciliation,
   JobProgress,
   JobStatus,
+  WorkerJobAccepted,
+  WorkerJobView,
+  WorkerListView,
+  WorkerTemplatesView,
 } from "./adapterInterface";
 
 /** Mirrors `JobRecord` in `src/core/state_store.py`. */
@@ -28,6 +35,11 @@ interface JobRecord {
   has_result: boolean;
   has_checkpoint: boolean;
   telemetry: JobTelemetry;
+}
+
+/** Mirrors `WorkerJobListView` — the envelope around `GET /workers/jobs`. */
+interface WorkerJobListView {
+  jobs: WorkerJobView[];
 }
 
 export const DEFAULT_API_BASE = "http://127.0.0.1:8000/api/v1";
@@ -259,6 +271,110 @@ export class HttpAdapter implements CrawlDataAdapter {
         body: export_,
       },
     );
+  }
+
+  /*
+   * -------------------------------------------------------------------------
+   * Worker dispatch (ADR 0015). A *different* job system from `/jobs` above:
+   * these ids address `/workers/jobs`, and passing one to `getProgress` would
+   * 404. Kept adjacent to `reconcileScreamingFrog` because both concern
+   * Screaming Frog, and deliberately not merged with it — that route reads a
+   * CSV an operator exported by hand, these ones run the crawler.
+   * -------------------------------------------------------------------------
+   */
+
+  /** Registered desktop workers for this org, with the server's liveness verdict. */
+  async listWorkers(): Promise<WorkerListView> {
+    return this.request<WorkerListView>("/workers");
+  }
+
+  /**
+   * What one worker reported it holds locally.
+   *
+   * Not `/screaming-frog/templates`: that lists the *API host's* own directory,
+   * which on a container has no `.seospiderconfig` files in it and is the wrong
+   * machine besides.
+   */
+  async getWorkerTemplates(workerId: string): Promise<WorkerTemplatesView> {
+    return this.request<WorkerTemplatesView>(
+      `/workers/${encodeURIComponent(workerId)}/templates`,
+    );
+  }
+
+  /**
+   * Mint the approval token. Nothing runs yet.
+   *
+   * The response carries the server's normalized `seed_url`; `confirmDispatch`
+   * must send that value back, not the one the operator typed, or the token is
+   * refused with a `403`.
+   */
+  async previewDispatch(
+    workerId: string,
+    request: DispatchPreviewRequest,
+  ): Promise<DispatchPreview> {
+    return this.request<DispatchPreview>(
+      `/workers/${encodeURIComponent(workerId)}/dispatch/preview`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      },
+    );
+  }
+
+  /** Spend the token and queue the job. `409` when the machine is offline. */
+  async confirmDispatch(
+    workerId: string,
+    request: DispatchConfirmRequest,
+  ): Promise<WorkerJobAccepted> {
+    return this.request<WorkerJobAccepted>(
+      `/workers/${encodeURIComponent(workerId)}/dispatch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      },
+    );
+  }
+
+  /**
+   * Every Screaming Frog dispatch for this org, newest last as the store
+   * returns them.
+   *
+   * Worth polling rather than caching: this call is also what sweeps jobs
+   * abandoned by a daemon that died, so a dashboard that never makes it shows
+   * a dead job as "running" forever.
+   */
+  async listWorkerJobs(): Promise<WorkerJobView[]> {
+    const view = await this.request<WorkerJobListView>("/workers/jobs");
+    return view.jobs;
+  }
+
+  /**
+   * A finished job's bundle, as a zip.
+   *
+   * Bypasses `request` because the body is binary, not JSON. The failure
+   * statuses are worth naming: `404` is "never uploaded, or past its retention
+   * window", `500` names `WORKER_BUNDLE_ENCRYPTION_SECRET`, and neither ever
+   * returns a partial or ciphertext body — so anything that resolves here is a
+   * whole, decrypted archive.
+   */
+  async downloadWorkerBundle(jobId: string): Promise<Blob> {
+    const url = `${this.baseUrl}/workers/jobs/${encodeURIComponent(jobId)}/bundle`;
+    let response: Response;
+    try {
+      response = await authorizedFetch(url);
+    } catch (cause) {
+      throw new ApiError(
+        0,
+        `Cannot reach the engine at ${this.baseUrl}. Is the API server running?`,
+        { cause },
+      );
+    }
+    if (!response.ok) {
+      throw new ApiError(response.status, await describeFailure(response));
+    }
+    return response.blob();
   }
 
   /**

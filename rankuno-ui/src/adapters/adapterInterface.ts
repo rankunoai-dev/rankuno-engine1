@@ -268,6 +268,137 @@ export interface SavedPerformance {
   created_at: string;
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * Worker dispatch (ADR 0015) — Screaming Frog on the operator's own machine.
+ *
+ * Hand-written for the same reason as `ReconciliationSummary` above: these
+ * shapes live in `src/api/worker_schemas.py`, and `export_ui_contract.py` reads
+ * the crawl contract only. Field names match the wire exactly, so there is no
+ * transformation layer to get wrong.
+ *
+ * These are a *different job system* from `CrawlJobSummary` above. Engine
+ * crawls are `/jobs` and carry a `JobStatus`; these are `/workers/jobs` and
+ * carry a `WorkerJobStatus`. The ids are not interchangeable and neither are
+ * the endpoints.
+ * ---------------------------------------------------------------------------
+ */
+
+/** One registered desktop worker. Mirrors `WorkerSummary`. */
+export interface WorkerSummary {
+  worker_id: string;
+  org_id: string;
+  display_name: string;
+  is_active: boolean;
+  created_at: string;
+  /**
+   * When this machine last polled or checked in. `null` means never.
+   *
+   * The raw fact. `is_online` is the server's verdict on it — never re-derive
+   * that here, or the dashboard becomes a second staleness rule that nothing
+   * tests and that disagrees with the one the dispatch route enforces.
+   */
+  last_seen_at: string | null;
+  is_online: boolean;
+  /** What the machine reported it holds. Empty until its daemon checks in. */
+  template_names: string[];
+}
+
+/** Mirrors `WorkerListView`. */
+export interface WorkerListView {
+  workers: WorkerSummary[];
+  /**
+   * The threshold behind `is_online`, in seconds, so the UI can explain the
+   * verdict ("last seen 4 min ago, offline after 60s") rather than restate it.
+   */
+  offline_after_s: number;
+}
+
+/** Mirrors `WorkerTemplatesView`. */
+export interface WorkerTemplatesView {
+  worker_id: string;
+  templates: string[];
+  /**
+   * When the worker last told the cloud anything at all.
+   *
+   * `null` means it never has — which is why `templates` may be empty for a
+   * machine that in fact holds several. Absence of a report is not a report of
+   * absence, and the picker must say which one it is looking at.
+   */
+  reported_at: string | null;
+}
+
+/** What `POST /workers/{id}/dispatch/preview` accepts. */
+export interface DispatchPreviewRequest {
+  seed_url: string;
+  template_name: string | null;
+  correlation_id: string;
+}
+
+/**
+ * A confirmation-ready preview. Mirrors `DispatchPreviewResponse`.
+ *
+ * Nothing has run yet. `seed_url` is the server's *normalized* URL, and the
+ * confirm must echo it back byte for byte or the token is refused.
+ */
+export interface DispatchPreview {
+  token: string;
+  expires_at: string;
+  worker_id: string;
+  seed_url: string;
+  template_name: string | null;
+  correlation_id: string;
+  /** False here means the confirm will 409 — warn before the operator commits. */
+  worker_online: boolean;
+  worker_last_seen_at: string | null;
+}
+
+/** What `POST /workers/{id}/dispatch` accepts. The token is the approval. */
+export interface DispatchConfirmRequest extends DispatchPreviewRequest {
+  token: string;
+}
+
+/** Mirrors `WorkerJobAccepted`. An id to poll, not a result. */
+export interface WorkerJobAccepted {
+  id: string;
+  status: string;
+}
+
+/** Mirrors `WorkerJobEnvelope` — the whole payload a worker is given. */
+export interface WorkerJobEnvelope {
+  job_id: string;
+  seed_url: string;
+  template_name: string | null;
+  correlation_id: string;
+}
+
+/**
+ * One dispatch job's cloud-tracked state. Mirrors `WorkerJobView`.
+ *
+ * `status` is a bare `string`, not a union of the five `WorkerJobStatus`
+ * members. A closed union here would compile against today's server and then
+ * have the UI fall through every branch — silently rendering nothing — the
+ * first time a member is added. Callers map it with an explicit fallback.
+ *
+ * The four optional fields are optional on the wire too, and records written
+ * before `bundle_size_bytes` existed carry none of them. Absence must read as
+ * "not recorded", never as zero.
+ */
+export interface WorkerJobView {
+  id: string;
+  org_id: string;
+  worker_id: string;
+  kind: string;
+  envelope: WorkerJobEnvelope;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  dispatched_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+  bundle_size_bytes?: number | null;
+}
+
 /**
  * How the UI reaches crawl data.
  *
@@ -343,7 +474,69 @@ export interface CrawlDataAdapter {
    * the modal shows no picker and the default credentials apply.
    */
   listGscAccounts?(): Promise<string[]>;
+
+  /**
+   * Desktop workers registered to the caller's org, with the server's own
+   * liveness verdict.
+   *
+   * Optional for the same reason as `startJob`: fixtures have no org, no
+   * session token and no worker fleet. When it is absent the Screaming Frog
+   * launcher says so rather than rendering an empty machine picker, which
+   * would read as "you have no PCs" instead of "this mode cannot ask".
+   */
+  listWorkers?(): Promise<WorkerListView>;
+
+  /** What one worker reported it holds locally, and when it last reported. */
+  getWorkerTemplates?(workerId: string): Promise<WorkerTemplatesView>;
+
+  /**
+   * Validate a dispatch and mint the single-use approval token.
+   *
+   * Runs nothing (ADR 0013: starting an external binary is MANDATORY_HITL and
+   * the token is the only evidence of approval that exists). The returned
+   * `seed_url` is normalized and must be echoed back unchanged.
+   */
+  previewDispatch?(
+    workerId: string,
+    request: DispatchPreviewRequest,
+  ): Promise<DispatchPreview>;
+
+  /** Spend a preview token and queue the job. Not idempotent: a token is used once. */
+  confirmDispatch?(
+    workerId: string,
+    request: DispatchConfirmRequest,
+  ): Promise<WorkerJobAccepted>;
+
+  /** Every Screaming Frog dispatch for the caller's org. Not `/jobs`. */
+  listWorkerJobs?(): Promise<WorkerJobView[]>;
+
+  /**
+   * A finished job's crawl bundle, as a zip.
+   *
+   * A `Blob` rather than a URL because the route is bearer-guarded: an
+   * `<a href>` the browser follows carries no `Authorization` header and would
+   * 401 every time.
+   */
+  downloadWorkerBundle?(jobId: string): Promise<Blob>;
 }
+
+/**
+ * The worker-dispatch slice of the adapter.
+ *
+ * Every member is optional on `CrawlDataAdapter` and stays optional here, so a
+ * component holding one of these still has to ask before calling — which is the
+ * whole point: fixture mode implements two of the six, and "the control is
+ * absent" is a different, better outcome than "the control fails on click".
+ */
+export type WorkerDispatchAdapter = Pick<
+  CrawlDataAdapter,
+  | "listWorkers"
+  | "getWorkerTemplates"
+  | "previewDispatch"
+  | "confirmDispatch"
+  | "listWorkerJobs"
+  | "downloadWorkerBundle"
+>;
 
 /**
  * How hard to push the target server.

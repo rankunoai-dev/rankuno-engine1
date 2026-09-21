@@ -26,6 +26,23 @@ export function NavigationRail(): JSX.Element {
     <nav className="rail" aria-label="Primary">
       <div className="mark">R</div>
 
+      {/* First, and the opening view: a session starts with nothing loaded,
+          and this is the screen that says which of the two crawlers you are
+          about to use. */}
+      <button
+        className={`rit${view === "launch" ? " on" : ""}`}
+        type="button"
+        onClick={() => setView("launch")}
+        {...(view === "launch" ? { "aria-current": "page" as const } : {})}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 2.5c3.5 2.2 5.5 6 5.5 10l-2 3h-7l-2-3c0-4 2-7.8 5.5-10z" />
+          <circle cx="12" cy="9.5" r="2" />
+          <path d="M9 19c0 1.4.9 2.5 3 2.5s3-1.1 3-2.5" />
+        </svg>
+        Launch
+      </button>
+
       <button
         className={`rit${view === "visualizer" ? " on" : ""}`}
         type="button"
@@ -59,6 +76,24 @@ export function NavigationRail(): JSX.Element {
             {running}
           </span>
         )}
+      </button>
+
+      {/* Its own destination, not a tab inside "Crawl jobs". These are a
+          separate job system — different ids, different statuses, different
+          endpoints — and one table holding both would invite reading a
+          Screaming Frog dispatch as an engine crawl. */}
+      <button
+        className={`rit${view === "screaming-frog" ? " on" : ""}`}
+        type="button"
+        onClick={() => setView("screaming-frog")}
+        {...(view === "screaming-frog" ? { "aria-current": "page" as const } : {})}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="2.5" y="4" width="19" height="12" rx="1.5" />
+          <path d="M8 20h8M12 16v4" />
+          <path d="M7.5 10.5l2.5-2.5 2 2 2.5-3 2 2.5" />
+        </svg>
+        Screaming Frog
       </button>
 
       <button className="rit" type="button" disabled title="Not implemented yet">

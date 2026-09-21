@@ -9,6 +9,11 @@
  */
 
 import type {
+  DispatchPreview,
+  WorkerJobView,
+  WorkerSummary,
+} from "../adapters/adapterInterface";
+import type {
   DiscoveryReport,
   FullPageIntelligenceProfile,
   PageClassificationOutput,
@@ -143,5 +148,77 @@ export function crawl(
     gsc: null,
     ...overrides,
     pages,
+  };
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Worker dispatch (ADR 0015).
+ *
+ * Hand-written like the types they build, for the same reason: these shapes
+ * come from `src/api/worker_schemas.py`, which the contract exporter does not
+ * read. Every default below is the *unhelpful* one — a machine that has never
+ * checked in, a job with no bundle — because a fixture healthier than
+ * production tests nothing. A test that wants a good state says so.
+ * ---------------------------------------------------------------------------
+ */
+
+/** One registered desktop worker. Offline and silent unless told otherwise. */
+export function worker(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
+  return {
+    worker_id: "wkr-aaaa",
+    org_id: "acme",
+    display_name: "Studio desktop",
+    is_active: true,
+    created_at: "2026-09-01T09:00:00Z",
+    last_seen_at: null,
+    is_online: false,
+    template_names: [],
+    ...overrides,
+  };
+}
+
+/** A minted approval. Expires two minutes out, as the server's TTL does. */
+export function dispatchPreview(
+  overrides: Partial<DispatchPreview> = {},
+): DispatchPreview {
+  return {
+    token: "tok-1",
+    expires_at: new Date(Date.now() + 120_000).toISOString(),
+    worker_id: "wkr-aaaa",
+    seed_url: "https://www.example.com/",
+    template_name: null,
+    correlation_id: "ui-test-1",
+    worker_online: true,
+    worker_last_seen_at: "2026-09-21T10:00:00Z",
+    ...overrides,
+  };
+}
+
+/**
+ * One dispatch job.
+ *
+ * Carries only the required fields by default. Records written before
+ * `bundle_size_bytes`, `dispatched_at`, `finished_at` and `error` existed have
+ * exactly this shape, and they must render.
+ */
+export function workerJob(overrides: Partial<WorkerJobView> = {}): WorkerJobView {
+  const seed = overrides.envelope?.seed_url ?? "https://www.example.com/";
+  return {
+    id: "wj-1",
+    org_id: "acme",
+    worker_id: "wkr-aaaa",
+    kind: "screaming_frog_crawl",
+    status: "queued",
+    created_at: "2026-09-21T10:00:00Z",
+    updated_at: "2026-09-21T10:00:00Z",
+    ...overrides,
+    envelope: {
+      job_id: overrides.id ?? "wj-1",
+      seed_url: seed,
+      template_name: null,
+      correlation_id: "ui-test-1",
+      ...overrides.envelope,
+    },
   };
 }

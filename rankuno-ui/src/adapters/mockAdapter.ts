@@ -3,6 +3,8 @@ import type {
   CrawlDataAdapter,
   CrawlJobSummary,
   JobProgress,
+  WorkerJobView,
+  WorkerListView,
 } from "./adapterInterface";
 
 /**
@@ -103,6 +105,30 @@ export class MockAdapter implements CrawlDataAdapter {
 
   async getResult(jobId: string): Promise<PageClassificationOutput> {
     return this.load(jobId);
+  }
+
+  /**
+   * No worker fleet, and no pretence of one.
+   *
+   * Fixture mode runs with no engine reachable, so there is no org to scope a
+   * fleet to and nothing that could answer `GET /workers`. An empty list is the
+   * truthful answer — the launcher renders its "no machine registered yet"
+   * explanation instead of an empty dropdown.
+   *
+   * `previewDispatch`, `confirmDispatch` and `downloadWorkerBundle` are
+   * deliberately *absent* rather than implemented as stubs: a preview token is
+   * the only evidence of approval ADR 0013 accepts, and a fixture that minted
+   * one would be manufacturing approval for a run that cannot happen. Their
+   * absence is what makes the launcher disable the control with a reason,
+   * instead of offering a button that fails on click.
+   */
+  async listWorkers(): Promise<WorkerListView> {
+    return { workers: [], offline_after_s: 60 };
+  }
+
+  /** No dispatch can have happened in a mode that cannot dispatch. */
+  async listWorkerJobs(): Promise<WorkerJobView[]> {
+    return [];
   }
 
   async getProgress(jobId: string): Promise<JobProgress> {
