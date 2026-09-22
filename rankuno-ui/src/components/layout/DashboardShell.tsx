@@ -44,7 +44,7 @@ export function DashboardShell(): JSX.Element {
   const status = useCrawlStore((state) => state.status);
   const error = useCrawlStore((state) => state.error);
   const view = useUiStore((state) => state.view);
-  const setView = useUiStore((state) => state.setView);
+  const enterMode = useUiStore((state) => state.enterMode);
   // Fixture mode implements neither. Both launch cards say so rather than
   // hiding, so "the engine is not running" is readable from the first screen.
   const canStartEngineCrawl = useCrawlStore((state) => state.adapter?.startJob !== undefined);
@@ -131,9 +131,15 @@ export function DashboardShell(): JSX.Element {
               leave no way back to any other view. */}
           {view === "launch" && (
             <ErrorBoundary label="The launch screen">
+              {/* Each card enters its product. The engine card also lands on
+                  the engine view last open, so the crawl form closes onto the
+                  engine rather than back onto Launch. */}
               <LaunchView
-                onEngineCrawl={() => setCrawlOpen(true)}
-                onScreamingFrog={() => setView("screaming-frog")}
+                onEngineCrawl={() => {
+                  enterMode("engine");
+                  setCrawlOpen(true);
+                }}
+                onScreamingFrog={() => enterMode("screaming-frog")}
                 canStartEngineCrawl={canStartEngineCrawl}
                 canDispatchScreamingFrog={canDispatchScreamingFrog}
               />

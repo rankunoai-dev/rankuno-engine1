@@ -5,7 +5,7 @@ import { formatCrawlTime } from "../../lib/time";
 import { hostOf } from "../../lib/url";
 import type { LiveJob } from "../../store/useCrawlStore";
 import { isLive, newestLiveJob, useCrawlStore } from "../../store/useCrawlStore";
-import { useUiStore } from "../../store/useUiStore";
+import { selectMode, useUiStore } from "../../store/useUiStore";
 
 interface Props {
   /** True when a header menu was parsed, so navigation grouping is meaningful. */
@@ -32,12 +32,32 @@ export function HeaderBar({ navParsed, onNewCrawl, onPrint }: Props): JSX.Elemen
   const adapter = useCrawlStore((state) => state.adapter);
   const status = useCrawlStore((state) => state.status);
   const liveJobs = useCrawlStore((state) => state.liveJobs);
+  const mode = useUiStore(selectMode);
 
   // Computed in the render body rather than inside the selector: a selector
   // returning a fresh array would compare unequal on every store write and
   // re-render the header continuously during a crawl.
   const runningCount = Object.values(liveJobs).filter(isLive).length;
   const lead = newestLiveJob(liveJobs);
+
+  /*
+   * Screaming Frog mode drops every engine control. "No crawl loaded", the
+   * crawl picker, PDF and the grouping toggle all describe an engine result,
+   * and "New crawl" opens the *engine* crawl form — offered on the Screaming
+   * Frog page it would start the other product's crawl.
+   *
+   * The background pill stays. It is read-only progress for an engine crawl
+   * already running, and without it nothing on screen would say that crawl
+   * still exists until its completion toast.
+   */
+  if (mode === "screaming-frog") {
+    return (
+      <header className="hdr">
+        <h1>Screaming Frog</h1>
+        {lead && <BackgroundPill lead={lead} runningCount={runningCount} />}
+      </header>
+    );
+  }
 
   return (
     <header className="hdr">

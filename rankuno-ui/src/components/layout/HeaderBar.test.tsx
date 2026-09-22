@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { useUiStore } from "../../store/useUiStore";
 import { crawl, discovery, page } from "../../test/factories";
 import { HeaderBar } from "./HeaderBar";
 
@@ -40,6 +41,7 @@ function mount(result = crawl({ base_url: "https://www.gep.com/" })) {
 
 beforeEach(() => {
   useCrawlStore.setState({ result: null, jobs: [], activeJobId: null, liveJobs: {} });
+  useUiStore.setState({ view: "launch", lastMode: "engine", lastEngineView: "visualizer" });
 });
 
 describe("HeaderBar", () => {
@@ -106,6 +108,51 @@ describe("HeaderBar", () => {
     useCrawlStore.setState({ adapter: null });
     mount();
     expect(screen.queryByText("New crawl")).not.toBeInTheDocument();
+  });
+
+  it("drops every engine control in Screaming Frog mode", () => {
+    /* "New crawl" opens the *engine* crawl form; on the Screaming Frog page
+       it would start the other product's crawl. */
+    useCrawlStore.setState({
+      adapter: {
+        listJobs: vi.fn(),
+        getResult: vi.fn(),
+        getProgress: vi.fn(),
+        startJob: vi.fn(),
+      } as never,
+    });
+    useUiStore.setState({ view: "screaming-frog", lastMode: "screaming-frog" });
+    mount();
+
+    expect(screen.getByRole("heading")).toHaveTextContent("Screaming Frog");
+    expect(screen.queryByText("New crawl")).not.toBeInTheDocument();
+    expect(screen.queryByText("PDF")).not.toBeInTheDocument();
+    expect(screen.queryByText("Navigation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No crawl loaded/)).not.toBeInTheDocument();
+  });
+
+  it("still shows a running engine crawl in Screaming Frog mode", () => {
+    /* The Crawl jobs badge is off the rail in this mode; the pill is what
+       says the engine crawl is still going. */
+    useUiStore.setState({ view: "screaming-frog", lastMode: "screaming-frog" });
+    useCrawlStore.setState({
+      liveJobs: {
+        "job-9": {
+          id: "job-9",
+          label: "https://kinsta.com/",
+          status: "running",
+          message: "",
+          telemetry: null,
+          startedAt: 1,
+          endedAt: null,
+          error: null,
+        },
+      },
+    });
+    render(<HeaderBar navParsed onNewCrawl={NOOP} onPrint={NOOP} />);
+
+    expect(screen.getByText("kinsta.com")).toBeInTheDocument();
   });
 
   it("shows New crawl when the adapter can start one", () => {
