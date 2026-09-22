@@ -62,6 +62,7 @@ from src.core.worker_consumed_ledger import ConsumedJobLedger
 from src.core.worker_dispatch_schemas import DispatchAssignmentClaims, WorkerJobKind
 from src.core.worker_dispatch_signing import DispatchAssignmentError, verify_dispatch_assignment
 from src.integrations.worker_cloud_client import WorkerCloudClient
+from src.modules.seo.screaming_frog_control.progress_parser import make_progress_callback
 from src.modules.seo.screaming_frog_control.schemas import (
     ScreamingFrogJobInput,
     ScreamingFrogJobOutput,
@@ -346,6 +347,9 @@ def _run_screaming_frog_job(  # noqa: PLR0913 - every argument is load-bearing, 
         url_policy=url_policy,
         max_runtime_s=settings.screaming_frog_max_runtime_s,
         job_id=claims.job_id,
+        on_progress=make_progress_callback(client, claims.job_id),
+        progress_poll_interval_s=settings.screaming_frog_progress_poll_interval_s,
+        progress_min_report_interval_s=settings.worker_progress_min_report_interval_s,
     )
 
     result = tool.run(

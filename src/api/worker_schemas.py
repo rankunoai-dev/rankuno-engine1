@@ -20,6 +20,7 @@ from src.core.worker_dispatch_schemas import (
     SignedDispatchAssignment,
     WorkerJobEnvelope,
     WorkerJobKind,
+    WorkerJobPhase,
 )
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "WorkerJobListView",
     "WorkerJobView",
     "WorkerListView",
+    "WorkerProgressReport",
     "WorkerRegisterRequest",
     "WorkerRegisterResponse",
     "WorkerSummary",
@@ -197,7 +199,21 @@ class WorkerJobAccepted(StrictModel):
 
 
 class WorkerJobView(StrictModel):
-    """One dispatch job's cloud-tracked state."""
+    """One dispatch job's cloud-tracked state.
+
+    Attributes:
+        pages_crawled: The worker's most recently reported live page count.
+            `None` until a progress report has arrived — which may be never,
+            for a job whose worker predates this feature, or one still
+            waiting on its first `SCREAMING_FROG_PROGRESS_POLL_INTERVAL_S`
+            tick. A dashboard must render this field's absence as "no data
+            yet", not as zero pages.
+        progress_pct: The worker's most recently reported completion
+            estimate, taken verbatim from Screaming Frog's own number. Can
+            decrease between two reports (`WorkerJob.progress_pct`'s own
+            docstring) — not a bug to guard against client-side.
+        current_phase: The worker's most recently reported coarse phase.
+    """
 
     id: str
     org_id: str
@@ -211,6 +227,9 @@ class WorkerJobView(StrictModel):
     finished_at: datetime | None = None
     error: str | None = None
     bundle_size_bytes: int | None = None
+    pages_crawled: int | None = None
+    progress_pct: float | None = None
+    current_phase: WorkerJobPhase | None = None
 
 
 class WorkerJobListView(StrictModel):
@@ -233,3 +252,19 @@ class WorkerFailureReport(StrictModel):
     """What `POST /workers/jobs/{job_id}/failed` accepts."""
 
     error: str = Field(min_length=1, max_length=2000)
+
+
+class WorkerProgressReport(StrictModel):
+    """What `POST /workers/jobs/{job_id}/progress` accepts.
+
+    Every field optional and independently meaningful: a worker may report
+    partial knowledge (e.g. a phase transition alone, before the crawl's
+    first `SpiderProgress` line) and `extra="forbid"` still guards against a
+    stray or renamed field silently going nowhere (CLAUDE.md §1.2). This
+    endpoint never changes a job's lifecycle `status` — see
+    `WorkerDispatchStore.update_job_progress`'s own docstring.
+    """
+
+    pages_crawled: int | None = Field(default=None, ge=0)
+    progress_pct: float | None = Field(default=None, ge=0.0)
+    phase: WorkerJobPhase | None = None

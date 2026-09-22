@@ -29,7 +29,7 @@ import httpx
 from src.core.config import Settings
 from src.core.errors import WorkerCredentialRejectedError
 from src.core.logger import get_logger
-from src.core.worker_dispatch_schemas import SignedDispatchAssignment
+from src.core.worker_dispatch_schemas import SignedDispatchAssignment, WorkerJobPhase
 from src.integrations.base_client import BaseAPIClient
 
 __all__ = ["WorkerCloudClient"]
@@ -196,6 +196,41 @@ class WorkerCloudClient(BaseAPIClient):
             response.raise_for_status()
 
         self.call("report_failure", _do)
+
+    def report_progress(
+        self,
+        job_id: str,
+        *,
+        pages_crawled: int | None,
+        progress_pct: float | None,
+        phase: WorkerJobPhase | None,
+    ) -> None:
+        """Tell the cloud how a claimed job is progressing.
+
+        Unlike `report_failure`/`upload_bundle`, the caller
+        (`progress_parser.ProgressPollThread`) already treats every
+        exception this raises as disposable: a lost progress update is a
+        stale dashboard, not a failed crawl, so it is never retried and
+        never blocks the crawl it describes. This method still raises like
+        every other `BaseAPIClient` call rather than swallowing the failure
+        itself — deciding that a given failure is disposable is the
+        caller's call to make, not this client's.
+        """
+
+        def _do() -> None:
+            response = self._client.post(
+                f"/api/v1/workers/jobs/{job_id}/progress",
+                json={
+                    "pages_crawled": pages_crawled,
+                    "progress_pct": progress_pct,
+                    "phase": phase.value if phase is not None else None,
+                },
+                headers=self._auth_headers(),
+            )
+            _raise_for_credential(response, "report_progress")
+            response.raise_for_status()
+
+        self.call("report_progress", _do)
 
     def close(self) -> None:
         """Release the underlying HTTP connection pool."""

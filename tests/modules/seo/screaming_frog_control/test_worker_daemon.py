@@ -22,13 +22,17 @@ from src.core.errors import (
     IntegrationError,
     WorkerCredentialRejectedError,
 )
-from src.core.schemas import RiskClass, ToolMetadata
+from src.core.schemas import ExecutionStatus, RiskClass, ToolMetadata, ToolResult
 from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_consumed_ledger import ConsumedJobLedger
-from src.core.worker_dispatch_schemas import DispatchAssignmentClaims, WorkerJobKind
+from src.core.worker_dispatch_schemas import DispatchAssignmentClaims, WorkerJobKind, WorkerJobPhase
 from src.core.worker_dispatch_signing import issue_dispatch_assignment, verify_dispatch_assignment
 from src.modules.seo.screaming_frog_control import worker_daemon
-from src.modules.seo.screaming_frog_control.schemas import LicenceStatus, ScreamingFrogJobOutput
+from src.modules.seo.screaming_frog_control.schemas import (
+    LicenceStatus,
+    ScreamingFrogJobOutput,
+    ScreamingFrogProgressSnapshot,
+)
 from src.modules.seo.screaming_frog_control.template_registry import TemplateRegistry
 
 SECRET = SecretStr("unit-test-dispatch-signing-key")
@@ -96,6 +100,7 @@ class _FakeClient:
         self.failures: list[tuple[str, str]] = []
         self.uploads: list[tuple[str, bytes]] = []
         self.heartbeats: list[tuple[str, ...]] = []
+        self.progress_reports: list[tuple[str, dict[str, object]]] = []
 
     def heartbeat(self, template_names: tuple[str, ...]) -> None:
         self.heartbeats.append(template_names)
@@ -110,6 +115,13 @@ class _FakeClient:
 
     def upload_bundle(self, job_id: str, archive_bytes: bytes) -> None:
         self.uploads.append((job_id, archive_bytes))
+
+    def report_progress(
+        self, job_id: str, *, pages_crawled: object, progress_pct: object, phase: object
+    ) -> None:
+        self.progress_reports.append(
+            (job_id, {"pages_crawled": pages_crawled, "progress_pct": progress_pct, "phase": phase})
+        )
 
 
 # --- make_approval_callback: the dual gate's load-bearing half (condition 3(b)) -
@@ -340,6 +352,116 @@ def test_run_screaming_frog_job_rejects_an_unknown_template(tmp_path):
     )
     assert len(client.failures) == 1
     assert ledger.has_run("job-1") is True
+
+
+# --- on_progress wiring: the tool's callback reaches the cloud client ----------
+
+
+def test_run_screaming_frog_job_wires_on_progress_to_the_clients_report_progress(
+    tmp_path, monkeypatch
+):
+    """The tool's `on_progress` callback must reach the cloud client.
+
+    `_run_screaming_frog_job` must hand the tool a callback that ends up
+    calling `WorkerCloudClient.report_progress` for *this* job — not just
+    construct one and drop it. Asserted by capturing the real constructor
+    kwargs `ScreamingFrogControlTool` receives, then invoking the captured
+    `on_progress` exactly as `progress_parser.ProgressPollThread` would.
+    """
+    settings = _settings(tmp_path)
+    token = _issue_token(settings)
+    claims = verify_dispatch_assignment(
+        token,
+        secret=settings.dispatch_signing_secret,
+        worker_id="wkr-alice-desktop",
+        org_id="acme",
+    )
+    client = _FakeClient()
+    ledger = ConsumedJobLedger(settings.worker_consumed_jobs_path)
+    captured_kwargs: dict[str, object] = {}
+
+    class _FakeTool:
+        def __init__(self, **kwargs: object) -> None:
+            captured_kwargs.update(kwargs)
+
+        def run(self, _payload: object) -> ToolResult[ScreamingFrogJobOutput]:
+            output = ScreamingFrogJobOutput(
+                bundle_dir=tmp_path / "bundle", licence=LicenceStatus(active=True), elapsed_s=1.0
+            )
+            return ToolResult[ScreamingFrogJobOutput](
+                status=ExecutionStatus.SUCCESS, tool="seo.screaming_frog_control", data=output
+            )
+
+    monkeypatch.setattr(worker_daemon, "ScreamingFrogControlTool", _FakeTool)
+
+    worker_daemon._run_screaming_frog_job(
+        token,
+        claims,
+        worker_id="wkr-alice-desktop",
+        org_id="acme",
+        settings=settings,
+        client=client,
+        ledger=ledger,
+        templates=TemplateRegistry(settings.screaming_frog_template_dir),
+        url_policy=UrlSafetyPolicy(resolver=lambda h: ["93.184.216.34"]),
+    )
+
+    on_progress = captured_kwargs["on_progress"]
+    on_progress(  # type: ignore[operator]
+        ScreamingFrogProgressSnapshot(
+            pages_crawled=42, progress_pct=12.5, phase=WorkerJobPhase.CRAWLING
+        )
+    )
+
+    assert client.progress_reports == [
+        ("job-1", {"pages_crawled": 42, "progress_pct": 12.5, "phase": WorkerJobPhase.CRAWLING})
+    ]
+
+
+def test_run_screaming_frog_job_passes_progress_settings_through(tmp_path, monkeypatch):
+    settings = _settings(
+        tmp_path,
+        screaming_frog_progress_poll_interval_s=3.0,
+        worker_progress_min_report_interval_s=9.0,
+    )
+    token = _issue_token(settings)
+    claims = verify_dispatch_assignment(
+        token,
+        secret=settings.dispatch_signing_secret,
+        worker_id="wkr-alice-desktop",
+        org_id="acme",
+    )
+    ledger = ConsumedJobLedger(settings.worker_consumed_jobs_path)
+    captured_kwargs: dict[str, object] = {}
+
+    class _FakeTool:
+        def __init__(self, **kwargs: object) -> None:
+            captured_kwargs.update(kwargs)
+
+        def run(self, _payload: object) -> ToolResult[ScreamingFrogJobOutput]:
+            output = ScreamingFrogJobOutput(
+                bundle_dir=tmp_path / "bundle", licence=LicenceStatus(active=True), elapsed_s=1.0
+            )
+            return ToolResult[ScreamingFrogJobOutput](
+                status=ExecutionStatus.SUCCESS, tool="seo.screaming_frog_control", data=output
+            )
+
+    monkeypatch.setattr(worker_daemon, "ScreamingFrogControlTool", _FakeTool)
+
+    worker_daemon._run_screaming_frog_job(
+        token,
+        claims,
+        worker_id="wkr-alice-desktop",
+        org_id="acme",
+        settings=settings,
+        client=_FakeClient(),
+        ledger=ledger,
+        templates=TemplateRegistry(settings.screaming_frog_template_dir),
+        url_policy=UrlSafetyPolicy(resolver=lambda h: ["93.184.216.34"]),
+    )
+
+    assert captured_kwargs["progress_poll_interval_s"] == 3.0
+    assert captured_kwargs["progress_min_report_interval_s"] == 9.0
 
 
 # --- _upload_bundle: only allow-listed files, size-capped -----------------------

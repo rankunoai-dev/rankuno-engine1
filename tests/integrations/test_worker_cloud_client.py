@@ -18,7 +18,7 @@ from src.core.errors import (
     IntegrationError,
     WorkerCredentialRejectedError,
 )
-from src.core.worker_dispatch_schemas import SignedDispatchAssignment, WorkerJobKind
+from src.core.worker_dispatch_schemas import SignedDispatchAssignment, WorkerJobKind, WorkerJobPhase
 from src.core.worker_dispatch_signing import issue_dispatch_assignment
 from src.integrations.worker_cloud_client import WorkerCloudClient
 
@@ -147,6 +147,55 @@ def test_report_failure_posts_the_error_as_json(tmp_path):
     request = captured["request"]
     assert request.url.path == "/api/v1/workers/jobs/job-1/failed"
     assert json.loads(request.content) == {"error": "screaming frog crashed"}
+
+
+def test_report_progress_posts_the_snapshot_fields_as_json(tmp_path):
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, json={"id": "job-1", "status": "dispatched"})
+
+    settings = _settings(tmp_path)
+    client = WorkerCloudClient(settings, transport=httpx.MockTransport(handler))
+    client.report_progress(
+        "job-1", pages_crawled=3718, progress_pct=40.43, phase=WorkerJobPhase.CRAWLING
+    )
+
+    request = captured["request"]
+    assert request.url.path == "/api/v1/workers/jobs/job-1/progress"
+    assert json.loads(request.content) == {
+        "pages_crawled": 3718,
+        "progress_pct": 40.43,
+        "phase": "crawling",
+    }
+
+
+def test_report_progress_sends_null_for_every_absent_field(tmp_path):
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, json={"id": "job-1", "status": "dispatched"})
+
+    settings = _settings(tmp_path)
+    client = WorkerCloudClient(settings, transport=httpx.MockTransport(handler))
+    client.report_progress("job-1", pages_crawled=None, progress_pct=None, phase=None)
+
+    assert json.loads(captured["request"].content) == {
+        "pages_crawled": None,
+        "progress_pct": None,
+        "phase": None,
+    }
+
+
+def test_report_progress_raises_integration_error_on_a_server_failure(tmp_path):
+    settings = _settings(tmp_path)
+    client = WorkerCloudClient(
+        settings, transport=httpx.MockTransport(lambda _r: httpx.Response(503, text="down"))
+    )
+    with pytest.raises(IntegrationError):
+        client.report_progress("job-1", pages_crawled=1, progress_pct=1.0, phase=None)
 
 
 def test_close_is_idempotent(tmp_path):

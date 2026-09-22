@@ -40,6 +40,10 @@ The whole surface, in the order ADR 0015's binding conditions introduce it:
   — worker-authenticated job outcome reporting. The upload path size-caps
   before buffering, then validates, allow-lists, and encrypts before it ever
   reaches storage (condition 9, condition 11).
+* `POST /workers/jobs/{job_id}/progress` — worker-authenticated, best-effort
+  live progress reporting while a job is still running. Additive to ADR
+  0015, not part of it: never changes a job's lifecycle `status`, and every
+  field it persists is optional everywhere it is read.
 
 No circuit breaker on this router's own outbound behaviour is needed — it
 has none; every failure mode here is either a `DispatchStoreUnavailableError`
@@ -68,6 +72,7 @@ from src.api.worker_schemas import (
     WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
     WorkerJobAccepted,
+    WorkerProgressReport,
 )
 from src.core.config import get_settings
 from src.core.logger import get_logger
@@ -255,6 +260,42 @@ def build_worker_router(state: ApiState) -> APIRouter:
         job = owned_job(state, job_id, principal.worker_id, principal.org_id)
         try:
             updated = state.worker_dispatch_store.mark_failed(job.id, payload.error)
+        except DispatchStoreUnavailableError as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        return WorkerJobAccepted(id=updated.id, status=updated.status.value)
+
+    @router.post("/workers/jobs/{job_id}/progress", response_model=WorkerJobAccepted)
+    def report_progress(
+        job_id: str,
+        payload: WorkerProgressReport,
+        authorization: str | None = Header(default=None),
+    ) -> WorkerJobAccepted:
+        """Record a claimed job's latest live progress snapshot.
+
+        Never changes a job's lifecycle `status` — it can arrive any number
+        of times, in any order relative to network retries or a job's own
+        terminal transition, and a late or out-of-order report after the job
+        has already finished is harmless (`WorkerDispatchStore.
+        update_job_progress`'s own docstring). The same per-job ownership
+        check `/failed` and `/upload` already enforce applies here
+        unchanged — a worker reporting progress on a job it did not claim is
+        refused exactly like every other per-job route (ADR 0015 condition
+        2's IDOR rule, condition 6's per-worker pinning).
+
+        Raises:
+            HTTPException: `401` unauthenticated; `404` unknown job; `403`
+                a job belonging to a different worker or org; `503` the
+                dispatch store is unreachable.
+        """
+        principal = require_worker_principal(authorization, worker_store=state.worker_store)
+        job = owned_job(state, job_id, principal.worker_id, principal.org_id)
+        try:
+            updated = state.worker_dispatch_store.update_job_progress(
+                job.id,
+                pages_crawled=payload.pages_crawled,
+                progress_pct=payload.progress_pct,
+                phase=payload.phase,
+            )
         except DispatchStoreUnavailableError as exc:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return WorkerJobAccepted(id=updated.id, status=updated.status.value)

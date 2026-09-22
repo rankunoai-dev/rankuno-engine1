@@ -313,6 +313,17 @@ class Settings(BaseSettings):
             "facet's max_concurrent=1 cap matters for reading it correctly."
         ),
     )
+    screaming_frog_progress_poll_interval_s: float = Field(
+        default=1.5,
+        gt=0.0,
+        description=(
+            "How often ScreamingFrogControlTool's optional progress thread "
+            "re-reads trace.txt for a fresh 'SpiderProgress' line, when an "
+            "on_progress callback is wired. Read-only against Screaming "
+            "Frog's own log file, same zero license/network impact as the "
+            "one-shot licence read this repeats instead of replacing."
+        ),
+    )
 
     # -- Multi-tenant organization configs -----------------------------------
     org_config_path: Path = Field(
@@ -503,6 +514,20 @@ class Settings(BaseSettings):
         default=300.0,
         gt=0.0,
         description="Ceiling for condition 10's bounded exponential backoff on repeated failures.",
+    )
+    worker_progress_min_report_interval_s: float = Field(
+        default=5.0,
+        gt=0.0,
+        description=(
+            "Floor between two progress reports the worker daemon sends the "
+            "cloud for the same job, even if trace.txt changes on every "
+            "SCREAMING_FROG_PROGRESS_POLL_INTERVAL_S tick. "
+            "PostgresWorkerDispatchStore opens a fresh connection per call "
+            "(ADR 0015 condition 5 — no pool, no in-process fallback), so a "
+            "multi-hour crawl polling every 1.5s would otherwise cost one "
+            "Postgres round trip per tick; a phase transition (crawling -> "
+            "exporting) is always sent immediately regardless of this floor."
+        ),
     )
     worker_upload_max_bytes: int = Field(
         default=100 * 1024 * 1024,

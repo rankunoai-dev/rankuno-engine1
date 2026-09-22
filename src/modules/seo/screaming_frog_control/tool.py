@@ -19,6 +19,7 @@ links run inside a process this engine does not control.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 from uuid import uuid4
@@ -37,10 +38,16 @@ from src.modules.seo.screaming_frog_control.export_manifest import (
 from src.modules.seo.screaming_frog_control.license_check import (
     read_licence_status,
 )
+from src.modules.seo.screaming_frog_control.progress_parser import (
+    ProgressPollThread,
+    ScreamingFrogProgressReader,
+    ScreamingFrogProgressThrottle,
+)
 from src.modules.seo.screaming_frog_control.schemas import (
     LicenceStatus,
     ScreamingFrogJobInput,
     ScreamingFrogJobOutput,
+    ScreamingFrogProgressSnapshot,
 )
 from src.modules.seo.screaming_frog_control.template_registry import TemplateRegistry
 
@@ -54,6 +61,17 @@ surface this verbatim as `JobRecord.error` — never a generic subprocess
 exit-code message, and never retried."""
 
 _POLL_INTERVAL_S = 2.0
+_DEFAULT_PROGRESS_POLL_INTERVAL_S = 1.5
+_DEFAULT_PROGRESS_MIN_REPORT_INTERVAL_S = 5.0
+_PROGRESS_THREAD_JOIN_TIMEOUT_S = 5.0
+"""How long `execute()` waits for the progress thread to notice `stop()` and
+exit before giving up and moving on. Generous relative to one file
+stat+read, and short relative to the crawl itself — `on_progress` may be a
+blocking network call (`WorkerCloudClient.report_progress`, 30s timeout), so
+a join that could in the worst case take that long must not become a hang
+this tool passes on to its own caller. The thread is a daemon (see
+`ProgressPollThread`), so a join that times out leaks nothing more than one
+already-in-flight report."""
 
 
 class ScreamingFrogLicenceError(RankunoError):
@@ -108,6 +126,9 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
         url_policy: UrlSafetyPolicy | None = None,
         max_runtime_s: float = 7200.0,
         job_id: str | None = None,
+        on_progress: Callable[[ScreamingFrogProgressSnapshot], None] | None = None,
+        progress_poll_interval_s: float = _DEFAULT_PROGRESS_POLL_INTERVAL_S,
+        progress_min_report_interval_s: float = _DEFAULT_PROGRESS_MIN_REPORT_INTERVAL_S,
         **kwargs: object,
     ) -> None:
         """Build the tool.
@@ -132,6 +153,19 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
                 to exit on its own.
             job_id: Correlates the Job Object / ledger entry with a
                 `JobRecord.id`, when one exists.
+            on_progress: Called from a background thread, zero or more times,
+                with each fresh `ScreamingFrogProgressSnapshot` this run's
+                `trace.txt` reveals. `None` (the default) starts no thread at
+                all — every existing caller that does not pass this sees no
+                behaviour change. Any exception this callback raises is
+                caught and logged by the polling thread itself
+                (`progress_parser.ProgressPollThread`); it can never fail or
+                delay the crawl this tool is supervising.
+            progress_poll_interval_s: How often the background thread
+                re-reads `trace.txt`, when `on_progress` is set.
+            progress_min_report_interval_s: Passed to
+                `progress_parser.ScreamingFrogProgressThrottle` — the floor
+                between two calls to `on_progress` for an unchanged phase.
             **kwargs: Forwarded to `BaseTool` (`guardrails`, `cost_ledger`).
         """
         super().__init__(**kwargs)  # type: ignore[arg-type]
@@ -143,6 +177,9 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
         self._url_policy = url_policy or UrlSafetyPolicy()
         self._max_runtime_s = max_runtime_s
         self._job_id = job_id
+        self._on_progress = on_progress
+        self._progress_poll_interval_s = progress_poll_interval_s
+        self._progress_min_report_interval_s = progress_min_report_interval_s
 
     def describe_invocation(self, payload: ScreamingFrogJobInput) -> str:
         """Operator-facing summary shown at the HITL approval point."""
@@ -184,6 +221,7 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
 
         started = time.monotonic()
         process = launch_supervised(argv, ledger_path=self._ledger_path, job_id=job_id)
+        progress_thread = self._start_progress_thread(since_offset=since_offset, job_id=job_id)
         timed_out = False
         try:
             while process.is_running():
@@ -201,6 +239,18 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
             # handle and removes the ledger entry on the graceful path, not
             # only the crash path the kernel already guarantees.
             process.terminate()
+            # Runs for every exit from the block above — success, timeout,
+            # or an exception raised mid-loop — the same guarantee that
+            # already covers `process.terminate()` on this line, so the
+            # progress thread can never outlive the crawl it describes.
+            if progress_thread is not None:
+                progress_thread.stop()
+                progress_thread.join(timeout=_PROGRESS_THREAD_JOIN_TIMEOUT_S)
+                if progress_thread.is_alive():
+                    _logger.warning(
+                        "sf_progress_thread_join_timeout",
+                        extra={"job_id": job_id, "timeout_s": _PROGRESS_THREAD_JOIN_TIMEOUT_S},
+                    )
 
         elapsed_s = time.monotonic() - started
         if timed_out:
@@ -211,6 +261,32 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
             raise ScreamingFrogLicenceError(licence)
 
         return ScreamingFrogJobOutput(bundle_dir=bundle_dir, licence=licence, elapsed_s=elapsed_s)
+
+    def _start_progress_thread(
+        self, *, since_offset: int, job_id: str
+    ) -> ProgressPollThread | None:
+        """Start the background progress poller, or start nothing at all.
+
+        `None` when no `on_progress` was wired at construction — the common
+        case for a direct, non-worker `execute()` call, and the reason every
+        pre-existing caller of this tool needs no changes: nothing here
+        differs from before unless a caller opts in.
+        """
+        if self._on_progress is None:
+            return None
+        reader = ScreamingFrogProgressReader(self._trace_log_path, since_offset=since_offset)
+        throttle = ScreamingFrogProgressThrottle(
+            min_interval_s=self._progress_min_report_interval_s
+        )
+        thread = ProgressPollThread(
+            reader,
+            throttle,
+            self._on_progress,
+            poll_interval_s=self._progress_poll_interval_s,
+            job_id=job_id,
+        )
+        thread.start()
+        return thread
 
     def _build_argv(self, seed_url: str, config_path: Path | None, output_dir: Path) -> list[str]:
         """Construct the CLI command line.

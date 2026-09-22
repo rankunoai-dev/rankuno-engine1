@@ -185,6 +185,21 @@ class _FakeWorkerDispatchStore:
         self._jobs[job_id] = job
         return job
 
+    def update_job_progress(self, job_id, *, pages_crawled, progress_pct, phase) -> WorkerJob:
+        from src.core.worker_dispatch_store import WorkerJobNotFoundError
+
+        if job_id not in self._jobs:
+            raise WorkerJobNotFoundError(job_id)
+        job = self._jobs[job_id].model_copy(
+            update={
+                "pages_crawled": pages_crawled,
+                "progress_pct": progress_pct,
+                "current_phase": phase,
+            }
+        )
+        self._jobs[job_id] = job
+        return job
+
     def store_upload(self, job_id, *, org_id, worker_id, encrypted_bytes, retention_days) -> None:
         self._uploads[job_id] = encrypted_bytes
 
@@ -662,6 +677,112 @@ def test_report_failure_by_the_owning_worker_succeeds(client, dispatch_store):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
+
+
+# --- Progress reporting: best-effort, same per-job ownership discipline --------
+
+
+def test_report_progress_requires_worker_authentication(client):
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/progress",
+        json={"pages_crawled": 10, "progress_pct": 25.0, "phase": "crawling"},
+    )
+    assert response.status_code == 401
+
+
+def test_report_progress_rejects_a_worker_claiming_another_workers_job(client):
+    """The exact IDOR rule `/failed` and `/upload` already enforce (condition 2/6)."""
+    worker_a = _register_worker(client, name="worker-a")
+    worker_b = _register_worker(client, name="worker-b")
+    job = _preview_and_confirm(client, worker_id=worker_a["worker_id"])
+
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/progress",
+        json={"pages_crawled": 5, "progress_pct": 10.0, "phase": "crawling"},
+        headers=_worker_headers(worker_b["worker_id"], worker_b["worker_secret"]),
+    )
+    assert response.status_code == 403
+
+
+def test_report_progress_of_an_unknown_job_is_rejected(client):
+    worker = _register_worker(client)
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/no-such-job/progress",
+        json={"pages_crawled": 1, "progress_pct": 1.0, "phase": "crawling"},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 404
+
+
+def test_report_progress_by_the_owning_worker_persists_every_field(client, dispatch_store):
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/progress",
+        json={"pages_crawled": 3718, "progress_pct": 40.43, "phase": "crawling"},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"id": job["id"], "status": "queued"}
+
+    stored = dispatch_store._jobs[job["id"]]
+    assert stored.pages_crawled == 3718
+    assert stored.progress_pct == 40.43
+    assert stored.current_phase.value == "crawling"
+
+
+def test_report_progress_never_changes_job_status(client):
+    """Progress and lifecycle status are independent columns by design."""
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/progress",
+        json={"pages_crawled": 1, "progress_pct": 1.0, "phase": "exporting"},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.json()["status"] == "queued"  # confirm_dispatch's own starting status
+
+
+def test_report_progress_accepts_every_field_as_optional(client):
+    """A worker may report partial knowledge — e.g. a bare phase transition."""
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/progress",
+        json={},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_report_progress_rejects_an_unexpected_field(client):
+    """StrictModel's extra='forbid' (CLAUDE.md §1.2), same as every other body here."""
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/progress",
+        json={"pages_crawled": 1, "raw_command": "rm -rf /"},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 422
+
+
+def test_report_progress_rejects_a_negative_page_count(client):
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/progress",
+        json={"pages_crawled": -1},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 422
 
 
 # --- Job listing: org-scoped read (no UI, still an API) -------------------------

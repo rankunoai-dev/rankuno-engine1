@@ -19,6 +19,7 @@ from src.core.worker_dispatch_schemas import (
     WorkerJob,
     WorkerJobEnvelope,
     WorkerJobKind,
+    WorkerJobPhase,
     WorkerJobStatus,
 )
 
@@ -35,7 +36,8 @@ to read a confirmation modal, short enough that a leaked token is narrow."""
 
 SELECT_COLUMNS = (
     "id, org_id, worker_id, kind, seed_url, template_name, correlation_id, "
-    "status, created_at, updated_at, dispatched_at, finished_at, error, bundle_size_bytes"
+    "status, created_at, updated_at, dispatched_at, finished_at, error, bundle_size_bytes, "
+    "pages_crawled, progress_pct, current_phase"
 )
 """Column list every `worker_jobs` read uses, in the order `row_to_job` expects."""
 
@@ -132,6 +134,29 @@ class WorkerDispatchStore(Protocol):
         """Move a job to `FAILED` with a reason."""
         ...
 
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        pages_crawled: int | None,
+        progress_pct: float | None,
+        phase: WorkerJobPhase | None,
+    ) -> WorkerJob:
+        """Persist a worker's latest progress snapshot for a claimed job.
+
+        Never changes `status`: a job's lifecycle transition is owned by
+        `mark_uploaded`/`mark_failed`/`claim_next_job` alone, so a progress
+        report racing a terminal transition can only ever overwrite these
+        three columns, never resurrect or short-circuit the job itself. A
+        report that arrives after the job has already finished is therefore
+        harmless — it updates fields no caller should read as authoritative
+        over `status` in the first place.
+
+        Raises:
+            WorkerJobNotFoundError: If no such job exists.
+        """
+        ...
+
     def store_upload(
         self,
         job_id: str,
@@ -179,6 +204,9 @@ def row_to_job(row: tuple[object, ...]) -> WorkerJob:
         finished_at,
         error,
         bundle_size_bytes,
+        pages_crawled,
+        progress_pct,
+        current_phase,
     ) = row
     return WorkerJob(
         id=str(job_id),
@@ -198,4 +226,7 @@ def row_to_job(row: tuple[object, ...]) -> WorkerJob:
         finished_at=_optional_datetime(finished_at),
         error=None if error is None else str(error),
         bundle_size_bytes=None if bundle_size_bytes is None else int(cast(int, bundle_size_bytes)),
+        pages_crawled=None if pages_crawled is None else int(cast(int, pages_crawled)),
+        progress_pct=None if progress_pct is None else float(cast(float, progress_pct)),
+        current_phase=None if current_phase is None else WorkerJobPhase(str(current_phase)),
     )
