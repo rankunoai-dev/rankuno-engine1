@@ -343,15 +343,27 @@ src/
     │   │   │                         # into a between-jobs stop flag, and exits
     │   │   │                         # 3 (not 0, not a restart loop) when the
     │   │   │                         # cloud refuses the credential
-    │   │   └── worker_daemon.py      # ADR 0015: the worker daemon's whole
-    │   │                             # lifetime. reconcile_orphans() at startup
-    │   │                             # (condition 12), closed-enum dispatch
-    │   │                             # (condition 7), gate (b)'s
-    │   │                             # make_approval_callback wired into
-    │   │                             # GuardrailEngine exactly like
-    │   │                             # preview_tokens.py's local pattern,
-    │   │                             # condition-8 envelope re-validation, and
-    │   │                             # condition-10 bounded backoff
+    │   │   ├── worker_daemon.py      # ADR 0015: the worker daemon's whole
+    │   │   │                         # lifetime. reconcile_orphans() at startup
+    │   │   │                         # (condition 12), closed-enum dispatch
+    │   │   │                         # (condition 7), gate (b)'s
+    │   │   │                         # make_approval_callback wired into
+    │   │   │                         # GuardrailEngine exactly like
+    │   │   │                         # preview_tokens.py's local pattern,
+    │   │   │                         # condition-8 envelope re-validation, and
+    │   │   │                         # condition-10 bounded backoff
+    │   │   └── progress_parser.py    # Additive to ADR 0015, not part of it:
+    │   │                             # live trace.txt tailing from a background
+    │   │                             # thread while a worker's own crawl runs.
+    │   │                             # ScreamingFrogProgressReader (offset-scoped,
+    │   │                             # rotation-aware — stops permanently rather
+    │   │                             # than misattribute a rotated file's
+    │   │                             # contents), ScreamingFrogProgressThrottle
+    │   │                             # (coalesces before any network call, since
+    │   │                             # the Postgres dispatch store opens a fresh
+    │   │                             # connection per call — condition 5), and
+    │   │                             # ProgressPollThread (daemon thread, joined
+    │   │                             # by tool.execute() on every exit path)
     │   └── performance/         # GSC + GA4 joined onto a crawl. Pure domain:
     │       │                    # no I/O, no settings. Ingestion belongs in
     │       │                    # integrations/, persistence in the job store.
@@ -377,6 +389,7 @@ src/
 | :--- | :--- |
 | The React UI for `modules/seo/screaming_frog_control/` (ADR 0013) | The API surface (`preview`/confirm/templates) is implemented; no confirmation-modal UI consumes it yet — an operator would call it directly today |
 | A cloud dashboard or worker-management screen for ADR 0015's worker dispatch | The backend the UI needs is complete (`api/worker_routes.py`, including liveness, per-worker templates and bundle download); the React screens themselves belong to a separate task and do not exist yet |
+| A live progress bar on `WorkerJobsPanel.tsx` for `pages_crawled`/`progress_pct`/`current_phase` | The backend contract is complete ([build-log 0100](build-log/0100-mcompleted-twice-with-two-meanings.md)); `rankuno-ui/` is untouched. Stronger than an ordinary gap: `WorkerJobsPanel.tsx`'s own docstring states "There is no progress column and there will not be one," written one commit before this backend shipped and now contradicted by it — resolving that tension is a deliberate UI decision, not assumed here |
 | A purge job for expired uploaded bundles | Still read-time filtering only (`read_upload` checks `expires_at`). Nothing deletes the row, so storage grows without bound — unchanged from build-log 0098 |
 | A migration of existing disk-backed worker registrations into Postgres | Impossible by construction: the `workers.json` it would read lives on a container filesystem that has already been rebuilt. Switching `WORKER_STORE_BACKEND` to `postgres` requires re-registering each desktop once (see `alembic/versions/0003_worker_identity_table.py`) |
 | Any Postgres SQL in `postgres_worker_store.py` or migration 0003 verified against a real database | `psycopg` is not installed in the local venv and no server is reachable from it. Both are covered only by an in-memory fake cursor, which cannot validate SQL syntax or `COALESCE`/`ON CONFLICT` semantics |
@@ -464,7 +477,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0012](adr/0012-gsc-account-profiles.md) | Named Search Console profiles as `GSC_ACCOUNTS__<name>__*` env keys; a crawl selects one by name; the API publishes names only, never credentials; unknown name is refused, never defaulted |
 | [0013](adr/0013-screaming-frog-cli-process-governance-exception.md) | Governance exception lifting ADR 0011 §3's ban on driving Screaming Frog via CLI, conditional on 8 binding security requirements (real Windows Job Object, independent PID+start-time ledger, same-process design, `UrlSafetyPolicy` seed-URL gate, explicit CLI field mapping, named license-failure error, `RiskClass.WRITE`/`MANDATORY_HITL`). Status: APPROVED. Conditions 1–3 implemented [build-log 0095](build-log/0095-a-crash-the-kernel-cleans-up.md); conditions 4–8 implemented (build-log entry pending — docs-scribe) as `modules/seo/screaming_frog_control/`. No React UI consumes the preview/confirm API yet |
 | [0014](adr/0014-native-title-h1-meta-description-extraction.md) | Extract title/H1/meta description natively at fetch time (`content_signals.py`, `html.parser`, no new dependency), hooked into the one `SiteGraph.record_fetch` method both sync and async discovery share. 13 of 17 `PAGE_TITLES`/`META_DESCRIPTION`/`H1` catalogue ids move to `MEASURED`; the 4 pixel-width ids stay `NOT_MEASURED` by design fallback — no verified glyph-width table available, and a live font-rendering substitute would be non-deterministic across machines. [build-log 0096](build-log/0096-twenty-nine-measured-eighty-one-not.md) |
-| [0015](adr/0015-cloud-local-desktop-worker-architecture.md) | Self-hosted-runner pattern for `RiskClass.WRITE` Screaming Frog dispatch: a cloud API queues a job for one pinned worker daemon; the daemon polls, never accepts an inbound connection. 14 binding conditions, chief among them a **dual** approval gate — cloud-side preview/confirm (gate a, Postgres-backed, worker-bound) plus a worker-independently-verified signed assignment (gate b, never a bare boolean) — and per-worker credentials distinct from ADR 0016's session tokens. Status: APPROVED. Implemented as `core/worker_auth.py`, `core/worker_dispatch_signing.py`, `core/worker_dispatch_store.py`/`core/postgres_worker_dispatch_store.py`, `core/worker_bundle_crypto.py`, `api/worker_routes.py`, `modules/seo/screaming_frog_control/upload_manifest.py`/`worker_daemon.py`, `integrations/worker_cloud_client.py` [build-log 0098](build-log/0098-expires-at-is-not-deletion.md). No React UI (cloud dashboard or worker-management screen) this cycle; uploaded-bundle "automatic expiry" (condition 11) is read-time filtering only, no purge job exists yet |
+| [0015](adr/0015-cloud-local-desktop-worker-architecture.md) | Self-hosted-runner pattern for `RiskClass.WRITE` Screaming Frog dispatch: a cloud API queues a job for one pinned worker daemon; the daemon polls, never accepts an inbound connection. 14 binding conditions, chief among them a **dual** approval gate — cloud-side preview/confirm (gate a, Postgres-backed, worker-bound) plus a worker-independently-verified signed assignment (gate b, never a bare boolean) — and per-worker credentials distinct from ADR 0016's session tokens. Status: APPROVED. Implemented as `core/worker_auth.py`, `core/worker_dispatch_signing.py`, `core/worker_dispatch_store.py`/`core/postgres_worker_dispatch_store.py`, `core/worker_bundle_crypto.py`, `api/worker_routes.py`, `modules/seo/screaming_frog_control/upload_manifest.py`/`worker_daemon.py`, `integrations/worker_cloud_client.py` [build-log 0098](build-log/0098-expires-at-is-not-deletion.md). No React UI (cloud dashboard or worker-management screen) this cycle; uploaded-bundle "automatic expiry" (condition 11) is read-time filtering only, no purge job exists yet. Live progress telemetry (`progress_parser.py`, `POST /workers/jobs/{id}/progress`) added additively in [build-log 0100](build-log/0100-mcompleted-twice-with-two-meanings.md); still no frontend consumer |
 | [0016](adr/0016-cloud-api-authentication.md) | Session-token authentication and an org-ownership retrofit for `src/api/server.py`, closing a CRITICAL unauthenticated-GSC-credential-access finding and a HIGH cross-tenant job-access finding across 14 routes. Status: APPROVED. Implemented as `core/auth.py`/`api/auth.py` (`Principal`/`Operator`, PBKDF2 password hashing, self-contained HMAC-SHA256 session tokens, `require_principal`, `org_scoped_or_404`, `POST /auth/login`) [build-log 0097](build-log/0097-the-header-that-verified-nothing.md) |
 
 ---
