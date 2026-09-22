@@ -116,6 +116,11 @@ class PostgresWorkerDispatchStore:
         try:
             with conn, conn.cursor() as cur:
                 cur.execute(
+                    "INSERT INTO org_configs (org_id, display_name) VALUES (%s, %s) "
+                    "ON CONFLICT (org_id) DO NOTHING",
+                    (org_id, f"Org {org_id}"),
+                )
+                cur.execute(
                     "INSERT INTO worker_dispatch_previews "
                     "(token, org_id, worker_id, seed_url, template_name, correlation_id, "
                     "expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
