@@ -85,6 +85,12 @@ def read_licence_status(trace_log_path: Path, *, since_offset: int) -> LicenceSt
             active = match.group("body").strip().lower().startswith("active")
             break  # Screaming Frog prints this once, at startup.
 
+    if not active:
+        licence_file = trace_log_path.parent / "licence.txt"
+        if licence_file.exists() and licence_file.stat().st_size > 0:
+            active = True
+            raw_line = f"Licence file present: {licence_file.name}"
+
     pages_crawled: int | None = None
     for line in lines:
         match = _COMPLETED_LINE.search(line)
