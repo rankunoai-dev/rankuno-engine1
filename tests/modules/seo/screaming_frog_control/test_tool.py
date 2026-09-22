@@ -13,6 +13,7 @@ before launching, so content written earlier must never be visible to
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -20,8 +21,12 @@ from src.core.errors import UnsafeUrlError
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.schemas import ExecutionStatus, RiskClass
 from src.core.url_safety import UrlSafetyPolicy
+from src.core.worker_dispatch_schemas import WorkerJobPhase
 from src.modules.seo.screaming_frog_control import tool as tool_module
-from src.modules.seo.screaming_frog_control.schemas import ScreamingFrogJobInput
+from src.modules.seo.screaming_frog_control.schemas import (
+    ScreamingFrogJobInput,
+    ScreamingFrogProgressSnapshot,
+)
 from src.modules.seo.screaming_frog_control.template_registry import TemplateRegistry
 from src.modules.seo.screaming_frog_control.tool import (
     SCREAMING_FROG_LICENCE_ERROR,
@@ -83,7 +88,12 @@ def fake_launch(tmp_path, monkeypatch) -> list[list[str]]:
 
 
 def _build_tool(
-    tmp_path, *, guardrails=None, max_runtime_s: float = 7200.0
+    tmp_path,
+    *,
+    guardrails=None,
+    max_runtime_s: float = 7200.0,
+    on_progress=None,
+    progress_poll_interval_s: float = 1.5,
 ) -> ScreamingFrogControlTool:
     return ScreamingFrogControlTool(
         guardrails=guardrails,
@@ -95,6 +105,8 @@ def _build_tool(
         url_policy=UrlSafetyPolicy(resolver=lambda host: [_PUBLIC_IP]),
         max_runtime_s=max_runtime_s,
         job_id="job-1",
+        on_progress=on_progress,
+        progress_poll_interval_s=progress_poll_interval_s,
     )
 
 
@@ -248,3 +260,116 @@ class TestGovernance:
         )
         assert "https://e.com/" in description
         assert "defaults" in description
+
+
+class TestProgressReporting:
+    """`on_progress` wiring — additive, and never allowed to affect the crawl."""
+
+    def test_on_progress_receives_a_snapshot_parsed_from_trace_txt(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        content = (
+            _ACTIVE_LICENCE_LINE
+            + "INFO  - SpiderProgress [mActive=2, mCompleted=10, mWaiting=5, mCompleted=66.67%]\n"
+            + _COMPLETED_LINE
+        )
+        _install_fake_launch(tmp_path, monkeypatch, content)
+        received: list[ScreamingFrogProgressSnapshot] = []
+        tool = _build_tool(tmp_path, guardrails=_allow_all(), on_progress=received.append)
+
+        tool.execute(ScreamingFrogJobInput(seed_url="https://e.com/"))
+
+        assert received  # at least the guaranteed final poll fired
+        last = received[-1]
+        assert last.pages_crawled == 10
+        assert last.progress_pct == 66.67
+        # The completion line is in the same chunk, so phase advances past crawling.
+        assert last.phase is WorkerJobPhase.EXPORTING
+
+    def test_no_progress_callback_means_no_behaviour_change(self, tmp_path, fake_launch) -> None:
+        """The default (`on_progress=None`) path — every pre-existing caller."""
+        tool = _build_tool(tmp_path, guardrails=_allow_all())
+
+        output = tool.execute(ScreamingFrogJobInput(seed_url="https://e.com/"))
+
+        assert output.licence.active is True
+
+    def test_a_raising_callback_never_crashes_the_crawl(self, tmp_path, monkeypatch) -> None:
+        content = (
+            _ACTIVE_LICENCE_LINE
+            + "INFO  - SpiderProgress [mActive=1, mCompleted=1, mWaiting=1, mCompleted=50%]\n"
+            + _COMPLETED_LINE
+        )
+        _install_fake_launch(tmp_path, monkeypatch, content)
+
+        def _boom(_snapshot: ScreamingFrogProgressSnapshot) -> None:
+            raise RuntimeError("the dashboard endpoint is down")
+
+        tool = _build_tool(tmp_path, guardrails=_allow_all(), on_progress=_boom)
+
+        output = tool.execute(ScreamingFrogJobInput(seed_url="https://e.com/"))  # must not raise
+
+        assert output.licence.active is True
+
+
+class TestProgressThreadLifecycle:
+    """The thread must never leak, across every exit path `execute()` has."""
+
+    def test_no_thread_is_started_without_an_on_progress_callback(
+        self, tmp_path, fake_launch
+    ) -> None:
+        before = {t.name for t in threading.enumerate()}
+        tool = _build_tool(tmp_path, guardrails=_allow_all())
+
+        tool.execute(ScreamingFrogJobInput(seed_url="https://e.com/"))
+
+        after = {t.name for t in threading.enumerate()}
+        assert after == before
+
+    def test_the_progress_thread_is_joined_before_execute_returns_on_success(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        _install_fake_launch(tmp_path, monkeypatch, _DEFAULT_TRACE_CONTENT)
+        tool = _build_tool(tmp_path, guardrails=_allow_all(), on_progress=lambda _s: None)
+
+        tool.execute(ScreamingFrogJobInput(seed_url="https://e.com/"))
+
+        alive = [t for t in threading.enumerate() if t.name == "sf-progress-job-1"]
+        assert alive == []
+
+    def test_the_progress_thread_is_joined_even_on_a_timeout(self, tmp_path, monkeypatch) -> None:
+        process = FakeSupervisedProcess(running_for_polls=10_000)
+        trace_log = tmp_path / "trace.txt"
+
+        def _fake_launch_supervised(
+            argv: list[str], *, ledger_path: Path, job_id: str | None = None
+        ) -> FakeSupervisedProcess:
+            trace_log.write_text(_ACTIVE_LICENCE_LINE, encoding="utf-8")
+            return process
+
+        monkeypatch.setattr(tool_module, "launch_supervised", _fake_launch_supervised)
+        clock = iter([0.0, 100.0, 100.0])
+        monkeypatch.setattr(tool_module.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(tool_module.time, "sleep", lambda _seconds: None)
+        tool = _build_tool(
+            tmp_path, guardrails=_allow_all(), max_runtime_s=1.0, on_progress=lambda _s: None
+        )
+
+        with pytest.raises(ScreamingFrogTimeoutError):
+            tool.execute(ScreamingFrogJobInput(seed_url="https://e.com/"))
+
+        alive = [t for t in threading.enumerate() if t.name == "sf-progress-job-1"]
+        assert alive == []
+        assert process.terminate_calls == 1
+
+    def test_the_progress_thread_is_joined_even_on_a_licence_error(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        _install_fake_launch(tmp_path, monkeypatch, "no licence line here\n")
+        tool = _build_tool(tmp_path, guardrails=_allow_all(), on_progress=lambda _s: None)
+
+        with pytest.raises(ScreamingFrogLicenceError):
+            tool.execute(ScreamingFrogJobInput(seed_url="https://e.com/"))
+
+        alive = [t for t in threading.enumerate() if t.name == "sf-progress-job-1"]
+        assert alive == []

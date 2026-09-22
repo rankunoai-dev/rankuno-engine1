@@ -19,7 +19,7 @@ from typing import NoReturn
 
 import pytest
 from src.core.postgres_worker_dispatch_store import PostgresWorkerDispatchStore
-from src.core.worker_dispatch_schemas import WorkerJobKind, WorkerJobStatus
+from src.core.worker_dispatch_schemas import WorkerJobKind, WorkerJobPhase, WorkerJobStatus
 from src.core.worker_dispatch_store import (
     DispatchStoreUnavailableError,
     WorkerJobNotFoundError,
@@ -40,6 +40,9 @@ _COLUMNS = (
     "finished_at",
     "error",
     "bundle_size_bytes",
+    "pages_crawled",
+    "progress_pct",
+    "current_phase",
 )
 
 
@@ -61,6 +64,14 @@ class _FakeCursor:
         q = " ".join(query.split())
         if "WITH next_job AS" in q:
             self._claim_next_job(params)
+        elif q.startswith("INSERT INTO org_configs"):
+            # `mint_dispatch_preview` ensures the parent org row exists
+            # before inserting a preview that foreign-keys to it (cycle
+            # 0021's fix for the FK violation this test suite predates).
+            # The fake has no FK constraints of its own to simulate, so
+            # there is nothing to record — just acknowledge the statement
+            # rather than fall through to the "unmodelled query" assertion.
+            self._result = None
         elif q.startswith("INSERT INTO worker_dispatch_previews"):
             self._insert_preview(params)
         elif q.startswith("UPDATE worker_dispatch_previews SET consumed_at"):
@@ -73,6 +84,8 @@ class _FakeCursor:
             self._read_upload(params)
         elif q.startswith("UPDATE worker_jobs SET status = %s, error = %s"):
             self._expire_stale(params)
+        elif q.startswith("UPDATE worker_jobs SET pages_crawled"):
+            self._update_progress(params)
         elif q.startswith("UPDATE worker_jobs SET"):
             self._transition(q, params)
         elif q.startswith("SELECT") and "FROM worker_jobs WHERE id = %s" in q:
@@ -150,6 +163,9 @@ class _FakeCursor:
             "finished_at": None,
             "error": None,
             "bundle_size_bytes": None,
+            "pages_crawled": None,
+            "progress_pct": None,
+            "current_phase": None,
         }
         self._result = None
 
@@ -202,6 +218,18 @@ class _FakeCursor:
             row["bundle_size_bytes"] = extra[0]
         elif "error = %s" in q:
             row["error"] = extra[0]
+        self._result = tuple(row[c] for c in _COLUMNS)
+
+    def _update_progress(self, params: tuple[object, ...]) -> None:
+        pages_crawled, progress_pct, current_phase, updated_at, job_id = params
+        row = self._db["worker_jobs"].get(str(job_id))
+        if row is None:
+            self._result = None
+            return
+        row["pages_crawled"] = pages_crawled
+        row["progress_pct"] = progress_pct
+        row["current_phase"] = current_phase
+        row["updated_at"] = updated_at
         self._result = tuple(row[c] for c in _COLUMNS)
 
     def _expire_stale(self, params: tuple[object, ...]) -> None:
@@ -466,6 +494,57 @@ def test_mark_failed_transitions_to_failed_with_a_reason(store):
 def test_transition_raises_for_an_unknown_job(store):
     with pytest.raises(WorkerJobNotFoundError):
         store.mark_failed("no-such-job", "irrelevant")
+
+
+# --- update_job_progress: live telemetry, no status change ----------------------
+
+
+def test_update_job_progress_persists_every_field(store):
+    _queue_job(store, worker_id="wkr-1")
+    job = store.claim_next_job(worker_id="wkr-1", org_id="acme")
+    updated = store.update_job_progress(
+        job.id, pages_crawled=3718, progress_pct=40.43, phase=WorkerJobPhase.CRAWLING
+    )
+    assert updated.pages_crawled == 3718
+    assert updated.progress_pct == 40.43
+    assert updated.current_phase is WorkerJobPhase.CRAWLING
+
+
+def test_update_job_progress_never_changes_status(store):
+    _queue_job(store, worker_id="wkr-1")
+    job = store.claim_next_job(worker_id="wkr-1", org_id="acme")
+    updated = store.update_job_progress(
+        job.id, pages_crawled=1, progress_pct=1.0, phase=WorkerJobPhase.EXPORTING
+    )
+    assert updated.status is WorkerJobStatus.DISPATCHED  # unchanged by claim_next_job
+
+
+def test_update_job_progress_accepts_every_field_as_none(store):
+    """A worker may report partial knowledge — e.g. a bare phase transition."""
+    _queue_job(store, worker_id="wkr-1")
+    job = store.claim_next_job(worker_id="wkr-1", org_id="acme")
+    updated = store.update_job_progress(job.id, pages_crawled=None, progress_pct=None, phase=None)
+    assert updated.pages_crawled is None
+    assert updated.progress_pct is None
+    assert updated.current_phase is None
+
+
+def test_update_job_progress_raises_for_an_unknown_job(store):
+    with pytest.raises(WorkerJobNotFoundError):
+        store.update_job_progress(
+            "no-such-job", pages_crawled=1, progress_pct=1.0, phase=WorkerJobPhase.CRAWLING
+        )
+
+
+def test_update_job_progress_fails_closed_on_a_store_outage():
+    def _raise() -> NoReturn:
+        raise ConnectionError("db unreachable")
+
+    store = PostgresWorkerDispatchStore(connection_factory=_raise)
+    with pytest.raises(DispatchStoreUnavailableError):
+        store.update_job_progress(
+            "job-1", pages_crawled=1, progress_pct=1.0, phase=WorkerJobPhase.CRAWLING
+        )
 
 
 # --- store_upload / read_upload (condition 11) ----------------------------------

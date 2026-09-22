@@ -47,6 +47,7 @@ from src.core.worker_dispatch_schemas import (
     WorkerJob,
     WorkerJobEnvelope,
     WorkerJobKind,
+    WorkerJobPhase,
     WorkerJobStatus,
 )
 from src.core.worker_dispatch_store import (
@@ -413,6 +414,51 @@ class PostgresWorkerDispatchStore:
     def mark_failed(self, job_id: str, error: str) -> WorkerJob:
         """Move a job to `FAILED` with a reason."""
         return self._transition(job_id, status=WorkerJobStatus.FAILED, error=error)
+
+    def update_job_progress(
+        self,
+        job_id: str,
+        *,
+        pages_crawled: int | None,
+        progress_pct: float | None,
+        phase: WorkerJobPhase | None,
+    ) -> WorkerJob:
+        """Overwrite the three progress columns. Never touches `status`.
+
+        Deliberately not routed through `_transition`: that helper always
+        assigns `status`/`finished_at` alongside its extra columns, and a
+        progress report is neither a status transition nor evidence the job
+        has finished — writing `finished_at` here on every one of a
+        multi-hour crawl's periodic reports would fabricate a finish time
+        that keeps moving.
+        """
+        now = datetime.now(UTC)
+        conn = self._connect()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE worker_jobs SET pages_crawled = %s, progress_pct = %s, "  # noqa: S608
+                    "current_phase = %s, updated_at = %s WHERE id = %s "
+                    f"RETURNING {SELECT_COLUMNS}",
+                    (
+                        pages_crawled,
+                        progress_pct,
+                        phase.value if phase is not None else None,
+                        now,
+                        job_id,
+                    ),
+                )
+                row = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001
+            raise DispatchStoreUnavailableError(
+                f"cannot update progress for {job_id}: {exc}"
+            ) from exc
+        finally:
+            conn.close()
+        if row is None:
+            msg = f"no worker job with id {job_id!r}"
+            raise WorkerJobNotFoundError(msg)
+        return row_to_job(row)
 
     def store_upload(
         self,

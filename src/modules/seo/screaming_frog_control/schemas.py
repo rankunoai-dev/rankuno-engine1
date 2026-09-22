@@ -13,6 +13,7 @@ from typing import NamedTuple
 from pydantic import Field
 
 from src.core.schemas import StrictModel
+from src.core.worker_dispatch_schemas import WorkerJobPhase
 
 __all__ = [
     "FIELD_MAPPING",
@@ -21,6 +22,7 @@ __all__ = [
     "LicenceStatus",
     "ScreamingFrogJobInput",
     "ScreamingFrogJobOutput",
+    "ScreamingFrogProgressSnapshot",
     "ScreamingFrogTemplate",
 ]
 
@@ -196,3 +198,40 @@ class ScreamingFrogJobOutput(StrictModel):
     bundle_dir: Path
     licence: LicenceStatus
     elapsed_s: float = Field(ge=0.0)
+
+
+class ScreamingFrogProgressSnapshot(StrictModel):
+    """One point-in-time read of a running crawl's progress.
+
+    Built by `progress_parser.parse_latest_progress` from Screaming Frog's
+    own `SpiderProgress` trace.txt line (verified live against a real 19.4
+    headless run, 2026-09-22 — see that module's docstring for the exact
+    captured format). Uses `WorkerJobPhase` from `core` directly, not a
+    module-local phase enum: this model's only consumer outside this module
+    is `worker_daemon`'s progress-reporting callback, which hands `phase`
+    straight to `WorkerCloudClient.report_progress` unconverted, and
+    `WorkerJob.current_phase` on the receiving end is typed `WorkerJobPhase`
+    already — an extra module-local enum would exist only to be converted
+    right back.
+
+    Attributes:
+        pages_crawled: Screaming Frog's own live count of completed pages.
+            `None` before the first `SpiderProgress` line has appeared.
+        progress_pct: Screaming Frog's own live completion estimate. Not
+            guaranteed to increase monotonically (see
+            `WorkerJob.progress_pct`'s own docstring) — this snapshot
+            records whatever the log said, unmodified.
+        phase: `CRAWLING` once any `SpiderProgress` line has been seen this
+            run; `EXPORTING` once the `Completed the spider of...` line has
+            also been seen. `progress_parser.parse_latest_progress` never
+            constructs a snapshot at all until one of those is true, so in
+            practice this is never `None` on an instance that exists — it
+            stays optional here only because `StrictModel` gives every
+            other field on this class the same treatment, and a future
+            caller building one directly (e.g. a test fixture) should not
+            be forced to supply a phase it does not have yet.
+    """
+
+    pages_crawled: int | None = Field(default=None, ge=0)
+    progress_pct: float | None = Field(default=None, ge=0.0)
+    phase: WorkerJobPhase | None = None

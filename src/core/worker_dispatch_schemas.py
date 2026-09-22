@@ -33,6 +33,7 @@ __all__ = [
     "WorkerJob",
     "WorkerJobEnvelope",
     "WorkerJobKind",
+    "WorkerJobPhase",
     "WorkerJobStatus",
 ]
 
@@ -48,6 +49,33 @@ class WorkerJobKind(StrEnum):
     """
 
     SCREAMING_FROG_CRAWL = "screaming_frog_crawl"
+
+
+class WorkerJobPhase(StrEnum):
+    """Coarse, closed vocabulary for where a running job currently is.
+
+    Populated only by a job whose `kind` supports live progress reporting —
+    today that is `screaming_frog_control.progress_parser`, which detects
+    these same two states from Screaming Frog's own trace.txt (a
+    `SpiderProgress` line means `CRAWLING`; the `Completed the spider of...`
+    line means the CLI has moved on to writing its CSV export, `EXPORTING`).
+
+    Defined once, here in `core`, and imported directly by
+    `screaming_frog_control` rather than duplicated as a second, module-
+    local enum with the same two members: `modules -> core` is the allowed
+    direction (CLAUDE.md §1.1), so there is nothing to round-trip through a
+    string at a module boundary — the module's own progress snapshot model
+    (`ScreamingFrogProgressSnapshot.phase`) carries this exact type.
+    """
+
+    CRAWLING = "crawling"
+    """The spider is actively fetching pages; `pages_crawled`/`progress_pct`
+    are Screaming Frog's own live estimate for the still-open crawl."""
+
+    EXPORTING = "exporting"
+    """The spider has finished discovering pages and is now writing the CSV
+    bundle this job will upload — `pages_crawled`/`progress_pct` stop
+    advancing once this phase is reported."""
 
 
 class WorkerJobStatus(StrEnum):
@@ -115,6 +143,20 @@ class WorkerJob(StrictModel):
         error: Why the job did not finish cleanly. `None` unless `FAILED`.
         bundle_size_bytes: Size of the uploaded, validated bundle, once one
             exists. `None` until `SUCCEEDED`/`PARTIAL`.
+        pages_crawled: The worker's most recently reported page count for
+            this run. `None` until the first progress report arrives, or
+            forever for a job whose worker never wired progress reporting
+            (an older worker build, or a job `kind` that has none) — every
+            reader of this field must treat absence as "no data yet", not
+            as zero.
+        progress_pct: The worker's most recently reported completion
+            percentage, taken verbatim from Screaming Frog's own estimate.
+            Not guaranteed monotonically increasing: Screaming Frog recomputes
+            it against a denominator that grows as the crawl discovers new
+            URLs, so a real run can report a lower percentage than its own
+            previous report. A UI must not treat a drop as an error.
+        current_phase: The worker's most recently reported coarse phase.
+            `None` until the first report arrives.
     """
 
     id: str = Field(min_length=1, max_length=64)
@@ -129,6 +171,9 @@ class WorkerJob(StrictModel):
     finished_at: datetime | None = None
     error: str | None = None
     bundle_size_bytes: int | None = Field(default=None, ge=0)
+    pages_crawled: int | None = Field(default=None, ge=0)
+    progress_pct: float | None = Field(default=None, ge=0.0)
+    current_phase: WorkerJobPhase | None = None
 
 
 class DispatchPreviewToken(StrictModel):

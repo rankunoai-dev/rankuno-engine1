@@ -11,8 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from getpass import getpass
 from pathlib import Path
@@ -49,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     if not cloud_url.startswith("http://") and not cloud_url.startswith("https://"):
         cloud_url = f"https://{cloud_url}"
 
-    print(f"=== Rankuno Worker Registration ===")
+    print("=== Rankuno Worker Registration ===")
     print(f"Connecting to: {cloud_url}\n")
 
     # Step 1: Prompt for operator login
