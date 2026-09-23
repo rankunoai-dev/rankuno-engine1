@@ -43,6 +43,9 @@ describe("WorkerJobsPanel", () => {
   });
 
   it("states that no progress detail exists rather than drawing a bar", async () => {
+    // The old, pre-telemetry placeholder state: a `dispatched` job whose
+    // worker has not (yet, or ever) sent a progress report. All three fields
+    // are null, same as a job dispatched before this feature existed.
     const api: WorkerDispatchAdapter = {
       listWorkerJobs: vi.fn().mockResolvedValue([
         workerJob({ status: "dispatched", dispatched_at: new Date().toISOString() }),
@@ -54,6 +57,90 @@ describe("WorkerJobsPanel", () => {
     expect(
       await screen.findByText(/no progress detail is available/i),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("draws a live progress bar for a dispatched job that is crawling", async () => {
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({
+          status: "dispatched",
+          dispatched_at: new Date().toISOString(),
+          pages_crawled: 3718,
+          progress_pct: 40.43,
+          current_phase: "crawling",
+        }),
+      ]),
+    };
+
+    renderPanel(api);
+
+    const bar = await screen.findByRole("progressbar");
+    expect(bar).toBeInTheDocument();
+    expect(await screen.findByText("Crawling: 3,718 pages (40%).")).toBeInTheDocument();
+    expect(screen.queryByText(/no progress detail is available/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the exporting phase once the crawl has moved past discovery", async () => {
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({
+          status: "dispatched",
+          dispatched_at: new Date().toISOString(),
+          pages_crawled: 9204,
+          progress_pct: 100,
+          current_phase: "exporting",
+        }),
+      ]),
+    };
+
+    renderPanel(api);
+
+    expect(await screen.findByRole("progressbar")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Exporting the crawl bundle — 9,204 pages found."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a decreasing percentage as-is, without treating it as an error", async () => {
+    // Screaming Frog's own denominator grows as it discovers more URLs
+    // mid-crawl, so a later report can show a lower percentage than an
+    // earlier one — real data, not a bug to guard against.
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({
+          status: "dispatched",
+          dispatched_at: new Date().toISOString(),
+          pages_crawled: 500,
+          progress_pct: 12.5,
+          current_phase: "crawling",
+        }),
+      ]),
+    };
+
+    renderPanel(api);
+
+    expect(await screen.findByText("Crawling: 500 pages (13%).")).toBeInTheDocument();
+  });
+
+  it("does not draw a progress bar for a job that is not dispatched", async () => {
+    // A defensive check: even if a stray progress report existed on a
+    // terminal-status record, only a `dispatched` row draws the bar.
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({
+          status: "succeeded",
+          finished_at: "2026-09-21T11:00:00Z",
+          pages_crawled: 500,
+          progress_pct: 100,
+          current_phase: "exporting",
+        }),
+      ]),
+    };
+
+    renderPanel(api);
+
+    await screen.findByText("SUCCEEDED");
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 

@@ -380,9 +380,21 @@ export interface WorkerJobEnvelope {
  * have the UI fall through every branch — silently rendering nothing — the
  * first time a member is added. Callers map it with an explicit fallback.
  *
- * The four optional fields are optional on the wire too, and records written
- * before `bundle_size_bytes` existed carry none of them. Absence must read as
+ * Every optional field here is optional on the wire too, and records written
+ * before a given field existed carry none of it. Absence must read as
  * "not recorded", never as zero.
+ *
+ * `pages_crawled`, `progress_pct` and `current_phase` are hand-written here
+ * rather than generated: `scripts/export_ui_contract.py`'s `MODELS` tuple only
+ * covers the page-classifier contract, not `src/api/worker_schemas.py`
+ * (build-log 0100 §6/§8, the same gap `GscAccountsView`'s own local
+ * `GscAccount` type works around for a different endpoint). `None` until a
+ * worker has sent at least one progress report — which may be never, for a
+ * job whose worker predates this feature, one still waiting on its first
+ * poll tick, or a worker that has gone offline. `progress_pct` is not
+ * guaranteed to only increase: Screaming Frog's own denominator grows as it
+ * discovers more URLs mid-crawl, so a later report can show a lower number
+ * than an earlier one — that is real data, not a bug to smooth over.
  */
 export interface WorkerJobView {
   id: string;
@@ -397,6 +409,9 @@ export interface WorkerJobView {
   finished_at?: string | null;
   error?: string | null;
   bundle_size_bytes?: number | null;
+  pages_crawled?: number | null;
+  progress_pct?: number | null;
+  current_phase?: "crawling" | "exporting" | null;
 }
 
 /**

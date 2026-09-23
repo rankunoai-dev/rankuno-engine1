@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Table, Tag, message } from "antd";
+import { Alert, Button, Empty, Progress, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import type {
@@ -50,10 +50,17 @@ const STATUS_COLOUR: Readonly<Record<string, string>> = {
  * a `/jobs` route is a 404. Merging the two would save a table and cost the
  * only visible evidence that they are different systems.
  *
- * There is no progress column and there will not be one. The supervisor knows
- * whether the Screaming Frog process is alive, and nothing else: a three-hour
- * crawl reports "running" for three hours. Elapsed time is real and is shown;
- * a percentage would be invented.
+ * A `dispatched` row's status cell used to say only that the process was
+ * alive, "for three hours" if that is how long it took, on the grounds that a
+ * percentage would be invented — the supervisor genuinely knew nothing more.
+ * That reasoning is now obsolete, not overridden: build-log 0100 shipped a
+ * worker-side `trace.txt` tail that reports real `pages_crawled`/
+ * `progress_pct`/`current_phase` numbers straight from Screaming Frog's own
+ * `SpiderProgress` line, so a percentage is no longer invented, it is read.
+ * When a `dispatched` job carries no progress yet — an older worker daemon, a
+ * job that only just started, a worker that has gone offline mid-crawl — the
+ * original "no progress detail is available" line still applies and is still
+ * shown; only its status as a permanent, structural limitation is gone.
  */
 export function WorkerJobsPanel({
   api,
@@ -136,7 +143,15 @@ export function WorkerJobsPanel({
           <Tag color={STATUS_COLOUR[job.status] ?? "default"}>
             {job.status.toUpperCase()}
           </Tag>
-          <span className="sfj-detail">{describeStatus(job)}</span>
+          {job.status === "dispatched" && job.progress_pct != null ? (
+            <DispatchProgress
+              percent={job.progress_pct}
+              pages={job.pages_crawled}
+              phase={job.current_phase}
+            />
+          ) : (
+            <span className="sfj-detail">{describeStatus(job)}</span>
+          )}
         </div>
       ),
     },
@@ -281,11 +296,57 @@ function hasBundle(job: WorkerJobView): boolean {
 }
 
 /**
+ * The progress bar and its caption for a `dispatched` job that has reported
+ * `progress_pct` at least once.
+ *
+ * Only rendered once the caller has already checked `progress_pct != null` —
+ * that is the one field treated as the gate, taken as a plain `number` prop
+ * here so this component never needs to re-check or cast it. `pages` and
+ * `phase` can each independently still be absent (`WorkerProgressReport`'s
+ * own docstring: "a worker may report partial knowledge") and are handled as
+ * such. `percent` is passed straight through with no clamping or
+ * "only increases" logic: Screaming Frog's own denominator grows as a crawl
+ * discovers more URLs, so a later report can legitimately show a lower number
+ * than an earlier one, and `antd`'s `Progress` already renders that correctly
+ * on its own.
+ */
+function DispatchProgress({
+  percent,
+  pages,
+  phase,
+}: {
+  percent: number;
+  pages: number | null | undefined;
+  phase: WorkerJobView["current_phase"];
+}): JSX.Element {
+  const exporting = phase === "exporting";
+
+  const caption = exporting
+    ? `Exporting the crawl bundle${pages != null ? ` — ${pages.toLocaleString()} pages found` : ""}.`
+    : `Crawling: ${pages != null ? `${pages.toLocaleString()} pages` : "page count not yet reported"} (${Math.round(percent)}%).`;
+
+  return (
+    <>
+      <Progress
+        percent={percent}
+        size="small"
+        status={exporting ? "normal" : "active"}
+        showInfo={false}
+        style={{ marginBottom: 0 }}
+      />
+      <span className="sfj-detail">{caption}</span>
+    </>
+  );
+}
+
+/**
  * A sentence for each status, saying what is and is not known.
  *
- * The `dispatched` line is the important one. The worker reports alive or
- * finished and nothing between, so "running" is the whole of what the platform
- * knows about a crawl that may have hours left.
+ * The `dispatched` line is the fallback the status cell falls back to when no
+ * progress report has arrived yet — an older worker daemon, a job that only
+ * just started, or a worker gone offline mid-crawl. When a report has
+ * arrived, `DispatchProgress` renders instead; this string is never shown
+ * alongside it.
  */
 function describeStatus(job: WorkerJobView): string {
   switch (job.status) {
