@@ -467,6 +467,16 @@ export interface CrawlDataAdapter {
   getPerformance?(jobId: string): Promise<SavedPerformance | null>;
 
   /**
+   * Every URL a finished crawl found, as an `.xlsx` workbook.
+   *
+   * A `Blob` rather than a URL for the same reason as `downloadWorkerBundle`:
+   * the route is bearer-guarded, and an `<a href>` the browser follows
+   * carries no `Authorization` header. Optional like `reconcileScreamingFrog`
+   * — fixtures have no server behind them to build the workbook.
+   */
+  downloadUrlList?(jobId: string): Promise<Blob>;
+
+  /**
    * Start a new crawl, returning its job id.
    *
    * Optional, and that is the point: `MockAdapter` reads files that were

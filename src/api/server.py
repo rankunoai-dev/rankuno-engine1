@@ -98,6 +98,7 @@ from src.core.worker_auth import WorkerStore
 from src.core.worker_dispatch_store import WorkerDispatchStore
 from src.modules.seo.deliverables.rulebook_store import RulebookStore
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
+from src.modules.seo.page_classifier.reports import MasterURLReport
 from src.modules.seo.page_classifier.schemas import (
     ConsensusMethod,
     FullPageIntelligenceProfile,
@@ -2374,6 +2375,62 @@ def create_app(
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
         org_scoped_or_404(record=record, record_id=job_id, org_id=org_id, kind=kind)
         return record
+
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}/urls.xlsx")
+    def download_urls_workbook(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Response:
+        """Every URL this crawl found, as a workbook — one click, no panel.
+
+        The job-row menu offers this beside `Search Console` and `Cross-check`,
+        both of which open a panel because they need an upload first. This one
+        needs nothing the crawl does not already have, so the click *is* the
+        download: no intermediate screen to open and close again.
+
+        Delegates to `MasterURLReport`, which already builds the three sheets
+        (all URLs, by indexability, by HTTP status) — this route is its first
+        caller. Unlike `opportunities.xlsx` and `reconciliation.xlsx`, which
+        assemble bespoke sheets from a saved report, there is nothing to
+        assemble here beyond handing the crawl's own result to a generator
+        that already exists for it.
+
+        Args:
+            job_id: The job whose URL list to download.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
+        Raises:
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                the job does not exist, `403` if another org owns it (ADR
+                0016), `409` if the job has not finished.
+        """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        record = _owned_job(job_id, principal.org_id, "result")
+        if not record.has_result:
+            # 409, not 404: the job exists and may yet produce a result — same
+            # reasoning as `get_result`.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"job {job_id} is {record.status.value} and has no result",
+            )
+        stored = state.store.read_result(job_id)
+        try:
+            crawl = PageClassificationOutput.model_validate(stored)
+        except ValidationError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="this job's result predates the current output contract",
+            ) from exc
+
+        workbook = MasterURLReport(crawl).generate()
+        stamp = record.finished_at.date().isoformat() if record.finished_at else "undated"
+        return Response(
+            content=workbook.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="urls-{job_id[:8]}-{stamp}.xlsx"'
+            },
+        )
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation")
     def get_reconciliation(

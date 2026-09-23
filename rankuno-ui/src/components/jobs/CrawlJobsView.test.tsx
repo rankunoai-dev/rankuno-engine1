@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import type { CrawlJobSummary } from "../../adapters/adapterInterface";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CrawlDataAdapter, CrawlJobSummary } from "../../adapters/adapterInterface";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { CrawlJobsView } from "./CrawlJobsView";
 
@@ -29,7 +29,7 @@ function withJob(overrides: Partial<CrawlJobSummary>): void {
 }
 
 afterEach(() => {
-  useCrawlStore.setState({ jobs: [], liveJobs: {} });
+  useCrawlStore.setState({ jobs: [], liveJobs: {}, adapter: null });
 });
 
 describe("CrawlJobsView status detail", () => {
@@ -63,5 +63,81 @@ describe("CrawlJobsView status detail", () => {
     expect(screen.queryByText("finished")).not.toBeInTheDocument();
     expect(screen.queryByText("hit page ceiling")).not.toBeInTheDocument();
     expect(screen.queryByText("stalled/aborted")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * "Download URLs" in the job-row `...` menu.
+ *
+ * One click, no panel: the workbook is fetched as a `Blob` and handed to
+ * `saveBlob` the moment the item is clicked, the same shape as
+ * `WorkerJobsPanel`'s bundle download — never through an `<a href>`, which
+ * would carry no `Authorization` header against a bearer-guarded route.
+ */
+describe("CrawlJobsView download URLs", () => {
+  it("offers Download URLs for a finished job and downloads the workbook on click", async () => {
+    const blob = new Blob(["xlsx"], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const downloadUrlList = vi.fn().mockResolvedValue(blob);
+    withJob({ status: "succeeded" });
+    useCrawlStore.setState({
+      adapter: { downloadUrlList } as unknown as CrawlDataAdapter,
+    });
+    // jsdom implements neither; the anchor-click download trick needs both.
+    URL.createObjectURL = vi.fn(() => "blob:x");
+    URL.revokeObjectURL = vi.fn();
+
+    render(<CrawlJobsView />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions for this crawl/i }));
+    fireEvent.click(await screen.findByText("Download URLs"));
+
+    await waitFor(() => {
+      expect(downloadUrlList).toHaveBeenCalledWith("job-1");
+    });
+  });
+
+  it("does not open a panel when Download URLs is clicked", async () => {
+    const downloadUrlList = vi.fn().mockResolvedValue(new Blob(["xlsx"]));
+    withJob({ status: "succeeded" });
+    useCrawlStore.setState({
+      adapter: { downloadUrlList } as unknown as CrawlDataAdapter,
+    });
+    URL.createObjectURL = vi.fn(() => "blob:x");
+    URL.revokeObjectURL = vi.fn();
+
+    render(<CrawlJobsView />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions for this crawl/i }));
+    fireEvent.click(await screen.findByText("Download URLs"));
+
+    await waitFor(() => expect(downloadUrlList).toHaveBeenCalled());
+    // No dialog role exists anywhere — the click fetched a blob and saved it,
+    // it did not open `ReconcilePanel` or `PerformancePanel`.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("hides Download URLs when the adapter cannot build the workbook", () => {
+    withJob({ status: "succeeded" });
+    // No adapter set at all — `MockAdapter` and a fixture session both leave
+    // `downloadUrlList` undefined.
+    render(<CrawlJobsView />);
+    expect(
+      screen.queryByRole("button", { name: /more actions for this crawl/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides Download URLs for a job that has not finished", () => {
+    const downloadUrlList = vi.fn();
+    withJob({ status: "running" });
+    useCrawlStore.setState({
+      adapter: { downloadUrlList } as unknown as CrawlDataAdapter,
+    });
+
+    render(<CrawlJobsView />);
+    // `running` offers no other menu item either, so the `...` trigger itself
+    // must be absent, not merely missing this one entry.
+    expect(
+      screen.queryByRole("button", { name: /more actions for this crawl/i }),
+    ).not.toBeInTheDocument();
   });
 });

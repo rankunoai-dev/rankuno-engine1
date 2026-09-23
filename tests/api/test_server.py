@@ -515,6 +515,88 @@ class TestReadingJobs:
         assert body["label"] == SAFE_URL
 
 
+class TestUrlsWorkbookDownload:
+    """The whole crawl's URL list, one click from the job-row menu.
+
+    Unlike `opportunities.xlsx` and `reconciliation.xlsx`, this route needs
+    nothing beyond a finished crawl — no Search Console export, no
+    Screaming Frog cross-check — so the only prerequisites worth testing are
+    the ones `get_result` already has: the job must exist, and it must have
+    produced a result.
+    """
+
+    def _finished_with_pages(self, store: DiskJobStore) -> JobRecord:
+        page = FullPageIntelligenceProfile(
+            url="https://e.com/a/",
+            canonical_url="https://e.com/a/",
+            normalized_path="https://e.com/a/",
+            hierarchy_level=HierarchyLevel.L3_LEAF_PAGE,
+            primary_page_type=PrimaryPageType.BLOG_ARTICLE,
+            depth_from_l0=1,
+            search_intent=SearchIntent.INFORMATIONAL,
+            signals_evaluated=(
+                SignalScore(
+                    source=SignalSource.SITEMAP_INDEX,
+                    suggested_level=HierarchyLevel.L3_LEAF_PAGE,
+                    suggested_page_type=PrimaryPageType.BLOG_ARTICLE,
+                    confidence=0.9,
+                ),
+            ),
+            final_confidence_score=0.9,
+            consensus_method=ConsensusMethod.LAYER1_STRUCTURAL,
+            gsc_clicks=12,
+            gsc_impressions=400,
+        )
+        record = store.create(server_module.TOOL_NAME, {"base_url": SAFE_URL}, label=SAFE_URL)
+        store.finish(
+            record.id,
+            PageClassificationOutput(
+                base_url=SAFE_URL,
+                site_profile=SiteProfile(),
+                weight_profile=WeightProfileReport.for_site(SiteProfile()),
+                discovery=DiscoveryReport(base_url=SAFE_URL),
+                summary=CrawlSummary(pages_classified=1),
+                pages=(page,),
+            ).model_dump(mode="json"),
+        )
+        return record
+
+    def test_an_unknown_job_is_404(self, client):
+        assert client.get(f"{API_PREFIX}/jobs/nope/urls.xlsx").status_code == 404
+
+    def test_a_missing_result_is_409_not_404(self, client, store):
+        """Same reasoning as `/result`: the job may yet finish."""
+        job_id = store.create("seo.page_classifier", {"base_url": SAFE_URL}).id
+        store.mark_running(job_id)
+
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}/urls.xlsx")
+        assert response.status_code == 409
+
+    def test_the_workbook_carries_every_url_the_crawl_found(self, client, store):
+        record = self._finished_with_pages(store)
+
+        response = client.get(f"{API_PREFIX}/jobs/{record.id}/urls.xlsx")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument"
+        )
+        assert f'filename="urls-{record.id[:8]}-' in response.headers["content-disposition"]
+        book = load_workbook(io.BytesIO(response.content))
+        assert book.sheetnames == ["All URLs", "By Indexability", "By HTTP Status"]
+        rows = list(book["All URLs"].iter_rows(values_only=True))
+        assert rows[0][0] == "URL"
+        assert rows[1][0] == "https://e.com/a/"
+
+    def test_a_result_predating_the_output_contract_is_409(self, client, store):
+        """A stored blob from before `MasterURLReport`'s fields existed must not 500."""
+        record = store.create(server_module.TOOL_NAME, {"base_url": SAFE_URL})
+        store.finish(record.id, {"base_url": SAFE_URL})
+
+        response = client.get(f"{API_PREFIX}/jobs/{record.id}/urls.xlsx")
+        assert response.status_code == 409
+
+
 class TestCors:
     def test_the_vite_origin_is_allowed(self, client):
         response = client.get(f"{API_PREFIX}/health", headers={"Origin": "http://localhost:5173"})
@@ -2162,10 +2244,14 @@ class TestBackwardCompatibility:
 
 
 class TestStaticUi:
-    def test_root_serves_ui_index_when_dist_exists(self, monkeypatch, tmp_path, store, mock_org_store):
+    def test_root_serves_ui_index_when_dist_exists(
+        self, monkeypatch, tmp_path, store, mock_org_store
+    ):
         dist_dir = tmp_path / "rankuno-ui" / "dist"
         dist_dir.mkdir(parents=True)
-        (dist_dir / "index.html").write_text("<html><body>Rankuno UI</body></html>", encoding="utf-8")
+        (dist_dir / "index.html").write_text(
+            "<html><body>Rankuno UI</body></html>", encoding="utf-8"
+        )
         assets_dir = dist_dir / "assets"
         assets_dir.mkdir()
         (assets_dir / "main.js").write_text("console.log('ui');", encoding="utf-8")
@@ -2189,7 +2275,9 @@ class TestStaticUi:
             assert res_asset.status_code == 200
             assert "console.log('ui');" in res_asset.text
 
-    def test_root_redirects_to_health_when_dist_absent(self, monkeypatch, tmp_path, store, mock_org_store):
+    def test_root_redirects_to_health_when_dist_absent(
+        self, monkeypatch, tmp_path, store, mock_org_store
+    ):
         monkeypatch.chdir(tmp_path)
         app = create_app(
             store=store,

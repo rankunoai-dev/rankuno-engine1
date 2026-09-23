@@ -123,6 +123,15 @@ class TestCrossOrgDenialOnPreviouslyUncheckedRoutes:
         response = client.get(f"{API_PREFIX}/jobs/{victim_job_id}/reconciliation.xlsx")
         assert response.status_code == 403
 
+    def test_download_urls_workbook(self, client, victim_job_id):
+        """Not in the ADR's fourteen.
+
+        Added alongside `urls.xlsx` itself, so this route never had a window
+        where it lacked the check.
+        """
+        response = client.get(f"{API_PREFIX}/jobs/{victim_job_id}/urls.xlsx")
+        assert response.status_code == 403
+
     def test_get_performance(self, client, store, victim_job_id):
         store.write_performance(victim_job_id, {"summary": {}, "created_at": "2026-01-01"})
         response = client.get(f"{API_PREFIX}/jobs/{victim_job_id}/performance")
@@ -188,6 +197,7 @@ class TestUnauthenticatedIsRejected:
             ("get", "/performance"),
             ("get", "/opportunities.csv"),
             ("get", "/opportunities.xlsx"),
+            ("get", "/urls.xlsx"),
             ("get", "/matched.csv"),
             ("get", "/unmatched.csv"),
             ("post", "/reconcile/screaming-frog"),

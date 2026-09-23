@@ -330,6 +330,12 @@ that; `MAX_CONCURRENT_CRAWLS` (1–10) sets the cap. It bounds memory, not CPU:
 each in-flight crawl holds its whole graph in RAM, so raise it only on a host
 with the RAM to match.
 
+A finished crawl's job-row `...` menu offers "Download URLs" alongside
+"Search Console", "Cross-check" and "Run again": one click, no intermediate
+panel, fetching `GET /jobs/{id}/urls.xlsx` — every URL the crawl found, as a
+3-sheet workbook (All URLs, By Indexability, By HTTP Status) built by
+`MasterURLReport` (`modules/seo/page_classifier/reports.py`).
+
 ### Search Console accounts (optional)
 
 A crawl can read Google Search Console for its property through the connector

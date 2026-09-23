@@ -10,9 +10,8 @@ from __future__ import annotations
 import os
 from logging.config import fileConfig
 
-from sqlalchemy import create_engine, pool
-
 from alembic import context
+from sqlalchemy import create_engine, pool
 
 # this is the Alembic Config object, which provides
 # the values of the alembic.ini file, and is passed

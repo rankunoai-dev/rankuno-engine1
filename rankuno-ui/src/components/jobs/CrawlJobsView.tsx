@@ -1,8 +1,19 @@
-import { Button, Dropdown, Empty, Popconfirm, Progress, Table, Tag, Tooltip } from "antd";
+import {
+  Button,
+  Dropdown,
+  Empty,
+  Popconfirm,
+  Progress,
+  Table,
+  Tag,
+  Tooltip,
+  message,
+} from "antd";
 import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useState } from "react";
 import type { CrawlJobSummary, JobStatus } from "../../adapters/adapterInterface";
+import { saveBlob } from "../../lib/download";
 import {
   elapsedSeconds,
   fetchedPercent,
@@ -75,8 +86,32 @@ export function CrawlJobsView(): JSX.Element {
   const canIngestGsc = useCrawlStore(
     (state) => state.adapter?.uploadGscExport !== undefined,
   );
+  // Same reasoning again: fixtures have no server behind them to build the
+  // workbook, so the menu item is absent rather than present and failing.
+  const downloadUrlList = useCrawlStore((state) => state.adapter?.downloadUrlList);
   const [reconciling, setReconciling] = useState<JobRow | null>(null);
   const [performing, setPerforming] = useState<JobRow | null>(null);
+
+  /**
+   * Fetch the workbook and save it — no panel, the click is the whole flow.
+   *
+   * Unlike `reconciliation.xlsx`, which the UI only ever fetches through an
+   * `<a href>` inside an already-open panel, this one has to carry the
+   * `Authorization` header itself: there is no panel open to have fetched it
+   * for us. Same blob-then-`saveBlob` shape as `WorkerJobsPanel`'s bundle
+   * download, for the same reason.
+   */
+  async function downloadUrls(row: JobRow): Promise<void> {
+    if (!downloadUrlList) return;
+    try {
+      const stamp = row.crawledAt ? row.crawledAt.slice(0, 10) : "undated";
+      saveBlob(`urls-${row.id.slice(0, 8)}-${stamp}.xlsx`, await downloadUrlList(row.id));
+    } catch (cause) {
+      message.error(
+        cause instanceof Error ? cause.message : "The URL list could not be downloaded.",
+      );
+    }
+  }
 
   // Drives the elapsed clocks only. The crawl's own numbers arrive on the
   // adapter's poll; this is a second-hand, and it stops when nothing is running
@@ -144,9 +179,11 @@ export function CrawlJobsView(): JSX.Element {
           onCancel={() => void cancel(row.id)}
           onReconcile={() => setReconciling(row)}
           onPerformance={() => setPerforming(row)}
+          onDownloadUrls={() => void downloadUrls(row)}
           canRelaunch={canRelaunch}
           canReconcile={canReconcile}
           canIngestGsc={canIngestGsc}
+          canDownloadUrls={downloadUrlList !== undefined}
         />
       ),
     },
@@ -291,9 +328,11 @@ function ActionCell({
   onCancel,
   onReconcile,
   onPerformance,
+  onDownloadUrls,
   canRelaunch,
   canReconcile,
   canIngestGsc,
+  canDownloadUrls,
 }: {
   row: JobRow;
   onOpen: () => void;
@@ -301,9 +340,11 @@ function ActionCell({
   onCancel: () => void;
   onReconcile: () => void;
   onPerformance: () => void;
+  onDownloadUrls: () => void;
   canRelaunch: boolean;
   canReconcile: boolean;
   canIngestGsc: boolean;
+  canDownloadUrls: boolean;
 }): JSX.Element {
   const ready = row.status === "succeeded" || row.status === "partial";
   const finished = ready || row.status === "failed";
@@ -354,6 +395,19 @@ function ActionCell({
         </span>
       ),
       onClick: onReconcile,
+    });
+  }
+
+  if (canDownloadUrls && ready) {
+    extras.push({
+      key: "urls",
+      label: (
+        <span className="jb-menuitem">
+          Download URLs
+          <em>Every URL this crawl found, as a spreadsheet.</em>
+        </span>
+      ),
+      onClick: onDownloadUrls,
     });
   }
 

@@ -119,6 +119,11 @@ src/
 │   │                            # 5) — the RAM bound; the rest get 429
 │   │                            # GET /api/v1/gsc/accounts lists profile names;
 │   │                            # admission refuses an unknown gsc_account (400)
+│   │                            # GET /jobs/{id}/urls.xlsx (cycle 0102): the
+│   │                            # whole crawl's URL list via MasterURLReport,
+│   │                            # one click from the job-row "..." menu — no
+│   │                            # panel, unlike reconciliation.xlsx/
+│   │                            # opportunities.xlsx which need an upload first
 │   │                            # Almost every route requires a bearer session
 │   │                            # token (ADR 0016); org_id is derived from its
 │   │                            # verified claim, never from X-Org-Id or a URL
@@ -226,6 +231,12 @@ src/
     │       │                         # .record_fetch, the one method both
     │       │                         # sync and async discovery call (ADR 0014)
     │       ├── tree_visualizer.py    # Standalone interactive HTML site tree
+    │       ├── reports.py            # MasterURLReport: 3-sheet .xlsx (All URLs
+    │       │                         # w/ GSC metrics+hierarchy+type+depth+
+    │       │                         # discovery-method, By Indexability, By
+    │       │                         # HTTP Status). Shipped with zero callers
+    │       │                         # until GET /jobs/{id}/urls.xlsx (cycle
+    │       │                         # 0102) became its first exerciser
     │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
     │       │                         # crawl job, RiskClass.READ (ADR 0003).
     │       │                         # Input carries gsc_account: the named

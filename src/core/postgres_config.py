@@ -77,7 +77,9 @@ class PostgresSettings(BaseSettings):
         raw_url = (
             self.database_url.get_secret_value()
             if self.database_url
-            else os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or os.getenv("DATABASE_PRIVATE_URL")
+            else os.getenv("DATABASE_URL")
+            or os.getenv("POSTGRES_URL")
+            or os.getenv("DATABASE_PRIVATE_URL")
         )
 
         if raw_url:
@@ -85,9 +87,7 @@ class PostgresSettings(BaseSettings):
                 return raw_url.replace("postgres://", "postgresql://", 1)
             return raw_url
 
-        password = (
-            self.postgres_password.get_secret_value() if self.postgres_password else ""
-        )
+        password = self.postgres_password.get_secret_value() if self.postgres_password else ""
         return (
             f"postgresql://{self.postgres_user}:{password}@"
             f"{self.postgres_host}:{self.postgres_port}/"

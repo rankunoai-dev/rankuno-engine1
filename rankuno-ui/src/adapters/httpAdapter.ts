@@ -320,6 +320,32 @@ export class HttpAdapter implements CrawlDataAdapter {
     );
   }
 
+  /**
+   * Every URL a finished crawl found, as an `.xlsx` workbook.
+   *
+   * Bypasses `request` for the same reason as `downloadWorkerBundle`: the
+   * body is binary, not JSON. One click from the closed job-row menu — no
+   * panel needs to be open first, unlike `reconciliation.xlsx`, which the UI
+   * only ever fetches through an `<a href>` inside an already-open panel.
+   */
+  async downloadUrlList(jobId: string): Promise<Blob> {
+    const url = `${this.baseUrl}/jobs/${encodeURIComponent(jobId)}/urls.xlsx`;
+    let response: Response;
+    try {
+      response = await authorizedFetch(url);
+    } catch (cause) {
+      throw new ApiError(
+        0,
+        `Cannot reach the engine at ${this.baseUrl}. Is the API server running?`,
+        { cause },
+      );
+    }
+    if (!response.ok) {
+      throw new ApiError(response.status, await describeFailure(response));
+    }
+    return response.blob();
+  }
+
   /*
    * -------------------------------------------------------------------------
    * Worker dispatch (ADR 0015). A *different* job system from `/jobs` above:
