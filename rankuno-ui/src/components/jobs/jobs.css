@@ -262,18 +262,31 @@
   line-height: 1.5;
 }
 
-/* The cross-check download. A link rather than a button because it is one:
-   the browser saves the file, the app never holds a copy. */
+/* The cross-check download. A `<button>` now, styled like the link it used to
+   be: the endpoint has required a bearer token since ADR 0016, and a plain
+   `<a href>` navigation cannot carry one, so the click fetches the bytes
+   through `authorizedFetch` and hands them to the browser as a blob instead.
+   The border/background/padding resets undo the browser's own `<button>`
+   chrome, which an `<a>` never had. */
 .jb-download {
   display: inline-block;
   margin-top: 14px;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
   font-size: 12px;
   color: var(--accent-soft);
   text-decoration: underline;
   text-underline-offset: 3px;
+  cursor: pointer;
 }
 .jb-download:hover {
   color: var(--accent-soft-hover);
+}
+.jb-download:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* --- Search Console panel -------------------------------------------------
@@ -345,23 +358,32 @@
 
 /* The recommendations download. Filled rather than outlined: the outlined
    version of this same control in the audit view went unnoticed for a whole
-   cycle (build-log 0038). A link, not a button, because it is one — the
-   browser saves the file and the app never holds a copy. */
+   cycle (build-log 0038). A `<button>`, not an `<a>`: the endpoint requires a
+   bearer token since ADR 0016 that a plain navigation cannot carry, so the
+   click fetches the bytes through `authorizedFetch` and saves them as a blob
+   instead. `font-family` is set explicitly because a `<button>`, unlike an
+   `<a>`, does not inherit it from the body by default. */
 .perf-download {
   display: inline-block;
   border: 1px solid var(--primary);
   border-radius: var(--radius);
   background: var(--primary);
   color: #fff;
+  font-family: inherit;
   font-size: 12px;
   font-weight: 600;
   padding: 4px 12px;
   text-decoration: none;
+  cursor: pointer;
 }
 .perf-download:hover {
   background: var(--btn-primary-bg-hover);
   border-color: var(--btn-primary-bg-hover);
   color: #fff;
+}
+.perf-download:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* Section-level download. Same affordance as the whole-report button, sized to
@@ -432,13 +454,22 @@
 }
 
 .perf-download-plain {
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
   font-size: 11.5px;
   color: var(--dim);
   text-decoration: underline;
   text-underline-offset: 3px;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .perf-download-plain:hover {
   color: var(--ink);
+}
+.perf-download-plain:disabled {
+  cursor: default;
+  opacity: 0.6;
 }

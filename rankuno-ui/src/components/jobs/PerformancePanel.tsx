@@ -1,4 +1,4 @@
-import { Alert, Modal, Table, Tag, Upload } from "antd";
+import { Alert, Modal, Table, Tag, Upload, message } from "antd";
 import { useEffect, useState } from "react";
 import type {
   Opportunity,
@@ -6,7 +6,7 @@ import type {
   SectionPerformance,
   UnmatchedGroup,
 } from "../../adapters/adapterInterface";
-import { API_BASE } from "../../adapters/httpAdapter";
+import { API_BASE, downloadFile } from "../../adapters/httpAdapter";
 import { downloadCsv, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import "./jobs.css";
@@ -215,6 +215,24 @@ function Quality({
   jobId: string;
 }): JSX.Element {
   const coverage = summary.pages ? summary.pages_with_data / summary.pages : 0;
+  const [downloading, setDownloading] = useState<"matched" | "unmatched" | null>(null);
+
+  async function download(kind: "matched" | "unmatched"): Promise<void> {
+    setDownloading(kind);
+    try {
+      await downloadFile(
+        `${API_BASE}/jobs/${encodeURIComponent(jobId)}/${kind}.csv`,
+        `${jobId}-${kind}.csv`,
+      );
+    } catch (cause) {
+      message.error(
+        cause instanceof Error ? cause.message : "The file could not be downloaded.",
+      );
+    } finally {
+      setDownloading(null);
+    }
+  }
+
   return (
     <>
       {!summary.is_reliable && (
@@ -247,18 +265,26 @@ function Quality({
         )}
       </div>
       <div className="perf-downloads">
-        <a
+        <button
+          type="button"
           className="perf-download"
-          href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/matched.csv`}
+          disabled={downloading !== null}
+          onClick={() => void download("matched")}
         >
-          Download the {summary.matched.toLocaleString()} matched pages
-        </a>
-        <a
+          {downloading === "matched"
+            ? "Downloading…"
+            : `Download the ${summary.matched.toLocaleString()} matched pages`}
+        </button>
+        <button
+          type="button"
           className="perf-download perf-download-muted"
-          href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/unmatched.csv`}
+          disabled={downloading !== null}
+          onClick={() => void download("unmatched")}
         >
-          Download the {(summary.rows - summary.matched).toLocaleString()} unmatched rows
-        </a>
+          {downloading === "unmatched"
+            ? "Downloading…"
+            : `Download the ${(summary.rows - summary.matched).toLocaleString()} unmatched rows`}
+        </button>
       </div>
       {summary.source_name && (
         <p className="perf-source">
@@ -538,6 +564,23 @@ function Opportunities({
 }): JSX.Element {
   const report = summary.opportunities;
   const kinds = [...new Set(report.opportunities.map((item) => item.kind))];
+  const [downloading, setDownloading] = useState<"xlsx" | "csv" | null>(null);
+
+  async function download(format: "xlsx" | "csv"): Promise<void> {
+    setDownloading(format);
+    try {
+      await downloadFile(
+        `${API_BASE}/jobs/${encodeURIComponent(jobId)}/opportunities.${format}`,
+        `${jobId}-opportunities.${format}`,
+      );
+    } catch (cause) {
+      message.error(
+        cause instanceof Error ? cause.message : "The file could not be downloaded.",
+      );
+    } finally {
+      setDownloading(null);
+    }
+  }
 
   return (
     <>
@@ -545,25 +588,29 @@ function Opportunities({
         <h4 className="perf-heading">Recommendations</h4>
         {report.opportunities.length > 0 && (
           <span className="perf-heading-actions">
-            <a
+            <button
               /* A class this file owns. The shared `rk-btn` is scoped to
                  `.rk-dash`, and this renders in a modal portal outside it — so
-                 borrowing it would give an unstyled link that `tsc` cannot see. */
+                 borrowing it would give an unstyled button that `tsc` cannot see. */
+              type="button"
               className="perf-download"
-              href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/opportunities.xlsx`}
+              disabled={downloading !== null}
               title="One sheet per recommendation kind, plus a contents page listing the kinds that were not evaluated."
+              onClick={() => void download("xlsx")}
             >
-              Download Excel (one sheet per kind)
-            </a>
+              {downloading === "xlsx" ? "Downloading…" : "Download Excel (one sheet per kind)"}
+            </button>
             {/* Kept, and second. Anything already linking to the flat file
                 keeps working, and a single sheet is still what someone piping
                 this into another tool wants. */}
-            <a
+            <button
+              type="button"
               className="perf-download-plain"
-              href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/opportunities.csv`}
+              disabled={downloading !== null}
+              onClick={() => void download("csv")}
             >
-              or a single CSV
-            </a>
+              {downloading === "csv" ? "Downloading…" : "or a single CSV"}
+            </button>
           </span>
         )}
       </div>

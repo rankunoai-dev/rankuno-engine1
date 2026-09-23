@@ -1,3 +1,4 @@
+import { saveBlob } from "../lib/download";
 import type {
   JobTelemetry,
   PageClassificationInput,
@@ -137,6 +138,52 @@ export async function authorizedFetch(url: string, init?: RequestInit): Promise<
   const response = await fetch(url, { ...init, headers });
   if (response.status === 401) onSessionExpired?.();
   return response;
+}
+
+/**
+ * Fetch an authenticated export and hand it to the browser as a local file.
+ *
+ * Every export route this app links to — reconciliation, performance, the
+ * worker bundle — has required a bearer token since ADR 0016, and a plain
+ * `<a href>` pointing straight at the API cannot carry one: a browser
+ * navigation has no mechanism to attach a custom header, so the request
+ * arrives with none and the server answers `401`. This is the one place that
+ * fetches such a file, so every download link in the app should call it
+ * rather than render an `<a href={API_BASE}...}>` of its own.
+ *
+ * `401` has already fired the shared session-expired handler by the time this
+ * throws, the same as any other call through `authorizedFetch`; a caller does
+ * not need to handle that status specially. Any other non-2xx is surfaced as
+ * an `ApiError` for the caller to show, typically via antd's `message.error`.
+ *
+ * @param url - Absolute URL to fetch.
+ * @param fallbackFilename - Used when the response carries no
+ *   `Content-Disposition`, or one this cannot parse. Every server route here
+ *   does set it (`server.py`'s `_csv_response` / `_workbook_response`), so
+ *   this is normally only reached on an error response or a route this
+ *   helper has not been taught about yet.
+ */
+export async function downloadFile(url: string, fallbackFilename: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await authorizedFetch(url);
+  } catch (cause) {
+    throw new ApiError(0, "Cannot reach the engine. Is the API server running?", { cause });
+  }
+  if (!response.ok) {
+    throw new ApiError(response.status, await describeFailure(response));
+  }
+  const filename =
+    filenameFromContentDisposition(response.headers.get("Content-Disposition")) ??
+    fallbackFilename;
+  saveBlob(filename, await response.blob());
+}
+
+/** The `filename` an `attachment; filename="..."` `Content-Disposition` names. */
+function filenameFromContentDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const match = /filename="?([^";]+)"?/i.exec(header);
+  return match?.[1]?.trim() || null;
 }
 
 /**
@@ -529,7 +576,7 @@ export class HttpAdapter implements CrawlDataAdapter {
 }
 
 /** Pull FastAPI's `detail` out of an error body, falling back to the status. */
-async function describeFailure(response: Response): Promise<string> {
+export async function describeFailure(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { detail?: unknown };
     if (typeof body.detail === "string" && body.detail) return body.detail;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { authorizedFetch, setAuthToken, setSessionExpiredHandler } from "./httpAdapter";
+import { ApiError, authorizedFetch, downloadFile, setAuthToken, setSessionExpiredHandler } from "./httpAdapter";
 
 /**
  * The ADR 0016 plumbing `authorizedFetch` adds underneath every adapter call:
@@ -90,5 +90,80 @@ describe("authorizedFetch", () => {
     await authorizedFetch("http://engine/api/v1/jobs");
 
     expect(onExpired).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `downloadFile` — the fetch-then-blob replacement for `<a href={API_BASE}...}
+ * download>`. Every download link in the app used to be that anchor, and a
+ * browser navigation cannot carry the `Authorization` header ADR 0016 made
+ * mandatory, so every one of those links 401'd (build-log — this cycle). This
+ * is the one place that saves a fetched export, so its three behaviours —
+ * naming the file from what the server sent, going through the shared
+ * session-expired handler on `401`, and surfacing any other failure rather
+ * than swallowing it the way a bare `<a>` turning into a browser error page
+ * would — are asserted directly rather than once per call site.
+ */
+describe("downloadFile", () => {
+  /** Capture a save without writing a real file. */
+  function stubSave() {
+    const filenames: string[] = [];
+    const clicked = vi.fn(function (this: HTMLAnchorElement) {
+      filenames.push(this.download);
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(clicked);
+    URL.createObjectURL = vi.fn(() => "blob:mock-url");
+    URL.revokeObjectURL = vi.fn();
+    return { clicked, filenames };
+  }
+
+  it("saves the response body under the server's Content-Disposition filename", async () => {
+    const { clicked, filenames } = stubSave();
+    (fetch as any).mockResolvedValueOnce(
+      new Response(new Blob(["a,b\n1,2"]), {
+        status: 200,
+        headers: { "Content-Disposition": 'attachment; filename="site-reconciliation.xlsx"' },
+      }),
+    );
+
+    await downloadFile("http://engine/api/v1/jobs/1/reconciliation.xlsx", "fallback.xlsx");
+
+    expect(clicked).toHaveBeenCalledTimes(1);
+    expect(filenames[0]).toBe("site-reconciliation.xlsx");
+  });
+
+  it("falls back to the given filename when Content-Disposition is absent", async () => {
+    const { clicked, filenames } = stubSave();
+    (fetch as any).mockResolvedValueOnce(new Response(new Blob(["x"]), { status: 200 }));
+
+    await downloadFile("http://engine/api/v1/jobs/1/matched.csv", "job-1-matched.csv");
+
+    expect(clicked).toHaveBeenCalledTimes(1);
+    expect(filenames[0]).toBe("job-1-matched.csv");
+  });
+
+  it("runs the shared session-expired handler on a 401, same as any other call", async () => {
+    const onExpired = vi.fn();
+    setSessionExpiredHandler(onExpired);
+    (fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "invalid or expired session" }), { status: 401 }),
+    );
+
+    await expect(downloadFile("http://engine/api/v1/jobs/1/matched.csv", "f.csv")).rejects.toThrow(
+      ApiError,
+    );
+    expect(onExpired).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws a message-bearing error on a non-401 failure instead of swallowing it", async () => {
+    // The failure a plain `<a href>` had no way to report: the browser just
+    // navigated to a 404 page in the same tab. A caller here can show it.
+    (fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "job not found" }), { status: 404 }),
+    );
+
+    await expect(
+      downloadFile("http://engine/api/v1/jobs/missing/matched.csv", "f.csv"),
+    ).rejects.toThrow("job not found");
   });
 });

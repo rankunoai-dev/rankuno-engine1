@@ -135,13 +135,27 @@ describe("per-figure downloads", () => {
      * QUERY_VARIANT, REDIRECT beside MISSED_PAGE. A single sheet mixing them is
      * what the reader has to sort out by hand, so these point at the workbook
      * endpoint with the side they own rather than building a CSV here.
+     *
+     * A `button`, not a `link`: the endpoint requires a session token (ADR
+     * 0016) that a plain `<a href>` navigation cannot carry, so the click
+     * fetches the bytes through `authorizedFetch` instead of letting the
+     * browser navigate there directly. Found by its title rather than its
+     * "Download 1" label: the per-figure `Stat` buttons above share that same
+     * label whenever a figure also has exactly one URL, and only this title
+     * names the workbook-per-reason behaviour this test is about.
      */
+    stubDownload();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(new Blob(["x"]), { status: 200 }));
     stubReconcile();
     stubSaved(saved());
     open();
 
-    const links = await screen.findAllByRole("link", { name: /^Download 1$/ });
-    const targets = links.map((link) => link.getAttribute("href") ?? "");
+    const buttons = await screen.findAllByTitle(/as a workbook, one sheet per reason/);
+    for (const button of buttons) fireEvent.click(button);
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(buttons.length));
+    const targets = fetchSpy.mock.calls.map((call) => String(call[0]));
     expect(targets.some((href) => href.includes("reconciliation.xlsx?side=frog"))).toBe(true);
     expect(targets.some((href) => href.includes("reconciliation.xlsx?side=engine"))).toBe(true);
   });

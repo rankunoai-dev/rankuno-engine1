@@ -1,8 +1,8 @@
-import { Alert, Button, Modal, Table, Tag, Upload } from "antd";
+import { Alert, Button, Modal, Table, Tag, Upload, message } from "antd";
 import type { UploadFile } from "antd/es/upload/interface";
 import { useEffect, useState } from "react";
 import type { ReconciliationSummary, SavedReconciliation } from "../../adapters/adapterInterface";
-import { API_BASE } from "../../adapters/httpAdapter";
+import { API_BASE, downloadFile } from "../../adapters/httpAdapter";
 import { downloadCsv, hostSlug, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
@@ -90,6 +90,10 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
   // its own. The panel used to keep `saved.summary` and drop the rest, which
   // meant the addresses were fetched, parsed and then discarded one line later.
   const [lists, setLists] = useState<SavedReconciliation | null>(null);
+  // Which whole-file download is in flight, or `null`. A fetch-then-blob
+  // download has a network round trip a plain `<a href>` click never showed,
+  // so the button that started it needs somewhere to show that.
+  const [downloadingWorkbook, setDownloadingWorkbook] = useState<"xlsx" | "csv" | null>(null);
 
   // Reload the last cross-check whenever the dialog opens. Without this, closing
   // it discarded a result that cost an export produced by hand in another tool,
@@ -186,6 +190,22 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
     })();
   }
 
+  async function downloadWorkbook(format: "xlsx" | "csv"): Promise<void> {
+    setDownloadingWorkbook(format);
+    try {
+      await downloadFile(
+        `${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.${format}`,
+        `${jobId}-reconciliation.${format}`,
+      );
+    } catch (cause) {
+      message.error(
+        cause instanceof Error ? cause.message : "The cross-check could not be downloaded.",
+      );
+    } finally {
+      setDownloadingWorkbook(null);
+    }
+  }
+
   return (
     <Modal
       open={open}
@@ -259,27 +279,33 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
             />
           )}
           <GapReport summary={summary} lists={lists} jobId={jobId} />
-          {/* A plain anchor, not a fetch-and-blob. The endpoint already sets
-              Content-Disposition, so the browser saves the file itself and the
-              app never holds a second copy of a multi-megabyte export. */}
+          {/* Buttons, not `<a href>`: every export route requires a session
+              token since ADR 0016, and a browser navigation cannot carry one.
+              `downloadFile` fetches the bytes through the same authorized
+              request every other call in this app makes, then hands them to
+              the browser as a local blob. */}
           {/* The workbook first. A real cross-check runs to 17,640 rows, and in
               one flat sheet the handful of pages the crawl actually missed sit
               below sixteen thousand differences that need no action. The CSV
               stays for anything that consumes it as a feed. */}
-          <a
+          <button
+            type="button"
             className="jb-download"
-            href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.xlsx`}
-            download
+            disabled={downloadingWorkbook !== null}
+            onClick={() => void downloadWorkbook("xlsx")}
           >
-            Download the cross-check (Excel, one sheet per list)
-          </a>
-          <a
+            {downloadingWorkbook === "xlsx"
+              ? "Downloading…"
+              : "Download the cross-check (Excel, one sheet per list)"}
+          </button>
+          <button
+            type="button"
             className="jb-download jb-download-muted"
-            href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.csv`}
-            download
+            disabled={downloadingWorkbook !== null}
+            onClick={() => void downloadWorkbook("csv")}
           >
-            or as a single CSV
-          </a>
+            {downloadingWorkbook === "csv" ? "Downloading…" : "or as a single CSV"}
+          </button>
         </>
       )}
     </Modal>
@@ -456,15 +482,35 @@ function GapDownload({
   /** Which half of the gap this heading owns. */
   side: "frog" | "engine";
 }): JSX.Element | null {
+  const [downloading, setDownloading] = useState(false);
   if (!rows || rows.length === 0) return null;
+
+  async function download(): Promise<void> {
+    setDownloading(true);
+    try {
+      await downloadFile(
+        `${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.xlsx?side=${side}`,
+        `${jobId}-reconciliation-${side}.xlsx`,
+      );
+    } catch (cause) {
+      message.error(
+        cause instanceof Error ? cause.message : "The file could not be downloaded.",
+      );
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   return (
-    <a
+    <button
+      type="button"
       className="jb-stat-dl jb-gap-dl"
-      href={`${API_BASE}/jobs/${encodeURIComponent(jobId)}/reconciliation.xlsx?side=${side}`}
+      disabled={downloading}
       title={`Download these ${rows.length.toLocaleString()} URLs as a workbook, one sheet per reason`}
+      onClick={() => void download()}
     >
-      Download {rows.length.toLocaleString()}
-    </a>
+      {downloading ? "Downloading…" : `Download ${rows.length.toLocaleString()}`}
+    </button>
   );
 }
 

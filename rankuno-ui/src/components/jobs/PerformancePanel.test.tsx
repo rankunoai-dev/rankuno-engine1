@@ -139,6 +139,15 @@ function open() {
   return render(<PerformancePanel jobId="job-1" label="e.com" open onClose={() => {}} />);
 }
 
+/** Capture a download without writing a file. */
+function stubDownload() {
+  const clicked = vi.fn();
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(clicked);
+  URL.createObjectURL = vi.fn(() => "blob:x");
+  URL.revokeObjectURL = vi.fn();
+  return clicked;
+}
+
 describe("PerformancePanel", () => {
   it("asks for the file Search Console actually produces", () => {
     stubUpload();
@@ -297,15 +306,31 @@ describe("PerformancePanel", () => {
      * nothing about where a URL sits; the crawl knows the section and nothing
      * about traffic. Only the joined file answers "which section earns".
      * Shipping the unmatched download alone left the useful half unreachable.
+     *
+     * Buttons, not `<a href>`: the endpoint requires a session token (ADR
+     * 0016) a browser navigation cannot carry, so the click fetches the bytes
+     * itself instead of pointing the browser at the URL directly — which is
+     * exactly why the URL is asserted from the fetch call rather than an
+     * `href` that no longer exists.
      */
+    stubDownload();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(new Blob(["x"]), { status: 200 }));
     stubUpload(summary({ rows: 1000, matched: 415 }));
     const { baseElement } = open();
     dropFile(baseElement as HTMLElement, exportFile(2048));
 
-    const matched = await screen.findByText(/Download the 415 matched pages/);
-    expect(matched.getAttribute("href")).toContain("/matched.csv");
-    const unmatched = screen.getByText(/Download the 585 unmatched rows/);
-    expect(unmatched.getAttribute("href")).toContain("/unmatched.csv");
+    // One at a time: the two buttons share a single "downloading" flag, so the
+    // second is disabled — and a disabled button fires no click — until the
+    // first download settles.
+    fireEvent.click(await screen.findByText(/Download the 415 matched pages/));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    fireEvent.click(await screen.findByText(/Download the 585 unmatched rows/));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    const targets = fetchSpy.mock.calls.map((call) => String(call[0]));
+    expect(targets.some((url) => url.includes("/matched.csv"))).toBe(true);
+    expect(targets.some((url) => url.includes("/unmatched.csv"))).toBe(true);
   });
 
   it("says a saved report is too old rather than rendering nothing", async () => {
@@ -432,22 +457,36 @@ describe("PerformancePanel", () => {
      * The kinds are not one job — unlinked earners go to a content team, buried
      * ones to whoever owns the menu — so a single sheet mixing them is a file
      * every recipient has to filter before starting.
+     *
+     * A `button`, not a `link`: the endpoint requires a session token (ADR
+     * 0016) a browser navigation cannot carry, so the URL is asserted from the
+     * fetch call the click makes rather than from an `href`.
      */
+    stubDownload();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(new Blob(["x"]), { status: 200 }));
     stubUpload();
     const { baseElement } = open();
     dropFile(baseElement as HTMLElement, exportFile(2048));
 
-    const link = await screen.findByRole("link", { name: /one sheet per kind/i });
-    expect(link.getAttribute("href")).toContain("opportunities.xlsx");
+    fireEvent.click(await screen.findByRole("button", { name: /one sheet per kind/i }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain("opportunities.xlsx");
   });
 
   it("keeps the flat CSV for anything already pointed at it", async () => {
+    stubDownload();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(new Blob(["x"]), { status: 200 }));
     stubUpload();
     const { baseElement } = open();
     dropFile(baseElement as HTMLElement, exportFile(2048));
 
-    const link = await screen.findByRole("link", { name: /single CSV/i });
-    expect(link.getAttribute("href")).toContain("opportunities.csv");
+    fireEvent.click(await screen.findByRole("button", { name: /single CSV/i }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain("opportunities.csv");
   });
 
   it("offers a download on the section itself, not only on the panel", async () => {
@@ -459,7 +498,7 @@ describe("PerformancePanel", () => {
     // content job, the navigation-depth ones an information-architecture job.
     expect(await screen.findByRole("button", { name: /Download 1/ })).toBeInTheDocument();
     // The whole-report download is still there beside them, now as a workbook.
-    expect(screen.getByRole("link", { name: /one sheet per kind/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /one sheet per kind/i })).toBeInTheDocument();
   });
 
   it("says the dropped findings are not in the section file either", async () => {
