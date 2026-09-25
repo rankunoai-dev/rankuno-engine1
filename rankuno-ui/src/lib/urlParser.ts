@@ -67,7 +67,7 @@ export function parseCSV(csvContent: string): string[] {
     const cells = line.split(",").map((cell) => cell.trim().replace(/^"|"$/g, ""));
 
     // Skip header-like rows: only check first row, only check first cell
-    if (i === 0 && looksLikeHeader(cells[0])) continue;
+    if (i === 0 && cells[0] && looksLikeHeader(cells[0])) continue;
 
     // Look for a URL in this row
     for (const cell of cells) {

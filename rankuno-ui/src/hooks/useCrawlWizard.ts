@@ -6,8 +6,7 @@
 
 import { useCallback, useState } from "react";
 import { CRAWL_SPEEDS, DEFAULT_CRAWL_REQUEST } from "../adapters/adapterInterface";
-import type { CrawlJobInput } from "../types/crawlWizard";
-import type { CrawlWizardFormData, CrawlSource, CrawlConfigPreset } from "../types/crawlWizard";
+import type { CrawlJobInput, CrawlWizardFormData } from "../types/crawlWizard";
 
 /**
  * Wizard state manager.
@@ -129,7 +128,6 @@ export function useCrawlWizard() {
     const seedUrls =
       formData.source === "url_list"
         ? formData.uploadedUrls.filter((url) => {
-            const domain = url;
             try {
               const urlObj = new URL(url);
               return urlObj.hostname === formData.domain || url.includes(formData.domain);

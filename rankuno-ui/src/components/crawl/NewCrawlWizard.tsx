@@ -30,7 +30,6 @@ export function NewCrawlWizard({ open, onClose }: Props): JSX.Element {
   const {
     currentStage,
     formData,
-    goToStage,
     nextStage,
     prevStage,
     updateFormData,

@@ -5,7 +5,7 @@
  * Shows warning if crawl time would exceed configured threshold.
  */
 
-import { Alert, Form, InputNumber, Segmented, Space, Typography } from "antd";
+import { Alert, Form, InputNumber, Segmented, Typography } from "antd";
 import { useMemo } from "react";
 import { CRAWL_SPEEDS } from "../../adapters/adapterInterface";
 import type { CrawlConfigPreset } from "../../types/crawlWizard";
@@ -49,7 +49,6 @@ export function ConfigStage({
   }, [configPreset]);
 
   const currentRate = configPreset === "custom" ? customRate : currentPreset?.rate_limit_rps;
-  const currentConcurrency = configPreset === "custom" ? customConcurrency : currentPreset?.concurrency;
 
   // Estimate crawl time
   const estimatedSeconds = useMemo(() => {
@@ -150,13 +149,13 @@ export function ConfigStage({
         />
       )}
 
-      {configPreset === "turbo" && (
+      {configPreset === "aggressive" && currentRate && currentRate > 10 && (
         <Alert
           type="warning"
           showIcon
           style={{ marginTop: 16 }}
           message="High crawl rate"
-          description="25 requests per second is real server load. Use this only on sites you own or have explicit permission to crawl at this rate."
+          description="High request rate is real server load. Use this only on sites you own or have explicit permission to crawl at this rate."
         />
       )}
     </div>

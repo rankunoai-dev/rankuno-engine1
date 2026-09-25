@@ -11,7 +11,6 @@ import {
   Collapse,
   Form,
   Input,
-  InputNumber,
   Select,
   Switch,
   Tooltip,
@@ -256,8 +255,8 @@ export function AdvancedStage({
                     value={userAgent}
                     onChange={onUserAgentChange}
                     options={USER_AGENT_PRESETS}
-                    optionLabelRender={(option) => (
-                      <span style={{ fontSize: 12 }}>{option?.label}</span>
+                    optionRender={(option) => (
+                      <span style={{ fontSize: 12 }}>{option.data?.label}</span>
                     )}
                   />
                 </Form.Item>

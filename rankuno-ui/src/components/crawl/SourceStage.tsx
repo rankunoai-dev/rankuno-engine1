@@ -5,7 +5,7 @@
  * For URL lists, handles file upload with CSV/TXT parsing.
  */
 
-import { Button, Divider, Empty, Progress, Radio, Space, Typography, Upload, message } from "antd";
+import { Button, Divider, Progress, Radio, Space, Typography, Upload, message } from "antd";
 import { useCallback, useState } from "react";
 import type { UploadFile } from "antd";
 import type { CrawlSource } from "../../types/crawlWizard";
@@ -24,7 +24,6 @@ interface Props {
  * Two options: Full Site (crawl entire domain) or URL List (upload file with URLs).
  */
 export function SourceStage({ source, uploadedUrls, onSourceChange, onUrlsChange }: Props): JSX.Element {
-  const [uploading, setUploading] = useState(false);
   const [fileList, setFileList] = useState<UploadFile[]>([]);
 
   /**
@@ -32,14 +31,12 @@ export function SourceStage({ source, uploadedUrls, onSourceChange, onUrlsChange
    */
   const handleUpload = useCallback(
     async (file: UploadFile) => {
-      setUploading(true);
       try {
         const reader = new FileReader();
         reader.onload = (e) => {
           const contents = e.target?.result as string;
           if (!contents) {
             message.error("Failed to read file");
-            setUploading(false);
             return;
           }
 
@@ -47,7 +44,6 @@ export function SourceStage({ source, uploadedUrls, onSourceChange, onUrlsChange
             const urls = parseUploadedFile(file.originFileObj as File, contents);
             if (urls.length === 0) {
               message.warning("No valid URLs found in file");
-              setUploading(false);
               return;
             }
 
@@ -56,20 +52,16 @@ export function SourceStage({ source, uploadedUrls, onSourceChange, onUrlsChange
             message.success(`Parsed ${urls.length} URLs from file`);
           } catch (err) {
             message.error(`Failed to parse file: ${err instanceof Error ? err.message : "Unknown error"}`);
-          } finally {
-            setUploading(false);
           }
         };
 
         reader.onerror = () => {
           message.error("Failed to read file");
-          setUploading(false);
         };
 
         reader.readAsText(file.originFileObj as File);
       } catch (err) {
         message.error(`Upload failed: ${err instanceof Error ? err.message : "Unknown error"}`);
-        setUploading(false);
       }
     },
     [onUrlsChange],
@@ -115,7 +107,6 @@ export function SourceStage({ source, uploadedUrls, onSourceChange, onUrlsChange
             multiple={false}
             maxCount={1}
             accept=".csv,.txt"
-            loading={uploading}
             beforeUpload={(file) => {
               const isCSVOrTXT = file.type === "text/csv" || file.type === "text/plain" ||
                                  file.name.endsWith(".csv") ||
