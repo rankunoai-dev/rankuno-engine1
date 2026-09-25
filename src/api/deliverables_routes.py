@@ -483,4 +483,17 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             headers={"Content-Disposition": f'attachment; filename="{candidate.name}"'},
         )
 
+    @router.get(
+        "/masterfiles/available",
+    )
+    def list_available_masterfiles() -> dict[str, list[str]]:
+        """List available masterfile service slugs.
+
+        Returns:
+            {"services": ["response_codes", "page_titles", ...]}
+        """
+        from src.modules.seo.deliverables.masterfile_registry import AVAILABLE_SERVICES
+
+        return {"services": sorted(AVAILABLE_SERVICES)}
+
     return router
