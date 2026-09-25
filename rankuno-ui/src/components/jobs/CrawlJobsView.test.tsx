@@ -141,3 +141,62 @@ describe("CrawlJobsView download URLs", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+/**
+ * "Masterfiles" submenu in the job-row `...` menu.
+ *
+ * Builds and downloads each of the 21 masterfile exports. Like Download URLs,
+ * no panel — one click fetches, polls, and downloads. The menu lists all
+ * available services from the API and shows a spinner while building.
+ */
+describe("CrawlJobsView masterfiles", () => {
+
+  it("hides Masterfiles when the adapter cannot build them", () => {
+    withJob({ status: "succeeded" });
+    // No adapter set at all — `MockAdapter` leaves `buildMasterfile` undefined.
+    render(<CrawlJobsView />);
+    expect(
+      screen.queryByRole("button", { name: /more actions for this crawl/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides Masterfiles for a job that has not finished", () => {
+    const listAvailableMasterfiles = vi.fn().mockResolvedValue([
+      { slug: "response_codes", label: "Response Codes" },
+    ]);
+    const buildMasterfile = vi.fn();
+    withJob({ status: "running" });
+    useCrawlStore.setState({
+      adapter: {
+        listAvailableMasterfiles,
+        buildMasterfile,
+      } as unknown as CrawlDataAdapter,
+    });
+
+    render(<CrawlJobsView />);
+    // `running` offers no other menu item either, so the `...` trigger itself
+    // must be absent, not merely missing this one entry.
+    expect(
+      screen.queryByRole("button", { name: /more actions for this crawl/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides Masterfiles when no services are available", () => {
+    const listAvailableMasterfiles = vi.fn().mockResolvedValue([]);
+    const buildMasterfile = vi.fn();
+    withJob({ status: "succeeded" });
+    useCrawlStore.setState({
+      adapter: {
+        listAvailableMasterfiles,
+        buildMasterfile,
+      } as unknown as CrawlDataAdapter,
+    });
+
+    render(<CrawlJobsView />);
+    // Empty service list means no masterfiles menu.
+    expect(
+      screen.queryByRole("button", { name: /more actions for this crawl/i }),
+    ).not.toBeInTheDocument();
+  });
+
+});

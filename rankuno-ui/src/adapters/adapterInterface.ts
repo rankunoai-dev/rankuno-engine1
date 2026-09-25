@@ -181,6 +181,28 @@ export interface SectionPerformance {
   data_coverage: number;
 }
 
+/** One available masterfile export service. */
+export interface MasterfileService {
+  slug: string;
+  label: string;
+  description?: string;
+}
+
+/** A deliverable build record (masterfile or workbook). */
+export interface DeliverableRecord {
+  id: string;
+  tool_name: string;
+  label: string;
+  status: JobStatus;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  has_result: boolean;
+  has_checkpoint: boolean;
+}
+
 /** One ranked recommendation. Mirrors `Opportunity` in the scorer. */
 export interface Opportunity {
   kind: string;
@@ -513,6 +535,38 @@ export interface CrawlDataAdapter {
 
   /** What one worker reported it holds locally, and when it last reported. */
   getWorkerTemplates?(workerId: string): Promise<WorkerTemplatesView>;
+
+  /**
+   * Available masterfile export services (slugs and labels).
+   *
+   * Optional like `startJob`: fixtures have no server behind them to build
+   * masterfiles, and the menu item is hidden rather than shown and failing
+   * on click.
+   */
+  listAvailableMasterfiles?(): Promise<MasterfileService[]>;
+
+  /**
+   * Build a masterfile export for a finished crawl.
+   *
+   * Returns a deliverable id to poll. Optional like `startJob` for the same
+   * reason.
+   */
+  buildMasterfile?(jobId: string, serviceSlug: string): Promise<string>;
+
+  /**
+   * Get the status of a deliverable (masterfile or other workbook build).
+   *
+   * Optional like `startJob` for the same reason.
+   */
+  getDeliverable?(deliverableId: string): Promise<DeliverableRecord>;
+
+  /**
+   * Download a finished deliverable as a binary blob.
+   *
+   * A `Blob` rather than a URL for the same reason as `downloadUrlList`:
+   * the route is bearer-guarded. Optional like `startJob` for the same reason.
+   */
+  downloadDeliverable?(deliverableId: string): Promise<Blob>;
 
   /**
    * Validate a dispatch and mint the single-use approval token.

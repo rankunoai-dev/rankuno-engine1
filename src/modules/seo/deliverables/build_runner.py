@@ -41,7 +41,7 @@ from src.modules.seo.contracts.url_normalizer import UrlNormalizer
 from src.modules.seo.deliverables.pipeline import run_deliverable_pipeline
 from src.modules.seo.deliverables.workbook import WorkbookPageLimitExceededError
 
-__all__ = ["run_build"]
+__all__ = ["run_build", "run_masterfile"]
 
 _logger = get_logger(__name__)
 
@@ -113,4 +113,61 @@ def run_build(
         deliverable_store.mark_failed(deliverable_id, str(exc))
     except Exception as exc:  # noqa: BLE001 - a detached worker must not leak
         _logger.exception("deliverable_job_crashed", extra={"deliverable_id": deliverable_id})
+        deliverable_store.mark_failed(deliverable_id, f"{type(exc).__name__}: {exc}")
+
+
+def run_masterfile(
+    deliverable_store: DiskJobStore,
+    deliverable_id: str,
+    job_id: str,
+    service_slug: str,
+    sf_export_dir: Path,
+    rulebook_path: Path | None,
+) -> None:
+    """Generate a masterfile from Screaming Frog CSV exports.
+
+    Intended to run on a worker thread, dispatched by
+    `deliverables_routes._dispatch_build` - never on the event loop. Never
+    raises: a caller that loses the exception here would leave the
+    deliverable `running` forever with nothing to move it.
+
+    Args:
+        deliverable_store: Where this deliverable's record and workbook live.
+        deliverable_id: The record to update.
+        job_id: The source crawl job ID (for logging).
+        service_slug: The masterfile service to invoke (e.g., "meta_description").
+        sf_export_dir: Path to the Screaming Frog sf_export/ directory.
+        rulebook_path: Optional path to a rulebook for theme classification.
+    """
+    from src.modules.seo.deliverables.masterfile_registry import get_masterfile_service
+
+    try:
+        deliverable_store.mark_running(deliverable_id)
+        service = get_masterfile_service(service_slug, job_id, sf_export_dir, rulebook_path)
+        xlsx_bytes = service.generate()
+
+        # Write to output directory
+        output_dir = deliverable_store.root / deliverable_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{service_slug}.xlsx"
+        output_path = output_dir / filename
+        output_path.write_bytes(xlsx_bytes)
+
+        deliverable_store.finish(
+            deliverable_id,
+            {
+                "filename": filename,
+                "service_slug": service_slug,
+                "source": "masterfile",
+            },
+        )
+        _logger.info(
+            "masterfile_built",
+            extra={"deliverable_id": deliverable_id, "service": service_slug, "job_id": job_id},
+        )
+    except ValueError as exc:
+        # Catches unknown service slug or instantiation errors
+        deliverable_store.mark_failed(deliverable_id, str(exc))
+    except Exception as exc:  # noqa: BLE001 - a detached worker must not leak
+        _logger.exception("masterfile_job_crashed", extra={"deliverable_id": deliverable_id})
         deliverable_store.mark_failed(deliverable_id, f"{type(exc).__name__}: {exc}")

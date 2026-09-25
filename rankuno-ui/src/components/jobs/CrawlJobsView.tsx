@@ -4,6 +4,7 @@ import {
   Empty,
   Popconfirm,
   Progress,
+  Spin,
   Table,
   Tag,
   Tooltip,
@@ -12,7 +13,11 @@ import {
 import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useState } from "react";
-import type { CrawlJobSummary, JobStatus } from "../../adapters/adapterInterface";
+import type {
+  CrawlJobSummary,
+  JobStatus,
+  MasterfileService,
+} from "../../adapters/adapterInterface";
 import { saveBlob } from "../../lib/download";
 import {
   elapsedSeconds,
@@ -89,8 +94,31 @@ export function CrawlJobsView(): JSX.Element {
   // Same reasoning again: fixtures have no server behind them to build the
   // workbook, so the menu item is absent rather than present and failing.
   const downloadUrlList = useCrawlStore((state) => state.adapter?.downloadUrlList);
+  // Same reasoning: fixtures have no server behind them to build masterfiles.
+  const buildMasterfile = useCrawlStore((state) => state.adapter?.buildMasterfile);
+  const getDeliverable = useCrawlStore((state) => state.adapter?.getDeliverable);
+  const downloadDeliverable = useCrawlStore((state) => state.adapter?.downloadDeliverable);
+  const listAvailableMasterfiles = useCrawlStore(
+    (state) => state.adapter?.listAvailableMasterfiles,
+  );
   const [reconciling, setReconciling] = useState<JobRow | null>(null);
   const [performing, setPerforming] = useState<JobRow | null>(null);
+  const [masterfiles, setMasterfiles] = useState<MasterfileService[]>([]);
+  const [masterfileBuilding, setMasterfileBuilding] = useState<string | null>(null);
+
+  // Fetch available masterfiles on mount
+  useEffect(() => {
+    if (!listAvailableMasterfiles) return;
+    void (async () => {
+      try {
+        const services = await listAvailableMasterfiles();
+        setMasterfiles(services);
+      } catch (cause) {
+        // Silently fail — if the list cannot load, the menu items just won't
+        // appear, which is fine. Showing an error would clutter the jobs tab.
+      }
+    })();
+  }, [listAvailableMasterfiles]);
 
   /**
    * Fetch the workbook and save it — no panel, the click is the whole flow.
@@ -109,6 +137,51 @@ export function CrawlJobsView(): JSX.Element {
     } catch (cause) {
       message.error(
         cause instanceof Error ? cause.message : "The URL list could not be downloaded.",
+      );
+    }
+  }
+
+  /**
+   * Build a masterfile and download it when ready.
+   *
+   * Triggers a build, polls its status, then downloads when complete.
+   */
+  async function buildAndDownloadMasterfile(row: JobRow, serviceSlug: string): Promise<void> {
+    if (!buildMasterfile || !getDeliverable || !downloadDeliverable) return;
+    try {
+      setMasterfileBuilding(serviceSlug);
+      const deliverableId = await buildMasterfile(row.id, serviceSlug);
+
+      // Poll until the deliverable is ready
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const record = await getDeliverable(deliverableId);
+        if (record.has_result) {
+          // Build is complete, download it
+          const blob = await downloadDeliverable(deliverableId);
+          const stamp = row.crawledAt ? row.crawledAt.slice(0, 10) : "undated";
+          const filename = `${serviceSlug}-${row.id.slice(0, 8)}-${stamp}.xlsx`;
+          saveBlob(filename, blob);
+          setMasterfileBuilding(null);
+          message.success(`${row.label} ${serviceSlug} downloaded successfully.`);
+          return;
+        }
+
+        if (record.status === "failed") {
+          setMasterfileBuilding(null);
+          message.error(record.error || "The masterfile build failed.");
+          return;
+        }
+
+        // Wait before polling again
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      setMasterfileBuilding(null);
+      message.error("Masterfile build timed out. Please try again.");
+    } catch (cause) {
+      setMasterfileBuilding(null);
+      message.error(
+        cause instanceof Error ? cause.message : "The masterfile could not be built.",
       );
     }
   }
@@ -180,10 +253,16 @@ export function CrawlJobsView(): JSX.Element {
           onReconcile={() => setReconciling(row)}
           onPerformance={() => setPerforming(row)}
           onDownloadUrls={() => void downloadUrls(row)}
+          onBuildMasterfile={(serviceSlug) =>
+            void buildAndDownloadMasterfile(row, serviceSlug)
+          }
           canRelaunch={canRelaunch}
           canReconcile={canReconcile}
           canIngestGsc={canIngestGsc}
           canDownloadUrls={downloadUrlList !== undefined}
+          canBuildMasterfile={buildMasterfile !== undefined && masterfiles.length > 0}
+          masterfiles={masterfiles}
+          masterfileBuilding={masterfileBuilding}
         />
       ),
     },
@@ -329,10 +408,14 @@ function ActionCell({
   onReconcile,
   onPerformance,
   onDownloadUrls,
+  onBuildMasterfile,
   canRelaunch,
   canReconcile,
   canIngestGsc,
   canDownloadUrls,
+  canBuildMasterfile,
+  masterfiles,
+  masterfileBuilding,
 }: {
   row: JobRow;
   onOpen: () => void;
@@ -341,10 +424,14 @@ function ActionCell({
   onReconcile: () => void;
   onPerformance: () => void;
   onDownloadUrls: () => void;
+  onBuildMasterfile: (serviceSlug: string) => void;
   canRelaunch: boolean;
   canReconcile: boolean;
   canIngestGsc: boolean;
   canDownloadUrls: boolean;
+  canBuildMasterfile: boolean;
+  masterfiles: MasterfileService[];
+  masterfileBuilding: string | null;
 }): JSX.Element {
   const ready = row.status === "succeeded" || row.status === "partial";
   const finished = ready || row.status === "failed";
@@ -408,6 +495,38 @@ function ActionCell({
         </span>
       ),
       onClick: onDownloadUrls,
+    });
+  }
+
+  if (canBuildMasterfile && ready && masterfiles.length > 0) {
+    const masterfileSubmenu: MenuProps["items"] = masterfiles.map((service) => ({
+      key: `masterfile-${service.slug}`,
+      label: (
+        <span className="jb-menuitem">
+          {service.label}
+          {service.description && <em>{service.description}</em>}
+        </span>
+      ),
+      onClick: () => onBuildMasterfile(service.slug),
+      disabled: masterfileBuilding !== null,
+    }));
+
+    extras.push({
+      key: "masterfiles",
+      label: (
+        <span className="jb-menuitem">
+          {masterfileBuilding ? (
+            <>
+              <Spin size="small" style={{ marginRight: 8 }} />
+              Masterfiles
+            </>
+          ) : (
+            "Masterfiles"
+          )}
+          <em>Download SEO audit masterfiles and reports.</em>
+        </span>
+      ),
+      children: masterfileSubmenu,
     });
   }
 

@@ -7,9 +7,11 @@ import type {
 import type {
   CrawlDataAdapter,
   CrawlJobSummary,
+  DeliverableRecord,
   DispatchConfirmRequest,
   DispatchPreview,
   DispatchPreviewRequest,
+  MasterfileService,
   PerformanceSummary,
   ReconciliationSummary,
   SavedPerformance,
@@ -598,6 +600,126 @@ export class HttpAdapter implements CrawlDataAdapter {
       const index = Math.min(attempt, POLL_SCHEDULE_MS.length - 1);
       await delay(POLL_SCHEDULE_MS[index] ?? 5_000);
     }
+  }
+
+  /**
+   * Available masterfile export services, sorted by slug.
+   */
+  async listAvailableMasterfiles(): Promise<MasterfileService[]> {
+    const response = await this.request<{ services: string[] }>("/masterfiles/available");
+    return response.services.map((slug) => ({
+      slug,
+      label: this.masterfileLabel(slug),
+      description: this.masterfileDescription(slug),
+    }));
+  }
+
+  /**
+   * Build a masterfile for a finished crawl.
+   *
+   * Returns the deliverable id to poll.
+   */
+  async buildMasterfile(jobId: string, serviceSlug: string): Promise<string> {
+    const accepted = await this.request<{ id: string }>(
+      `/jobs/${encodeURIComponent(jobId)}/masterfile/${encodeURIComponent(serviceSlug)}`,
+      { method: "POST" },
+    );
+    return accepted.id;
+  }
+
+  /**
+   * Get the status of a deliverable build.
+   */
+  async getDeliverable(deliverableId: string): Promise<DeliverableRecord> {
+    return this.request<DeliverableRecord>(
+      `/deliverables/${encodeURIComponent(deliverableId)}`,
+    );
+  }
+
+  /**
+   * Download a finished deliverable as a binary blob.
+   *
+   * Bypasses `request` for the same reason as `downloadUrlList`: the body is
+   * binary, not JSON.
+   */
+  async downloadDeliverable(deliverableId: string): Promise<Blob> {
+    const url = `${this.baseUrl}/deliverables/${encodeURIComponent(deliverableId)}/download`;
+    let response: Response;
+    try {
+      response = await authorizedFetch(url);
+    } catch (cause) {
+      throw new ApiError(
+        0,
+        `Cannot reach the engine at ${this.baseUrl}. Is the API server running?`,
+        { cause },
+      );
+    }
+    if (!response.ok) {
+      throw new ApiError(response.status, await describeFailure(response));
+    }
+    return response.blob();
+  }
+
+  /**
+   * Human-readable label for a masterfile service slug.
+   *
+   * Maps service slugs to friendly display names for menu items.
+   */
+  private masterfileLabel(slug: string): string {
+    const labels: Record<string, string> = {
+      response_codes: "Response Codes",
+      page_titles: "Page Titles",
+      meta_description: "Meta Descriptions",
+      h1: "H1 Tags",
+      canonicals: "Canonicals",
+      directives: "Directives",
+      sitemaps: "Sitemaps",
+      security: "Security",
+      content_issues: "Content Issues",
+      duplicate_content: "Duplicate Content",
+      functional_internal_links: "Functional Internal Links",
+      non_functional_internal_links: "Non-Functional Internal Links",
+      pagination: "Pagination",
+      lorem_ipsum: "Lorem Ipsum",
+      url_issues: "URL Issues",
+      custom_search_ga4_gtm: "Custom Search (GA4/GTM)",
+      custom_search_og_twitter: "Custom Search (OG/Twitter)",
+      hreflang: "hreflang",
+      structured_data: "Structured Data",
+      custom_extraction: "Custom Extraction",
+      overview_report: "Overview Report",
+    };
+    return labels[slug] ?? slug;
+  }
+
+  /**
+   * Brief description for a masterfile service slug.
+   */
+  private masterfileDescription(slug: string): string {
+    const descriptions: Record<string, string> = {
+      overview_report: "Complete technical SEO overview",
+      response_codes: "HTTP status codes for all pages",
+      page_titles: "Title tags and analysis",
+      meta_description: "Meta descriptions and length checks",
+      h1: "H1 tags and uniqueness",
+      canonicals: "Canonical tags",
+      directives: "Robots and X-Robots headers",
+      sitemaps: "Sitemap references",
+      security: "SSL/HTTPS configuration",
+      content_issues: "Content quality issues",
+      duplicate_content: "Duplicate content analysis",
+      functional_internal_links: "Working internal links",
+      non_functional_internal_links: "Broken internal links",
+      pagination: "Pagination markup",
+      lorem_ipsum: "Lorem ipsum detection",
+      url_issues: "URL structure issues",
+      custom_search_ga4_gtm: "GA4 and GTM implementations",
+      custom_search_og_twitter: "Open Graph and Twitter Card tags",
+      hreflang: "Hreflang implementation",
+      structured_data: "Schema.org markup",
+      custom_extraction: "Custom data extraction",
+    };
+    return descriptions[slug] ?? "";
   }
 }
 

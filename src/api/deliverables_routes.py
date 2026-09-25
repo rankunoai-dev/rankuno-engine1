@@ -483,6 +483,133 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             headers={"Content-Disposition": f'attachment; filename="{candidate.name}"'},
         )
 
+    async def _dispatch_masterfile(
+        state: ApiState,
+        deliverable_id: str,
+        job_id: str,
+        service_slug: str,
+        sf_export_dir: Path,
+        rulebook_path: Path | None,
+    ) -> None:
+        """Run a masterfile build on a worker thread, then always release its slot."""
+        from src.modules.seo.deliverables.build_runner import run_masterfile
+
+        try:
+            await asyncio.to_thread(
+                run_masterfile,
+                state.deliverable_store,
+                deliverable_id,
+                job_id,
+                service_slug,
+                sf_export_dir,
+                rulebook_path,
+            )
+        finally:
+            state.release_deliverable(deliverable_id)
+
+    @router.post(
+        "/jobs/{job_id}/masterfile/{service_slug}",
+        response_model=DeliverableAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def build_masterfile(
+        job_id: str,
+        service_slug: str,
+        authorization: str | None = Header(default=None),
+    ) -> DeliverableAccepted:
+        """Build a masterfile from a finished crawl job's Screaming Frog exports.
+
+        `202`, never `200`: nothing has been built when this returns - the
+        same contract `POST /jobs` uses for a crawl, for the same reason
+        (`service.generate()` measures up to 26.3s at the page ceiling).
+
+        Raises:
+            HTTPException: `404` if the source job is unknown or service is
+                unknown, `403` if another org owns it, `409` if it has not
+                finished or lacks sf_export directory, `429` if the
+                deliverable concurrency guard is saturated.
+        """
+        from src.modules.seo.deliverables.masterfile_registry import AVAILABLE_SERVICES
+        from src.core.state_store import DiskJobStore
+
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
+
+        # Validate service slug
+        if service_slug not in AVAILABLE_SERVICES:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"unknown masterfile service: {service_slug}",
+            )
+
+        # Validate job exists and is owned by this org
+        try:
+            crawl_record = state.store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+        org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="job")
+
+        # Validate job has result (finished)
+        if not crawl_record.has_result:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"job {job_id} is {crawl_record.status.value} and has no result",
+            )
+
+        # Resolve sf_export directory (from DiskJobStore)
+        if isinstance(state.store, DiskJobStore):
+            sf_export_dir = state.store.root / job_id / "sf_export"
+            if not sf_export_dir.exists():
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail=f"job {job_id} has no Screaming Frog exports (sf_export not found)",
+                )
+        else:
+            # Non-disk store; cannot determine sf_export path
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="Masterfiles require DiskJobStore; cannot determine sf_export path",
+            )
+
+        # Reserve slot
+        pending = f"pending:{uuid4().hex}"
+        if not state.try_reserve_deliverable(pending):
+            _logger.warning("masterfile_rejected_saturation", extra={"org": org_id})
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"deliverable builds are at capacity "
+                    f"({state.max_concurrent_deliverables} concurrent); please retry in a moment"
+                ),
+            )
+
+        try:
+            result = state.deliverable_store.read_result(job_id)
+            site = str(result.get("site", "Unknown"))
+            record = state.deliverable_store.create(
+                DELIVERABLE_TOOL_NAME,
+                {
+                    "source": "masterfile",
+                    "source_job_id": job_id,
+                    "service_slug": service_slug,
+                },
+                label=f"{site} — {service_slug}",
+                facet_id=DELIVERABLE_FACET_ID,
+                org_id=org_id,
+            )
+        except Exception:
+            state.release_deliverable(pending)
+            raise
+
+        state.rekey_deliverable(pending, record.id)
+        state.track(
+            asyncio.create_task(
+                _dispatch_masterfile(
+                    state, record.id, job_id, service_slug, sf_export_dir, None
+                )
+            )
+        )
+        return DeliverableAccepted(id=record.id, status=record.status.value, label=record.label)
+
     @router.get(
         "/masterfiles/available",
     )
