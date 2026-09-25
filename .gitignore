@@ -120,4 +120,6 @@ project-standards/
 
 # Evaluation copy of the RAE project: 9 GB, nested .git, 49 client crawls, and a
 # live .env. Read for its catalogue and filenames only; never committed.
+# Both names exist: the copy was renamed, and the old rule stopped matching it.
 RAE - Copy/
+RAE/
