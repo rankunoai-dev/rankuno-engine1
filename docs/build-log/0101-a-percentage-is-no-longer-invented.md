@@ -160,10 +160,22 @@ no worker-dispatch model in it at all —
 
 ```python
 MODELS: tuple[type[BaseModel], ...] = (
-    SignalScore, FullPageIntelligenceProfile, CmsRecord, DiscoverySource,
-    DiscoveredNode, DiscoveryReport, SiteProfile, WeightProfileReport,
-    NavSource, NavNode, NavigationTree, NavCoverageReport, JobTelemetry,
-    CrawlSummary, GscEnrichmentReport, PageClassificationInput,
+    SignalScore,
+    FullPageIntelligenceProfile,
+    CmsRecord,
+    DiscoverySource,
+    DiscoveredNode,
+    DiscoveryReport,
+    SiteProfile,
+    WeightProfileReport,
+    NavSource,
+    NavNode,
+    NavigationTree,
+    NavCoverageReport,
+    JobTelemetry,
+    CrawlSummary,
+    GscEnrichmentReport,
+    PageClassificationInput,
     PageClassificationOutput,
 )
 ```
