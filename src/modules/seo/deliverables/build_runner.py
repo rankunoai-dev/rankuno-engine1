@@ -38,6 +38,7 @@ from src.core.logger import get_logger
 from src.core.state_store import DiskJobStore
 from src.modules.seo.contracts.audit import AuditDataset
 from src.modules.seo.contracts.url_normalizer import UrlNormalizer
+from src.modules.seo.deliverables.masterfile_source import MasterfileSource
 from src.modules.seo.deliverables.pipeline import run_deliverable_pipeline
 from src.modules.seo.deliverables.workbook import WorkbookPageLimitExceededError
 
@@ -121,29 +122,35 @@ def run_masterfile(
     deliverable_id: str,
     job_id: str,
     service_slug: str,
-    sf_export_dir: Path,
+    source_factory: Callable[[], MasterfileSource],
     rulebook_path: Path | None,
 ) -> None:
-    """Generate a masterfile from Screaming Frog CSV exports.
+    """Generate one masterfile workbook from a Screaming Frog export.
 
     Intended to run on a worker thread, dispatched by
-    `deliverables_routes._dispatch_build` - never on the event loop. Never
-    raises: a caller that loses the exception here would leave the
+    `deliverables_routes._dispatch_masterfile` - never on the event loop.
+    Never raises: a caller that loses the exception here would leave the
     deliverable `running` forever with nothing to move it.
 
     Args:
         deliverable_store: Where this deliverable's record and workbook live.
         deliverable_id: The record to update.
-        job_id: The source crawl job ID (for logging).
-        service_slug: The masterfile service to invoke (e.g., "meta_description").
-        sf_export_dir: Path to the Screaming Frog sf_export/ directory.
+        job_id: The source job ID (for logging and the service's own label).
+        service_slug: The masterfile service to invoke (e.g. "meta_description").
+        source_factory: Opens the CSV source. A callable, not an open source,
+            for the reason `run_build`'s `dataset_loader` is one: opening a zip
+            pre-flights every member, and that cost belongs on this thread.
+            Whatever it returns is closed here, on every path.
         rulebook_path: Optional path to a rulebook for theme classification.
+            Accepted and forwarded; no masterfile service reads it yet.
     """
     from src.modules.seo.deliverables.masterfile_registry import get_masterfile_service
 
+    source: MasterfileSource | None = None
     try:
         deliverable_store.mark_running(deliverable_id)
-        service = get_masterfile_service(service_slug, job_id, sf_export_dir, rulebook_path)
+        source = source_factory()
+        service = get_masterfile_service(service_slug, job_id, source, rulebook_path)
         xlsx_bytes = service.generate()
 
         # Write to output directory
@@ -159,6 +166,7 @@ def run_masterfile(
                 "filename": filename,
                 "service_slug": service_slug,
                 "source": "masterfile",
+                "source_job_id": job_id,
             },
         )
         _logger.info(
@@ -166,8 +174,16 @@ def run_masterfile(
             extra={"deliverable_id": deliverable_id, "service": service_slug, "job_id": job_id},
         )
     except ValueError as exc:
-        # Catches unknown service slug or instantiation errors
+        # Catches an unknown service slug, `MasterfileSourceError` and
+        # `ScreamingFrogBundleError` by their shared base - see the module
+        # docstring for why none of them is imported by name here.
         deliverable_store.mark_failed(deliverable_id, str(exc))
     except Exception as exc:  # noqa: BLE001 - a detached worker must not leak
         _logger.exception("masterfile_job_crashed", extra={"deliverable_id": deliverable_id})
         deliverable_store.mark_failed(deliverable_id, f"{type(exc).__name__}: {exc}")
+    finally:
+        if source is not None:
+            # A zip left open pins its file on Windows and its memory
+            # everywhere; the plaintext of an encrypted bundle must not
+            # outlive the build that needed it.
+            source.close()

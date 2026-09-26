@@ -107,7 +107,7 @@ def test_3_load_test_budget_enforcement() -> None:
 
     # Simulate job submissions
     for org_id, org_data in orgs.items():
-        for job_num in range(jobs_per_org):
+        for _job in range(jobs_per_org):
             cost = job_cost
             org_data["cost_charged"] += cost
             org_data["jobs_submitted"] += 1
@@ -202,8 +202,12 @@ def test_5_secret_rotation_drill() -> None:
     print("  [OK] Password would be re-read from environment (not cached)")
 
 
-def main() -> None:
-    """Run all chaos tests."""
+def main() -> int:
+    """Run all chaos tests.
+
+    Returns:
+        `0` if every check passed, `1` otherwise, for `sys.exit`.
+    """
     print("=" * 80)
     print("PHASE 2 CHAOS TESTING SUITE")
     print("=" * 80)

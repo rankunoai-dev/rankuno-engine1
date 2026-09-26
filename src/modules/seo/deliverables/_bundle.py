@@ -34,6 +34,7 @@ __all__ = [
     "Bundle",
     "ScreamingFrogBundleError",
     "open_bundle",
+    "open_bundle_bytes",
 ]
 
 MAX_ZIP_MEMBERS: Final[int] = 1_000
@@ -76,6 +77,18 @@ class Bundle(Protocol):
 
     def open_text(self, name: str) -> IO[str] | None:
         """Return a text stream for `name`, or `None` when the bundle lacks it."""
+        ...
+
+    def names(self) -> frozenset[str]:
+        """Every catalogue-shaped name this bundle holds, by basename.
+
+        The adapter never needs this - it asks for names it already knows.
+        A masterfile service does: Screaming Frog's custom-extraction export
+        is one file *per configured extractor*, so the set is only knowable
+        from the bundle itself. Returning the whole set, rather than taking a
+        glob, keeps pattern matching in the caller and leaves this Protocol
+        with nothing to interpret.
+        """
         ...
 
     def close(self) -> None:
@@ -141,17 +154,24 @@ def _check_member_name(name: str) -> None:
 
 
 class _ZipBundle:
-    """A zip opened by path and pre-flighted before any member is opened."""
+    """A zip pre-flighted before any member is opened, from a path or memory.
 
-    def __init__(self, path: Path) -> None:
+    `source` is whatever `zipfile.ZipFile` accepts: a `Path` for a bundle on
+    disk, or a `BytesIO` for one that must never touch disk (a worker upload
+    is encrypted at rest, so its plaintext is held only in memory). Nothing
+    else about the class changes with the source - the same pre-flight, the
+    same metering, the same refusals.
+    """
+
+    def __init__(self, source: Path | IO[bytes], display_name: str) -> None:
         self._meter = _ByteMeter()
         try:
-            self._archive = zipfile.ZipFile(path)
+            self._archive = zipfile.ZipFile(source)
             infos = self._archive.infolist()
         except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as exc:
-            raise ScreamingFrogBundleError(path.name, "not-a-zip") from exc
+            raise ScreamingFrogBundleError(display_name, "not-a-zip") from exc
         try:
-            self._members = self._preflight(path.name, infos)
+            self._members = self._preflight(display_name, infos)
         except ScreamingFrogBundleError:
             # A refused archive must not keep a handle open; on Windows that
             # would pin the file and defeat the caller's cleanup.
@@ -196,6 +216,11 @@ class _ZipBundle:
         metered = io.BufferedReader(_MeteredStream(raw, name, self._meter))
         return io.TextIOWrapper(metered, encoding=_ENCODING, errors="strict", newline="")
 
+    def names(self) -> frozenset[str]:
+        # Already basenames: `_preflight` keys members that way, so a bundle
+        # zipped with a containing folder lists the same names as a flat one.
+        return frozenset(self._members)
+
     def close(self) -> None:
         self._archive.close()
 
@@ -226,6 +251,9 @@ class _DirectoryBundle:
         except OSError as exc:
             raise ScreamingFrogBundleError(name, "file-unreadable") from exc
 
+    def names(self) -> frozenset[str]:
+        return self._names
+
     def close(self) -> None:
         return None
 
@@ -248,5 +276,26 @@ def open_bundle(path: Path) -> Bundle:
     if path.is_dir():
         return _DirectoryBundle(path)
     if path.is_file() and _looks_like_zip(path):
-        return _ZipBundle(path)
+        return _ZipBundle(path, path.name)
     raise ScreamingFrogBundleError(path.name, "not-a-bundle")
+
+
+def open_bundle_bytes(data: bytes, display_name: str) -> Bundle:
+    """Open an in-memory zip, without ever writing it to disk.
+
+    The path a worker-uploaded bundle takes: it is encrypted at rest and
+    decrypted only into memory, so there is no file for `open_bundle` to
+    dispatch on. The same `_ZipBundle` pre-flight and byte metering apply -
+    plaintext held in memory is no more trusted than a file.
+
+    Args:
+        data: The decrypted zip archive.
+        display_name: Name to put in an error message. Never a member name,
+            a URL or a cell value; a job id or a fixed label.
+
+    Raises:
+        ScreamingFrogBundleError: `data` is not a zip, or fails pre-flight.
+    """
+    if not data.startswith(_ZIP_MAGIC):
+        raise ScreamingFrogBundleError(display_name, "not-a-zip")
+    return _ZipBundle(io.BytesIO(data), display_name)

@@ -139,7 +139,11 @@ src/
 │   │                            # Wraps core/auth.py; no route here has its own
 │   │                            # RiskClass — a login is not a BaseTool.run()
 │   ├── deliverables_routes.py   # Workbook build/download HTTP surface (cycle
-│                                # 0087). A separate router, not routes on
+│                                # 0087), plus POST /jobs/{id}/masterfile/
+│                                # {slug} (ADR 0017, build-log 0107), which
+│                                # resolves an id against both the engine
+│                                # store and the worker dispatch store.
+│                                # A separate router, not routes on
 │                                # server.py, included via app.include_router();
 │                                # imports ApiState only under TYPE_CHECKING so
 │                                # the two modules cannot form an import cycle.
@@ -254,6 +258,17 @@ src/
     │                                 # verified glyph-width table (ADR 0014).
     │                                 # The only page_classifier file that
     │                                 # imports contracts (build-log 0079, 0096)
+    │   ├── url_filter.py        # Include/exclude URL patterns (wildcard */**
+    │   │                        # or regex, auto-detected), applied in
+    │   │                        # discovery.SiteGraph.add() after loop detection
+    │   │                        # and before a node is created, so the graph
+    │   │                        # never holds a filtered URL. Include is a
+    │   │                        # whitelist applied first, exclude a blacklist
+    │   │                        # second; path only; the base URL is exempt;
+    │   │                        # DiscoveryReport.filter_skipped counts drops.
+    │   │                        # API-only - PageClassificationInput carries
+    │   │                        # include_patterns/exclude_patterns and no UI
+    │   │                        # surface sets either (build-log 0106)
     │   ├── contracts/           # Seam between the crawler and client
     │   │   │                    # deliverables (ADR 0011). Imports core only;
     │   │   │                    # never page_classifier or deliverables.
@@ -321,6 +336,23 @@ src/
     │   │                             # (ADR 0011 d.1). Catches every build-failure
     │   │                             # type via their shared ValueError base for
     │   │                             # the same reason (cycle 0087)
+    │   │   ├── masterfile_source.py  # Where a masterfile's CSVs come from:
+    │   │   │                         # MasterfileSource Protocol over a
+    │   │   │                         # directory OR a zip held in memory
+    │   │   │                         # (ADR 0017). A worker bundle is encrypted
+    │   │   │                         # at rest and never extracted, so there is
+    │   │   │                         # no sf_export/ directory and never was.
+    │   │   │                         # read_csv_safe defaults to utf-8-sig:
+    │   │   │                         # Screaming Frog writes a BOM that bare
+    │   │   │                         # utf-8 glues to the first header cell
+    │   │   └── masterfile_*.py       # 21 RAE masterfile export services +
+    │   │                             # masterfile_registry.py. 21 classes, NOT
+    │   │                             # 21 working reports: 13 render an empty
+    │   │                             # workbook against a real export,
+    │   │                             # overview_report crashes at line 235 on an
+    │   │                             # unsanitised sheet name, and 37 of the 49
+    │   │                             # CSV filenames they ask for do not exist
+    │   │                             # in an export (build-log 0107 §5)
     │   ├── screaming_frog_control/  # ADR 0013 conditions 4-8: launches Screaming
     │   │   │                    # Frog CLI via core/process_supervisor.py under
     │   │   │                    # a RiskClass.WRITE/MANDATORY_HITL tool. Imports
@@ -341,8 +373,11 @@ src/
     │   │   ├── upload_manifest.py    # ADR 0015 condition 9: untrusted-upload
     │   │   │                         # validation for the worker->cloud bundle
     │   │   │                         # path. ALLOWED_BUNDLE_FILENAMES derived
-    │   │   │                         # mechanically from export_manifest.py's
-    │   │   │                         # own naming transform; zip-slip/size-cap/
+    │   │   │                         # from contracts/catalogue.py's sf_sources
+    │   │   │                         # + the spine (ADR 0018) - NOT from
+    │   │   │                         # export_manifest.py's naming transform,
+    │   │   │                         # which produced 7 filenames no export
+    │   │   │                         # contains; zip-slip/size-cap/
     │   │   │                         # encrypted-member defense; an unlisted
     │   │   │                         # member rejects the whole upload
     │   │   ├── worker_daemon_cli.py  # The process an operator actually starts:
@@ -398,6 +433,10 @@ src/
 
 | Path | Purpose |
 | :--- | :--- |
+| A masterfile that is actually populated | The route, the in-memory bundle seam and the registry work (ADR 0017). The services do not: 13 of 21 render an **empty workbook** against a real Screaming Frog export, `overview_report` **crashes** (`masterfile_overview_report.py:235`, an unsanitised sheet name, with `sanitize_sheet_name()` already available at `masterfile_base.py:164`), the 6 with data are partial, 37 of 49 requested CSV filenames do not exist in an export, and no multi-file service records which issue put a URL in the sheet. Commit `0d26e26`'s "Complete RAE masterfile parity" and build-log 0105's "Phase 1 COMPLETE" are both false ([build-log 0107 §5](build-log/0107-a-directory-that-could-never-exist.md)) |
+| Any UI for masterfiles | `POST /jobs/{id}/masterfile/{slug}` and `GET /masterfiles/available` are served and nothing consumes either |
+| A UI for URL include/exclude patterns | `url_filter.py`, the two `PageClassificationInput` fields and their `schema.ts` entries all shipped (build-log 0106). No component sets them, so the feature is reachable only by posting to `/api/v1/jobs` by hand |
+| Backend support for the crawl wizard's advanced stage | `AdvancedStage.tsx` collects proxy, HTTP auth, custom headers, an SSL-verification opt-out and a GA4 property id. No `PageClassificationInput` field accepts any of them, and posting them returned `422` on every crawl start until build-log 0109. They are held in form state and consumed by nothing |
 | The React UI for `modules/seo/screaming_frog_control/` (ADR 0013) | The API surface (`preview`/confirm/templates) is implemented; no confirmation-modal UI consumes it yet — an operator would call it directly today |
 | A cloud dashboard or worker-management screen for ADR 0015's worker dispatch | The backend the UI needs is complete (`api/worker_routes.py`, including liveness, per-worker templates and bundle download); the React screens themselves belong to a separate task and do not exist yet |
 | A purge job for expired uploaded bundles | Still read-time filtering only (`read_upload` checks `expires_at`). Nothing deletes the row, so storage grows without bound — unchanged from build-log 0098 |
@@ -497,6 +536,8 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0014](adr/0014-native-title-h1-meta-description-extraction.md) | Extract title/H1/meta description natively at fetch time (`content_signals.py`, `html.parser`, no new dependency), hooked into the one `SiteGraph.record_fetch` method both sync and async discovery share. 13 of 17 `PAGE_TITLES`/`META_DESCRIPTION`/`H1` catalogue ids move to `MEASURED`; the 4 pixel-width ids stay `NOT_MEASURED` by design fallback — no verified glyph-width table available, and a live font-rendering substitute would be non-deterministic across machines. [build-log 0096](build-log/0096-twenty-nine-measured-eighty-one-not.md) |
 | [0015](adr/0015-cloud-local-desktop-worker-architecture.md) | Self-hosted-runner pattern for `RiskClass.WRITE` Screaming Frog dispatch: a cloud API queues a job for one pinned worker daemon; the daemon polls, never accepts an inbound connection. 14 binding conditions, chief among them a **dual** approval gate — cloud-side preview/confirm (gate a, Postgres-backed, worker-bound) plus a worker-independently-verified signed assignment (gate b, never a bare boolean) — and per-worker credentials distinct from ADR 0016's session tokens. Status: APPROVED. Implemented as `core/worker_auth.py`, `core/worker_dispatch_signing.py`, `core/worker_dispatch_store.py`/`core/postgres_worker_dispatch_store.py`, `core/worker_bundle_crypto.py`, `api/worker_routes.py`, `modules/seo/screaming_frog_control/upload_manifest.py`/`worker_daemon.py`, `integrations/worker_cloud_client.py` [build-log 0098](build-log/0098-expires-at-is-not-deletion.md). No React UI (cloud dashboard or worker-management screen) this cycle; uploaded-bundle "automatic expiry" (condition 11) is read-time filtering only, no purge job exists yet. Live progress telemetry (`progress_parser.py`, `POST /workers/jobs/{id}/progress`) added additively in [build-log 0100](build-log/0100-mcompleted-twice-with-two-meanings.md); `WorkerJobsPanel.tsx` now renders it as a progress bar [build-log 0101](build-log/0101-a-percentage-is-no-longer-invented.md) |
 | [0016](adr/0016-cloud-api-authentication.md) | Session-token authentication and an org-ownership retrofit for `src/api/server.py`, closing a CRITICAL unauthenticated-GSC-credential-access finding and a HIGH cross-tenant job-access finding across 14 routes. Status: APPROVED. Implemented as `core/auth.py`/`api/auth.py` (`Principal`/`Operator`, PBKDF2 password hashing, self-contained HMAC-SHA256 session tokens, `require_principal`, `org_scoped_or_404`, `POST /auth/login`) [build-log 0097](build-log/0097-the-header-that-verified-nothing.md) |
+| [0017](adr/0017-masterfile-input-is-an-in-memory-export-bundle.md) | A masterfile is built from a `MasterfileSource` — a directory of CSVs or, canonically, a Screaming Frog export bundle decrypted and read **in memory**, never extracted to disk (ADR 0015 condition 11). `POST /jobs/{id}/masterfile/{slug}` resolves the id against **both** job namespaces, so the caller has one id to send and one deliverable id to poll; `409` a native crawl or no bundle, `410` retention window closed, `503` dispatch store unreachable. Supersedes the implicit `sf_export/` directory convention, which nothing ever wrote — the route had never succeeded for any input. Status: APPROVED. Implemented as `deliverables/masterfile_source.py`, `_bundle.open_bundle_bytes()` and `api/deliverables_routes.py` [build-log 0107](build-log/0107-a-directory-that-could-never-exist.md). Says nothing about *which* CSVs a service should read: 13 of 21 services still render an empty workbook and `overview_report` still crashes |
+| [0018](adr/0018-bundle-allow-list-derives-from-the-issue-catalogue.md) | `ALLOWED_BUNDLE_FILENAMES` derives from `ISSUE_CATALOGUE.sf_sources` plus the spine, not from Screaming Frog's `--export-tabs`/`--bulk-export` argument strings. That transform is unsatisfiable for 7 files: 5 embed a threshold Screaming Frog takes from an operator-authored `.seospiderconfig` (an opaque Java-serialised binary this codebase cannot read), and 2 mangle `" & "`. The worker filtered those files out silently, so 7 of 110 issue ids read `NOT_MEASURED` forever. Seven exact literals, never a numeric wildcard — a pattern would hand the admissible-filename set at an untrusted boundary to whoever authors that config. Status: APPROVED. A skipped file is now logged, and the correspondence is pinned in both directions [build-log 0108](build-log/0108-a-literal-x-where-a-number-belongs.md) |
 
 ---
 

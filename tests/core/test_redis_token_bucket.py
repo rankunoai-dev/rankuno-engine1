@@ -205,10 +205,6 @@ class TestAsyncRedisTokenBucketMultiWorker:
         script1 = MagicMock(return_value=1)
         script2 = MagicMock(return_value=1)
 
-        def register_script_side_effect(script_text):
-            if "org:1" in script_text or True:  # Always returns same
-                return script1 if mock_redis.register_script.call_count == 1 else script2
-
         mock_redis.register_script.side_effect = [script1, script2]
 
         bucket1 = AsyncRedisTokenBucket(

@@ -23,7 +23,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -54,7 +53,7 @@ class URLIssuesService(MasterfileService):
         """Read and combine all URL issues CSVs."""
         dfs = []
         for filename in _URL_ISSUES_FILES:
-            df = read_csv_safe(self.sf_export_dir / filename)
+            df = self._read_csv(filename)
             if df is not None and not df.empty:
                 dfs.append(df)
 
@@ -124,9 +123,7 @@ class URLIssuesService(MasterfileService):
         wb.save(output)
         return output.getvalue()
 
-    def _write_url_issues_sheet(
-        self, ws: object, urls_with_issues: list[dict[str, Any]]
-    ) -> None:
+    def _write_url_issues_sheet(self, ws: object, urls_with_issues: list[dict[str, Any]]) -> None:
         """Write URL issues sheet."""
         ws.append([])  # type: ignore[attr-defined]
         ws.append(["URL ISSUES"])  # type: ignore[attr-defined]

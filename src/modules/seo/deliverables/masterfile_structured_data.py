@@ -27,7 +27,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -58,7 +57,7 @@ class StructuredDataService(MasterfileService):
         """Read and combine all structured data CSVs."""
         dfs = []
         for filename in _STRUCTURED_DATA_FILES:
-            df = read_csv_safe(self.sf_export_dir / filename)
+            df = self._read_csv(filename)
             if df is not None and not df.empty:
                 dfs.append(df)
 
@@ -135,9 +134,7 @@ class StructuredDataService(MasterfileService):
         ws.append([])
         ws.append(["Total Pages with Schema Issues", total_pages])
 
-    def _write_by_type_sheet(
-        self, wb: Workbook, urls_with_schema: list[dict[str, Any]]
-    ) -> None:
+    def _write_by_type_sheet(self, wb: Workbook, urls_with_schema: list[dict[str, Any]]) -> None:
         """Write by type sheet."""
         ws = wb.create_sheet("By Type")
         ws.append(["STRUCTURED DATA BY TYPE"])
@@ -151,9 +148,7 @@ class StructuredDataService(MasterfileService):
         ws.append(["STRUCTURED DATA BY PAGE TEMPLATE"])
         ws.append(["Page Template", "Count"])
 
-    def _write_theme_wise_sheet(
-        self, wb: Workbook, urls_with_schema: list[dict[str, Any]]
-    ) -> None:
+    def _write_theme_wise_sheet(self, wb: Workbook, urls_with_schema: list[dict[str, Any]]) -> None:
         """Write theme-wise sheet."""
         ws = wb.create_sheet("Theme-wise")
         ws.append(["STRUCTURED DATA THEME-WISE"])
@@ -183,9 +178,7 @@ class StructuredDataService(MasterfileService):
         ws.append(["STRUCTURED DATA DETAILED DATA"])
         ws.append(["URL", "Inlinks", "Impressions", "Clicks"])
 
-        sorted_urls = sorted(
-            urls_with_schema, key=lambda x: x.get("impressions", 0), reverse=True
-        )
+        sorted_urls = sorted(urls_with_schema, key=lambda x: x.get("impressions", 0), reverse=True)
         for url_data in sorted_urls:
             ws.append(
                 [

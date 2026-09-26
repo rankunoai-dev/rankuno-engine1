@@ -132,6 +132,41 @@ which, for an AI-assisted codebase, is every session.
 | [0102](0102-a-click-that-carries-its-own-auth.md) | 2026-09-23 | One-click `.xlsx` download of a job's full URL list from the job-row `...` menu: `GET /jobs/{id}/urls.xlsx` delegates to `MasterURLReport`, which had shipped with zero callers until this cycle (0% -> 85% coverage on `reports.py`); UI reuses the `downloadWorkerBundle`/`saveBlob` blob pattern, not `<a href>`, because the route is bearer-guarded and no panel is open to carry the auth; found and recorded (not fixed) two pre-existing `reports.py` defects — `_extract_status_code()` always returns `None`, and the "All URLs" sheet's "HTTP Status" column is actually `page.final_url` | this cycle's files clean in isolation: 218/218 py + 390/390 ui + `tsc --noEmit` clean; whole-repo gate **RED**, independently reproduced — 1 failed (pre-existing `test_gsc_token_manager` circuit-breaker gap)/3024 passed/2 skipped, 93.63% cov, 1 pre-existing format + 29 pre-existing lint + 16 pre-existing type-check findings, all confirmed pre-existing by file mtime as well as content, none in this cycle's files |
 | [0103](0103-a-navigation-carries-no-header.md) | 2026-09-23 | 7 report-download buttons in `ReconcilePanel`/`PerformancePanel` switched from `<a href>` navigation to fetch-then-blob (`httpAdapter.downloadFile`), closing a 401 an anchor cannot carry a bearer token past; report initially scoped 8 files, re-verification found only 2 actually broken; two test-only bugs found (a `role`+`label` query collision, a sequential-click race against an intentionally shared `downloading` flag), not app bugs | UI-only, no Python file changed: `tsc --noEmit` clean; 37 files / 394 tests passed, 28.39s (independently re-run); `npm run build` clean, 23.94s (1 pre-existing unrelated chunk-size warning) |
 | [0104](0104-masterfile-framework-and-phase-1-foundation.md) | 2026-09-25 | Masterfile framework: abstract base + utilities for all 21 RAE masterfile services; response_codes and page_titles services implemented; registry and API `/masterfiles/available` endpoint | 18/18 new tests pass (0.66s); masterfile modules 73% base, 87% registry, 86% response_codes; no import/lint/type errors |
+| [0102b](0102-phase2-new-crawl-wizard.md) | 2026-09-25 | Phase 2A 4-stage new-crawl wizard replacing `LiveCrawlModal` (second entry numbered 0102; index row added retrospectively in cycle 0109) | claimed "69 new tests" and a passing gate; **both false** — corrected in [0109 §5](0109-a-type-that-certified-the-bug.md) |
+| [0105](0105-masterfile-milestone2.md) | 2026-09-25 | Phase 1 Milestone 2: the remaining 19 RAE masterfile services, the `/masterfile/{slug}` route and the build runner (index row added retrospectively in cycle 0107) | claimed "COMPLETE (Green Gate)" and "all 21 … shipping and tested"; **both false** — corrected in [0107 §5](0107-a-directory-that-could-never-exist.md) |
+| [0106](0106-a-pattern-that-never-reaches-the-form.md) | 2026-09-27 | URL include/exclude patterns (`url_filter.py`, wildcard + regex, whitelist then blacklist, base URL exempt) wired into `SiteGraph.add()` with a `filter_skipped` counter and two new `PageClassificationInput` fields; **no UI exposes either field**, so the feature is API-only. Opens with §0, the thread through 0106–0111: every defect repaired this session was in code reported complete and green | 44 new tests (statically counted); gate reported in 0110 — a second `pytest` would have overwritten the in-flight run's `.coverage` |
+| [0107](0107-a-directory-that-could-never-exist.md) | 2026-09-27 | `POST /jobs/{id}/masterfile/{slug}` had **never succeeded for any input** — it built `store.root/{job_id}/sf_export` against a flat store and called `read_result` on the wrong store. New `masterfile_source.py` seam reads a decrypted bundle **in memory** (ADR 0017), all 21 services rewired, dual-namespace id resolution, 410/503 added. Carries the session's largest correction: commit `0d26e26`'s "Complete RAE masterfile parity" is false — 13 of 21 services render an empty workbook, `overview_report` crashes on any real bundle, and 37 of 49 requested CSV filenames were invented | 42 new tests (14 API + 21 source + 7 bundle-build; `tests/api/` had zero masterfile coverage before); gate in 0110 |
+| [0108](0108-a-literal-x-where-a-number-belongs.md) | 2026-09-27 | `ALLOWED_BUNDLE_FILENAMES` re-derived from `ISSUE_CATALOGUE.sf_sources` + spine (ADR 0018): the old CLI-argument transform produced 7 names no export contains (a literal `X` where Screaming Frog writes the configured threshold; `" & "` mangled), so 7 of 110 issue ids read `NOT_MEASURED` forever. Corrects my own earlier claim that bundles were rejected wholesale — the worker dropped the files silently instead | 8 new tests including a two-way drift test; gate in 0110 |
+| [0109](0109-a-type-that-certified-the-bug.md) | 2026-09-27 | Every crawl start in `main` returned `422`: `serializeToPayload` emitted six keys `PageClassificationInput` (a `StrictModel`, `extra="forbid"`) rejects, and `CrawlJobInput` had been widened to `PageClassificationInput & {six extras}` so TypeScript certified the body. Widened type deleted; the payload key set is now asserted against the generated contract | 9 → 11 hook tests; gate in 0110 |
+| [0110](0110-what-the-gate-had-not-been-run-on.md) | 2026-09-27 | Whole-tree gate repaired, every suppression scoped and justified in `pyproject.toml`. Two of the three failing tests were **the test's** fault (a circuit-breaker recovery asserted with zero elapsed time; a 0.1s perf bound a coverage-traced run trips); one was a real bug (`validateDomain` accepted `example..com`). `test_masterfile_response_codes.py`'s `__all__` has named a non-existent function since `2a6b6cc`, which proves the gate was not run at that commit. Records `CLAUDE.md` §8's false "`circuit_breaker.py` — does not exist" | **GREEN** (operator's run): 62 ruff → 0, 16 mypy → 0, 3 failures → 0, **88.40%** against an unchanged 85% floor, UI 473/473. Not independently re-run — see §1 |
+| [0111](0111-a-test-that-had-never-run.md) | 2026-09-27 | `NewCrawlWizard.test.tsx` had never executed once: its mock rebuilt `adapter` inside the selector, looping a `useEffect` forever to 3 GB, and Vitest hangs after `Worker exited unexpectedly` — so `verify.ps1` hung instead of failing. Running it found three real component bugs (Cancel skipped `reset()`; `setSubmitting(false)` only on failure, bricking the wizard after one success; payload serialized after `onClose()`). `verify.ps1 -UiTimeoutSeconds` (owned process handle, `taskkill /T /F`) and `maxForks: 4` added | 9 → 15 tests, none skipped; UI 473/473 at 4 forks vs 2–3 files failing per run at the default, identical wall clock |
+
+
+### Numbering, and the collisions that exist
+
+Numbering is sequential and never reused. Three numbers were nevertheless used
+twice before this was enforced — **0084**, **0086** and **0102**, and **0103**
+came close — so a cite of the form "build-log 00NN" is ambiguous for those. Do
+not create a new collision: take the highest `NNNN` on disk and add one, not the
+highest in this index (entries have been committed without an index row, which is
+how the false claims in `0102-phase2-new-crawl-wizard.md` and
+`0105-masterfile-milestone2.md` went unchallenged for two days).
+
+Four code comments written during the 0106–0111 session cite their work as
+"cycle 0104" / "build-log 0104", which is an existing committed entry. The work
+they mean is cycle **0107**: `src/modules/seo/deliverables/masterfile_base.py:220`,
+`src/modules/seo/deliverables/masterfile_source.py:8`,
+`tests/api/test_masterfile_endpoints.py:1` and
+`tests/modules/seo/deliverables/test_masterfile_source.py:1`. They were left
+unchanged because source files were off-limits during a concurrent gate run; see
+[0110 §8](0110-what-the-gate-had-not-been-run-on.md).
+
+Entries still missing an index row, found in the cycle-0110 audit and not
+backfilled because their gate figures cannot now be verified:
+`0053-a-banner-that-outlived-its-cause.md`,
+`0054-the-crawler-was-breaking-the-site.md`, `0056-indexable-is-not-indexed.md`,
+`0086-a-pattern-is-not-a-verdict.md`, `0086-phase-2-implementation.md`,
+`0092-gsc-org-account-management.md`, `0093-gsc-accounts-ui-tab.md`.
 
 
 ---

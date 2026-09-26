@@ -251,6 +251,7 @@ export interface DiscoveryReport {
   malformed_skipped: number;
   loop_urls_skipped: number;
   traps_skipped: number;
+  filter_skipped: number;
   truncated: boolean;
   stopped_reason: string | null;
   dom_reserve: number;
@@ -356,6 +357,10 @@ export interface PageClassificationInput {
   gsc_property_url: string | null;
   /** Named GSC account profile from GSC_ACCOUNTS__<name>__* in .env.local; None uses the default credentials */
   gsc_account: string | null;
+  /** Optional URL whitelist patterns (wildcard or regex). If provided, only URLs matching at least one pattern are included. */
+  include_patterns: string[] | null;
+  /** Optional URL blacklist patterns (wildcard or regex). If provided, URLs matching any pattern are excluded. */
+  exclude_patterns: string[] | null;
 }
 
 /** Everything one crawl job produced. */

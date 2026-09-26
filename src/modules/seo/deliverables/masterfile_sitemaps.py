@@ -22,7 +22,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -52,7 +51,7 @@ class SitemapsService(MasterfileService):
         """Read and combine all sitemaps CSVs."""
         dfs = []
         for filename in _SITEMAPS_FILES:
-            df = read_csv_safe(self.sf_export_dir / filename)
+            df = self._read_csv(filename)
             if df is not None and not df.empty:
                 dfs.append(df)
 
@@ -122,9 +121,7 @@ class SitemapsService(MasterfileService):
         wb.save(output)
         return output.getvalue()
 
-    def _write_sitemaps_sheet(
-        self, ws: object, urls_with_sitemaps: list[dict[str, Any]]
-    ) -> None:
+    def _write_sitemaps_sheet(self, ws: object, urls_with_sitemaps: list[dict[str, Any]]) -> None:
         """Write sitemaps sheet."""
         ws.append([])  # type: ignore[attr-defined]
         ws.append(["SITEMAPS"])  # type: ignore[attr-defined]

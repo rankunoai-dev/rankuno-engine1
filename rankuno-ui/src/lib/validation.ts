@@ -19,8 +19,16 @@ export function validateDomain(domain: string | undefined): string | null {
 
   const trimmed = domain.trim();
 
-  // Check basic domain format
-  if (!/^[a-z0-9]([a-z0-9-]*\.)*[a-z0-9]([a-z0-9-]*)?$/i.test(trimmed)) {
+  // Check basic domain format. Each dot-separated label must be non-empty and
+  // must neither start nor end with a hyphen (RFC 1123 §2.1). Spelling that as
+  // one label pattern repeated after each dot is what rejects `example..com`:
+  // the previous `([a-z0-9-]*\.)*` let a label match the empty string, so any
+  // run of consecutive dots passed.
+  if (
+    !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(
+      trimmed,
+    )
+  ) {
     return "Invalid domain format (e.g., www.example.com)";
   }
 

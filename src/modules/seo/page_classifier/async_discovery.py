@@ -85,6 +85,7 @@ from src.modules.seo.page_classifier.discovery_parsers import (
 )
 from src.modules.seo.page_classifier.url_rules import is_faceted_filter, normalize_url
 from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
+from src.modules.seo.url_filter import URLFilter
 
 __all__ = [
     "BACKOFF_RECOVERY_STREAK",
@@ -415,6 +416,7 @@ async def adiscover_site(
     on_checkpoint: CheckpointSink | None = None,
     seed_urls: tuple[str, ...] = (),
     exclude_urls: tuple[str, ...] = (),
+    url_filter: URLFilter | None = None,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths concurrently and merge them.
 
@@ -446,12 +448,19 @@ async def adiscover_site(
             root. Set when resuming an interrupted crawl. Seeds the graph
             refuses — media, loop artefacts, URLs past the ceiling — are dropped
             like any other.
+        url_filter: Optional URL filter for include/exclude patterns. If
+            provided, only URLs matching the filter are added to the graph.
 
     Returns:
         The merged graph and its report.
     """
     bounded = min(max(1, concurrency), MAX_CONCURRENCY)
-    graph = SiteGraph(base_url, max_pages=max_pages, dom_reserve_fraction=dom_reserve_fraction)
+    graph = SiteGraph(
+        base_url,
+        max_pages=max_pages,
+        dom_reserve_fraction=dom_reserve_fraction,
+        url_filter=url_filter,
+    )
 
     sitemaps_fetched = await _asitemaps(fetcher, base_url, graph, bounded, on_progress)
     await _acms(fetcher, base_url, graph, site_profile)

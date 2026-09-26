@@ -1,11 +1,14 @@
 """Tests for GSC OAuth token manager."""
 
+import contextlib
+import time
 from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
 import requests
 from pydantic import SecretStr
+from src.core.circuit_breaker import CircuitBreakerState
 from src.core.config import DEFAULT_ORG_ID, Settings
 from src.core.errors import ConfigurationError, GscAuthenticationError
 from src.core.schemas import GscAccountCredential, OrgConfig
@@ -371,10 +374,8 @@ class TestCircuitBreaker:
             manager = GscTokenManager(settings=mock_oauth_settings)
 
             for _ in range(3):
-                try:
+                with contextlib.suppress(GscAuthenticationError):
                     manager.get_or_refresh_token()
-                except GscAuthenticationError:
-                    pass
 
             assert manager._circuit_breaker._failure_count == 3
 
@@ -386,10 +387,8 @@ class TestCircuitBreaker:
 
             # Trigger failures to open circuit
             for _ in range(5):
-                try:
+                with contextlib.suppress(GscAuthenticationError):
                     manager.get_or_refresh_token()
-                except GscAuthenticationError:
-                    pass
 
             assert manager._circuit_breaker.is_open()
 
@@ -431,18 +430,51 @@ class TestCircuitBreaker:
         with pytest.raises(GscAuthenticationError, match="Token endpoint unreachable"):
             manager.get_or_refresh_token()
 
-    def test_circuit_breaker_recovers_after_success(self, mock_oauth_settings):
-        """Circuit breaker closes after successful refresh."""
+    def test_circuit_breaker_stays_open_inside_the_recovery_window(self, mock_oauth_settings):
+        """An open circuit refuses the endpoint even when it would answer.
+
+        This is the half of the contract that protects a token endpoint already
+        in trouble: `get_or_refresh_token` must not probe it again until
+        `recovery_timeout_s` has passed, however healthy it has since become.
+        """
         with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
             mock_post.return_value = _token_response()
             manager = GscTokenManager(settings=mock_oauth_settings)
 
-            # Open the circuit
             for _ in range(5):
                 manager._circuit_breaker.record_failure(Exception("test"))
-
             assert manager._circuit_breaker.is_open()
 
+            with pytest.raises(GscAuthenticationError, match="Token endpoint unreachable"):
+                manager.get_or_refresh_token()
+            mock_post.assert_not_called()
+
+    def test_circuit_breaker_recovers_after_success(self, mock_oauth_settings):
+        """A successful probe once the recovery window has passed closes the circuit.
+
+        The window has to elapse first, which is why the recorded failure time is
+        rewound instead of the test sleeping for `recovery_timeout_s` (30s).
+        `is_open()` is what moves OPEN -> HALF_OPEN, and `record_success()` only
+        closes a circuit from HALF_OPEN — so a refresh is the probe, and its
+        success is what recovery means here.
+        """
+        with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
+            mock_post.return_value = _token_response()
+            manager = GscTokenManager(settings=mock_oauth_settings)
+            breaker = manager._circuit_breaker
+
+            # Open the circuit
+            for _ in range(5):
+                breaker.record_failure(Exception("test"))
+            assert breaker.is_open()
+
+            # Age the last failure past the recovery timeout so the next call probes.
+            breaker._last_failure_time = time.time() - breaker.recovery_timeout_s - 1
+
             # Successful refresh should close it
-            manager.get_or_refresh_token()
-            assert not manager._circuit_breaker.is_open()
+            token = manager.get_or_refresh_token()
+
+            assert token == "ya29.test-token-123"
+            mock_post.assert_called_once()
+            assert not breaker.is_open()
+            assert breaker.state() is CircuitBreakerState.CLOSED

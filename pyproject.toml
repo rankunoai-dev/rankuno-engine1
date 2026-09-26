@@ -128,8 +128,36 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "D100", "D101", "D102", "D103", "ANN201", "ANN001"]
+# `S105`/`S106` (hardcoded password string / argument) are unavoidable in a suite
+# whose whole job is to prove that credentials are handled correctly: a test for
+# `SecretStr` masking has to pass a literal secret in to check it comes back
+# masked. Scoped to `tests/**` rather than dodged with inline `# noqa` at each
+# site, so the check keeps its full force over `src/**`, which is the only place
+# a literal credential would actually be a leak.
+"tests/**" = [
+    "S101",
+    "S105",
+    "S106",
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "ANN201",
+    "ANN001",
+]
 "scripts/**" = ["T201", "D103", "D415", "E501"]
+# `scripts/chaos_test.py` is a hand-run resilience harness, not production code:
+# `assert` is its assertion mechanism exactly as it is under pytest, which is
+# why `tests/**` exempts the same rule. Scoped to this one file so a real script
+# cannot smuggle an `assert` into a code path that runs under `python -O`.
+"scripts/chaos_test.py" = ["S101"]
+# The only undocumented public member in the masterfile services is the
+# `metadata` property, which overrides an abstract property already documented
+# on `MasterfileService` and whose body is a single literal `MasterfileMetadata`.
+# A docstring there could only restate the literal, and 21 copies of "Return the
+# metadata" is noise that makes the docstring convention mean less everywhere
+# else. Ruff has no inherited-docstring awareness, so the exemption lives here.
+"src/modules/seo/deliverables/masterfile_*.py" = ["D102"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -174,6 +202,15 @@ ignore_missing_imports = true
 # `src/core/_win32_bindings.py::load_win32()`.
 [[tool.mypy.overrides]]
 module = ["win32api", "win32con", "win32event", "win32job", "win32process", "pywintypes"]
+ignore_missing_imports = true
+
+# `celery` ships no `py.typed` marker and no bundled stubs, so `mypy --strict`
+# cannot resolve `Celery` or `Task` however they are annotated. The published
+# stubs live in the third-party `celery-types` distribution, which is not a
+# declared dependency of this project. Same treatment as `openpyxl` above:
+# scoped to the one module, so nothing else silently degrades to `Any`.
+[[tool.mypy.overrides]]
+module = "celery.*"
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

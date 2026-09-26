@@ -95,7 +95,30 @@ export function NewCrawlWizard({ open, onClose }: Props): JSX.Element {
   };
 
   /**
+   * Close the wizard and clear it for the next crawl.
+   *
+   * Every close affordance routes through here — the Cancel button, the
+   * Modal's own close icon, Esc and a mask click. They used to differ: Cancel
+   * called `onClose` alone, so the state in `useCrawlWizard` survived. That is
+   * invisible in isolation but not in the app, because `DashboardShell` keeps
+   * this component mounted for the session and only toggles `open`, so
+   * "closed" never unmounts anything. Cancelling on the Domain stage and
+   * reopening put the operator back on the Domain stage with the previous
+   * domain still in the field, ready to crawl the wrong site.
+   */
+  const handleClose = (): void => {
+    if (submitting) return;
+    onClose();
+    reset();
+  };
+
+  /**
    * Submit the form and start crawl.
+   *
+   * The payload is serialized *before* `onClose()`. Closing re-renders the
+   * parent and can clear this wizard, and reading the form after that point
+   * only works by accident of closure capture; computing it first means the
+   * body cannot depend on when the close lands.
    */
   const handleSubmit = async (): Promise<void> => {
     // Final validation
@@ -105,16 +128,24 @@ export function NewCrawlWizard({ open, onClose }: Props): JSX.Element {
       return;
     }
 
+    const payload = serializeToPayload();
     setSubmitting(true);
     onClose();
     try {
-      const payload = serializeToPayload();
       await startCrawl(payload);
       reset();
     } catch (err) {
       message.error(
         err instanceof Error ? err.message : "Failed to start crawl",
       );
+      // Deliberately no `reset()` here: the crawl never started, so the
+      // operator reopens to a form still holding what they typed and retries.
+    } finally {
+      // Unconditional. This used to be set only on the failure path, so one
+      // successful crawl left `submitting` true for the life of the page:
+      // reopening the wizard showed a permanently spinning primary button and
+      // a disabled Cancel, and no second crawl could be started without a
+      // reload.
       setSubmitting(false);
     }
   };
@@ -124,16 +155,12 @@ export function NewCrawlWizard({ open, onClose }: Props): JSX.Element {
   return (
     <Modal
       open={open}
-      onCancel={() => {
-        if (!submitting) {
-          onClose();
-          reset();
-        }
-      }}
+      onCancel={handleClose}
       width={600}
       title="New Crawl"
       footer={null}
-      destroyOnClose
+      // `destroyOnClose` is deprecated in antd 5 and warns on every render.
+      destroyOnHidden
     >
       <div style={{ paddingBottom: 16 }}>
         {/* Stage indicator */}
@@ -213,7 +240,7 @@ export function NewCrawlWizard({ open, onClose }: Props): JSX.Element {
 
         {/* Action buttons */}
         <Space style={{ width: "100%", justifyContent: "flex-end" }}>
-          <Button onClick={onClose} disabled={submitting}>
+          <Button onClick={handleClose} disabled={submitting}>
             Cancel
           </Button>
 

@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import { renderHook, act } from "@testing-library/react";
+import { DEFAULT_CRAWL_REQUEST } from "../adapters/adapterInterface";
 import { useCrawlWizard } from "./useCrawlWizard";
 
 describe("useCrawlWizard", () => {
@@ -102,7 +103,21 @@ describe("useCrawlWizard", () => {
     expect(payload.concurrency).toBe(10);
   });
 
-  it("includes proxy and auth in payload", () => {
+  /**
+   * The payload key set is a contract with `PageClassificationInput`, which
+   * inherits `StrictModel` (`extra="forbid"`). A key the backend model does
+   * not declare is not ignored — the whole request is rejected with a `422`,
+   * so one unsupported field breaks starting a crawl for every user. That
+   * shipped once (commit 8d606db added six), and it can only be caught here:
+   * `startCrawl` takes a widened `PageClassificationInput`, so TypeScript's
+   * excess-property check does not apply and `tsc` stays green.
+   *
+   * Compared against `DEFAULT_CRAWL_REQUEST` rather than a hand-written list
+   * because that constant is typed as the generated `PageClassificationInput`
+   * — a backend field added to the contract must be added there too, so this
+   * test tracks the schema instead of drifting from it.
+   */
+  it("posts exactly the keys PageClassificationInput declares", () => {
     const { result } = renderHook(() => useCrawlWizard());
 
     act(() => {
@@ -110,12 +125,63 @@ describe("useCrawlWizard", () => {
         domain: "example.com",
         proxy: "socks5://proxy:1080",
         auth: { username: "user", password: "pass" },
+        customHeaders: { "X-Trace": "1" },
+        verifySsl: false,
+        ga4PropertyId: "G-ABC123",
       });
     });
 
     const payload = result.current.serializeToPayload();
-    expect(payload.proxy).toBe("socks5://proxy:1080");
-    expect(payload.auth?.username).toBe("user");
+    expect(Object.keys(payload).sort()).toEqual(Object.keys(DEFAULT_CRAWL_REQUEST).sort());
+  });
+
+  it("keeps the advanced-stage fields out of the payload", () => {
+    const { result } = renderHook(() => useCrawlWizard());
+
+    act(() => {
+      result.current.updateFormData({
+        domain: "example.com",
+        proxy: "socks5://proxy:1080",
+        auth: { username: "user", password: "pass" },
+        customHeaders: { "X-Trace": "1" },
+        verifySsl: false,
+        ga4PropertyId: "G-ABC123",
+      });
+    });
+
+    // Spread rather than cast: `toHaveProperty` needs an index signature, and
+    // a spread of the real payload gives one without asserting a type onto it.
+    const payload: Record<string, unknown> = { ...result.current.serializeToPayload() };
+    for (const key of [
+      "source",
+      "proxy",
+      "auth",
+      "custom_headers",
+      "verify_ssl",
+      "ga4_property_id",
+    ]) {
+      expect(payload).not.toHaveProperty(key);
+    }
+  });
+
+  /**
+   * The advanced stages must keep collecting input even though nothing
+   * consumes it yet: the fix for the `422` was to stop *posting* these, not
+   * to gut the UI that gathers them. When a backend schema grows a home for
+   * them, the values are already here.
+   */
+  it("still records proxy and auth in wizard state", () => {
+    const { result } = renderHook(() => useCrawlWizard());
+
+    act(() => {
+      result.current.updateFormData({
+        proxy: "socks5://proxy:1080",
+        auth: { username: "user", password: "pass" },
+      });
+    });
+
+    expect(result.current.formData.proxy).toBe("socks5://proxy:1080");
+    expect(result.current.formData.auth?.username).toBe("user");
   });
 
   it("gets available domains from uploaded URLs", () => {

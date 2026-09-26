@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 from src.modules.seo.deliverables.masterfile_response_codes import ResponseCodesService
 
-__all__ = ["test_response_codes_empty_export", "test_response_codes_with_data"]
+__all__ = [
+    "test_response_codes_empty_export",
+    "test_response_codes_metadata",
+    "test_response_codes_with_response_csv",
+]
 
 
 @pytest.fixture

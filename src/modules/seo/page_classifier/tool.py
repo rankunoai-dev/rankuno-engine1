@@ -86,6 +86,7 @@ from src.modules.seo.page_classifier.schemas import (
 from src.modules.seo.page_classifier.signal_parsers import PageEvidence
 from src.modules.seo.page_classifier.site_profile import probe_site
 from src.modules.seo.page_classifier.weights import SiteProfile, WeightProfileReport
+from src.modules.seo.url_filter import URLFilter
 
 __all__ = [
     "CrawlSummary",
@@ -258,6 +259,32 @@ class PageClassificationInput(StrictModel):
     replayed by retry, so anything secret here would be written to disk. An
     unknown name is refused, not defaulted — querying the wrong client's
     property is worse than no enrichment."""
+
+    include_patterns: list[str] | None = Field(
+        default=None,
+        description="Optional URL whitelist patterns (wildcard or regex). "
+        "If provided, only URLs matching at least one pattern are included.",
+    )
+    """Include pattern list for URL filtering during discovery.
+
+    Patterns can be:
+    - Wildcard: `/blog/*` (single level), `/articles/**` (recursive), `/admin` (prefix)
+    - Regex: Must start with `^` or `$`, or contain `[`. Example: `/blog/[0-9]{4}`
+
+    If `include_patterns` is provided, only URLs matching at least one pattern
+    pass through discovery. If empty or None, all URLs pass (no restriction)."""
+
+    exclude_patterns: list[str] | None = Field(
+        default=None,
+        description="Optional URL blacklist patterns (wildcard or regex). "
+        "If provided, URLs matching any pattern are excluded.",
+    )
+    """Exclude pattern list for URL filtering during discovery.
+
+    Patterns use the same format as `include_patterns`. If `exclude_patterns`
+    is provided, URLs matching any pattern are dropped. If both include and
+    exclude are provided, include is applied first (whitelist), then exclude
+    is applied (blacklist)."""
 
 
 class CrawlSummary(StrictModel):
@@ -756,6 +783,14 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         synchronous — but if a caller has somehow arranged otherwise, falling
         back to the serial path is far better than raising.
         """
+        # Create URL filter if patterns provided
+        url_filter = None
+        if payload.include_patterns or payload.exclude_patterns:
+            url_filter = URLFilter(
+                include_patterns=payload.include_patterns,
+                exclude_patterns=payload.exclude_patterns,
+            )
+
         kwargs = {
             "site_profile": site_profile,
             "max_pages": payload.resolved_max_pages,
@@ -772,6 +807,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             # Both halves of a resume travel together. Passing seeds without the
             # exclusion is what made a resume a full re-crawl with extra steps.
             "exclude_urls": payload.exclude_urls,
+            "url_filter": url_filter,
         }
 
         if payload.use_async_crawl and not _event_loop_running():

@@ -96,6 +96,7 @@ export function discovery(overrides: Partial<DiscoveryReport> = {}): DiscoveryRe
     malformed_skipped: 0,
     loop_urls_skipped: 0,
     traps_skipped: 0,
+    filter_skipped: 0,
     truncated: false,
     stopped_reason: null,
     dom_reserve: 0,

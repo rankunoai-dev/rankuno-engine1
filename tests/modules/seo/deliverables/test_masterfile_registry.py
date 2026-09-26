@@ -39,6 +39,8 @@ def test_get_page_titles_service() -> None:
 
 def test_get_invalid_service() -> None:
     """get_masterfile_service should raise ValueError for unknown slug."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        with pytest.raises(ValueError, match="Unknown masterfile service"):
-            get_masterfile_service("nonexistent_service", "test-job", Path(tmpdir))
+    with (
+        tempfile.TemporaryDirectory() as tmpdir,
+        pytest.raises(ValueError, match="Unknown masterfile service"),
+    ):
+        get_masterfile_service("nonexistent_service", "test-job", Path(tmpdir))

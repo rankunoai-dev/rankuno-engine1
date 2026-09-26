@@ -21,7 +21,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -46,7 +45,7 @@ class CustomSearchGA4GTMService(MasterfileService):
 
     def _read_ga4_gtm(self) -> pd.DataFrame | None:
         """Read GA4 GTM CSV."""
-        return read_csv_safe(self.sf_export_dir / _CUSTOM_SEARCH_GA4_GTM_FILE)
+        return self._read_csv(_CUSTOM_SEARCH_GA4_GTM_FILE)
 
     def generate(self) -> bytes:
         """Generate GA4 GTM XLSX."""
@@ -108,9 +107,7 @@ class CustomSearchGA4GTMService(MasterfileService):
         wb.save(output)
         return output.getvalue()
 
-    def _write_ga4_gtm_sheet(
-        self, ws: object, urls_with_ga4_gtm: list[dict[str, Any]]
-    ) -> None:
+    def _write_ga4_gtm_sheet(self, ws: object, urls_with_ga4_gtm: list[dict[str, Any]]) -> None:
         """Write GA4/GTM sheet."""
         ws.append([])  # type: ignore[attr-defined]
         ws.append(["CUSTOM SEARCH GA4 GTM"])  # type: ignore[attr-defined]
@@ -126,9 +123,7 @@ class CustomSearchGA4GTMService(MasterfileService):
         ws.append(["URL", "Inlinks", "Impressions", "Clicks"])  # type: ignore[attr-defined]
 
         # Sort by impressions descending
-        sorted_urls = sorted(
-            urls_with_ga4_gtm, key=lambda x: x.get("impressions", 0), reverse=True
-        )
+        sorted_urls = sorted(urls_with_ga4_gtm, key=lambda x: x.get("impressions", 0), reverse=True)
         for url_data in sorted_urls:
             ws.append(  # type: ignore[attr-defined]
                 [

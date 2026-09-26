@@ -15,7 +15,20 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$Fix
+    [switch]$Fix,
+
+    # Wall-clock ceiling for the UI test stage, in seconds.
+    #
+    # Not a performance budget - the whole suite measured 67-71s per run on a
+    # 20-core workstation, so this is roughly 8x headroom. It exists because a
+    # hanging gate is worse than a failing one: `NewCrawlWizard.test.tsx`
+    # shipped with a store mock that
+    # re-entered a useEffect forever, the Vitest worker was killed at ~3 GB, and
+    # Vitest does not exit after `Worker exited unexpectedly` - it waits on a
+    # worker that is gone. This script then never printed a verdict and never
+    # returned, so no operator and no CI job could tell a slow run from a dead
+    # one. Raise it if the suite genuinely grows; do not remove it.
+    [int]$UiTimeoutSeconds = 600
 )
 
 $ErrorActionPreference = 'Continue'
@@ -90,12 +103,62 @@ function Invoke-UiGate {
         return
     }
 
-    Push-Location $ui
+    # Run as a child process we hold the handle to, rather than with the call
+    # operator. `&` blocks with no way back, so a hanging test file hangs the
+    # gate — which is what this replaces.
+    #
+    # Built through `ProcessStartInfo` and not `Start-Process -PassThru`,
+    # because that cmdlet does not keep the process handle and the object it
+    # returns reports `$null` for `ExitCode` even after a clean exit. Measured:
+    # a 473-test run that passed came back with `ExitCode` null, `$null -ne 0`
+    # was true, and this stage announced FAILED on a green suite. Owning the
+    # handle is what makes the exit code real (verified 0 on pass, 1 on fail).
+    #
+    # No stream redirection: the child inherits this console, so test progress
+    # and any failure detail appear live exactly as they did before. (The
+    # `--reporter=dot` argument is carried over unchanged from the previous
+    # invocation; note that the `reporters` setting in vite.config.ts appears to
+    # win over it in Vitest 2.1, so the output is verbose either way. That was
+    # true before this change too.)
+    #
+    # The heap cap turns a runaway render loop into a fast OOM instead of a
+    # process that grows until the workstation swaps; the timeout then collects
+    # it. Both are needed: the cap bounds the damage, the timeout bounds the
+    # wait.
+    $previousNodeOptions = $env:NODE_OPTIONS
+    if ([string]::IsNullOrWhiteSpace($previousNodeOptions)) {
+        $env:NODE_OPTIONS = '--max-old-space-size=2048'
+    } else {
+        $env:NODE_OPTIONS = "$previousNodeOptions --max-old-space-size=2048"
+    }
+
     try {
-        & (Join-Path $ui 'node_modules/.bin/vitest.cmd') run --reporter=dot
-        $code = $LASTEXITCODE
+        $vitest = Join-Path $ui 'node_modules\.bin\vitest.cmd'
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        # A .cmd is not an executable image, so it goes through the shell. `/s`
+        # with the whole command in one outer pair of quotes is the form cmd
+        # parses correctly when the path itself is quoted.
+        $psi.FileName = $env:ComSpec
+        $psi.Arguments = '/s /c "' + '"' + $vitest + '" run --reporter=dot"'
+        $psi.WorkingDirectory = $ui
+        $psi.UseShellExecute = $false
+        $proc = [System.Diagnostics.Process]::Start($psi)
+
+        if ($proc.WaitForExit($UiTimeoutSeconds * 1000)) {
+            $code = $proc.ExitCode
+        } else {
+            # Kill the tree, not just the launcher: cmd -> node -> one tinypool
+            # worker per file. Stopping the cmd shell alone would orphan a
+            # multi-gigabyte node process that then starves every later stage of
+            # this same gate, and survives the run that spawned it.
+            & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
+            $code = 124
+            Write-Host ''
+            Write-Host ("TIMED OUT after ${UiTimeoutSeconds}s - UI test process tree killed (PID " + $proc.Id + ').') -ForegroundColor Red
+            Write-Host 'A hanging test file is a defect, not a slow one. Bisect with: npx vitest run <file>' -ForegroundColor Yellow
+        }
     } finally {
-        Pop-Location
+        $env:NODE_OPTIONS = $previousNodeOptions
     }
 
     if ($code -ne 0) {

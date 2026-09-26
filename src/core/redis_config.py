@@ -64,7 +64,7 @@ class RedisSettings(BaseSettings):
 
 
 @lru_cache(maxsize=1)
-def get_redis_client() -> redis.Redis:  # type: ignore
+def get_redis_client() -> redis.Redis:
     """Return a cached Redis client connection.
 
     The client is cached so that connection parameters are read exactly once

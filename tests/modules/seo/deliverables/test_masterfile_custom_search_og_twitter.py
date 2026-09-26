@@ -6,7 +6,9 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from src.modules.seo.deliverables.masterfile_custom_search_og_twitter import CustomSearchOGTwitterService
+from src.modules.seo.deliverables.masterfile_custom_search_og_twitter import (
+    CustomSearchOGTwitterService,
+)
 
 
 @pytest.fixture

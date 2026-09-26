@@ -115,7 +115,7 @@ def get_celery_app() -> Celery:
     return app
 
 
-def _build_broker_url(redis_settings: dict) -> str:
+def _build_broker_url(redis_settings: dict[str, object]) -> str:
     """Build Redis broker URL from settings.
 
     Args:
@@ -140,7 +140,7 @@ def _build_broker_url(redis_settings: dict) -> str:
     return f"redis://{host}:{port}/{db}"
 
 
-def _build_result_backend_url(redis_settings: dict) -> str:
+def _build_result_backend_url(redis_settings: dict[str, object]) -> str:
     """Build Redis result backend URL from settings.
 
     Args:

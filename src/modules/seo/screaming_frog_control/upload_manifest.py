@@ -3,16 +3,38 @@
 The upload path (worker -> cloud) gets the same scrutiny as any untrusted
 file upload: a size cap, zip-slip/path-traversal defense, and — the
 constraint specific to this tool — a hard restriction to exactly the CSV
-filenames `export_manifest.py` already defines. Never an arbitrary walk of
-whatever a compromised or buggy worker happened to zip up.
+filenames a deliverable can consume. Never an arbitrary walk of whatever a
+compromised or buggy worker happened to zip up.
 
-`ALLOWED_BUNDLE_FILENAMES` is derived mechanically from `SPINE_TAB`,
-`EXPORT_TABS`, and `BULK_EXPORT` using the exact naming transform
-`export_manifest.py`'s own module docstring documents (lowercase; strip
-`-`, `<`, `>`, `&`; `.` -> `_`; ` ` and `:` -> `_`; for `--bulk-export`'s
-nested arguments, only the last `:`-separated segment contributes) — never
-a second, hand-typed filename list that could drift from the CLI argument
-list that actually produces it.
+`ALLOWED_BUNDLE_FILENAMES` is derived mechanically from one source of truth:
+`ISSUE_CATALOGUE`'s `sf_sources` filenames, plus the mandatory spine file.
+That is deliberately *not* `export_manifest.py`'s `--export-tabs` /
+`--bulk-export` argument strings, because for seven files those arguments
+cannot produce the filename Screaming Frog actually writes:
+
+* `H1:Over X Characters`, `Meta Description:Below/Over X Pixels` and
+  `Page Titles:Below/Over X Pixels` carry a literal `X` that Screaming Frog
+  replaces with the *active configuration's* threshold — `70`, `400`, `985`,
+  `200`, `561` for this engine's templates — so the transform yields
+  `h1_over_x_characters.csv`, a name no export has ever contained.
+* `Hreflang:Incorrect Language & Region Codes` and its "Inconsistent ...
+  Return Links" sibling collapse `" & "` to a single `_`, where stripping the
+  `&` and mapping each space leaves a double underscore.
+
+Confirmed empirically against 45 real Screaming Frog 19.4 export folders: the
+catalogue's spelling appears 45/45, the transform's 0/45. The catalogue is also
+what every consumer already asks for by name, so deriving the gate from it
+makes "the allow-list refuses a file a deliverable needs" unrepresentable
+rather than merely tested for.
+
+The five thresholds live in an operator-authored `.seospiderconfig`, which is
+an opaque Java-serialised binary this codebase cannot read
+(`template_registry.py`). A template that changes one of those settings
+silently renames its export file, and this list — and `catalogue.py` with it —
+must then be corrected by hand. It is seven exact literals on purpose: a numeric
+wildcard would hand the set of admissible filenames at an untrusted boundary
+to whoever authors that config. `tests/.../test_upload_manifest.py` pins both
+directions of the drift.
 """
 
 from __future__ import annotations
@@ -25,11 +47,8 @@ from typing import Final
 
 from src.core.errors import RankunoError
 from src.core.logger import get_logger
-from src.modules.seo.screaming_frog_control.export_manifest import (
-    BULK_EXPORT,
-    EXPORT_TABS,
-    SPINE_TAB,
-)
+from src.modules.seo.contracts.catalogue import ISSUE_CATALOGUE
+from src.modules.seo.screaming_frog_control.export_manifest import SPINE_TAB
 
 __all__ = ["ALLOWED_BUNDLE_FILENAMES", "BundleUploadError", "validate_and_extract_bundle"]
 
@@ -47,26 +66,15 @@ _ALLOWED_COMPRESSION = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _ENCRYPTED_FLAG = 0x1
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
-_STRIPPED_CHARS = ("-", "<", ">", "&")
 
 
 class BundleUploadError(RankunoError):
     """An uploaded bundle failed validation and was rejected outright."""
 
 
-def _filename_for(argument: str, *, bulk: bool) -> str:
-    """Screaming Frog's own `--export-tabs`/`--bulk-export` naming transform."""
-    segment = argument.rsplit(":", 1)[-1] if bulk else argument
-    for char in _STRIPPED_CHARS:
-        segment = segment.replace(char, "")
-    segment = segment.replace(".", "_").replace(" ", "_").replace(":", "_")
-    return f"{segment.lower()}.csv"
-
-
 ALLOWED_BUNDLE_FILENAMES: Final[frozenset[str]] = frozenset(
     {f"{SPINE_TAB.replace(':', '_').lower()}.csv"}
-    | {_filename_for(arg, bulk=False) for arg in EXPORT_TABS}
-    | {_filename_for(arg, bulk=True) for arg in BULK_EXPORT}
+    | {name for spec in ISSUE_CATALOGUE for name in spec.sf_sources}
 )
 """Every filename this endpoint will ever accept. Nothing else survives
 `validate_and_extract_bundle`, regardless of what a worker's zip contains."""
@@ -139,7 +147,11 @@ def validate_and_extract_bundle(data: bytes, *, max_total_bytes: int) -> dict[st
 
             basename = PurePosixPath(info.filename).name
             if basename not in ALLOWED_BUNDLE_FILENAMES:
-                raise BundleUploadError(f"member '{info.filename}' is not an expected export file")
+                # Names the rule, not the input: this message reaches an HTTP 400
+                # body, and an error channel must not echo an attacker-supplied
+                # string back (`deliverables/_bundle.py`'s own stated rule).
+                _logger.debug("worker_bundle_member_unexpected", extra={"member": info.filename})
+                raise BundleUploadError("a bundle member is not an expected export file")
             if basename in extracted:
                 raise BundleUploadError(f"duplicate member basename '{basename}'")
 

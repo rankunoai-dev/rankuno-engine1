@@ -21,7 +21,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -46,7 +45,7 @@ class LoremIpsumService(MasterfileService):
 
     def _read_lorem_ipsum(self) -> pd.DataFrame | None:
         """Read lorem ipsum CSV."""
-        return read_csv_safe(self.sf_export_dir / _LOREM_IPSUM_FILE)
+        return self._read_csv(_LOREM_IPSUM_FILE)
 
     def generate(self) -> bytes:
         """Generate lorem ipsum XLSX."""
@@ -108,9 +107,7 @@ class LoremIpsumService(MasterfileService):
         wb.save(output)
         return output.getvalue()
 
-    def _write_lorem_ipsum_sheet(
-        self, ws: object, urls_with_lorem: list[dict[str, Any]]
-    ) -> None:
+    def _write_lorem_ipsum_sheet(self, ws: object, urls_with_lorem: list[dict[str, Any]]) -> None:
         """Write lorem ipsum sheet."""
         ws.append([])  # type: ignore[attr-defined]
         ws.append(["LOREM IPSUM / PLACEHOLDER TEXT"])  # type: ignore[attr-defined]

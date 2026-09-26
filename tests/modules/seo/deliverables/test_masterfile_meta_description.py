@@ -49,10 +49,7 @@ def test_meta_description_with_data(sf_export_dir: Path) -> None:
     )
 
     gsc_csv = sf_export_dir / "search_console_all.csv"
-    gsc_csv.write_text(
-        '"Address","Impressions","Clicks"\n'
-        '"https://example.com/","100","10"\n'
-    )
+    gsc_csv.write_text('"Address","Impressions","Clicks"\n"https://example.com/","100","10"\n')
 
     meta_csv = sf_export_dir / "meta_description_missing.csv"
     meta_csv.write_text('"Address"\n"https://example.com/"\n')
@@ -78,9 +75,7 @@ def test_meta_description_with_non_indexable(sf_export_dir: Path) -> None:
 
     meta_csv = sf_export_dir / "meta_description_missing.csv"
     meta_csv.write_text(
-        '"Address"\n'
-        '"https://example.com/indexable"\n'
-        '"https://example.com/non-indexable"\n'
+        '"Address"\n"https://example.com/indexable"\n"https://example.com/non-indexable"\n'
     )
 
     service = MetaDescriptionService("test-job", sf_export_dir)

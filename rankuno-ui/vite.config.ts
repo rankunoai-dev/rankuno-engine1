@@ -26,6 +26,25 @@ export default defineConfig({
     // summary line.
     reporters: "verbose",
     pool: "forks",
+    // Cap the worker count well below the core count.
+    //
+    // Vitest defaults to one fork per logical CPU, which on a 20-core
+    // workstation means 20 concurrent jsdom environments each mounting antd.
+    // These tests are latency-bound, not CPU-bound - they spend their time in
+    // `waitFor` polls and antd's own timers - so 20-way parallelism does not
+    // make the suite faster, it just starves each worker's timers: RTL's 1s
+    // async timeout and Vitest's 5s test timeout start expiring on renders that
+    // did nothing wrong.
+    //
+    // Measured on a 20-core box, 41 files / 473 tests:
+    //   default (20 forks): 2-3 files failed per run, a different set each time
+    //                       (GscAccountForm, ReconcilePanel, ScreamingFrogView),
+    //                       every one of them green when run alone. 67-70s.
+    //   4 forks:            473/473 green. 67s.
+    // Same wall clock, so the parallelism was buying nothing and costing a
+    // deterministic gate. Not a timeout increase: no assertion or budget was
+    // relaxed, the workers are simply no longer fighting for a core.
+    poolOptions: { forks: { maxForks: 4, minForks: 1 } },
     // The tests finish in about a second; Vitest then waits on file handles
     // that Vite does not release on Windows — 26 of them, per the
     // `hanging-process` reporter, with no stack trace between them. The

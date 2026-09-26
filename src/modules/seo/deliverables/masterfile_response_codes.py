@@ -25,7 +25,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -64,7 +63,7 @@ class ResponseCodesService(MasterfileService):
         """Read and combine all response code CSVs."""
         dfs = []
         for filename in _RESPONSE_CODE_FILES:
-            df = read_csv_safe(self.sf_export_dir / filename)
+            df = self._read_csv(filename)
             if df is not None and not df.empty:
                 dfs.append(df)
 
@@ -145,7 +144,7 @@ class ResponseCodesService(MasterfileService):
     def _write_response_codes_sheet(
         self,
         ws: object,
-        urls_with_status: list[dict[str, Any]],  # noqa: type is object
+        urls_with_status: list[dict[str, Any]],
     ) -> None:
         """Write response codes sheet with summary, theme-wise, and detailed sections."""
         ws.append([])  # type: ignore[attr-defined]

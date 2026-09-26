@@ -21,7 +21,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -46,7 +45,7 @@ class FunctionalInternalLinksService(MasterfileService):
 
     def _read_functional_links(self) -> pd.DataFrame | None:
         """Read functional internal links CSV."""
-        return read_csv_safe(self.sf_export_dir / _FUNCTIONAL_LINKS_FILE)
+        return self._read_csv(_FUNCTIONAL_LINKS_FILE)
 
     def generate(self) -> bytes:
         """Generate functional internal links XLSX."""

@@ -23,7 +23,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -54,7 +53,7 @@ class H1Service(MasterfileService):
         """Read and combine all H1 CSVs."""
         dfs = []
         for filename in _H1_FILES:
-            df = read_csv_safe(self.sf_export_dir / filename)
+            df = self._read_csv(filename)
             if df is not None and not df.empty:
                 dfs.append(df)
 

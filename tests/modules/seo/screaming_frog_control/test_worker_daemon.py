@@ -484,6 +484,41 @@ def test_upload_bundle_only_includes_allow_listed_files(tmp_path):
     assert archive.namelist() == ["internal_all.csv"]
 
 
+def test_upload_bundle_reports_the_files_it_skipped(tmp_path, monkeypatch):
+    """Silence here is what let a seven-name allow-list error ship unnoticed.
+
+    The worker filters on the same list the engine validates against, so a
+    filename missing from the list is dropped here rather than rejected there.
+    The drop must be counted and named.
+    """
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    class _Recorder:
+        def info(self, message: str, *, extra: dict[str, object] | None = None) -> None:
+            calls.append(("INFO", message, extra or {}))
+
+        def warning(self, message: str, *, extra: dict[str, object] | None = None) -> None:
+            calls.append(("WARNING", message, extra or {}))
+
+    monkeypatch.setattr(worker_daemon, "_logger", _Recorder())
+
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "internal_all.csv").write_text("Address\nhttps://example.com/\n")
+    (bundle_dir / "not_an_export.csv").write_text("unexpected")
+
+    output = ScreamingFrogJobOutput(
+        bundle_dir=bundle_dir, licence=LicenceStatus(active=True), elapsed_s=1.0
+    )
+    worker_daemon._upload_bundle(_FakeClient(), "job-1", output, max_bytes=1_000_000)
+
+    skipped = [extra for level, message, extra in calls if message == "worker_bundle_files_skipped"]
+    assert skipped == [{"job_id": "job-1", "count": 1, "files": ["not_an_export.csv"]}]
+    assert ("WARNING", "worker_bundle_files_skipped", skipped[0]) in calls
+    uploaded = [extra for _, message, extra in calls if message == "worker_bundle_uploaded"]
+    assert uploaded == [{"job_id": "job-1", "files": 1, "skipped": 1}]
+
+
 def test_upload_bundle_reports_failure_over_the_size_cap(tmp_path):
     bundle_dir = tmp_path / "bundle"
     bundle_dir.mkdir()

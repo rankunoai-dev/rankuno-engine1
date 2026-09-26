@@ -44,11 +44,19 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, 
 from pydantic import Field, ValidationError
 
 from src.api.auth import org_scoped_or_404, require_principal
+from src.api.worker_dashboard_routes import human_owned_job
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.core.state_store import JobNotFoundError, JobRecord
+from src.core.worker_bundle_crypto import BundleDecryptionError, decrypt_bytes
+from src.core.worker_dispatch_schemas import WorkerJob
+from src.core.worker_dispatch_store import DispatchStoreUnavailableError
 from src.modules.seo.contracts.audit import AuditDataset
 from src.modules.seo.deliverables.build_runner import run_build
+from src.modules.seo.deliverables.masterfile_source import (
+    MasterfileSource,
+    source_for_bundle_bytes,
+)
 from src.modules.seo.deliverables.rulebook import RulebookError
 from src.modules.seo.deliverables.rulebook_store import (
     MAX_RULEBOOK_LABEL_LENGTH,
@@ -488,7 +496,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
         deliverable_id: str,
         job_id: str,
         service_slug: str,
-        sf_export_dir: Path,
+        source_factory: Callable[[], MasterfileSource],
         rulebook_path: Path | None,
     ) -> None:
         """Run a masterfile build on a worker thread, then always release its slot."""
@@ -501,11 +509,147 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
                 deliverable_id,
                 job_id,
                 service_slug,
-                sf_export_dir,
+                source_factory,
                 rulebook_path,
             )
         finally:
             state.release_deliverable(deliverable_id)
+
+    def _start_masterfile(
+        state: ApiState,
+        org_id: str,
+        *,
+        job_id: str,
+        service_slug: str,
+        source_factory: Callable[[], MasterfileSource],
+        label: str,
+    ) -> DeliverableAccepted:
+        """Admit a masterfile build, reserve a slot, and dispatch it.
+
+        The same admission sequence `_start_build` documents - a provisional
+        id claimed before a record exists, re-keyed once the store mints the
+        real one - so a refusal never leaves a permanent `FAILED` row behind.
+
+        Raises:
+            HTTPException: `429` if the deliverable concurrency guard is
+                saturated.
+        """
+        pending = f"pending:{uuid4().hex}"
+        if not state.try_reserve_deliverable(pending):
+            _logger.warning("masterfile_rejected_saturation", extra={"org": org_id})
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"deliverable builds are at capacity "
+                    f"({state.max_concurrent_deliverables} concurrent); please retry in a moment"
+                ),
+            )
+        try:
+            record = state.deliverable_store.create(
+                DELIVERABLE_TOOL_NAME,
+                {
+                    "source": "masterfile",
+                    "source_job_id": job_id,
+                    "service_slug": service_slug,
+                },
+                label=label,
+                facet_id=DELIVERABLE_FACET_ID,
+                org_id=org_id,
+            )
+        except Exception:
+            # The store failed, so there is no job and nothing will ever
+            # release this slot.
+            state.release_deliverable(pending)
+            raise
+        state.rekey_deliverable(pending, record.id)
+        state.track(
+            asyncio.create_task(
+                _dispatch_masterfile(state, record.id, job_id, service_slug, source_factory, None)
+            )
+        )
+        return DeliverableAccepted(id=record.id, status=record.status.value, label=record.label)
+
+    def _reject_engine_job(job_id: str) -> None:
+        """A native crawl job can never produce a masterfile. Say so precisely.
+
+        Raises:
+            HTTPException: always, `409`.
+        """
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                f"job {job_id} is a native engine crawl: it produces a page-intelligence "
+                f"result, not Screaming Frog CSV exports. Masterfiles are built from a "
+                f"Screaming Frog export bundle - send a Screaming Frog worker job id here, "
+                f"or POST /deliverables/from-screaming-frog to build from an upload"
+            ),
+        )
+
+    async def _screaming_frog_bundle_bytes(state: ApiState, job: WorkerJob, org_id: str) -> bytes:
+        """The decrypted export bundle for a finished Screaming Frog worker job.
+
+        Read and decrypted on a worker thread, never on the event loop: a
+        bundle is capped at `worker_upload_max_bytes`, and both the database
+        read and the pass over the ciphertext are long enough at that size to
+        stall every other request if they ran here.
+
+        Three failures a caller must be able to tell apart, so they get three
+        statuses rather than one message to parse:
+
+        * `409` - no bundle was ever uploaded (the crawl is queued, running,
+          or failed). `bundle_size_bytes` is the authority for that: it is
+          set only by `mark_uploaded`.
+        * `410` - a bundle existed and its retention window has closed.
+          `read_upload` filters on `expires_at` in SQL, so an expired blob is
+          simply not readable; that is a *gone* resource, not a missing one,
+          and a `404` would have a caller looking for a job that is right
+          there.
+        * `500` - the blob is present and cannot be decrypted, naming the
+          setting, exactly as `GET /workers/jobs/{id}/bundle` already does.
+
+        Raises:
+            HTTPException: as above, plus `503` if the dispatch store is
+                unreachable.
+        """
+        if job.bundle_size_bytes is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Screaming Frog job {job.id} is {job.status.value} and has uploaded no "
+                    f"export bundle; a masterfile needs one"
+                ),
+            )
+        try:
+            blob = await asyncio.to_thread(
+                state.worker_dispatch_store.read_upload, job.id, org_id=org_id
+            )
+        except DispatchStoreUnavailableError as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        if blob is None:
+            raise HTTPException(
+                status.HTTP_410_GONE,
+                detail=(
+                    f"the export bundle for Screaming Frog job {job.id} has passed its "
+                    f"retention window (worker_bundle_retention_days) and is no longer stored; "
+                    f"re-run the crawl to rebuild this masterfile"
+                ),
+            )
+        try:
+            return await asyncio.to_thread(
+                decrypt_bytes, blob, secret=state.bundle_encryption_secret
+            )
+        except BundleDecryptionError as exc:
+            _logger.error(  # noqa: TRY400 - the traceback adds nothing; the cause is configuration
+                "masterfile_bundle_decrypt_failed", extra={"job_id": job.id, "error": str(exc)}
+            )
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    "the stored bundle could not be decrypted; "
+                    "WORKER_BUNDLE_ENCRYPTION_SECRET is missing or differs from the "
+                    "value in force when this bundle was uploaded"
+                ),
+            ) from exc
 
     @router.post(
         "/jobs/{job_id}/masterfile/{service_slug}",
@@ -517,98 +661,73 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
         service_slug: str,
         authorization: str | None = Header(default=None),
     ) -> DeliverableAccepted:
-        """Build a masterfile from a finished crawl job's Screaming Frog exports.
+        """Build one masterfile workbook from a job's Screaming Frog exports.
+
+        `job_id` is resolved against both job namespaces this platform has,
+        the engine store first: a caller has exactly one id to send here and
+        one id - the returned deliverable - to poll, which is the reason this
+        accepts both rather than shipping a second route over the dispatch
+        store.
+
+        * A native crawl job (`state.store`) is refused with `409`. It has no
+          Screaming Frog CSVs and never will. The route used to build
+          `state.store.root / job_id / "sf_export"` - a directory a flat file
+          store cannot contain and which nothing in this repository ever
+          wrote - so every request died there, whatever the id.
+        * A Screaming Frog worker job (`state.worker_dispatch_store`) is
+          built from its uploaded bundle, decrypted into memory and read as a
+          zip. Nothing is written to disk: the bundle is encrypted at rest
+          deliberately (ADR 0015 condition 11), and extracting it to a
+          plaintext CSV directory to satisfy the old path-shaped signature
+          would have undone that.
 
         `202`, never `200`: nothing has been built when this returns - the
         same contract `POST /jobs` uses for a crawl, for the same reason
         (`service.generate()` measures up to 26.3s at the page ceiling).
 
         Raises:
-            HTTPException: `404` if the source job is unknown or service is
-                unknown, `403` if another org owns it, `409` if it has not
-                finished or lacks sf_export directory, `429` if the
-                deliverable concurrency guard is saturated.
+            HTTPException: `404` unknown service, or an id in neither
+                namespace; `403` another org's job; `409` a native crawl job,
+                or a Screaming Frog job with no uploaded bundle; `410` the
+                bundle's retention window has closed; `429` the deliverable
+                concurrency guard is saturated; `500` the bundle cannot be
+                decrypted; `503` the dispatch store is unreachable, which is
+                also what an unknown id becomes when the second namespace
+                cannot be consulted at all.
         """
         from src.modules.seo.deliverables.masterfile_registry import AVAILABLE_SERVICES
-        from src.core.state_store import DiskJobStore
 
         org_id = require_principal(authorization, session_secret=state.session_secret).org_id
 
-        # Validate service slug
         if service_slug not in AVAILABLE_SERVICES:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND,
                 detail=f"unknown masterfile service: {service_slug}",
             )
 
-        # Validate job exists and is owned by this org
         try:
-            crawl_record = state.store.get(job_id)
-        except JobNotFoundError as exc:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
-        org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="job")
+            crawl_record: JobRecord | None = state.store.get(job_id)
+        except JobNotFoundError:
+            crawl_record = None
+        if crawl_record is not None:
+            # Org-scoped before the refusal, so this route cannot be used to
+            # probe which ids exist in another organization.
+            org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="job")
+            _reject_engine_job(job_id)
 
-        # Validate job has result (finished)
-        if not crawl_record.has_result:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                detail=f"job {job_id} is {crawl_record.status.value} and has no result",
-            )
+        job = human_owned_job(state, job_id, org_id)
+        payload = await _screaming_frog_bundle_bytes(state, job, org_id)
 
-        # Resolve sf_export directory (from DiskJobStore)
-        if isinstance(state.store, DiskJobStore):
-            sf_export_dir = state.store.root / job_id / "sf_export"
-            if not sf_export_dir.exists():
-                raise HTTPException(
-                    status.HTTP_409_CONFLICT,
-                    detail=f"job {job_id} has no Screaming Frog exports (sf_export not found)",
-                )
-        else:
-            # Non-disk store; cannot determine sf_export path
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                detail="Masterfiles require DiskJobStore; cannot determine sf_export path",
-            )
-
-        # Reserve slot
-        pending = f"pending:{uuid4().hex}"
-        if not state.try_reserve_deliverable(pending):
-            _logger.warning("masterfile_rejected_saturation", extra={"org": org_id})
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=(
-                    f"deliverable builds are at capacity "
-                    f"({state.max_concurrent_deliverables} concurrent); please retry in a moment"
-                ),
-            )
-
-        try:
-            result = state.deliverable_store.read_result(job_id)
-            site = str(result.get("site", "Unknown"))
-            record = state.deliverable_store.create(
-                DELIVERABLE_TOOL_NAME,
-                {
-                    "source": "masterfile",
-                    "source_job_id": job_id,
-                    "service_slug": service_slug,
-                },
-                label=f"{site} — {service_slug}",
-                facet_id=DELIVERABLE_FACET_ID,
-                org_id=org_id,
-            )
-        except Exception:
-            state.release_deliverable(pending)
-            raise
-
-        state.rekey_deliverable(pending, record.id)
-        state.track(
-            asyncio.create_task(
-                _dispatch_masterfile(
-                    state, record.id, job_id, service_slug, sf_export_dir, None
-                )
-            )
+        return _start_masterfile(
+            state,
+            org_id,
+            job_id=job_id,
+            service_slug=service_slug,
+            # The plaintext lives in this closure alone, and only until the
+            # build finishes and `run_masterfile` closes the source.
+            source_factory=lambda: source_for_bundle_bytes(payload, job_id),
+            label=f"{job.envelope.seed_url} — {service_slug}",
         )
-        return DeliverableAccepted(id=record.id, status=record.status.value, label=record.label)
 
     @router.get(
         "/masterfiles/available",

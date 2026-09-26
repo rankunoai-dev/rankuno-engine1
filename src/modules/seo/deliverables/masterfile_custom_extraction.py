@@ -15,7 +15,6 @@ Source CSVs:
 from __future__ import annotations
 
 import io
-from pathlib import Path
 from typing import Any, Final
 
 import pandas as pd  # type: ignore[import-untyped]
@@ -26,7 +25,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -53,32 +51,25 @@ class CustomExtractionService(MasterfileService):
 
     def _count_extractor_csvs(self) -> int:
         """Count the number of custom extraction CSVs to determine sheet count."""
-        if not self.sf_export_dir.exists():
-            return 1
-
-        count = 0
-        for file in self.sf_export_dir.glob(f"{_CUSTOM_EXTRACTION_PREFIX}*.csv"):
-            count += 1
-
-        return max(1, count)  # At least 1 sheet (summary)
+        return max(1, len(self._find_custom_extractors()))  # At least 1 sheet (summary)
 
     def _find_custom_extractors(self) -> list[str]:
-        """Find all custom extraction CSV files and return extractor names."""
-        if not self.sf_export_dir.exists():
-            return []
+        """Find all custom extraction CSV files and return extractor names.
 
-        extractors = []
-        for file in self.sf_export_dir.glob(f"{_CUSTOM_EXTRACTION_PREFIX}*.csv"):
-            # Extract extractor name from filename: custom_extraction_<name>.csv
-            extractor_name = file.stem[len(_CUSTOM_EXTRACTION_PREFIX) :]
-            extractors.append(extractor_name)
-
-        return sorted(extractors)
+        Matched against the source's own name set rather than a filesystem
+        glob: this is the one dynamic export (one file per configured
+        extractor), and a source may be a zip with no directory to glob.
+        """
+        return sorted(
+            name[len(_CUSTOM_EXTRACTION_PREFIX) : -len(".csv")]
+            for name in self._csv_names()
+            if name.startswith(_CUSTOM_EXTRACTION_PREFIX) and name.endswith(".csv")
+        )
 
     def _read_extractor_csv(self, extractor_name: str) -> pd.DataFrame | None:
         """Read a specific extractor's CSV."""
         filename = f"{_CUSTOM_EXTRACTION_PREFIX}{extractor_name}.csv"
-        return read_csv_safe(self.sf_export_dir / filename)
+        return self._read_csv(filename)
 
     def generate(self) -> bytes:
         """Generate custom extraction XLSX with dynamic sheets."""

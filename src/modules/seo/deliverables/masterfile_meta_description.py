@@ -24,7 +24,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -56,7 +55,7 @@ class MetaDescriptionService(MasterfileService):
         """Read and combine all meta description CSVs."""
         dfs = []
         for filename in _META_DESCRIPTION_FILES:
-            df = read_csv_safe(self.sf_export_dir / filename)
+            df = self._read_csv(filename)
             if df is not None and not df.empty:
                 dfs.append(df)
 
@@ -144,9 +143,7 @@ class MetaDescriptionService(MasterfileService):
         ws.append(["URL", "Inlinks", "Impressions", "Clicks"])  # type: ignore[attr-defined]
 
         # Sort by impressions descending
-        sorted_urls = sorted(
-            urls_with_meta, key=lambda x: x.get("impressions", 0), reverse=True
-        )
+        sorted_urls = sorted(urls_with_meta, key=lambda x: x.get("impressions", 0), reverse=True)
         for url_data in sorted_urls:
             ws.append(  # type: ignore[attr-defined]
                 [

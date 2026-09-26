@@ -77,6 +77,7 @@ from src.modules.seo.page_classifier.url_rules import (
     site_host,
 )
 from src.modules.seo.page_classifier.weights import CmsFamily, SiteProfile
+from src.modules.seo.url_filter import URLFilter
 
 __all__ = [
     "ABSOLUTE_MAX_PAGES",
@@ -387,6 +388,10 @@ class DiscoveryReport(StrictModel):
     A finding about the site rather than the crawl: a template emitting
     relative hrefs that resolve one level deeper each time they are followed.
     Observed at 63% of all URLs on one live site."""
+    filter_skipped: int = Field(default=0, ge=0)
+    """URLs rejected by include/exclude pattern filters.
+
+    Only non-zero if `include_patterns` or `exclude_patterns` were provided."""
     truncated: bool = False
     stopped_reason: str | None = None
     """Why the crawl ended early, or `None` if it ran to completion.
@@ -430,6 +435,7 @@ class SiteGraph:
         base_url: str,
         max_pages: int = DEFAULT_MAX_PAGES,
         dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
+        url_filter: URLFilter | None = None,
     ) -> None:
         """Create an empty graph rooted at `base_url`.
 
@@ -440,9 +446,12 @@ class SiteGraph:
                 may fill. Sitemap and CMS discovery are capped below the hard
                 ceiling by this amount, so a sitemap-omitted page always has
                 somewhere to land.
+            url_filter: Optional URL filter (include/exclude patterns). If
+                provided, only URLs matching the filter are added to the graph.
         """
         self.base_url = base_url
         self.max_pages = max_pages
+        self.url_filter = url_filter
         self.dom_reserve = int(max_pages * max(0.0, min(dom_reserve_fraction, 0.9)))
         # At least one slot must remain for the non-DOM paths, or a tiny budget
         # would discover nothing at all before the crawl starts.
@@ -506,6 +515,8 @@ class SiteGraph:
         self.sitemap_offhost_skipped = 0
         """Declared sitemap URLs dropped by the registrable-host filter,
         never fetched. See `DiscoveryReport.sitemap_offhost_skipped`."""
+        self.filter_skipped = 0
+        """URLs rejected by include/exclude pattern filters."""
 
     def __len__(self) -> int:
         """Node count."""
@@ -587,6 +598,15 @@ class SiteGraph:
             if refuse:
                 self.loop_urls_skipped += 1
                 return None
+
+        # Apply include/exclude URL patterns
+        if (
+            url != self.base_url
+            and self.url_filter is not None
+            and not self.url_filter.matches(url)
+        ):
+            self.filter_skipped += 1
+            return None
 
         existing = self._nodes.get(key)
 
@@ -838,6 +858,7 @@ class SiteGraph:
             traps_skipped=self.traps_skipped,
             loop_urls_skipped=self.loop_urls_skipped,
             malformed_skipped=self.malformed_skipped,
+            filter_skipped=self.filter_skipped,
             sitemap_fetch_attempts=self.sitemap_fetch_attempts,
             sitemaps_blocked=(
                 self.sitemap_fetch_attempts > 0
@@ -862,6 +883,7 @@ def discover_site(
     on_checkpoint: CheckpointSink | None = None,
     seed_urls: tuple[str, ...] = (),
     exclude_urls: tuple[str, ...] = (),
+    url_filter: URLFilter | None = None,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths and merge them into one graph.
 
@@ -889,11 +911,18 @@ def discover_site(
             graph as link targets but are never requested. Without this a
             resumed crawl starts at the site root and walks the whole site
             again, with the seeds merely appended to it.
+        url_filter: Optional URL filter for include/exclude patterns. If
+            provided, only URLs matching the filter are added to the graph.
 
     Returns:
         The merged graph and its report.
     """
-    graph = SiteGraph(base_url, max_pages=max_pages, dom_reserve_fraction=dom_reserve_fraction)
+    graph = SiteGraph(
+        base_url,
+        max_pages=max_pages,
+        dom_reserve_fraction=dom_reserve_fraction,
+        url_filter=url_filter,
+    )
 
     sitemaps_fetched = _discover_from_sitemaps(fetcher, base_url, graph)
     _discover_from_cms(fetcher, base_url, graph, site_profile)

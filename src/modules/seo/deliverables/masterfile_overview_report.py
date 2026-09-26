@@ -23,7 +23,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -90,7 +89,7 @@ class OverviewReportService(MasterfileService):
         """Read all issue CSVs."""
         dfs = []
         for filename in _ISSUE_CSVS:
-            df = read_csv_safe(self.sf_export_dir / filename)
+            df = self._read_csv(filename)
             if df is not None and not df.empty:
                 dfs.append(df)
 
@@ -163,9 +162,7 @@ class OverviewReportService(MasterfileService):
         wb.save(output)
         return output.getvalue()
 
-    def _write_overview_sheet(
-        self, wb: Workbook, enriched_urls: list[dict[str, Any]]
-    ) -> None:
+    def _write_overview_sheet(self, wb: Workbook, enriched_urls: list[dict[str, Any]]) -> None:
         """Write overview sheet."""
         ws = wb.create_sheet("Overview")
         ws.append([])
@@ -179,9 +176,9 @@ class OverviewReportService(MasterfileService):
         ws.append(["Top Pages by Impressions"])
         ws.append(["URL", "Impressions", "Clicks"])
 
-        sorted_urls = sorted(
-            enriched_urls, key=lambda x: x.get("impressions", 0), reverse=True
-        )[:10]
+        sorted_urls = sorted(enriched_urls, key=lambda x: x.get("impressions", 0), reverse=True)[
+            :10
+        ]
         for url_data in sorted_urls:
             ws.append(
                 [
@@ -210,9 +207,7 @@ class OverviewReportService(MasterfileService):
             pct = (count / total_issues * 100) if total_issues > 0 else 0
             ws.append([issue_type, count, f"{pct:.1f}%"])
 
-    def _write_pages_at_risk_sheet(
-        self, wb: Workbook, enriched_urls: list[dict[str, Any]]
-    ) -> None:
+    def _write_pages_at_risk_sheet(self, wb: Workbook, enriched_urls: list[dict[str, Any]]) -> None:
         """Write pages at risk sheet."""
         ws = wb.create_sheet("Pages at Risk")
         ws.append([])
@@ -221,9 +216,9 @@ class OverviewReportService(MasterfileService):
         ws.append(["URL", "Risk Score", "Impressions"])
 
         # Sort by impressions (risk score proxy)
-        sorted_urls = sorted(
-            enriched_urls, key=lambda x: x.get("impressions", 0), reverse=True
-        )[:20]
+        sorted_urls = sorted(enriched_urls, key=lambda x: x.get("impressions", 0), reverse=True)[
+            :20
+        ]
         for url_data in sorted_urls:
             ws.append(
                 [

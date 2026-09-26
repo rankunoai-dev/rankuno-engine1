@@ -6,7 +6,8 @@
 
 import { useCallback, useState } from "react";
 import { CRAWL_SPEEDS, DEFAULT_CRAWL_REQUEST } from "../adapters/adapterInterface";
-import type { CrawlJobInput, CrawlWizardFormData } from "../types/crawlWizard";
+import type { CrawlWizardFormData } from "../types/crawlWizard";
+import type { PageClassificationInput } from "../types/schema";
 
 /**
  * Wizard state manager.
@@ -101,8 +102,19 @@ export function useCrawlWizard() {
    *
    * Converts wizard form data to the API payload format.
    * Maps UI fields to backend fields (e.g., maxPages -> max_pages).
+   *
+   * Emits only keys `PageClassificationInput` declares, and the return type
+   * says so. That model inherits `StrictModel`, which sets `extra="forbid"`
+   * (CLAUDE.md ruling 4), so an undeclared key does not get ignored — the
+   * server answers `422` and the crawl never starts. The wizard's advanced
+   * stages collect proxy, auth, custom headers, SSL verification and a GA4
+   * property, and those stay in `formData` where the form can round-trip
+   * them; they are deliberately *not* spread into the body, because no
+   * backend field consumes them yet and inventing one to make the payload fit
+   * would only add dead schema. When a real field exists, add it to the model
+   * first and this mapping second.
    */
-  const serializeToPayload = useCallback((): CrawlJobInput => {
+  const serializeToPayload = useCallback((): PageClassificationInput => {
     // Get rate and concurrency from preset or custom
     let rateLimitRps = DEFAULT_CRAWL_REQUEST.rate_limit_rps;
     let concurrency = DEFAULT_CRAWL_REQUEST.concurrency;
@@ -138,7 +150,7 @@ export function useCrawlWizard() {
         : [];
 
     // Build payload
-    const payload: CrawlJobInput = {
+    const payload: PageClassificationInput = {
       ...DEFAULT_CRAWL_REQUEST,
       base_url: baseUrl,
       rate_limit_rps: rateLimitRps,
@@ -150,14 +162,6 @@ export function useCrawlWizard() {
       browser_headers: formData.browserHeaders,
       user_agent: formData.userAgent,
       seed_urls: seedUrls,
-
-      // Phase 2 additions
-      source: formData.source,
-      proxy: formData.proxy ?? null,
-      auth: formData.auth ?? null,
-      custom_headers: formData.customHeaders,
-      verify_ssl: formData.verifySsl,
-      ga4_property_id: formData.ga4PropertyId ?? null,
     };
 
     return payload;

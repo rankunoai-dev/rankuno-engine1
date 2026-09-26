@@ -1,8 +1,10 @@
 """Abstract base and utilities for masterfile services (RAE porting, Phase 1).
 
-Each masterfile service reads Screaming Frog CSVs from a job's sf_export/
-directory, applies enrichment (status codes, impressions, GA4 sessions, themes),
-and generates a styled XLSX file. This module provides:
+Each masterfile service reads Screaming Frog CSVs from a `MasterfileSource` -
+a directory of loose CSVs *or* a zip bundle held in memory, which is what lets
+an encrypted worker upload feed a build without being extracted to disk
+(`masterfile_source.py`). It applies enrichment (status codes, impressions,
+GA4 sessions, themes) and generates a styled XLSX file. This module provides:
 
 - MasterfileService: abstract base for all 21 services
 - CSV reading with case-insensitive column lookup and graceful degradation
@@ -27,12 +29,18 @@ from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.modules.seo.deliverables.masterfile_source import (
+    DirectoryMasterfileSource,
+    MasterfileSource,
+    read_csv_safe,
+)
 from src.modules.seo.deliverables.rulebook import OTHERS_THEME
 
 __all__ = [
     "MasterfileService",
     "MasterfileMetadata",
     "EnrichedURLRecord",
+    "MasterfileSource",
     "read_csv_safe",
     "gc",
 ]
@@ -123,35 +131,6 @@ def gc(header: list[str], column_name: str) -> int:
     raise KeyError(msg)
 
 
-def read_csv_safe(csv_path: str | Path, encoding: str = "utf-8") -> pd.DataFrame | None:
-    """Read a CSV with fallback encoding; return None if file missing.
-
-    Args:
-        csv_path: Path to CSV file
-        encoding: Initial encoding (default UTF-8)
-
-    Returns:
-        DataFrame or None if file missing
-
-    Raises:
-        Exception: On parse or encoding error after fallback attempts
-    """
-    if isinstance(csv_path, str):
-        csv_path = Path(csv_path)
-
-    if not csv_path.exists():
-        return None
-
-    encodings = [encoding, "latin-1", "iso-8859-1", "cp1252"]
-    for enc in encodings:
-        try:
-            return pd.read_csv(csv_path, encoding=enc)
-        except (UnicodeDecodeError, pd.errors.ParserError):
-            continue
-    msg = f"Could not read {csv_path} with any encoding"
-    raise ValueError(msg)
-
-
 def safe_cell(value: object) -> object:
     """Neutralise formula-injection trigger characters.
 
@@ -211,30 +190,56 @@ class MasterfileService(ABC):
     """Abstract base for all masterfile services.
 
     Each service:
-    1. Reads one or more issue CSVs from sf_export/
+    1. Reads one or more issue CSVs from its `MasterfileSource`
     2. Loads enrichment (internal_all.csv, search_console_all.csv, analytics_all.csv)
     3. Applies theme classification via rulebook
     4. Generates styled XLSX with 1+ sheets
+
+    A subclass reads CSVs through `self._read_csv(filename)` and discovers
+    dynamic ones through `self._csv_names()`. Neither joins a path: a source
+    may be a zip in memory, where there is no path to join.
     """
 
     def __init__(
         self,
         job_id: str,
-        sf_export_dir: Path,
+        source: MasterfileSource | Path | str,
         rulebook_path: Path | None = None,
-    ):
+    ) -> None:
         """Initialize the service.
 
         Args:
             job_id: Job ID (used for logging)
-            sf_export_dir: Path to sf_export/ directory
-            rulebook_path: Optional rulebook for theme classification
+            source: Where this build's Screaming Frog CSVs come from. A
+                `Path` (or `str`) is wrapped in a `DirectoryMasterfileSource`
+                for the caller, so every existing directory-based call site -
+                `scripts/build_deliverable.py`, the 21 service tests - keeps
+                working unchanged.
+            rulebook_path: Optional rulebook for theme classification. Held
+                for services that theme their output; no service reads it
+                yet (build-log 0107, "explicitly not done").
         """
         self.job_id = job_id
-        self.sf_export_dir = Path(sf_export_dir)
+        self.source: MasterfileSource = (
+            DirectoryMasterfileSource(source) if isinstance(source, (str, Path)) else source
+        )
         self.rulebook_path = rulebook_path
         self._logger = get_logger(self.__class__.__module__)
         self._enrichment_cache: dict[str, pd.DataFrame | None] = {}
+
+    def _read_csv(self, filename: str) -> pd.DataFrame | None:
+        """One export CSV, or `None` when this source does not hold it.
+
+        Absent is never an error: an export a crawl did not produce means
+        "not measured", the distinction `screaming_frog_adapter` already
+        keeps, and a masterfile that raised on it would report nothing at
+        all rather than the issues it did find.
+        """
+        return self.source.read_csv(filename)
+
+    def _csv_names(self) -> frozenset[str]:
+        """Every CSV filename this source holds, for the dynamic exports."""
+        return self.source.names()
 
     @property
     @abstractmethod
@@ -246,7 +251,7 @@ class MasterfileService(ABC):
         """Read enrichment CSV with caching."""
         if filename in self._enrichment_cache:
             return self._enrichment_cache[filename]
-        df = read_csv_safe(self.sf_export_dir / filename)
+        df = self._read_csv(filename)
         self._enrichment_cache[filename] = df
         return df
 

@@ -543,7 +543,7 @@ class AsyncRedisTokenBucket:
 
     def __init__(
         self,
-        redis_client: redis.Redis,  # type: ignore
+        redis_client: redis.Redis,
         key: str,
         capacity: int,
         refill_rate: float,
@@ -572,7 +572,7 @@ class AsyncRedisTokenBucket:
     @classmethod
     def per_minute(
         cls,
-        redis_client: redis.Redis,  # type: ignore
+        redis_client: redis.Redis,
         key: str,
         requests_per_minute: int,
         burst: int | None = None,

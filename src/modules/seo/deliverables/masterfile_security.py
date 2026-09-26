@@ -23,7 +23,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -54,7 +53,7 @@ class SecurityService(MasterfileService):
         """Read and combine all security CSVs."""
         dfs = []
         for filename in _SECURITY_FILES:
-            df = read_csv_safe(self.sf_export_dir / filename)
+            df = self._read_csv(filename)
             if df is not None and not df.empty:
                 dfs.append(df)
 
@@ -124,9 +123,7 @@ class SecurityService(MasterfileService):
         wb.save(output)
         return output.getvalue()
 
-    def _write_security_sheet(
-        self, ws: object, urls_with_security: list[dict[str, Any]]
-    ) -> None:
+    def _write_security_sheet(self, ws: object, urls_with_security: list[dict[str, Any]]) -> None:
         """Write security sheet."""
         ws.append([])  # type: ignore[attr-defined]
         ws.append(["SECURITY"])  # type: ignore[attr-defined]

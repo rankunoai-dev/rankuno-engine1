@@ -6,7 +6,9 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from src.modules.seo.deliverables.masterfile_non_functional_internal_links import NonFunctionalInternalLinksService
+from src.modules.seo.deliverables.masterfile_non_functional_internal_links import (
+    NonFunctionalInternalLinksService,
+)
 
 
 @pytest.fixture

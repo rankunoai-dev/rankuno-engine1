@@ -21,7 +21,6 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
     gc,
-    read_csv_safe,
     safe_cell,
 )
 
@@ -46,7 +45,7 @@ class CustomSearchOGTwitterService(MasterfileService):
 
     def _read_og_twitter(self) -> pd.DataFrame | None:
         """Read OG Twitter CSV."""
-        return read_csv_safe(self.sf_export_dir / _CUSTOM_SEARCH_OG_TWITTER_FILE)
+        return self._read_csv(_CUSTOM_SEARCH_OG_TWITTER_FILE)
 
     def generate(self) -> bytes:
         """Generate OG Twitter XLSX."""

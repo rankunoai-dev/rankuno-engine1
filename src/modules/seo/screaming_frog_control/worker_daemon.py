@@ -391,15 +391,29 @@ def _upload_bundle(
     Only files named in `ALLOWED_BUNDLE_FILENAMES` are ever included — the
     same manifest the cloud re-validates the upload against (ADR 0015
     condition 9) — so a stray file in `bundle_dir` is never sent at all.
+
+    A skipped file is reported, never silent. This filter and the engine's
+    gate read the same list, so the filter also hides any disagreement between
+    the list and what Screaming Frog really wrote: the data simply never
+    arrives and the issue reports `NOT_MEASURED`. Counting and naming the
+    skipped set is what makes that visible from the worker's own logs.
     """
     buffer = io.BytesIO()
     included = 0
+    skipped: list[str] = []
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(Path(output.bundle_dir).glob("*.csv")):
             if path.name not in ALLOWED_BUNDLE_FILENAMES:
+                skipped.append(path.name)
                 continue
             archive.write(path, arcname=path.name)
             included += 1
+
+    if skipped:
+        _logger.warning(
+            "worker_bundle_files_skipped",
+            extra={"job_id": job_id, "count": len(skipped), "files": skipped},
+        )
 
     archive_bytes = buffer.getvalue()
     if len(archive_bytes) > max_bytes:
@@ -409,4 +423,7 @@ def _upload_bundle(
         return
 
     client.upload_bundle(job_id, archive_bytes)
-    _logger.info("worker_bundle_uploaded", extra={"job_id": job_id, "files": included})
+    _logger.info(
+        "worker_bundle_uploaded",
+        extra={"job_id": job_id, "files": included, "skipped": len(skipped)},
+    )

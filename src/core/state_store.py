@@ -859,7 +859,7 @@ class DiskOrgConfigStore:
             return obj
 
         # Convert frozensets and SecretStr to JSON-serializable types
-        serializable = {}
+        serializable: dict[str, object] = {}
         for org_id, config in self._configs.items():
             config_copy = dict(config)
             if "allowed_facets" in config_copy and isinstance(
@@ -867,10 +867,11 @@ class DiskOrgConfigStore:
             ):
                 config_copy["allowed_facets"] = sorted(config_copy["allowed_facets"])
 
-            # Recursively convert all SecretStr objects to strings
-            config_copy = _convert_secrets(config_copy)
-
-            serializable[org_id] = config_copy
+            # Recursively convert all SecretStr objects to strings. The result is
+            # kept in its own name because `_convert_secrets` is typed to return
+            # `object`: the recursion cannot promise it hands back a mapping, and
+            # assigning it over `config_copy` would claim it does.
+            serializable[org_id] = _convert_secrets(config_copy)
         payload = json.dumps(serializable, indent=2, sort_keys=True)
         _atomic_write(self._config_path, payload)
 

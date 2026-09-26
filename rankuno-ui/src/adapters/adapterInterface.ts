@@ -691,4 +691,9 @@ export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   concurrency: 5,
   use_async_crawl: true,
   dom_reserve_fraction: 0.2,
+  // No URL filtering unless the operator asks for it. `null`, not `[]`: an
+  // empty include list would read as "match nothing" to a future reader even
+  // though the engine treats both as "no restriction".
+  include_patterns: null,
+  exclude_patterns: null,
 };

@@ -1,11 +1,16 @@
 /**
  * Phase 2 New Crawl Wizard types.
  *
- * Extends PageClassificationInput with Phase 2 fields (proxy, auth, headers, etc).
- * These fields are stored but not yet consumed by the crawl engine (deferred to Phase 2C/2D).
+ * `CrawlWizardFormData` is wizard-local state, deliberately wider than the
+ * crawl request: the advanced stage collects proxy, auth, custom headers, SSL
+ * verification and a GA4 property that no backend field consumes yet, so
+ * `useCrawlWizard.serializeToPayload` drops them and posts a plain
+ * `PageClassificationInput`. There is intentionally no "request plus Phase 2
+ * extras" type here — one existed, and because it widened the payload type it
+ * let six undeclared keys reach a `StrictModel` (`extra="forbid"`) endpoint,
+ * which answered `422` and stopped every crawl. Add a field to the Pydantic
+ * model before adding it to a payload type.
  */
-
-import type { PageClassificationInput } from "./schema";
 
 /**
  * Source selection for crawl: full domain or uploaded URL list.
@@ -57,32 +62,6 @@ export interface CrawlWizardFormData {
   respectRobots: boolean;
   browserHeaders: boolean;
 }
-
-/**
- * Extended PageClassificationInput with Phase 2 additions.
- *
- * These fields are sent to the backend but may not be consumed until later phases.
- * - proxy: stored, not used by crawl engine yet (Phase 2C)
- * - auth: stored, not used by crawl engine yet (Phase 2C)
- * - custom_headers: stored, not sent in crawl requests yet (Phase 2C)
- * - verify_ssl: stored, not validated in crawl yet (Phase 2C)
- * - ga4_property_id: stored, not used for enrichment yet (Phase 2D)
- * - source: metadata about how the crawl was triggered
- */
-export type CrawlJobInput = PageClassificationInput & {
-  /** Source of the crawl: full_site or url_list */
-  source?: CrawlSource;
-  /** Proxy server URL (socks5://host:port or http://host:port) */
-  proxy?: string | null;
-  /** Basic authentication credentials */
-  auth?: BasicAuthCredentials | null;
-  /** Custom HTTP headers to send with requests */
-  custom_headers?: Record<string, string>;
-  /** Whether to verify SSL certificates */
-  verify_ssl?: boolean;
-  /** GA4 measurement ID for optional enrichment */
-  ga4_property_id?: string | null;
-};
 
 /**
  * Domain option extracted from uploaded URL list.
