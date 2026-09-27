@@ -1,43 +1,137 @@
 /**
- * Validation utilities for the crawl wizard form.
+ * Form validation helpers for a crawl target and its rate settings.
  *
- * Provides rules and helpers for validating URLs, domains, rates, proxies, etc.
+ * Kept after the 4-stage crawl wizard was removed: the wizard configured the
+ * native Python crawler, which is the wrong engine for most of what it
+ * collected, but these rules are engine-agnostic and a Screaming Frog dispatch
+ * form needs the same domain, rate and concurrency checks. Nothing in the tree
+ * imports the module today except its own tests — that is a known state, not an
+ * oversight.
  */
+
+/**
+ * A base domain, parsed from whatever the operator typed.
+ *
+ * Exactly one of the two fields is set. The pair exists so `validateDomain` and
+ * `normalizeDomain` can share one parse: they used to be the same problem
+ * solved twice, and the duplicate is how the field's help text and its
+ * validator came to disagree.
+ */
+interface ParsedDomain {
+  /** The bare, lowercased hostname, or `null` when `error` is set. */
+  host: string | null;
+  /** The message to show the operator, or `null` when the input is usable. */
+  error: string | null;
+}
+
+/**
+ * One label of a hostname, repeated after each dot.
+ *
+ * Each dot-separated label must be non-empty and must neither start nor end
+ * with a hyphen (RFC 1123 §2.1). Spelling it as a repeated label pattern rather
+ * than `([a-z0-9-]*\.)*` is what rejects `example..com`: the older form let a
+ * label match the empty string, so any run of consecutive dots passed.
+ */
+const HOSTNAME_PATTERN =
+  /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i;
+
+/**
+ * Reduce operator input to a base domain.
+ *
+ * A scheme and a single trailing slash are *stripped*, not rejected: neither
+ * can change which site is crawled, and the help text beneath the field has
+ * always promised "with or without https://". The validator used to test the
+ * raw string against a bare-hostname pattern, so `https://rankuno.com/` — the
+ * form the field's own example gives — was refused.
+ *
+ * A path, query, fragment or port is **rejected**, deliberately, rather than
+ * stripped. Each one names something narrower than the domain: someone who
+ * pastes `https://example.com/blog/` is asking for a section, and someone who
+ * types `example.com:8080` is naming a different origin. Silently widening
+ * either to the whole of `example.com` would start a crawl the operator did not
+ * ask for, which is worse than making them delete three characters. The message
+ * says which part is the problem.
+ */
+function parseDomain(domain: string | undefined): ParsedDomain {
+  if (!domain || !domain.trim()) {
+    return { host: null, error: "Domain is required" };
+  }
+
+  const trimmed = domain.trim();
+
+  // Checked before anything is stripped: an interior space means two things
+  // were pasted into one field, and no amount of normalising fixes that.
+  if (/\s/.test(trimmed)) {
+    return { host: null, error: "Domain cannot contain spaces" };
+  }
+
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed);
+  if (scheme && !/^https?$/i.test(scheme[1] ?? "")) {
+    return {
+      host: null,
+      error: "Only http:// and https:// are supported (e.g., https://www.example.com)",
+    };
+  }
+  const withoutScheme = scheme ? trimmed.slice(scheme[0].length) : trimmed;
+
+  const boundary = withoutScheme.search(/[/?#]/);
+  const host = boundary === -1 ? withoutScheme : withoutScheme.slice(0, boundary);
+  const remainder = boundary === -1 ? "" : withoutScheme.slice(boundary);
+
+  // `"/"` alone is the trailing slash a browser address bar adds, and carries
+  // no information. Anything longer is a path, query or fragment.
+  if (remainder !== "" && remainder !== "/") {
+    return {
+      host: null,
+      error: "Enter the base domain only, without a path or query (e.g., www.example.com)",
+    };
+  }
+
+  if (host.includes(":")) {
+    return {
+      host: null,
+      error: "Enter the base domain only, without a port (e.g., www.example.com)",
+    };
+  }
+
+  if (!HOSTNAME_PATTERN.test(host)) {
+    return { host: null, error: "Invalid domain format (e.g., www.example.com)" };
+  }
+
+  if (!host.includes(".")) {
+    return { host: null, error: "Domain must include a TLD (e.g., .com, .org)" };
+  }
+
+  return { host: host.toLowerCase(), error: null };
+}
 
 /**
  * Validate a domain name format.
  *
- * Accepts: www.example.com, example.com, sub.domain.co.uk, etc.
+ * Accepts a bare domain or a full http/https URL of the site root, with or
+ * without a trailing slash: `example.com`, `www.example.com`,
+ * `https://www.example.co.uk/`. Rejects a path, query or port — see
+ * `parseDomain` for why that is a rejection and not a normalisation.
  *
  * @param domain - Domain string
  * @returns Error message or null if valid
  */
 export function validateDomain(domain: string | undefined): string | null {
-  if (!domain || !domain.trim()) {
-    return "Domain is required";
-  }
+  return parseDomain(domain).error;
+}
 
-  const trimmed = domain.trim();
-
-  // Check basic domain format. Each dot-separated label must be non-empty and
-  // must neither start nor end with a hyphen (RFC 1123 §2.1). Spelling that as
-  // one label pattern repeated after each dot is what rejects `example..com`:
-  // the previous `([a-z0-9-]*\.)*` let a label match the empty string, so any
-  // run of consecutive dots passed.
-  if (
-    !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(
-      trimmed,
-    )
-  ) {
-    return "Invalid domain format (e.g., www.example.com)";
-  }
-
-  // Must have at least one dot for a valid domain
-  if (!trimmed.includes(".")) {
-    return "Domain must include a TLD (e.g., .com, .org)";
-  }
-
-  return null;
+/**
+ * Reduce a validated domain to its bare hostname.
+ *
+ * The counterpart to `validateDomain`: a form that has shown no error can take
+ * the crawl target from here instead of re-implementing the scheme stripping,
+ * which is the duplication that let the validator drift from its help text.
+ *
+ * @param domain - Domain string
+ * @returns Lowercased hostname, or null if the input is not a valid base domain
+ */
+export function normalizeDomain(domain: string | undefined): string | null {
+  return parseDomain(domain).host;
 }
 
 /**

@@ -19,7 +19,7 @@ import { GscAccountsView } from "../gsc/GscAccountsView";
 import { LaunchView } from "../screaming-frog/LaunchView";
 import { ScreamingFrogView } from "../screaming-frog/ScreamingFrogView";
 import { HeaderBar } from "./HeaderBar";
-import { NewCrawlWizard } from "../crawl/NewCrawlWizard";
+import { LiveCrawlModal } from "./LiveCrawlModal";
 import { NavigationRail } from "./NavigationRail";
 import { useAuthStore } from "../../store/useAuthStore";
 import { useUiStore } from "../../store/useUiStore";
@@ -301,7 +301,7 @@ export function DashboardShell(): JSX.Element {
           )}
         </div>
 
-        <NewCrawlWizard open={crawlOpen} onClose={() => setCrawlOpen(false)} />
+        <LiveCrawlModal open={crawlOpen} onClose={() => setCrawlOpen(false)} />
         {/* Renders nothing. Announces background crawls as they finish, from
             above the view switch so a crawl that ends while the operator is on
             the jobs tab is still offered. */}

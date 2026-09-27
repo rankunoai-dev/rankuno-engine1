@@ -1,10 +1,24 @@
 /**
- * URL parsing and domain extraction utilities for the crawl wizard.
+ * URL parsing and domain extraction for an uploaded URL list.
  *
  * Handles CSV, TXT, and plain text file formats with flexible URL parsing.
+ *
+ * Kept after the 4-stage crawl wizard was removed (it configured the native
+ * Python crawler, which is the wrong engine for those settings). This module is
+ * engine-agnostic: a Screaming Frog `--crawl-list` upload needs exactly this
+ * parsing and domain grouping, so it stays rather than being rewritten later.
+ * `DomainOption` lives here, with the function that produces it, because the
+ * wizard-only type module it used to live in went with the wizard.
  */
 
-import type { DomainOption } from "../types/crawlWizard";
+/**
+ * A domain extracted from an uploaded URL list, with how many of the uploaded
+ * URLs belong to it.
+ */
+export interface DomainOption {
+  domain: string;
+  urlCount: number;
+}
 
 /**
  * Extract domain from a full URL string.

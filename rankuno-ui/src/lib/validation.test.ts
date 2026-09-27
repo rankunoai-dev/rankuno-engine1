@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 import {
   validateDomain,
+  normalizeDomain,
   validateProxyUrl,
   validateRate,
   validateConcurrency,
@@ -35,6 +36,77 @@ describe("validation", () => {
     it("rejects invalid characters", () => {
       expect(validateDomain("example..com")).not.toBeNull();
       expect(validateDomain("-example.com")).not.toBeNull();
+      expect(validateDomain("example-.com")).not.toBeNull();
+    });
+
+    /*
+     * The case the single `example..com` assertion above never reached. The
+     * help text beneath this field says "with or without https://" and offers
+     * `https://example.co.uk` as an example, while the validator tested the raw
+     * string against a bare-hostname pattern and answered "Invalid domain
+     * format" — so the field rejected its own documented example.
+     */
+    it("accepts a scheme and a trailing slash", () => {
+      expect(validateDomain("https://rankuno.com/")).toBeNull();
+      expect(validateDomain("http://rankuno.com")).toBeNull();
+      expect(validateDomain("https://www.example.co.uk/")).toBeNull();
+      expect(validateDomain("HTTPS://Example.COM")).toBeNull();
+      expect(validateDomain("  https://example.com/  ")).toBeNull();
+    });
+
+    it("still rejects a malformed host behind a scheme", () => {
+      expect(validateDomain("https://example..com")).not.toBeNull();
+      expect(validateDomain("https://-example.com")).not.toBeNull();
+      expect(validateDomain("https://example-.com")).not.toBeNull();
+      expect(validateDomain("https://localhost")).not.toBeNull();
+      expect(validateDomain("https://example")).not.toBeNull();
+      expect(validateDomain("https://")).not.toBeNull();
+    });
+
+    it("rejects a scheme other than http or https", () => {
+      expect(validateDomain("ftp://example.com")).toMatch(/http/i);
+      expect(validateDomain("file://example.com")).toMatch(/http/i);
+    });
+
+    /*
+     * Rejected rather than normalised, on purpose: a path names a section and a
+     * port names a different origin, so silently widening either to the whole
+     * domain would start a crawl nobody asked for. The message has to name the
+     * offending part, or the rejection is indistinguishable from the scheme bug
+     * this test file was extended to cover.
+     */
+    it("rejects a path, query or fragment and says which", () => {
+      expect(validateDomain("https://example.com/some/page")).toMatch(/path or query/i);
+      expect(validateDomain("example.com/blog")).toMatch(/path or query/i);
+      expect(validateDomain("example.com?utm_source=x")).toMatch(/path or query/i);
+      expect(validateDomain("example.com#top")).toMatch(/path or query/i);
+    });
+
+    it("rejects a port and says so", () => {
+      expect(validateDomain("example.com:8080")).toMatch(/port/i);
+      expect(validateDomain("https://example.com:8080/")).toMatch(/port/i);
+    });
+
+    it("rejects anything containing a space", () => {
+      expect(validateDomain("exa mple.com")).toMatch(/space/i);
+      expect(validateDomain("example.com other.com")).toMatch(/space/i);
+      expect(validateDomain("https://example.com /")).toMatch(/space/i);
+      expect(validateDomain("   ")).not.toBeNull();
+    });
+  });
+
+  describe("normalizeDomain", () => {
+    it("reduces accepted input to a bare lowercased hostname", () => {
+      expect(normalizeDomain("https://rankuno.com/")).toBe("rankuno.com");
+      expect(normalizeDomain("HTTP://WWW.Example.CO.UK")).toBe("www.example.co.uk");
+      expect(normalizeDomain("example.com")).toBe("example.com");
+    });
+
+    it("returns null for anything validateDomain rejects", () => {
+      expect(normalizeDomain("example..com")).toBeNull();
+      expect(normalizeDomain("https://example.com/page")).toBeNull();
+      expect(normalizeDomain("example.com:8080")).toBeNull();
+      expect(normalizeDomain(undefined)).toBeNull();
     });
   });
 
