@@ -36,7 +36,7 @@ const status = () => screen.findByRole("status");
 beforeEach(() => {
   useAuthStore.setState({ token: "token" });
   useCrawlStore.setState({ result: null, jobs: [], activeJobId: null, liveJobs: {} });
-  useUiStore.setState({ view: "visualizer", lastMode: "engine", lastEngineView: "visualizer" });
+  useUiStore.setState({ view: "visualizer", lastEngineView: "visualizer" });
 });
 
 afterEach(() => {
