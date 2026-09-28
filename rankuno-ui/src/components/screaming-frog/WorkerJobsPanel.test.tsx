@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { message } from "antd";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { WorkerDispatchAdapter } from "../../adapters/adapterInterface";
+import { ApiError } from "../../adapters/httpAdapter";
+import * as download from "../../lib/download";
 import { workerJob } from "../../test/factories";
 import { WorkerJobsPanel } from "./WorkerJobsPanel";
 
@@ -227,5 +230,191 @@ describe("WorkerJobsPanel", () => {
     );
 
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+/**
+ * Masterfiles, built from a finished dispatch row.
+ *
+ * The build route reads the uploaded Screaming Frog bundle, so it wants the
+ * WORKER job id (`wj-1` here) and answers a native crawl id with a 409. The
+ * control lives on this table for that reason, and only on rows with a bundle.
+ */
+describe("WorkerJobsPanel masterfiles", () => {
+  const SERVICES = [
+    { slug: "response_codes", label: "Response Codes", description: "HTTP status codes" },
+    { slug: "page_titles", label: "Page Titles" },
+  ];
+  const DONE = {
+    status: "succeeded" as const,
+    finished_at: "2026-09-21T11:00:00Z",
+    bundle_size_bytes: 1024,
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function masterfileApi(overrides: Partial<WorkerDispatchAdapter> = {}) {
+    const api = {
+      listWorkerJobs: vi.fn().mockResolvedValue([workerJob(DONE)]),
+      listAvailableMasterfiles: vi.fn().mockResolvedValue(SERVICES),
+      buildMasterfile: vi.fn().mockResolvedValue("dl-1"),
+      getDeliverable: vi
+        .fn()
+        .mockResolvedValue({ id: "dl-1", status: "succeeded", has_result: true }),
+      downloadDeliverable: vi.fn().mockResolvedValue(new Blob(["xlsx"])),
+      ...overrides,
+    };
+    return api as typeof api & WorkerDispatchAdapter;
+  }
+
+  async function openMenu(): Promise<void> {
+    fireEvent.click(await screen.findByRole("button", { name: /masterfiles for/i }));
+    await screen.findByRole("group", { name: /masterfile services/i });
+  }
+
+  it("shows the control for a bundle row, listing services the adapter returned", async () => {
+    const api = masterfileApi({
+      listAvailableMasterfiles: vi
+        .fn()
+        .mockResolvedValue([{ slug: "only_one", label: "The Only Service" }]),
+    });
+    renderPanel(api);
+
+    await openMenu();
+
+    expect(screen.getByRole("button", { name: "The Only Service" })).toBeInTheDocument();
+    // Not a constant: the two services in SERVICES are absent.
+    expect(screen.queryByRole("button", { name: "Response Codes" })).not.toBeInTheDocument();
+    expect(api.listAvailableMasterfiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the control for a row with no bundle", async () => {
+    const api = masterfileApi({
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({ status: "partial", finished_at: "2026-09-21T11:00:00Z" }),
+        workerJob({ id: "wj-2", status: "failed", error: "boom" }),
+        workerJob({ id: "wj-3", status: "queued" }),
+      ]),
+    });
+    renderPanel(api);
+
+    await screen.findByText("PARTIAL");
+    expect(screen.queryByRole("button", { name: /masterfiles for/i })).not.toBeInTheDocument();
+  });
+
+  it("hides the control when the adapter cannot build masterfiles", async () => {
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([workerJob(DONE)]),
+      downloadWorkerBundle: vi.fn(),
+    };
+    renderPanel(api);
+
+    await screen.findByText("SUCCEEDED");
+    expect(screen.queryByRole("button", { name: /masterfiles for/i })).not.toBeInTheDocument();
+  });
+
+  it("builds from the worker job id, polls, then saves the blob", async () => {
+    const blob = new Blob(["xlsx"]);
+    const save = vi.spyOn(download, "saveBlob").mockImplementation(() => undefined);
+    const success = vi.spyOn(message, "success").mockImplementation(() => ({}) as never);
+    const getDeliverable = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "dl-1", status: "dispatched", has_result: false })
+      .mockResolvedValueOnce({ id: "dl-1", status: "succeeded", has_result: true });
+    const api = masterfileApi({
+      getDeliverable,
+      downloadDeliverable: vi.fn().mockResolvedValue(blob),
+    });
+    renderPanel(api);
+    await openMenu();
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Response Codes" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(api.buildMasterfile).toHaveBeenCalledWith("wj-1", "response_codes");
+    expect(getDeliverable).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(getDeliverable).toHaveBeenCalledTimes(2);
+    expect(api.downloadDeliverable).toHaveBeenCalledWith("dl-1");
+    expect(save).toHaveBeenCalledWith("response_codes-wj-1-2026-09-21.xlsx", blob);
+    expect(success).toHaveBeenCalled();
+  });
+
+  it("disables only the building service while in flight, then re-enables it", async () => {
+    vi.spyOn(download, "saveBlob").mockImplementation(() => undefined);
+    vi.spyOn(message, "success").mockImplementation(() => ({}) as never);
+    let finish: (value: { id: string; status: string; has_result: boolean }) => void = () => {};
+    const api = masterfileApi({
+      getDeliverable: vi.fn().mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      ),
+    });
+    renderPanel(api);
+    await openMenu();
+
+    const button = screen.getByRole("button", { name: "Response Codes" });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(button).toBeDisabled());
+    expect(button.className).toContain("ant-btn-loading");
+    expect(screen.getByRole("button", { name: "Page Titles" })).toBeEnabled();
+    // A second click on a disabled button starts nothing.
+    fireEvent.click(button);
+    expect(api.buildMasterfile).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finish({ id: "dl-1", status: "succeeded", has_result: true });
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+  });
+
+  it.each([
+    [409, "This crawl has no uploaded bundle to build from."],
+    [410, "The bundle has expired."],
+    [429, "The server is busy building masterfiles. Try again in a moment."],
+    [500, "the exporter fell over"],
+  ])("says something readable for a %i on the build request", async (status, expected) => {
+    const error = vi.spyOn(message, "error").mockImplementation(() => ({}) as never);
+    const api = masterfileApi({
+      buildMasterfile: vi.fn().mockRejectedValue(new ApiError(status, "the exporter fell over")),
+    });
+    renderPanel(api);
+    await openMenu();
+
+    const button = screen.getByRole("button", { name: "Response Codes" });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(error).toHaveBeenCalledWith(expected));
+    await waitFor(() => expect(button).toBeEnabled());
+  });
+
+  it("reports a build the server marked failed, using its own error", async () => {
+    const error = vi.spyOn(message, "error").mockImplementation(() => ({}) as never);
+    const api = masterfileApi({
+      getDeliverable: vi.fn().mockResolvedValue({
+        id: "dl-1",
+        status: "failed",
+        has_result: false,
+        error: "bad bundle",
+      }),
+    });
+    renderPanel(api);
+    await openMenu();
+
+    fireEvent.click(screen.getByRole("button", { name: "Response Codes" }));
+
+    await waitFor(() => expect(error).toHaveBeenCalledWith("bad bundle"));
+    expect(api.downloadDeliverable).not.toHaveBeenCalled();
   });
 });

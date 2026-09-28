@@ -339,6 +339,27 @@
   flex-wrap: wrap;
 }
 
+/* Masterfile builder: a wrapping grid inside a popover. The popover is
+   portalled outside `.sfj-*`, so its own width is set on the overlay class. */
+.sfj-mf-pop {
+  max-width: min(560px, calc(100vw - 24px));
+}
+
+.sfj-mf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.sfj-mf-grid .ant-btn {
+  white-space: normal;
+  height: auto;
+  min-height: 24px;
+  text-align: left;
+}
+
 /* ---- Confirmation dialog ---- */
 
 .sfc-rows {

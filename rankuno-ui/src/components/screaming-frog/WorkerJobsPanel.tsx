@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Progress, Table, Tag, message } from "antd";
+import { Alert, Button, Empty, Popover, Progress, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import type {
@@ -9,6 +9,8 @@ import { formatBytes, saveBlob } from "../../lib/download";
 import { formatClock } from "../../lib/duration";
 import { formatCrawlTime } from "../../lib/time";
 import "./screaming-frog.css";
+import { useMasterfileBuild } from "./useMasterfileBuild";
+import type { MasterfileBuild } from "./useMasterfileBuild";
 
 interface Props {
   /**
@@ -72,6 +74,7 @@ export function WorkerJobsPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const masterfiles = useMasterfileBuild(api);
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!api?.listWorkerJobs) return;
@@ -189,6 +192,9 @@ export function WorkerJobsPanel({
               Download ({formatBytes(job.bundle_size_bytes)})
             </Button>
           )}
+          {hasBundle(job) && masterfiles.supported && masterfiles.services.length > 0 && (
+            <MasterfileMenu job={job} masterfiles={masterfiles} />
+          )}
         </div>
       ),
     },
@@ -288,6 +294,62 @@ function Outcome({
   }
 
   return <span className="sfj-detail">—</span>;
+}
+
+/**
+ * The masterfile builder for one finished row, behind a popover.
+ *
+ * Twenty-one always-visible buttons per row would swamp the table, so they
+ * open on demand. Built from the WORKER job id: the endpoint reads the
+ * uploaded bundle, which only a worker job has, and answers a native crawl
+ * id with a 409. Popover content is portalled, but the in-flight state lives
+ * in the hook above, so closing it mid-build loses nothing.
+ */
+function MasterfileMenu({
+  job,
+  masterfiles,
+}: {
+  job: WorkerJobView;
+  masterfiles: MasterfileBuild;
+}): JSX.Element {
+  const content = (
+    <div className="sfj-mf-grid" role="group" aria-label="Masterfile services">
+      {masterfiles.services.map((service) => {
+        const busy = masterfiles.isBuilding(job.id, service.slug);
+        return (
+          <Button
+            key={service.slug}
+            size="small"
+            loading={busy}
+            disabled={busy}
+            title={service.description}
+            onClick={() =>
+              void masterfiles.build(
+                { id: job.id, when: job.finished_at ?? job.created_at },
+                service,
+              )
+            }
+          >
+            {service.label}
+          </Button>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <Popover
+      trigger="click"
+      placement="bottomRight"
+      title="Build a masterfile from this crawl"
+      content={content}
+      overlayClassName="sfj-mf-pop"
+    >
+      <Button size="small" aria-haspopup="dialog" aria-label={`Masterfiles for ${job.envelope.seed_url}`}>
+        Masterfiles
+      </Button>
+    </Popover>
+  );
 }
 
 /** Whether a finished job has an archive to offer. */

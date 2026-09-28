@@ -638,6 +638,10 @@ export type WorkerDispatchAdapter = Pick<
   | "confirmDispatch"
   | "listWorkerJobs"
   | "downloadWorkerBundle"
+  | "listAvailableMasterfiles"
+  | "buildMasterfile"
+  | "getDeliverable"
+  | "downloadDeliverable"
 >;
 
 /**

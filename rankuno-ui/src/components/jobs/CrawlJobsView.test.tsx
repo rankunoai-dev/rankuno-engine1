@@ -143,60 +143,37 @@ describe("CrawlJobsView download URLs", () => {
 });
 
 /**
- * "Masterfiles" submenu in the job-row `...` menu.
+ * The masterfile menu no longer lives on this table.
  *
- * Builds and downloads each of the 21 masterfile exports. Like Download URLs,
- * no panel — one click fetches, polls, and downloads. The menu lists all
- * available services from the API and shows a spinner while building.
+ * It posted a NATIVE crawl id to a route that reads a Screaming Frog worker
+ * job's uploaded bundle and refuses anything else with a 409. Masterfiles are
+ * built from the finished rows of the Screaming Frog dispatch table now, so
+ * this menu must not offer them however capable the adapter is.
  */
 describe("CrawlJobsView masterfiles", () => {
-
-  it("hides Masterfiles when the adapter cannot build them", () => {
-    withJob({ status: "succeeded" });
-    // No adapter set at all — `MockAdapter` leaves `buildMasterfile` undefined.
-    render(<CrawlJobsView />);
-    expect(
-      screen.queryByRole("button", { name: /more actions for this crawl/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("hides Masterfiles for a job that has not finished", () => {
-    const listAvailableMasterfiles = vi.fn().mockResolvedValue([
-      { slug: "response_codes", label: "Response Codes" },
-    ]);
-    const buildMasterfile = vi.fn();
-    withJob({ status: "running" });
-    useCrawlStore.setState({
-      adapter: {
-        listAvailableMasterfiles,
-        buildMasterfile,
-      } as unknown as CrawlDataAdapter,
-    });
-
-    render(<CrawlJobsView />);
-    // `running` offers no other menu item either, so the `...` trigger itself
-    // must be absent, not merely missing this one entry.
-    expect(
-      screen.queryByRole("button", { name: /more actions for this crawl/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("hides Masterfiles when no services are available", () => {
-    const listAvailableMasterfiles = vi.fn().mockResolvedValue([]);
+  it("offers no Masterfiles item and never asks for the service list", async () => {
+    const listAvailableMasterfiles = vi
+      .fn()
+      .mockResolvedValue([{ slug: "response_codes", label: "Response Codes" }]);
     const buildMasterfile = vi.fn();
     withJob({ status: "succeeded" });
     useCrawlStore.setState({
       adapter: {
+        // Present so the `...` menu renders at all.
+        downloadUrlList: vi.fn(),
         listAvailableMasterfiles,
         buildMasterfile,
+        getDeliverable: vi.fn(),
+        downloadDeliverable: vi.fn(),
       } as unknown as CrawlDataAdapter,
     });
 
     render(<CrawlJobsView />);
-    // Empty service list means no masterfiles menu.
-    expect(
-      screen.queryByRole("button", { name: /more actions for this crawl/i }),
-    ).not.toBeInTheDocument();
-  });
+    fireEvent.click(screen.getByRole("button", { name: /more actions for this crawl/i }));
+    expect(await screen.findByText("Download URLs")).toBeInTheDocument();
 
+    expect(screen.queryByText("Masterfiles")).not.toBeInTheDocument();
+    expect(listAvailableMasterfiles).not.toHaveBeenCalled();
+    expect(buildMasterfile).not.toHaveBeenCalled();
+  });
 });
