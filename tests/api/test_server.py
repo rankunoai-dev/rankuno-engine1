@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -21,7 +22,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from src.api import server as server_module
 from src.api.server import API_PREFIX, GAP_MEANINGS, SHEET_TITLES, create_app
-from src.core.config import Settings, get_settings
+from src.core.config import REPO_ROOT, Settings, get_settings
 from src.core.schemas import OrgConfig
 from src.core.state_store import (
     MAX_HOMEPAGE_BYTES,
@@ -657,6 +658,57 @@ class TestStartupRecovery:
             assert app.state.api.recovery_done.wait(timeout=5), "recovery did not finish in time"
 
         assert store.get(job_id).status is JobStatus.FAILED
+
+
+class TestStartupOrphanReconciliationIsolation:
+    """Building the app in a test must never reconcile the real PID ledger.
+
+    Cycle 0113: every `TestClient(create_app(...))` in this suite ran
+    `reconcile_orphans` against `REPO_ROOT/.process_ledger.json` — the same
+    file a live Screaming Frog crawl on this workstation is enrolled in — so
+    running `pytest` killed the crawl. Reconciliation itself stays on (it is
+    the thing that just misfired, and disabling it would hide the next
+    regression); only its target is moved somewhere harmless.
+    """
+
+    def test_the_lifespan_reconciles_the_injected_ledger_path(self, tmp_path, monkeypatch):
+        seen: list[Path] = []
+
+        def _record(path: Path) -> list[int]:
+            seen.append(path)
+            return []
+
+        monkeypatch.setattr(server_module, "reconcile_orphans", _record)
+        ledger = tmp_path / "ledger.json"
+        app = create_app(
+            store=DiskJobStore(tmp_path / "jobs"),
+            session_secret=TEST_SESSION_SECRET,
+            process_ledger_path=ledger,
+        )
+
+        with TestClient(app, headers=auth_headers()):
+            assert app.state.api.sf_reconciliation_done.wait(timeout=5)
+
+        assert seen == [ledger]
+
+    def test_an_app_built_with_no_explicit_ledger_never_touches_the_repo_ledger(
+        self, tmp_path, monkeypatch
+    ):
+        """The default must be whatever the test settings say, not the real file."""
+        seen: list[Path] = []
+
+        def _record(path: Path) -> list[int]:
+            seen.append(path)
+            return []
+
+        monkeypatch.setattr(server_module, "reconcile_orphans", _record)
+        app = create_app(store=DiskJobStore(tmp_path / "jobs"), session_secret=TEST_SESSION_SECRET)
+
+        with TestClient(app, headers=auth_headers()):
+            assert app.state.api.sf_reconciliation_done.wait(timeout=5)
+
+        assert seen, "reconciliation must still run under test, only somewhere harmless"
+        assert seen[0] != REPO_ROOT / ".process_ledger.json"
 
 
 def _fake_output(*, truncated: bool, stopped_reason: str | None = None) -> PageClassificationOutput:

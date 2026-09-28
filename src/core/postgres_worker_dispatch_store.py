@@ -405,11 +405,31 @@ class PostgresWorkerDispatchStore:
         return row_to_job(row)
 
     def mark_uploaded(
-        self, job_id: str, *, bundle_size_bytes: int, partial: bool = False
+        self,
+        job_id: str,
+        *,
+        bundle_size_bytes: int,
+        partial: bool = False,
+        reason: str | None = None,
     ) -> WorkerJob:
-        """Move a job to `SUCCEEDED`/`PARTIAL` once its bundle is stored."""
+        """Move a job to `SUCCEEDED`/`PARTIAL` once its bundle is stored.
+
+        Args:
+            job_id: The job to transition.
+            bundle_size_bytes: Size of the stored, rebuilt archive.
+            partial: Whether the bundle is incomplete. `PARTIAL` rather than
+                `SUCCEEDED`.
+            reason: Why it is partial, in an operator's words. Written to the
+                same `error` column `mark_failed` uses, because that is the
+                one the dashboard already reads and shows — a `PARTIAL` row
+                with nothing there renders as "No reason was recorded."
+        """
         status = WorkerJobStatus.PARTIAL if partial else WorkerJobStatus.SUCCEEDED
-        return self._transition(job_id, status=status, bundle_size_bytes=bundle_size_bytes)
+        if reason is None:
+            return self._transition(job_id, status=status, bundle_size_bytes=bundle_size_bytes)
+        return self._transition(
+            job_id, status=status, bundle_size_bytes=bundle_size_bytes, error=reason
+        )
 
     def mark_failed(self, job_id: str, error: str) -> WorkerJob:
         """Move a job to `FAILED` with a reason."""

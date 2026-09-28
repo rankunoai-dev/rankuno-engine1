@@ -45,11 +45,26 @@ class LedgerEntry(StrictModel):
             `launch_supervised` covers by writing the PID first. `None` tells
             `reconcile_orphans` there is no job to reopen, only a process tree
             to walk.
+        supervisor_pid: PID of the process that launched this child and is
+            supervising it. The same PID + start-time identity trick applied
+            one level up: it is what lets `reconcile_orphans` tell a process
+            that is alive *because someone is watching it* from one that is
+            alive because nobody is.
+        supervisor_start_time: The supervisor's `GetProcessTimes` creation
+            time. Without it `supervisor_pid` is as meaningless as a bare
+            child PID — Windows reuses both alike.
+
+    `supervisor_pid`/`supervisor_start_time` default to `None` so a ledger
+    written by an older build still parses. `None` means "owner unknown", and
+    `reconcile_orphans` reaps an unknown-owner entry exactly as it always
+    did: the alternative would make every pre-upgrade entry immortal.
     """
 
     pid: int = Field(gt=0)
     process_start_time: float
     job_object_name: str | None = None
+    supervisor_pid: int | None = Field(default=None, gt=0)
+    supervisor_start_time: float | None = None
 
 
 def read_ledger(path: Path) -> dict[str, LedgerEntry]:
@@ -99,12 +114,24 @@ def upsert_entry(
     process_start_time: float,
     *,
     job_object_name: str | None,
+    supervisor_pid: int | None = None,
+    supervisor_start_time: float | None = None,
 ) -> None:
-    """Write or replace one entry, under the intra-process lock."""
+    """Write or replace one entry, under the intra-process lock.
+
+    The supervisor arguments are optional so the only in-tree caller that has
+    no supervisor to name — a test constructing a ledger by hand — keeps
+    working, and so an omitted owner is spelled the same way a legacy file
+    spells it.
+    """
     with _lock:
         entries = read_ledger(path)
         entries[job_id] = LedgerEntry(
-            pid=pid, process_start_time=process_start_time, job_object_name=job_object_name
+            pid=pid,
+            process_start_time=process_start_time,
+            job_object_name=job_object_name,
+            supervisor_pid=supervisor_pid,
+            supervisor_start_time=supervisor_start_time,
         )
         write_ledger(path, entries)
 

@@ -383,6 +383,29 @@ def _report_and_consume(
     client.report_failure(job_id, error)
 
 
+def _empty_bundle_error(skipped: list[str]) -> str:
+    """The operator-facing reason a crawl produced nothing to upload.
+
+    Two causes, and they need different actions from different people, so
+    they must not collapse into one generic message: an output folder that is
+    genuinely empty means the crawl never reached its export phase (the
+    operator re-runs it), while an output folder full of files none of which
+    are allow-listed means `ALLOWED_BUNDLE_FILENAMES` and what Screaming Frog
+    actually wrote have drifted apart (an engineer fixes the list).
+    """
+    if skipped:
+        return (
+            f"The crawl wrote {len(skipped)} file(s), but none of them are export files "
+            "this engine recognises, so nothing could be uploaded. This is a "
+            "configuration problem, not a crawl problem — report it."
+        )
+    return (
+        "The crawl produced no export files. Screaming Frog writes its exports only "
+        "when a crawl finishes, so a run that was stopped, killed, or crashed before "
+        "the end leaves an empty output folder. Start the crawl again."
+    )
+
+
 def _upload_bundle(
     client: WorkerCloudClient, job_id: str, output: ScreamingFrogJobOutput, *, max_bytes: int
 ) -> None:
@@ -414,6 +437,19 @@ def _upload_bundle(
             "worker_bundle_files_skipped",
             extra={"job_id": job_id, "count": len(skipped), "files": skipped},
         )
+
+    if included == 0:
+        # Two different bugs produce zero included files, and the cloud can
+        # no longer tell them apart once the archive is empty. The daemon is
+        # the only place both counts exist, so it names which one happened
+        # rather than uploading an empty archive and leaving the cloud to
+        # guess (cycle 0113).
+        _logger.error(
+            "worker_bundle_empty",
+            extra={"job_id": job_id, "files": 0, "skipped": len(skipped)},
+        )
+        client.report_failure(job_id, _empty_bundle_error(skipped))
+        return
 
     archive_bytes = buffer.getvalue()
     if len(archive_bytes) > max_bytes:

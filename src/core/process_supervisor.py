@@ -45,6 +45,7 @@ tool that calls this module.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess  # noqa: S404 - `list2cmdline` only; no process is spawned via `subprocess`
 import uuid
@@ -184,10 +185,13 @@ def launch_supervised(
     1. `CreateProcess(..., CREATE_SUSPENDED, ...)` — the child exists but has
        not run one instruction of its own code yet.
     2. PID and process-start-time go to the ledger immediately — before the
-       Job Object exists. This closes the enrollment-race window: a crash
-       between here and step 3 still leaves the PID discoverable by
-       `reconcile_orphans`, whose `None` `job_object_name` tells it there is
-       no job to reopen, only a process tree to walk.
+       Job Object exists, and alongside *this* process's own PID and start
+       time, which is what marks the entry as supervised rather than
+       orphaned. This closes the enrollment-race window: a crash between here
+       and step 3 still leaves the PID discoverable by `reconcile_orphans`,
+       whose `None` `job_object_name` tells it there is no job to reopen,
+       only a process tree to walk — and whose supervisor check then finds
+       this process gone, so the child is correctly reaped.
     3. `CreateJobObject` + `SetInformationJobObject(...,
        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)` + `AssignProcessToJobObject`, then
        the ledger entry is updated with the job's name.
@@ -248,7 +252,23 @@ def launch_supervised(
     # The PID is real; record it (and its creation time, only readable now)
     # before anything else that could fail.
     start_time = float(win32.process.GetProcessTimes(process_handle)["CreationTime"].timestamp())
-    upsert_entry(ledger_path, resolved_job_id, pid, start_time, job_object_name=None)
+    # Recorded with the child, not derived later: this process is the child's
+    # supervisor, and `reconcile_orphans` has no other way to tell "alive and
+    # supervised" from "alive and abandoned" (cycle 0113). The pseudo-handle
+    # from `GetCurrentProcess` needs no access rights and cannot fail.
+    supervisor_pid = os.getpid()
+    supervisor_start_time = float(
+        win32.process.GetProcessTimes(win32.api.GetCurrentProcess())["CreationTime"].timestamp()
+    )
+    upsert_entry(
+        ledger_path,
+        resolved_job_id,
+        pid,
+        start_time,
+        job_object_name=None,
+        supervisor_pid=supervisor_pid,
+        supervisor_start_time=supervisor_start_time,
+    )
 
     job_object_name = f"{_JOB_NAME_PREFIX}{resolved_job_id}"
     try:
@@ -273,7 +293,15 @@ def launch_supervised(
         msg = f"failed to assign {argv[0]!r} (pid {pid}) to a Job Object: {exc}"
         raise ProcessSupervisorError(msg) from exc
 
-    upsert_entry(ledger_path, resolved_job_id, pid, start_time, job_object_name=job_object_name)
+    upsert_entry(
+        ledger_path,
+        resolved_job_id,
+        pid,
+        start_time,
+        job_object_name=job_object_name,
+        supervisor_pid=supervisor_pid,
+        supervisor_start_time=supervisor_start_time,
+    )
 
     win32.process.ResumeThread(thread_handle)
     win32.api.CloseHandle(thread_handle)

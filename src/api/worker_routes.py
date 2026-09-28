@@ -81,6 +81,7 @@ from src.core.worker_bundle_crypto import encrypt_bytes
 from src.core.worker_dispatch_signing import issue_dispatch_assignment
 from src.core.worker_dispatch_store import DispatchStoreUnavailableError
 from src.modules.seo.screaming_frog_control.upload_manifest import (
+    SPINE_FILENAME,
     BundleUploadError,
     validate_and_extract_bundle,
 )
@@ -91,6 +92,27 @@ if TYPE_CHECKING:
 __all__ = ["build_worker_router"]
 
 _logger = get_logger("api.worker_routes")
+
+_EMPTY_BUNDLE_ERROR = (
+    "The crawl produced no export files. Screaming Frog writes its exports only "
+    "when a crawl finishes, so a run that was stopped, killed, or crashed before "
+    "the end leaves an empty output folder. Nothing was recovered from this run — "
+    "start the crawl again."
+)
+"""Written to `WorkerJob.error`, so it is read by an operator on a dashboard,
+not by an engineer in a stack trace. It names the mechanism and the next
+action, because "0 files" on its own is indistinguishable from "the site has
+no pages"."""
+
+_MISSING_SPINE_REASON = (
+    f"The crawl uploaded its export files but not {SPINE_FILENAME}, the page list "
+    "every report is built from. The files are kept and can be downloaded, but no "
+    "report can be produced from them — run the crawl again."
+)
+"""Carried on the `PARTIAL` transition for the same reason: the dashboard
+shows `WorkerJob.error` beside a partial row, and a partial row with nothing
+there renders as a bare "No reason was recorded." — a worse answer than the
+wrong status it replaced."""
 
 
 def build_worker_router(state: ApiState) -> APIRouter:
@@ -199,6 +221,14 @@ def build_worker_router(state: ApiState) -> APIRouter:
         upload, never a partially received body — a truncated retry fails
         `validate_and_extract_bundle` and never reaches storage at all.
 
+        What the bundle contains decides the job's terminal status, because
+        nothing else in this system can tell a finished crawl from a killed
+        one (cycle 0113): no export files at all is `FAILED`, export files
+        without `internal_all.csv` is `PARTIAL` — real data, but no
+        deliverable can be built from it — and only a bundle carrying the
+        spine is `SUCCEEDED`. All three are `200`: the report itself was
+        accepted and the job is terminal, so a worker must not retry.
+
         Raises:
             HTTPException: `401` unauthenticated; `404` unknown job; `403`
                 a job belonging to a different worker or org (condition 2's
@@ -221,8 +251,37 @@ def build_worker_router(state: ApiState) -> APIRouter:
         except BundleUploadError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+        if not members:
+            # A valid archive with nothing in it is not a finished crawl. The
+            # bytes are not stored: a 22-byte empty zip offered as a download
+            # is the exact failure this branch exists to stop.
+            try:
+                updated = state.worker_dispatch_store.mark_failed(job.id, _EMPTY_BUNDLE_ERROR)
+            except DispatchStoreUnavailableError as exc:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+            _logger.warning(
+                "worker_bundle_empty",
+                extra={
+                    "job_id": job.id,
+                    "worker_id": principal.worker_id,
+                    "members": 0,
+                    # Kept alongside `members` so this stays distinguishable
+                    # from "files arrived but the allow-list dropped them":
+                    # that case cannot reach here (an unlisted member is a
+                    # 400), so an empty archive with a near-empty body is
+                    # specifically "killed before export".
+                    "bundle_bytes": len(body),
+                },
+            )
+            return WorkerJobAccepted(id=updated.id, status=updated.status.value)
+
         rebuilt = rebuild_zip(members)
         encrypted = encrypt_bytes(rebuilt, secret=state.bundle_encryption_secret)
+        # `load_screaming_frog_bundle` requires the spine non-optionally, so a
+        # bundle without it can never become a deliverable however many other
+        # files it carries. Stored anyway — partial data is worth keeping —
+        # but never presented as a clean finish.
+        spine_present = SPINE_FILENAME in members
         try:
             state.worker_dispatch_store.store_upload(
                 job.id,
@@ -232,14 +291,23 @@ def build_worker_router(state: ApiState) -> APIRouter:
                 retention_days=settings.worker_bundle_retention_days,
             )
             updated = state.worker_dispatch_store.mark_uploaded(
-                job.id, bundle_size_bytes=len(rebuilt)
+                job.id,
+                bundle_size_bytes=len(rebuilt),
+                partial=not spine_present,
+                reason=None if spine_present else _MISSING_SPINE_REASON,
             )
         except DispatchStoreUnavailableError as exc:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
         _logger.info(
             "worker_bundle_uploaded",
-            extra={"job_id": job.id, "worker_id": principal.worker_id, "members": len(members)},
+            extra={
+                "job_id": job.id,
+                "worker_id": principal.worker_id,
+                "members": len(members),
+                "spine_present": spine_present,
+                "status": updated.status.value,
+            },
         )
         return WorkerJobAccepted(id=updated.id, status=updated.status.value)
 

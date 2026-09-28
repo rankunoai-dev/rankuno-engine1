@@ -214,10 +214,16 @@ class _FakeCursor:
         row["status"] = status
         row["updated_at"] = updated_at
         row["finished_at"] = finished_at
-        if "bundle_size_bytes = %s" in q:
-            row["bundle_size_bytes"] = extra[0]
-        elif "error = %s" in q:
-            row["error"] = extra[0]
+        # Every optional column the real `SET` clause may carry, in the order
+        # the query itself lists them. An `if/elif` here modelled Postgres as
+        # applying only the *first* assignment, which no database does — a
+        # transition setting both `bundle_size_bytes` and `error` (an uploaded
+        # but unusable bundle, cycle 0113) silently lost the second.
+        assigned = sorted(
+            (name for name in ("bundle_size_bytes", "error") if f"{name} = %s" in q), key=q.index
+        )
+        for name, value in zip(assigned, extra, strict=True):
+            row[name] = value
         self._result = tuple(row[c] for c in _COLUMNS)
 
     def _update_progress(self, params: tuple[object, ...]) -> None:
@@ -481,6 +487,22 @@ def test_mark_uploaded_transitions_to_succeeded(store):
     updated = store.mark_uploaded(job.id, bundle_size_bytes=1234)
     assert updated.status is WorkerJobStatus.SUCCEEDED
     assert updated.bundle_size_bytes == 1234
+
+
+def test_mark_uploaded_can_transition_to_partial_with_a_reason(store):
+    """A bundle that arrived but cannot produce a report (cycle 0113).
+
+    The reason lands in the same `error` column `mark_failed` writes, because
+    that is the one the dashboard shows beside a finished row.
+    """
+    _queue_job(store, worker_id="wkr-1")
+    job = store.claim_next_job(worker_id="wkr-1", org_id="acme")
+    updated = store.mark_uploaded(
+        job.id, bundle_size_bytes=99, partial=True, reason="no internal_all.csv"
+    )
+    assert updated.status is WorkerJobStatus.PARTIAL
+    assert updated.bundle_size_bytes == 99
+    assert updated.error == "no internal_all.csv"
 
 
 def test_mark_failed_transitions_to_failed_with_a_reason(store):

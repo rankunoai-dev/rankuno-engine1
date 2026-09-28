@@ -1272,6 +1272,7 @@ def create_app(
     worker_dispatch_store: WorkerDispatchStore | None = None,
     dispatch_signing_secret: SecretStr | None = None,
     bundle_encryption_secret: SecretStr | None = None,
+    process_ledger_path: Path | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -1322,6 +1323,13 @@ def create_app(
             `Settings.dispatch_signing_secret`.
         bundle_encryption_secret: At-rest bundle encryption key (ADR 0015
             condition 11). Defaults to `Settings.bundle_encryption_secret`.
+        process_ledger_path: PID ledger that startup orphan reconciliation
+            reaps against (ADR 0013 condition 2). Defaults to
+            `Settings.process_supervisor_ledger_path`. Injectable because
+            reconciliation *kills processes*: an app built for a test must be
+            able to name a throwaway ledger rather than the workstation's
+            real one, which a live Screaming Frog crawl is enrolled in
+            (cycle 0113).
 
     Returns:
         The configured application.
@@ -1391,8 +1399,13 @@ def create_app(
         # boots cleanly — `ProcessSupervisorUnavailableError` is expected
         # there, not a startup failure.
         def _reconcile_sf_orphans_in_bg() -> None:
+            ledger_path = (
+                process_ledger_path
+                if process_ledger_path is not None
+                else get_settings().process_supervisor_ledger_path
+            )
             try:
-                killed = reconcile_orphans(get_settings().process_supervisor_ledger_path)
+                killed = reconcile_orphans(ledger_path)
                 if killed:
                     _logger.warning("sf_orphans_reconciled", extra={"count": len(killed)})
             except ProcessSupervisorUnavailableError:

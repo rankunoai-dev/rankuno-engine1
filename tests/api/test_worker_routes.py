@@ -162,15 +162,16 @@ class _FakeWorkerDispatchStore:
             reverse=True,
         )
 
-    def mark_uploaded(self, job_id, *, bundle_size_bytes, partial=False) -> WorkerJob:
+    def mark_uploaded(self, job_id, *, bundle_size_bytes, partial=False, reason=None) -> WorkerJob:
         status = WorkerJobStatus.PARTIAL if partial else WorkerJobStatus.SUCCEEDED
-        job = self._jobs[job_id].model_copy(
-            update={
-                "status": status,
-                "bundle_size_bytes": bundle_size_bytes,
-                "finished_at": datetime.now(UTC),
-            }
-        )
+        update = {
+            "status": status,
+            "bundle_size_bytes": bundle_size_bytes,
+            "finished_at": datetime.now(UTC),
+        }
+        if reason is not None:
+            update["error"] = reason
+        job = self._jobs[job_id].model_copy(update=update)
         self._jobs[job_id] = job
         return job
 
@@ -608,6 +609,77 @@ def test_upload_by_the_owning_worker_succeeds(client, dispatch_store):
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "succeeded"
     assert dispatch_store._uploads[job["id"]]  # an encrypted blob was actually stored
+
+
+# --- Bundle completeness decides the terminal status (cycle 0113) --------------
+
+
+def test_upload_of_a_zero_member_bundle_is_recorded_as_failed(client, dispatch_store):
+    """An empty archive is a failed crawl, never a succeeded one.
+
+    Screaming Frog writes nothing to its output folder until a crawl
+    completes, so a run killed at 99% produces exactly this: a valid, empty
+    zip. Recording it as SUCCEEDED handed the operator a 22-byte download and
+    no way to tell a finished crawl from a killed one.
+    """
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+    client.get(
+        f"{API_PREFIX}/workers/dispatch/poll",
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w"):
+        pass
+
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/upload",
+        content=buffer.getvalue(),
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "failed"
+    stored = dispatch_store.get_job(job["id"])
+    assert stored.status is WorkerJobStatus.FAILED
+    assert "no export files" in (stored.error or "")
+    # Nothing worth downloading was kept: a 22-byte empty zip is not a bundle.
+    assert job["id"] not in dispatch_store._uploads
+
+
+def test_upload_missing_the_spine_file_is_recorded_as_partial(client, dispatch_store):
+    """`internal_all.csv` is required non-optionally by every deliverable.
+
+    Files did arrive, so they are kept — but no deliverable can be built from
+    them, and PARTIAL is the only status that says both things at once.
+    """
+    worker = _register_worker(client)
+    job = _preview_and_confirm(client, worker_id=worker["worker_id"])
+    client.get(
+        f"{API_PREFIX}/workers/dispatch/poll",
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w") as archive:
+        archive.writestr("canonicals_missing.csv", "Address\nhttps://e.com/\n")
+
+    response = client.post(
+        f"{API_PREFIX}/workers/jobs/{job['id']}/upload",
+        content=buffer.getvalue(),
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "partial"
+    stored = dispatch_store.get_job(job["id"])
+    assert stored.status is WorkerJobStatus.PARTIAL
+    # A partial row with no reason renders as "No reason was recorded." on the
+    # dashboard, which is a worse lie than the status it replaced.
+    assert "internal_all.csv" in (stored.error or "")
+    # Still stored: partial data is worth having, it is just not a deliverable.
+    assert dispatch_store._uploads[job["id"]]
 
 
 def test_upload_of_an_unknown_job_is_rejected(client):

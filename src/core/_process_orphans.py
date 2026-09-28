@@ -18,6 +18,17 @@ Every entry is matched on PID **and** process start time before either path
 runs — a bare PID match is not enough, because Windows reuses a PID the
 instant its previous holder exits, and killing whatever now holds a recycled
 PID would kill a process this engine never launched.
+
+That match alone is not an orphan test, though, and treating it as one was a
+real defect (cycle 0113): a child that is alive because a worker is
+supervising it right now looks identical to one nobody is watching, so a
+second process starting up and reconciling the shared ledger killed a live
+Screaming Frog crawl at 99.7%. The ledger therefore also records *who*
+launched the child, under the same PID + start-time identity rule, and an
+entry whose supervisor is still alive is skipped — it belongs to that
+process, not to this one. A dead supervisor still means a real orphan, and
+that is still killed: an abandoned Screaming Frog holds a licence seat and
+gigabytes of heap until something reaps it.
 """
 
 from __future__ import annotations
@@ -63,6 +74,31 @@ def _process_start_time(pid: int) -> float | None:
     finally:
         win32.api.CloseHandle(handle)
     return float(creation_time.timestamp())
+
+
+def _supervisor_is_alive(entry: LedgerEntry) -> bool:
+    """Whether the process that launched this child is still running it.
+
+    `False` when the entry names no supervisor — a ledger written before this
+    field existed. "Owner unknown" has to mean "reap", not "spare": sparing
+    it would make every pre-upgrade entry permanent, and a permanent entry is
+    a Screaming Frog process holding a licence seat that nothing will ever
+    kill. That keeps legacy entries behaving exactly as they did.
+
+    PID reuse is guarded here exactly as it is for the child: a recycled
+    supervisor PID now held by some unrelated process fails the start-time
+    match, so the entry is correctly treated as unowned rather than being
+    granted immortality by a coincidence.
+    """
+    if entry.supervisor_pid is None or entry.supervisor_start_time is None:
+        return False
+    if not _process_is_alive(entry.supervisor_pid):
+        return False
+    observed_start = _process_start_time(entry.supervisor_pid)
+    return (
+        observed_start is not None
+        and abs(observed_start - entry.supervisor_start_time) <= _START_TIME_TOLERANCE_S
+    )
 
 
 def _kill_via_named_job_object(name: str) -> bool:
@@ -180,13 +216,29 @@ def reconcile_orphans(ledger_path: Path) -> list[int]:
 
     Returns:
         PIDs actually terminated. An empty ledger, or one whose every entry
-        is already gone or belongs to a reused PID, returns `[]`.
+        is already gone, belongs to a reused PID, or is still supervised by a
+        live process, returns `[]`.
     """
     entries = read_ledger(ledger_path)
     killed: list[int] = []
     surviving: dict[str, LedgerEntry] = {}
 
     for job_id, entry in entries.items():
+        if _supervisor_is_alive(entry):
+            # Not an orphan: someone is watching it. Kept in the ledger
+            # rather than dropped, so that if that supervisor later dies
+            # without cleaning up, the next reconciliation still finds it.
+            _logger.info(
+                "orphan_skipped_supervisor_alive",
+                extra={
+                    "job_id": job_id,
+                    "pid": entry.pid,
+                    "supervisor_pid": entry.supervisor_pid,
+                },
+            )
+            surviving[job_id] = entry
+            continue
+
         if not _process_is_alive(entry.pid):
             _logger.info(
                 "orphan_ledger_entry_already_gone", extra={"job_id": job_id, "pid": entry.pid}

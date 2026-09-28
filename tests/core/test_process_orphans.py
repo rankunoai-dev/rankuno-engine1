@@ -144,6 +144,111 @@ class TestReconcileOrphansUnit:
         assert read_ledger(path) == {}
 
 
+class TestSupervisorOwnership:
+    """A process someone is *supervising right now* is not an orphan.
+
+    The reaper's only identity gate used to be "the child PID is alive and
+    its start time matches", which is equally true of a live, supervised
+    crawl and of a genuinely abandoned one. Cycle 0113: a running Screaming
+    Frog crawl was killed at 99.7% by an unrelated process starting up and
+    reconciling the shared ledger. The supervisor's own PID + start time is
+    the discriminator; these tests pin both directions of it.
+    """
+
+    def test_an_entry_whose_supervisor_is_still_alive_is_never_killed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        path = tmp_path / "ledger.json"
+        upsert_entry(
+            path,
+            "job-1",
+            pid=111,
+            process_start_time=1.0,
+            job_object_name="Local\\x",
+            supervisor_pid=222,
+            supervisor_start_time=50.0,
+        )
+        monkeypatch.setattr(orphans_mod, "_process_is_alive", lambda pid: True)
+        monkeypatch.setattr(
+            orphans_mod, "_process_start_time", lambda pid: 1.0 if pid == 111 else 50.0
+        )
+
+        def _fail_if_called(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("a supervised process must never be reaped")
+
+        monkeypatch.setattr(orphans_mod, "_kill_via_named_job_object", _fail_if_called)
+        monkeypatch.setattr(orphans_mod, "_kill_via_process_tree", _fail_if_called)
+
+        killed = reconcile_orphans(path)
+
+        assert killed == []
+        # Kept, not dropped: if that supervisor later dies without cleaning
+        # up, the next reconciliation must still find this entry.
+        assert "job-1" in read_ledger(path)
+
+    def test_an_entry_whose_supervisor_is_dead_is_still_killed(self, tmp_path, monkeypatch) -> None:
+        """The whole point of the reaper: a crashed worker's child is an orphan."""
+        path = tmp_path / "ledger.json"
+        upsert_entry(
+            path,
+            "job-1",
+            pid=111,
+            process_start_time=1.0,
+            job_object_name="Local\\x",
+            supervisor_pid=222,
+            supervisor_start_time=50.0,
+        )
+        monkeypatch.setattr(orphans_mod, "_process_is_alive", lambda pid: pid == 111)
+        monkeypatch.setattr(
+            orphans_mod, "_process_start_time", lambda pid: 1.0 if pid == 111 else None
+        )
+        monkeypatch.setattr(orphans_mod, "_kill_via_named_job_object", lambda name: True)
+
+        killed = reconcile_orphans(path)
+
+        assert killed == [111]
+        assert read_ledger(path) == {}
+
+    def test_a_supervisor_pid_now_held_by_another_process_is_treated_as_dead(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """PID reuse on the supervisor side, guarded exactly like the child's."""
+        path = tmp_path / "ledger.json"
+        upsert_entry(
+            path,
+            "job-1",
+            pid=111,
+            process_start_time=1.0,
+            job_object_name="Local\\x",
+            supervisor_pid=222,
+            supervisor_start_time=50.0,
+        )
+        monkeypatch.setattr(orphans_mod, "_process_is_alive", lambda pid: True)
+        monkeypatch.setattr(
+            orphans_mod, "_process_start_time", lambda pid: 1.0 if pid == 111 else 987.0
+        )
+        monkeypatch.setattr(orphans_mod, "_kill_via_named_job_object", lambda name: True)
+
+        assert reconcile_orphans(path) == [111]
+
+    def test_a_legacy_entry_with_no_supervisor_marker_is_still_reaped(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """An entry written before this field existed means "owner unknown".
+
+        Unknown is reaped, not spared: sparing it would make every pre-upgrade
+        entry immortal, and immortal entries are how a licence seat leaks.
+        """
+        path = tmp_path / "ledger.json"
+        upsert_entry(path, "job-1", pid=111, process_start_time=1.0, job_object_name="Local\\x")
+        monkeypatch.setattr(orphans_mod, "_process_is_alive", lambda pid: True)
+        monkeypatch.setattr(orphans_mod, "_process_start_time", lambda pid: 1.0)
+        monkeypatch.setattr(orphans_mod, "_kill_via_named_job_object", lambda name: True)
+
+        assert reconcile_orphans(path) == [111]
+        assert read_ledger(path) == {}
+
+
 def _pid_is_alive(pid: int) -> bool:
     """Windows-only liveness probe, used only by the real integration tests below.
 
@@ -196,7 +301,16 @@ class TestOrphanHelpersAgainstRealWindows:
 @pytest.mark.skipif(sys.platform != "win32", reason="Job Objects and Toolhelp32 are Windows-only")
 class TestReconcileOrphansRealWindows:
     def test_kills_a_real_orphan_via_the_named_job_object_path(self, tmp_path) -> None:
-        """A process launched normally, then reconciled as if this were a fresh startup."""
+        """A process launched normally, then reconciled as if this were a fresh startup.
+
+        The supervisor identity has to be overwritten for that "as if" to
+        hold. `launch_supervised` now records *this* pytest process as the
+        entry's supervisor, and this process is plainly still alive, so
+        reconciling here without the rewrite exercises the supervised-skip
+        path rather than the orphan path (it did, when the skip landed: the
+        test failed with `[] == [pid]`). A PID that cannot exist is the
+        simplest faithful stand-in for the crashed server this test is about.
+        """
         import time
 
         ledger_path = tmp_path / "ledger.json"
@@ -205,6 +319,17 @@ class TestReconcileOrphansRealWindows:
         )
         pid = supervised.pid
         assert _pid_is_alive(pid)
+
+        entry = read_ledger(ledger_path)["orphan-via-job"]
+        upsert_entry(
+            ledger_path,
+            "orphan-via-job",
+            pid=entry.pid,
+            process_start_time=entry.process_start_time,
+            job_object_name=entry.job_object_name,
+            supervisor_pid=999_999_999,
+            supervisor_start_time=entry.process_start_time,
+        )
 
         try:
             killed = reconcile_orphans(ledger_path)

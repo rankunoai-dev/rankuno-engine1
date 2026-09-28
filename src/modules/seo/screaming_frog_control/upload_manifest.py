@@ -50,7 +50,12 @@ from src.core.logger import get_logger
 from src.modules.seo.contracts.catalogue import ISSUE_CATALOGUE
 from src.modules.seo.screaming_frog_control.export_manifest import SPINE_TAB
 
-__all__ = ["ALLOWED_BUNDLE_FILENAMES", "BundleUploadError", "validate_and_extract_bundle"]
+__all__ = [
+    "ALLOWED_BUNDLE_FILENAMES",
+    "SPINE_FILENAME",
+    "BundleUploadError",
+    "validate_and_extract_bundle",
+]
 
 _logger = get_logger(__name__)
 
@@ -72,9 +77,14 @@ class BundleUploadError(RankunoError):
     """An uploaded bundle failed validation and was rejected outright."""
 
 
+SPINE_FILENAME: Final[str] = f"{SPINE_TAB.replace(':', '_').lower()}.csv"
+"""The one file no deliverable can be built without (`SPINE_FILE` in
+`screaming_frog_adapter.py`). Named here, not only folded into the allow-list
+below, because the upload route must be able to ask "did the spine arrive?" —
+a bundle without it is data, but it is not a deliverable."""
+
 ALLOWED_BUNDLE_FILENAMES: Final[frozenset[str]] = frozenset(
-    {f"{SPINE_TAB.replace(':', '_').lower()}.csv"}
-    | {name for spec in ISSUE_CATALOGUE for name in spec.sf_sources}
+    {SPINE_FILENAME} | {name for spec in ISSUE_CATALOGUE for name in spec.sf_sources}
 )
 """Every filename this endpoint will ever accept. Nothing else survives
 `validate_and_extract_bundle`, regardless of what a worker's zip contains."""

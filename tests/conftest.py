@@ -1,23 +1,55 @@
 """Shared pytest fixtures.
 
-Two invariants this file exists to protect:
+Three invariants this file exists to protect:
 
 1. Tests never read the developer's real `.env`. Every test gets an explicit,
    hermetic `Settings` object.
 2. Tests never touch a real external service. There is no network fixture here
    on purpose - connectors are mocked at the `BaseAPIClient` boundary.
+3. Tests never write to, or act on, this workstation's own durable files.
+   The module-level block below is that invariant - `audit_log_path` and
+   `process_supervisor_ledger_path` are redirected into a throwaway directory
+   before the first `src` import. Read its comment before weakening it: it was
+   added after running `pytest` killed a live 1h47m Screaming Frog crawl
+   (cycle 0113).
 """
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import tempfile
 from collections.abc import Iterator
 
-import pytest
-from src.core.config import Environment, Settings, reset_settings_cache
-from src.core.guardrails import AutoApproveProvider, GuardrailEngine
-from src.core.rate_limiter import CostLedger
-from src.core.registry import registry
-from src.core.schemas import RiskClass, ToolMetadata
+# -- Invariant 3, and it has to run here ---------------------------------------
+#
+# Before any `src` import, not in a fixture. `get_logger` calls `setup_logging`
+# on first use, and first use is at *import* time - so by the time the earliest
+# fixture could run, a `FileHandler` on the real audit log is already open and
+# `src.core.celery_config` has already written a line into it. Settings read
+# these two names from the environment (`get_settings()`), and env set here
+# survives the per-test `reset_settings_cache()` below, which rebuilds
+# `Settings` from scratch between every single test.
+#
+# The ledger is the one that mattered. Every `TestClient(create_app(...))` runs
+# startup orphan reconciliation against whatever path settings name, and on a
+# workstation that is the same ledger a *live* Screaming Frog crawl is enrolled
+# in - so running `pytest` killed the crawl, twice, the second time at 99.7%
+# (cycle 0113). Reconciliation itself is deliberately left switched on: it is
+# the routine that misfired, and disabling it under test would hide the next
+# regression in exactly the code that needs watching. Only its target moves.
+_TEST_STATE_DIR = tempfile.mkdtemp(prefix="rankuno-test-state-")
+atexit.register(shutil.rmtree, _TEST_STATE_DIR, True)  # noqa: FBT003 - `ignore_errors`
+os.environ["AUDIT_LOG_PATH"] = os.path.join(_TEST_STATE_DIR, "audit.jsonl")
+os.environ["PROCESS_SUPERVISOR_LEDGER_PATH"] = os.path.join(_TEST_STATE_DIR, ".process_ledger.json")
+
+import pytest  # noqa: E402 - must not import `src` before the block above runs
+from src.core.config import Environment, Settings, reset_settings_cache  # noqa: E402
+from src.core.guardrails import AutoApproveProvider, GuardrailEngine  # noqa: E402
+from src.core.rate_limiter import CostLedger  # noqa: E402
+from src.core.registry import registry  # noqa: E402
+from src.core.schemas import RiskClass, ToolMetadata  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

@@ -96,11 +96,14 @@ class WorkerJobStatus(StrEnum):
     """The worker uploaded a bundle and reported a clean finish."""
 
     PARTIAL = "partial"
-    """The worker uploaded a bundle, but the run degraded (e.g. a licence
-    read reporting free-tier capping) — present for parity with
-    `ScreamingFrogJobOutput`'s own licence-degrade handling, though today's
-    tool.execute() raises rather than returning a degraded output, so this
-    status is reachable only if a future worker behaviour changes that."""
+    """The worker uploaded a bundle, but it cannot produce a deliverable.
+
+    Reached today by exactly one rule: export files arrived without
+    `internal_all.csv`, the spine `load_screaming_frog_bundle` requires
+    non-optionally (`worker_routes.upload_bundle`, cycle 0113). The data is
+    kept and downloadable; what it is not is a finished job. Also the status
+    reserved for a degraded run in the licence sense (`ScreamingFrogJobOutput`
+    parity), which `tool.execute()` still raises on rather than returning."""
 
     FAILED = "failed"
     """The worker could not complete the run. `WorkerJob.error` says why."""

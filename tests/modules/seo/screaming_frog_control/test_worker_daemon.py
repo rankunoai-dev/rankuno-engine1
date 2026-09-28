@@ -519,6 +519,48 @@ def test_upload_bundle_reports_the_files_it_skipped(tmp_path, monkeypatch):
     assert uploaded == [{"job_id": "job-1", "files": 1, "skipped": 1}]
 
 
+def test_upload_bundle_refuses_to_upload_an_empty_archive(tmp_path):
+    """An empty output folder is a failed crawl and must be reported as one.
+
+    Screaming Frog writes nothing until a crawl completes, so this is what a
+    killed run leaves behind. Uploading the resulting 22-byte archive is what
+    produced a SUCCEEDED job with an empty bundle (cycle 0113).
+    """
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+
+    output = ScreamingFrogJobOutput(
+        bundle_dir=bundle_dir, licence=LicenceStatus(active=True), elapsed_s=1.0
+    )
+    client = _FakeClient()
+    worker_daemon._upload_bundle(client, "job-1", output, max_bytes=1_000_000)
+
+    assert client.uploads == []
+    assert len(client.failures) == 1
+    assert "no export files" in client.failures[0][1]
+
+
+def test_an_empty_archive_names_which_of_the_two_causes_it_was(tmp_path):
+    """`files=0, skipped=0` and `files=0, skipped=N` are different bugs.
+
+    The first is a crawl killed before export; the second is the allow-list
+    and what Screaming Frog wrote having drifted apart. The daemon is the only
+    place both numbers exist, so it must not flatten them into one message.
+    """
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "not_an_export.csv").write_text("unexpected")
+
+    output = ScreamingFrogJobOutput(
+        bundle_dir=bundle_dir, licence=LicenceStatus(active=True), elapsed_s=1.0
+    )
+    client = _FakeClient()
+    worker_daemon._upload_bundle(client, "job-1", output, max_bytes=1_000_000)
+
+    assert client.uploads == []
+    assert "none of them are export files" in client.failures[0][1]
+
+
 def test_upload_bundle_reports_failure_over_the_size_cap(tmp_path):
     bundle_dir = tmp_path / "bundle"
     bundle_dir.mkdir()

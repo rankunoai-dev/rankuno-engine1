@@ -58,10 +58,21 @@ src/
 │   │                            # supervises, not only Screaming Frog
 │   ├── _process_ledger.py       # PID + process-start-time ledger, independent
 │   │                            # of DiskJobStore (answers "which OS process
-│   │                            # is still alive", not "which job record")
+│   │                            # is still alive", not "which job record").
+│   │                            # Also records supervisor_pid/start_time: who
+│   │                            # launched the child, under the same identity
+│   │                            # rule. Optional, so an old file still parses
 │   ├── _process_orphans.py      # Startup reconciliation: named-Job-Object
 │   │                            # reopen, Toolhelp32 tree-walk fallback,
-│   │                            # PID+start-time matching before any kill
+│   │                            # PID+start-time matching before any kill.
+│   │                            # A PID+start-time match is a LIVENESS test,
+│   │                            # not an orphan test, so supervisor liveness
+│   │                            # is checked first and a supervised entry is
+│   │                            # skipped and kept (cycle 0113 - this reaper
+│   │                            # killed two live crawls, one at 99.7%). An
+│   │                            # entry with no supervisor marker is still
+│   │                            # reaped: unknown ownership must fail toward
+│   │                            # reaping or pre-upgrade entries never die
 │   ├── _win32_bindings.py       # Deferred pywin32 import (load_win32()) so
 │   │                            # importing process_supervisor.py never
 │   │                            # requires Windows -- only calling it does
@@ -162,7 +173,13 @@ src/
 │   │                            # /workers/dispatch/poll, POST
 │   │                            # /workers/jobs/{id}/upload|failed. Composes
 │   │                            # the dashboard router below, so server.py
-│   │                            # still mounts exactly one router
+│   │                            # still mounts exactly one router. The upload
+│   │                            # route decides the job's terminal status from
+│   │                            # what the bundle contains (ADR 0019): 0
+│   │                            # members -> FAILED and nothing stored, no
+│   │                            # internal_all.csv -> PARTIAL, otherwise
+│   │                            # SUCCEEDED. All three are 200 - the upload
+│   │                            # report was accepted, the job was not
 │   ├── worker_dashboard_routes.py   # The human-authenticated half, split on
 │   │                            # the authentication boundary rather than an
 │   │                            # arbitrary line count. POST/GET /workers
@@ -372,7 +389,10 @@ src/
     │   │   │                         # entry point
     │   │   ├── upload_manifest.py    # ADR 0015 condition 9: untrusted-upload
     │   │   │                         # validation for the worker->cloud bundle
-    │   │   │                         # path. ALLOWED_BUNDLE_FILENAMES derived
+    │   │   │                         # path. Exports SPINE_FILENAME, which
+    │   │   │                         # worker_routes uses to decide a job's
+    │   │   │                         # terminal status (ADR 0019).
+    │   │   │                         # ALLOWED_BUNDLE_FILENAMES derived
     │   │   │                         # from contracts/catalogue.py's sf_sources
     │   │   │                         # + the spine (ADR 0018) - NOT from
     │   │   │                         # export_manifest.py's naming transform,
@@ -433,10 +453,14 @@ src/
 
 | Path | Purpose |
 | :--- | :--- |
+| A worker-side check that a Screaming Frog crawl actually finished | `ScreamingFrogControlTool.execute()` never examines process exit status and `SupervisedProcess` exposes none, so a killed crawl and a clean one are the same code path — a run terminated at 99.7% logged `tool_succeeded` 28 ms after `process_terminated`. ADR 0019 catches this at the cloud upload boundary, which does not cover the direct non-worker `execute()` path. Note before attempting the Win32 version: `TerminateJobObject(handle, 1)` stamps exit code 1 on every process in the job, so after our own kill the exit code cannot distinguish it from a CLI that genuinely exited 1; the load-bearing signal is `is_running()` sampled at the top of the `finally` block ([build-log 0113 §6.1](build-log/0113-the-test-suite-was-killing-live-crawls.md)) |
+| A cross-process-safe PID ledger | `reconcile_orphans` reads the whole ledger then writes the surviving set, and `_process_ledger._lock` is intra-process only and documented as such. A child enrolled in that window loses its entry and becomes untracked. Pre-existing; cycle 0113 makes `surviving` non-empty more often, so the window is marginally more consequential ([build-log 0113 §6.2](build-log/0113-the-test-suite-was-killing-live-crawls.md)) |
+| Audit-log rotation | `setup_logging` attaches a plain `FileHandler`, never a `RotatingFileHandler`, in production as well as under test. `logs/audit.jsonl` reached 510 MB. The test suite no longer feeds it (cycle 0113 redirects `AUDIT_LOG_PATH` in `tests/conftest.py`), which removes the largest contributor but not the growth |
 | A masterfile that is actually populated | The route, the in-memory bundle seam and the registry work (ADR 0017). The services do not: 13 of 21 render an **empty workbook** against a real Screaming Frog export, `overview_report` **crashes** (`masterfile_overview_report.py:235`, an unsanitised sheet name, with `sanitize_sheet_name()` already available at `masterfile_base.py:164`), the 6 with data are partial, 37 of 49 requested CSV filenames do not exist in an export, and no multi-file service records which issue put a URL in the sheet. Commit `0d26e26`'s "Complete RAE masterfile parity" and build-log 0105's "Phase 1 COMPLETE" are both false ([build-log 0107 §5](build-log/0107-a-directory-that-could-never-exist.md)) |
 | Any UI for masterfiles | `POST /jobs/{id}/masterfile/{slug}` and `GET /masterfiles/available` are served and nothing consumes either |
 | A UI for URL include/exclude patterns | `url_filter.py`, the two `PageClassificationInput` fields and their `schema.ts` entries all shipped (build-log 0106). No component sets them, so the feature is reachable only by posting to `/api/v1/jobs` by hand |
-| Backend support for the crawl wizard's advanced stage | `AdvancedStage.tsx` collects proxy, HTTP auth, custom headers, an SSL-verification opt-out and a GA4 property id. No `PageClassificationInput` field accepts any of them, and posting them returned `422` on every crawl start until build-log 0109. They are held in form state and consumed by nothing |
+| Any UI or backend for proxy, HTTP auth, custom headers, an SSL-verification opt-out or a GA4 property id | The 4-stage crawl wizard collected all five in `AdvancedStage.tsx`, and nothing accepted them: no `PageClassificationInput` field exists for any of them, and posting them returned `422` on every crawl start until build-log 0109. The wizard was **removed** in cycle 0112 and `DashboardShell` renders `LiveCrawlModal` again, so the fields are no longer collected either. They cannot simply be moved to the Screaming Frog path: `ScreamingFrogJobInput` and `WorkerJobEnvelope` carry only `seed_url` and `template_name` (ADR 0015 condition 8), and `template_registry.py` records that none of these settings has a Screaming Frog CLI flag — they exist only inside an opaque `.seospiderconfig` ([build-log 0112 §3.1](build-log/0112-a-wizard-wired-to-the-wrong-crawler.md)) |
+| A UI that consumes `rankuno-ui/src/lib/validation.ts` or `lib/urlParser.ts` | Both modules are retained with **zero importers** except their own tests, deliberately, awaiting a Screaming Frog dispatch form (cycle 0112 §6.1). `validateProxyUrl`, `validateRate`, `validateConcurrency`, `validateCustomHeaders`, `validateGA4PropertyId`, `estimateCrawlSeconds`, `formatCrawlTimeEstimate` and `normalizeDomain` are all unconsumed. `--crawl-list` appears nowhere in `src/`, so the URL-list upload `urlParser.ts` is held for does not exist yet either |
 | The React UI for `modules/seo/screaming_frog_control/` (ADR 0013) | The API surface (`preview`/confirm/templates) is implemented; no confirmation-modal UI consumes it yet — an operator would call it directly today |
 | A cloud dashboard or worker-management screen for ADR 0015's worker dispatch | The backend the UI needs is complete (`api/worker_routes.py`, including liveness, per-worker templates and bundle download); the React screens themselves belong to a separate task and do not exist yet |
 | A purge job for expired uploaded bundles | Still read-time filtering only (`read_upload` checks `expires_at`). Nothing deletes the row, so storage grows without bound — unchanged from build-log 0098 |
@@ -538,6 +562,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0016](adr/0016-cloud-api-authentication.md) | Session-token authentication and an org-ownership retrofit for `src/api/server.py`, closing a CRITICAL unauthenticated-GSC-credential-access finding and a HIGH cross-tenant job-access finding across 14 routes. Status: APPROVED. Implemented as `core/auth.py`/`api/auth.py` (`Principal`/`Operator`, PBKDF2 password hashing, self-contained HMAC-SHA256 session tokens, `require_principal`, `org_scoped_or_404`, `POST /auth/login`) [build-log 0097](build-log/0097-the-header-that-verified-nothing.md) |
 | [0017](adr/0017-masterfile-input-is-an-in-memory-export-bundle.md) | A masterfile is built from a `MasterfileSource` — a directory of CSVs or, canonically, a Screaming Frog export bundle decrypted and read **in memory**, never extracted to disk (ADR 0015 condition 11). `POST /jobs/{id}/masterfile/{slug}` resolves the id against **both** job namespaces, so the caller has one id to send and one deliverable id to poll; `409` a native crawl or no bundle, `410` retention window closed, `503` dispatch store unreachable. Supersedes the implicit `sf_export/` directory convention, which nothing ever wrote — the route had never succeeded for any input. Status: APPROVED. Implemented as `deliverables/masterfile_source.py`, `_bundle.open_bundle_bytes()` and `api/deliverables_routes.py` [build-log 0107](build-log/0107-a-directory-that-could-never-exist.md). Says nothing about *which* CSVs a service should read: 13 of 21 services still render an empty workbook and `overview_report` still crashes |
 | [0018](adr/0018-bundle-allow-list-derives-from-the-issue-catalogue.md) | `ALLOWED_BUNDLE_FILENAMES` derives from `ISSUE_CATALOGUE.sf_sources` plus the spine, not from Screaming Frog's `--export-tabs`/`--bulk-export` argument strings. That transform is unsatisfiable for 7 files: 5 embed a threshold Screaming Frog takes from an operator-authored `.seospiderconfig` (an opaque Java-serialised binary this codebase cannot read), and 2 mangle `" & "`. The worker filtered those files out silently, so 7 of 110 issue ids read `NOT_MEASURED` forever. Seven exact literals, never a numeric wildcard — a pattern would hand the admissible-filename set at an untrusted boundary to whoever authors that config. Status: APPROVED. A skipped file is now logged, and the correspondence is pinned in both directions [build-log 0108](build-log/0108-a-literal-x-where-a-number-belongs.md) |
+| [0019](adr/0019-an-export-bundle-decides-its-own-job-status.md) | The contents of an uploaded export bundle decide the job's terminal status; the worker reports evidence, the cloud decides meaning. Zero members → `FAILED` and the bundle is **not stored** (a 22-byte empty zip offered as a download was the failure being removed); members without `internal_all.csv` → `PARTIAL`, stored but never a deliverable, because `load_screaming_frog_bundle` requires the spine non-optionally; otherwise `SUCCEEDED`. All three return **`200`** deliberately — `WorkerCloudClient.upload_bundle` calls `raise_for_status()`, so a 4xx becomes a daemon-side exception about an already-terminal job no retry can improve; the upload *report* was accepted, the *job* failed. A non-`SUCCEEDED` transition carries a reason in the existing `error` column, because `WorkerJobsPanel.tsx` renders `job.error ?? "No reason was recorded."` for `partial` too. Makes `WorkerJobStatus.PARTIAL`, previously documented as unreachable, reachable. Status: APPROVED. Implemented in `api/worker_routes.py`, `core/worker_dispatch_store.py`/`core/postgres_worker_dispatch_store.py`, `modules/seo/screaming_frog_control/worker_daemon.py`/`upload_manifest.py` [build-log 0113](build-log/0113-the-test-suite-was-killing-live-crawls.md). Covers the cloud upload boundary only — the direct `ScreamingFrogControlTool.execute()` path still returns success for a killed crawl |
 
 ---
 
