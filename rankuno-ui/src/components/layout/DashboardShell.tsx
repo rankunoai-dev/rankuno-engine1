@@ -131,14 +131,18 @@ export function DashboardShell(): JSX.Element {
               leave no way back to any other view. */}
           {view === "launch" && (
             <ErrorBoundary label="The launch screen">
-              {/* Each card enters its product. The engine card also lands on
-                  the engine view last open, so the crawl form closes onto the
-                  engine rather than back onto Launch. */}
+              {/* Each card enters its product, landing on the engine view last
+                  open, so the crawl form closes onto the engine rather than
+                  back onto Launch. `onOpenEngine` is the same landing without
+                  `setCrawlOpen` — entering the engine and starting a crawl are
+                  two different intentions, and the rail no longer offers the
+                  first from this screen. */}
               <LaunchView
                 onEngineCrawl={() => {
                   enterMode("engine");
                   setCrawlOpen(true);
                 }}
+                onOpenEngine={() => enterMode("engine")}
                 onScreamingFrog={() => enterMode("screaming-frog")}
                 canStartEngineCrawl={canStartEngineCrawl}
                 canDispatchScreamingFrog={canDispatchScreamingFrog}

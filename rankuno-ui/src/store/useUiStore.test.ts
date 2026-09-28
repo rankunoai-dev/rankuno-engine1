@@ -1,21 +1,22 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { modeOfView, selectMode, useUiStore, type RailView } from "./useUiStore";
+import { modeOfView, useUiStore, type RailView } from "./useUiStore";
 
 /**
- * The rail shows one product at a time, so the one invariant that matters is
- * that the mode it renders never names a different product from the page on
- * screen. These pin that, and the "come back to where you were" behaviour.
+ * The rail and header show one product at a time, so the one invariant that
+ * matters is that the product they render never differs from the page on
+ * screen. `modeOfView` is the whole of that answer: these pin that nothing
+ * else is consulted, and the "come back to where you were" behaviour.
  */
 
 beforeEach(() => {
-  useUiStore.setState({ view: "launch", lastMode: "engine", lastEngineView: "visualizer" });
+  useUiStore.setState({ view: "launch", lastEngineView: "visualizer" });
 });
 
 describe("useUiStore", () => {
-  it("opens on Launch in engine mode", () => {
+  it("opens on Launch, which belongs to neither product", () => {
     const state = useUiStore.getState();
     expect(state.view).toBe("launch");
-    expect(selectMode(state)).toBe("engine");
+    expect(modeOfView(state.view)).toBeNull();
   });
 
   it("moves the page off an engine view when Screaming Frog is entered", () => {
@@ -25,7 +26,7 @@ describe("useUiStore", () => {
 
     const state = useUiStore.getState();
     expect(state.view).toBe("screaming-frog");
-    expect(selectMode(state)).toBe("screaming-frog");
+    expect(modeOfView(state.view)).toBe("screaming-frog");
   });
 
   it("returns to the engine view last open, not a fixed default", () => {
@@ -43,24 +44,43 @@ describe("useUiStore", () => {
     useUiStore.getState().enterMode("screaming-frog");
     useUiStore.getState().setView("visualizer");
 
-    expect(selectMode(useUiStore.getState())).toBe("engine");
+    expect(modeOfView(useUiStore.getState().view)).toBe("engine");
   });
 
-  it("never lets a stored mode contradict a product view", () => {
-    /* A restore (or any direct `setState`) that pairs a view with the other
-       product's mode: the view wins, so the rail still matches the page. */
-    const views: RailView[] = ["visualizer", "jobs", "audit", "gsc-accounts", "screaming-frog"];
-    for (const view of views) {
-      for (const lastMode of ["engine", "screaming-frog"] as const) {
-        useUiStore.setState({ view, lastMode });
-        expect(selectMode(useUiStore.getState())).toBe(modeOfView(view));
-      }
+  it("stores no product mode that a view could contradict", () => {
+    /* The regression this store used to carry: a `lastMode` field, settable
+       independently of the view, which answered for Launch with whatever was
+       used last and so put the engine's tabs on the chooser. There is nothing
+       to restore, persist or set out of step with the view any more. */
+    expect(Object.keys(useUiStore.getState())).toEqual([
+      "view",
+      "lastEngineView",
+      "setView",
+      "enterMode",
+    ]);
+  });
+
+  it("neither product answers for Launch, however it was reached", () => {
+    expect(modeOfView("launch")).toBeNull();
+
+    for (const view of ["visualizer", "jobs", "audit", "gsc-accounts", "screaming-frog"] as const) {
+      useUiStore.getState().setView(view);
+      useUiStore.getState().setView("launch");
+      expect(modeOfView(useUiStore.getState().view)).toBeNull();
     }
   });
 
-  it("uses the stored mode only on Launch, which belongs to neither", () => {
-    expect(modeOfView("launch")).toBeNull();
-    useUiStore.setState({ view: "launch", lastMode: "screaming-frog" });
-    expect(selectMode(useUiStore.getState())).toBe("screaming-frog");
+  it("names the product of every view that has one", () => {
+    const engine: RailView[] = ["visualizer", "jobs", "audit", "gsc-accounts"];
+    for (const view of engine) expect(modeOfView(view)).toBe("engine");
+    expect(modeOfView("screaming-frog")).toBe("screaming-frog");
+  });
+
+  it("never remembers Launch or Screaming Frog as the engine view to return to", () => {
+    useUiStore.getState().setView("gsc-accounts");
+    useUiStore.getState().setView("screaming-frog");
+    useUiStore.getState().setView("launch");
+
+    expect(useUiStore.getState().lastEngineView).toBe("gsc-accounts");
   });
 });

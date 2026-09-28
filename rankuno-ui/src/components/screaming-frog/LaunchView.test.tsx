@@ -13,17 +13,19 @@ import { LaunchView } from "./LaunchView";
 describe("LaunchView", () => {
   function renderView(overrides: Partial<Parameters<typeof LaunchView>[0]> = {}) {
     const onEngineCrawl = vi.fn();
+    const onOpenEngine = vi.fn();
     const onScreamingFrog = vi.fn();
     render(
       <LaunchView
         onEngineCrawl={onEngineCrawl}
+        onOpenEngine={onOpenEngine}
         onScreamingFrog={onScreamingFrog}
         canStartEngineCrawl
         canDispatchScreamingFrog
         {...overrides}
       />,
     );
-    return { onEngineCrawl, onScreamingFrog };
+    return { onEngineCrawl, onOpenEngine, onScreamingFrog };
   }
 
   it("offers both crawlers and routes each to its own flow", () => {
@@ -68,5 +70,59 @@ describe("LaunchView", () => {
       screen.getByRole("button", { name: /set up a screaming frog crawl/i }),
     ).toBeDisabled();
     expect(screen.getByText(/no engine to ask which machines are registered/i)).toBeInTheDocument();
+  });
+
+  it("opens the engine without starting a crawl", () => {
+    /* Entering the product and starting a crawl were the same control. The
+       only way to look at a finished crawl was to open the new-crawl form and
+       cancel it, and the rail no longer offers the engine from this screen. */
+    const { onEngineCrawl, onOpenEngine } = renderView();
+
+    fireEvent.click(screen.getByRole("button", { name: /open the engine/i }));
+
+    expect(onOpenEngine).toHaveBeenCalledTimes(1);
+    expect(onEngineCrawl).not.toHaveBeenCalled();
+  });
+
+  it("says what opening the engine does, and says it to a screen reader", () => {
+    renderView();
+
+    const open = screen.getByRole("button", { name: /open the engine/i });
+    const hint = screen.getByText(/results already stored\. Starts nothing\./i);
+    expect(open).toHaveAttribute("aria-describedby", hint.id);
+  });
+
+  it("keeps a way into the engine when no crawl can be started", () => {
+    /* The trap this change had to clear: a chooser whose only two controls are
+       both disabled is an application with no way into it. Reading results
+       that already exist asks nothing of the engine. */
+    const { onOpenEngine } = renderView({
+      canStartEngineCrawl: false,
+      canDispatchScreamingFrog: false,
+    });
+
+    const open = screen.getByRole("button", { name: /open the engine/i });
+    expect(open).toBeEnabled();
+
+    fireEvent.click(open);
+    expect(onOpenEngine).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the Screaming Frog view reachable when nothing can be dispatched", () => {
+    /* That view states "fixture mode" and "no machine registered" for itself.
+       Being unable to dispatch is a reason to explain, not to lock the door. */
+    const { onScreamingFrog } = renderView({ canDispatchScreamingFrog: false });
+
+    fireEvent.click(screen.getByRole("button", { name: /^open screaming frog$/i }));
+    expect(onScreamingFrog).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no second door beside an enabled Screaming Frog button", () => {
+    // Both controls would land on the same view; one of them is enough.
+    renderView();
+
+    expect(
+      screen.queryByRole("button", { name: /^open screaming frog$/i }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -43,7 +43,7 @@ beforeEach(() => {
   useCrawlStore.setState({ result: null, jobs: [], activeJobId: null, liveJobs: {} });
   // An engine view, not `launch`: the engine controls are keyed on the view, and
   // `launch` belongs to neither product.
-  useUiStore.setState({ view: "visualizer", lastMode: "engine", lastEngineView: "visualizer" });
+  useUiStore.setState({ view: "visualizer", lastEngineView: "visualizer" });
 });
 
 describe("HeaderBar", () => {
@@ -123,7 +123,7 @@ describe("HeaderBar", () => {
         startJob: vi.fn(),
       } as never,
     });
-    useUiStore.setState({ view: "launch", lastMode: "engine" });
+    useUiStore.setState({ view: "launch" });
     mount();
 
     expect(screen.queryByText("New crawl")).not.toBeInTheDocument();
@@ -144,7 +144,7 @@ describe("HeaderBar", () => {
         startJob: vi.fn(),
       } as never,
     });
-    useUiStore.setState({ view: "screaming-frog", lastMode: "screaming-frog" });
+    useUiStore.setState({ view: "screaming-frog" });
     mount();
 
     expect(screen.getByRole("heading")).toHaveTextContent("Screaming Frog");
@@ -158,7 +158,7 @@ describe("HeaderBar", () => {
   it("still shows a running engine crawl in Screaming Frog mode", () => {
     /* The Crawl jobs badge is off the rail in this mode; the pill is what
        says the engine crawl is still going. */
-    useUiStore.setState({ view: "screaming-frog", lastMode: "screaming-frog" });
+    useUiStore.setState({ view: "screaming-frog" });
     useCrawlStore.setState({
       liveJobs: {
         "job-9": {

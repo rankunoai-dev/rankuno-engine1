@@ -23,12 +23,6 @@ export type EngineView = Exclude<RailView, "launch" | "screaming-frog">;
 
 interface UiState {
   view: RailView;
-  /**
-   * The product last chosen. Consulted *only* while `view` is `launch`, which
-   * belongs to neither product; everywhere else the mode is derived from the
-   * view by `selectMode`, so the two cannot disagree.
-   */
-  lastMode: ProductMode;
   /** Where "back to the engine" lands, instead of always the visualizer. */
   lastEngineView: EngineView;
   setView: (view: RailView) => void;
@@ -36,22 +30,18 @@ interface UiState {
   enterMode: (mode: ProductMode) => void;
 }
 
-/** The product a view belongs to, or `null` for Launch, which is shared. */
+/**
+ * The product a view belongs to, or `null` for Launch, which is shared.
+ *
+ * The only source of truth for "which product is on screen". There is
+ * deliberately no stored mode beside it: a mode field that could be set
+ * independently of the view is what put the engine's rail and header over the
+ * Launch chooser, because Launch belongs to neither product and the stored
+ * value answered for it.
+ */
 export function modeOfView(view: RailView): ProductMode | null {
   if (view === "launch") return null;
   return view === "screaming-frog" ? "screaming-frog" : "engine";
-}
-
-/**
- * The mode the rail and header should render.
- *
- * Derived from the view whenever the view names a product. `lastMode` is only
- * the tie-breaker for Launch. Storing the mode as an independent field would
- * let any `setState({ view })` — or a future persisted restore — produce a rail
- * showing one product over a page from the other.
- */
-export function selectMode(state: Pick<UiState, "view" | "lastMode">): ProductMode {
-  return modeOfView(state.view) ?? state.lastMode;
 }
 
 /*
@@ -67,8 +57,8 @@ export function selectMode(state: Pick<UiState, "view" | "lastMode">): ProductMo
  * an enum.
  *
  * Not persisted: a reload always opens on Launch. If persistence is added,
- * persist `view` and `lastMode` together — `selectMode` keeps a restored view
- * authoritative over a restored mode, so the pair cannot contradict.
+ * persist `view` alone — every piece of product chrome derives from it through
+ * `modeOfView`, so there is no second field a restore could contradict.
  *
  * `launch` is the opening view rather than `visualizer`. A session starts with
  * nothing loaded, and the visualizer's answer to that was one line of grey text
@@ -77,24 +67,24 @@ export function selectMode(state: Pick<UiState, "view" | "lastMode">): ProductMo
  * systems, and a screen that names both is what keeps that distinction visible
  * instead of hidden behind one ambiguous "New crawl".
  *
- * The opening mode is `engine`, not "none". In fixture mode both Launch cards
- * are disabled, so a Launch-only rail would leave the bundled results
- * unreachable; and the engine is what the rest of this dashboard is built on.
+ * Launch shows no product's destinations at all. It used to fall back to the
+ * last product used, which put the engine's five tabs on the chooser; the way
+ * into the engine without starting a crawl is now a control on the engine card
+ * itself, so a rail that shows nothing strands nobody — including in fixture
+ * mode, where no crawl can be started but the bundled results still open.
  */
 export const useUiStore = create<UiState>((set) => ({
   view: "launch",
-  lastMode: "engine",
   lastEngineView: "visualizer",
   setView: (view) =>
     set(() => {
-      // Launch belongs to neither product, so it leaves the mode where it was.
-      if (view === "launch") return { view };
-      if (view === "screaming-frog") return { view, lastMode: "screaming-frog" };
-      return { view, lastMode: "engine", lastEngineView: view };
+      // Only an engine view is remembered: "back to the engine" must never
+      // land on Launch or on the other product.
+      if (view === "launch" || view === "screaming-frog") return { view };
+      return { view, lastEngineView: view };
     }),
   enterMode: (mode) =>
     set((state) => ({
-      lastMode: mode,
       view: mode === "engine" ? state.lastEngineView : "screaming-frog",
     })),
 }));

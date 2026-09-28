@@ -1,6 +1,6 @@
 import { isLive, useCrawlStore } from "../../store/useCrawlStore";
 import { useAuthStore } from "../../store/useAuthStore";
-import { selectMode, useUiStore } from "../../store/useUiStore";
+import { modeOfView, useUiStore } from "../../store/useUiStore";
 
 /**
  * Left icon rail.
@@ -11,13 +11,23 @@ import { selectMode, useUiStore } from "../../store/useUiStore";
  * does. Hidden entries are not rendered at all, rather than faded, so keyboard
  * and screen-reader users cannot tab into a destination that is not on screen.
  *
+ * Keyed on the *view*, not on a stored mode. Launch belongs to neither product,
+ * so a stored mode answered for it with whichever product was last used — and
+ * the chooser, whose whole job is to ask which crawler you want, opened with
+ * the engine's five tabs already beside it. `modeOfView` returns `null` there,
+ * which renders neither group. `HeaderBar` was corrected the same way.
+ *
+ * A Launch-only rail is only safe because the Launch screen itself offers a way
+ * into each product that does not depend on a reachable engine; see
+ * `LaunchView`. Nothing here should start disabling that.
+ *
  * Unimplemented entries ("Dashboard") are rendered `disabled` with a title
  * saying so, rather than as live buttons that do nothing — a control that
  * looks clickable and silently ignores the click reads as a bug.
  */
 export function NavigationRail(): JSX.Element {
   const view = useUiStore((state) => state.view);
-  const mode = useUiStore(selectMode);
+  const mode = modeOfView(view);
   const setView = useUiStore((state) => state.setView);
   const liveJobs = useCrawlStore((state) => state.liveJobs);
   // `null` in offline/fixture mode, which never logged in and has nothing to

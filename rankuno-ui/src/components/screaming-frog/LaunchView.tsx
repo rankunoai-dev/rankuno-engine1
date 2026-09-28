@@ -4,6 +4,8 @@ import "./screaming-frog.css";
 interface Props {
   /** Opens the existing engine crawl form (`LiveCrawlModal`). */
   onEngineCrawl: () => void;
+  /** Enters the engine with no form open, on the view last used. */
+  onOpenEngine: () => void;
   /** Switches to the Screaming Frog dispatch view. */
   onScreamingFrog: () => void;
   /** False in fixture mode, where no engine is reachable to accept a crawl. */
@@ -26,9 +28,20 @@ interface Props {
  * Unavailability is stated on the card rather than hiding it. A missing option
  * is indistinguishable from a feature that does not exist, and fixture mode is
  * exactly when someone needs to be told the engine is not answering.
+ *
+ * Each card carries two separate things: *starting* a crawl, and *entering* the
+ * product. They were one control, and conflating them cost twice. Starting an
+ * engine crawl needs a reachable engine, so in fixture mode that button is
+ * correctly disabled — but with the rail now showing no product's tabs on this
+ * screen, a disabled button was the only door, and there was none. It also
+ * meant the only way to look at a crawl that already finished was to open the
+ * new-crawl form and cancel it. "Open the engine" is neither: it is the door,
+ * and it stays open whether or not anything can be crawled, because reading
+ * stored results is not an engine operation.
  */
 export function LaunchView({
   onEngineCrawl,
+  onOpenEngine,
   onScreamingFrog,
   canStartEngineCrawl,
   canDispatchScreamingFrog,
@@ -69,13 +82,24 @@ export function LaunchView({
           )}
 
           <div className="sfl-actions">
-            <Button
-              type="primary"
-              onClick={onEngineCrawl}
-              disabled={!canStartEngineCrawl}
-            >
-              Start an engine crawl
-            </Button>
+            <div className="sfl-actions-row">
+              <Button
+                type="primary"
+                onClick={onEngineCrawl}
+                disabled={!canStartEngineCrawl}
+              >
+                Start an engine crawl
+              </Button>
+              {/* Never disabled. Browsing results that already exist asks
+                  nothing of the engine, and this is the only way in. */}
+              <Button onClick={onOpenEngine} aria-describedby="sfl-engine-open-hint">
+                Open the engine
+              </Button>
+            </div>
+            <span className="sfl-actions-hint" id="sfl-engine-open-hint">
+              Opens the visualizer, audit, Search Console reports and crawl jobs
+              for results already stored. Starts nothing.
+            </span>
           </div>
         </section>
 
@@ -97,11 +121,22 @@ export function LaunchView({
             </li>
           </ul>
 
+          {/* The door for this side lives on the notice rather than beside the
+              button, because here the button *is* the door whenever it is
+              enabled — a second control next to it would do the identical
+              thing. Only when dispatch is impossible is a way in missing, and
+              the Screaming Frog view states that case for itself (no engine to
+              ask, no machine registered) rather than being unreachable. */}
           {!canDispatchScreamingFrog && (
             <Alert
               type="info"
               showIcon
               message="Fixture mode — there is no engine to ask which machines are registered, so nothing can be dispatched."
+              action={
+                <Button size="small" onClick={onScreamingFrog}>
+                  Open Screaming Frog
+                </Button>
+              }
             />
           )}
 

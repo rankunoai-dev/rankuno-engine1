@@ -47,8 +47,9 @@ export function HeaderBar({ navParsed, onNewCrawl, onPrint }: Props): JSX.Elemen
    * crawl form — offered anywhere else it starts the wrong product's crawl.
    *
    * Launch is the reason this reads the view: it belongs to neither product, so
-   * `selectMode` falls back to the last one used and the engine header rendered
-   * over the chooser.
+   * the stored mode this once consulted answered with the last product used,
+   * and the engine header rendered over the chooser. That stored mode is gone;
+   * `modeOfView` is now the only answer, and the rail reads it too.
    *
    * The background pill stays everywhere. It is read-only progress for an engine
    * crawl already running, and without it nothing on screen would say that crawl
