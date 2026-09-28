@@ -126,7 +126,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `src/api/deliverables_routes.py` — `POST /jobs/{id}/deliverable`, `POST /deliverables/from-screaming-frog`, `POST`/`GET`/`DELETE /deliverables/rulebooks`, `GET /deliverables`, `GET /deliverables/{id}`, `GET /deliverables/{id}/download` | ✅ Implemented & tested (cycle 0087). Every build runs as an async job on a worker thread (`asyncio.to_thread`), gated by `ApiState`'s own deliverable concurrency guard (default 3, independent of `FacetRouter`) — never a synchronous handler blocking on `build_workbook` (measured up to 26.3s at 500k pages). `ApiState.deliverable_store` is a second `DiskJobStore` under `.deliverable_jobs/`, separate from crawl jobs; `ApiState.rulebook_store` is a new `RulebookStore` under `.deliverable_rulebooks/`. Every record carries `org_id`; every read, status check and download enforces `record.org_id == org_id`, the same 403-after-404 shape `get_job`/`get_result` already use. No web UI page yet — only the API (deferred, separate cycle) |
 | `modules/seo/deliverables/masterfile_*.py` — 21 RAE masterfile export services + `masterfile_registry.py` | ⚠️ **21 classes ship; they are not 21 working reports.** Measured against real Screaming Frog 19.4 exports: 13 of 21 render an **empty workbook**, `overview_report` **crashes** on any real bundle (`wb.create_sheet("Notes/Recommendations")` at `masterfile_overview_report.py:235`; `sanitize_sheet_name()` exists at `masterfile_base.py:164` and is not called), the 6 with data are partial, and **37 of the 49** CSV filenames the services request are not in the export at all — they were invented from the service slug. 19 of 21 service test files write zero CSV bytes and assert only `len(result) > 0`. Commit `0d26e26`'s "Complete RAE masterfile parity" and build-log 0105's "Phase 1 COMPLETE" are both false; corrected in [build-log 0107 §5](docs/build-log/0107-a-directory-that-could-never-exist.md) |
 | `modules/seo/deliverables/masterfile_source.py` — `MasterfileSource` seam: a folder of CSVs **or** a zip read in memory | ✅ Implemented & tested (42 tests, [ADR 0017](docs/adr/0017-masterfile-input-is-an-in-memory-export-bundle.md), [build-log 0107](docs/build-log/0107-a-directory-that-could-never-exist.md)). A decrypted worker bundle is never written to disk (ADR 0015 condition 11); `_bundle.open_bundle_bytes()` reuses the existing zip pre-flight. `read_csv_safe` now defaults to `utf-8-sig`, because Screaming Frog writes a UTF-8 BOM that bare `utf-8` glues to the first header cell — which produced a silent empty report on real exports and on no fixture. There is no `sf_export/` directory and never was |
-| `POST /jobs/{id}/masterfile/{slug}` — one masterfile workbook from a job's Screaming Frog exports | ✅ Route works (14 tests, [build-log 0107](docs/build-log/0107-a-directory-that-could-never-exist.md)); it had **never succeeded for any input** before that cycle. Resolves the id against **both** job namespaces — engine store first, then the ADR 0015 worker dispatch store — so the caller has one id to send and one deliverable id to poll. `409` a native crawl or no uploaded bundle, `410` the retention window closed, `500` the bundle cannot be decrypted, `503` the dispatch store is unreachable. No UI calls it; `GET /masterfiles/available` is served and nothing consumes it |
+| `POST /jobs/{id}/masterfile/{slug}` — one masterfile workbook from a job's Screaming Frog exports | ✅ Route works (14 tests, [build-log 0107](docs/build-log/0107-a-directory-that-could-never-exist.md)); it had **never succeeded for any input** before that cycle. Resolves the id against **both** job namespaces — engine store first, then the ADR 0015 worker dispatch store — so the caller has one id to send and one deliverable id to poll. `409` a native crawl or no uploaded bundle, `410` the retention window closed, `500` the bundle cannot be decrypted, `503` the dispatch store is unreachable. The UI calls it from a "Masterfiles" popover on finished Screaming Frog worker-job rows and sends the **worker** job id; the earlier menu on native crawl rows sent a native id, which this route refuses, and was removed ([build-log 0115](docs/build-log/0115-a-menu-that-sent-the-wrong-id.md)). `GET /masterfiles/available` supplies the button list |
 | `core/logger.py` — structured `extra=` fields on log records | ✅ Fixed in [build-log 0078](docs/build-log/0078-the-fields-that-never-left-the-call-site.md): `get_logger` returns a merging adapter, caller keys win (6 tests). Was dropped on Python 3.11 from the first commit; found in cycle 0074 |
 | Layer 2 local ML classifier | ❌ Protocol only; needs local GPU ([ADR 0004](docs/adr/0004-local-first-deployment-swappable-ml-layer.md)) |
 | Layer 3 `LlmPageClassifier` implementation | ❌ Protocol only; needs a live credential |
@@ -274,8 +274,9 @@ GET    /api/v1/deliverables/{id}
 GET    /api/v1/deliverables/{id}/download
 
 # Build one RAE masterfile workbook from a job's Screaming Frog export bundle.
-# The id may be an engine crawl job or an ADR 0015 worker job; a native crawl is
-# refused 409, because it produces a page-intelligence result and not CSVs.
+# The id must be an ADR 0015 Screaming Frog worker job with an uploaded bundle; a
+# native crawl id is refused 409, because it produces a page-intelligence result
+# and not CSVs. The UI sends the worker job id (build-log 0115).
 POST   /api/v1/jobs/{job_id}/masterfile/{service_slug}
 GET    /api/v1/masterfiles/available
 ```
@@ -290,8 +291,11 @@ this file (build-log 0097). Workbook builds run on a worker thread behind their 
 concurrency guard on `ApiState` (default 3 at once, independent of the crawl
 `FacetRouter`) — `build_workbook` alone measures up to 26.3s at the 500k-page
 ceiling, so nothing here may block a request handler on it. There is still no
-web UI page for this — only the API; a UI affordance is a follow-up, tracked
-as a handoff to `ui-engineer`.
+web UI page for the deliverable-workbook routes above — only the API; a UI
+affordance is a follow-up, tracked as a handoff to `ui-engineer`. The two
+masterfile routes are the exception: a "Masterfiles" popover on finished
+Screaming Frog rows in `WorkerJobsPanel.tsx` builds and downloads them
+([build-log 0115](docs/build-log/0115-a-menu-that-sent-the-wrong-id.md)).
 
 ### The local API and the React UI
 
