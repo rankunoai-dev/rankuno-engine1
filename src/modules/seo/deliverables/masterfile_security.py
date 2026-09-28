@@ -1,24 +1,25 @@
 """Security masterfile service (HTTPS, SSL cert, security headers).
 
-Reads security_*.csv files and generates a single-sheet XLSX showing:
+Reads its catalogue sources and generates a single-sheet XLSX showing:
 1. Summary: Security issue counts
 2. Detailed Data: One row per affected URL
 
-Source CSVs:
-- security_https.csv
-- security_headers.csv
-- security_ssl.csv
+Source CSVs: `SOURCE_FILES`, derived from IssueCategory.SECURITY through
+`contracts/sources.py`. Never written out here - a hand-kept second
+copy of that list is what build-log 0116 found wrong in this file.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
+from src.modules.seo.contracts.issue_ids import IssueCategory
+from src.modules.seo.contracts.sources import sources_for_categories
 from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
@@ -30,15 +31,11 @@ __all__ = ["SecurityService"]
 
 _logger = get_logger(__name__)
 
-_SECURITY_FILES: Final[list[str]] = [
-    "security_https.csv",
-    "security_headers.csv",
-    "security_ssl.csv",
-]
-
 
 class SecurityService(MasterfileService):
     """Generate security masterfile."""
+
+    SOURCE_FILES = sources_for_categories(IssueCategory.SECURITY)
 
     @property
     def metadata(self) -> MasterfileMetadata:
@@ -51,17 +48,7 @@ class SecurityService(MasterfileService):
 
     def _read_all_security(self) -> pd.DataFrame | None:
         """Read and combine all security CSVs."""
-        dfs = []
-        for filename in _SECURITY_FILES:
-            df = self._read_csv(filename)
-            if df is not None and not df.empty:
-                dfs.append(df)
-
-        if not dfs:
-            return None
-
-        combined = pd.concat(dfs, ignore_index=True)
-        return combined if not combined.empty else None
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate security XLSX."""
@@ -95,11 +82,10 @@ class SecurityService(MasterfileService):
 
                 # Enrich
                 internal_data = internal_map.get(url, {}) if internal_map else {}
-                gsc_data = gsc_map.get(url, {}) if gsc_map else {}
+                gsc_data = self._gsc_lookup(gsc_map, url)
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
-                if indexability != "Indexable":
+                if not self._is_reportable(indexability):
                     continue
 
                 urls_with_security.append(

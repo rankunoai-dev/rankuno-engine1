@@ -140,7 +140,7 @@ class DirectoryMasterfileSource:
         except ValueError as exc:
             raise MasterfileSourceError(str(exc)) from exc
         if frame is None:
-            _logger.debug("masterfile_csv_absent", extra={"filename": filename})
+            _logger.debug("masterfile_csv_absent", extra={"export": filename})
         return frame
 
     def names(self) -> frozenset[str]:
@@ -174,7 +174,7 @@ class BundleMasterfileSource:
         """
         stream = self._bundle.open_text(filename)
         if stream is None:
-            _logger.debug("masterfile_csv_absent", extra={"filename": filename})
+            _logger.debug("masterfile_csv_absent", extra={"export": filename})
             return None
         try:
             with stream:

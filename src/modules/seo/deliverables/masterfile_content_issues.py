@@ -1,24 +1,26 @@
 """Content Issues masterfile service (thin content, boilerplate, duplication warnings).
 
-Reads content_issues_*.csv files and generates a single-sheet XLSX showing:
+Reads its catalogue sources and generates a single-sheet XLSX showing:
 1. Summary: Content issue counts
 2. Detailed Data: One row per affected URL, sorted by impressions
 
-Source CSVs:
-- content_issues_thin.csv
-- content_issues_boilerplate.csv
-- content_issues_duplicate_warning.csv
+Source CSVs: `SOURCE_FILES`, derived through `contracts/sources.py` from
+the six CONTENT_ISSUES issues that are neither duplicate content nor
+placeholder text (those two have their own workbooks). Never written out here - a hand-kept second
+copy of that list is what build-log 0116 found wrong in this file.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
+from src.modules.seo.contracts.issue_ids import IssueId
+from src.modules.seo.contracts.sources import sources_for_issues
 from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
@@ -30,15 +32,18 @@ __all__ = ["ContentIssuesService"]
 
 _logger = get_logger(__name__)
 
-_CONTENT_ISSUES_FILES: Final[list[str]] = [
-    "content_issues_thin.csv",
-    "content_issues_boilerplate.csv",
-    "content_issues_duplicate_warning.csv",
-]
-
 
 class ContentIssuesService(MasterfileService):
     """Generate content issues masterfile."""
+
+    SOURCE_FILES = sources_for_issues(
+        IssueId.CONTENT_LOW_CONTENT_PAGES,
+        IssueId.CONTENT_SOFT_404_PAGES,
+        IssueId.CONTENT_SPELLING_ERRORS,
+        IssueId.CONTENT_GRAMMAR_ERRORS,
+        IssueId.CONTENT_READABILITY_DIFFICULT,
+        IssueId.CONTENT_READABILITY_VERY_DIFFICULT,
+    )
 
     @property
     def metadata(self) -> MasterfileMetadata:
@@ -51,17 +56,7 @@ class ContentIssuesService(MasterfileService):
 
     def _read_all_content_issues(self) -> pd.DataFrame | None:
         """Read and combine all content issues CSVs."""
-        dfs = []
-        for filename in _CONTENT_ISSUES_FILES:
-            df = self._read_csv(filename)
-            if df is not None and not df.empty:
-                dfs.append(df)
-
-        if not dfs:
-            return None
-
-        combined = pd.concat(dfs, ignore_index=True)
-        return combined if not combined.empty else None
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate content issues XLSX."""
@@ -95,11 +90,10 @@ class ContentIssuesService(MasterfileService):
 
                 # Enrich
                 internal_data = internal_map.get(url, {}) if internal_map else {}
-                gsc_data = gsc_map.get(url, {}) if gsc_map else {}
+                gsc_data = self._gsc_lookup(gsc_map, url)
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
-                if indexability != "Indexable":
+                if not self._is_reportable(indexability):
                     continue
 
                 urls_with_content_issues.append(

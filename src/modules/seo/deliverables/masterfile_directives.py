@@ -1,24 +1,25 @@
 """Directives masterfile service (robots, noindex, nofollow directives).
 
-Reads directives_*.csv files and generates a single-sheet XLSX showing:
+Reads its catalogue sources and generates a single-sheet XLSX showing:
 1. Summary: Directive type counts
 2. Detailed Data: One row per affected URL, sorted by impressions
 
-Source CSVs:
-- directives_robots.csv
-- directives_noindex.csv
-- directives_nofollow.csv
+Source CSVs: `SOURCE_FILES`, derived from IssueCategory.DIRECTIVES through
+`contracts/sources.py`. Never written out here - a hand-kept second
+copy of that list is what build-log 0116 found wrong in this file.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
+from src.modules.seo.contracts.issue_ids import IssueCategory
+from src.modules.seo.contracts.sources import sources_for_categories
 from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
@@ -30,15 +31,15 @@ __all__ = ["DirectivesService"]
 
 _logger = get_logger(__name__)
 
-_DIRECTIVES_FILES: Final[list[str]] = [
-    "directives_robots.csv",
-    "directives_noindex.csv",
-    "directives_nofollow.csv",
-]
-
 
 class DirectivesService(MasterfileService):
     """Generate directives masterfile."""
+
+    SOURCE_FILES = sources_for_categories(IssueCategory.DIRECTIVES)
+
+    INDEXABLE_ONLY = False
+    """A `noindex` page is Non-Indexable by definition: filtering this
+    report to indexable pages is a rule that can never match a row."""
 
     @property
     def metadata(self) -> MasterfileMetadata:
@@ -51,17 +52,7 @@ class DirectivesService(MasterfileService):
 
     def _read_all_directives(self) -> pd.DataFrame | None:
         """Read and combine all directives CSVs."""
-        dfs = []
-        for filename in _DIRECTIVES_FILES:
-            df = self._read_csv(filename)
-            if df is not None and not df.empty:
-                dfs.append(df)
-
-        if not dfs:
-            return None
-
-        combined = pd.concat(dfs, ignore_index=True)
-        return combined if not combined.empty else None
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate directives XLSX."""
@@ -95,11 +86,10 @@ class DirectivesService(MasterfileService):
 
                 # Enrich
                 internal_data = internal_map.get(url, {}) if internal_map else {}
-                gsc_data = gsc_map.get(url, {}) if gsc_map else {}
+                gsc_data = self._gsc_lookup(gsc_map, url)
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
-                if indexability != "Indexable":
+                if not self._is_reportable(indexability):
                     continue
 
                 urls_with_directives.append(

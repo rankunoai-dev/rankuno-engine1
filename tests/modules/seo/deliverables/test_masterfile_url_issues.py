@@ -1,4 +1,4 @@
-"""Tests for url_issues masterfile service."""
+"""Row-count and header assertions for url_issues masterfile service."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from src.modules.seo.deliverables.masterfile_url_issues import URLIssuesService
+from tests.modules.seo.deliverables.conftest import detail_table, first_cell, sheet_names
 
 
 @pytest.fixture
@@ -17,9 +18,11 @@ def sf_export_dir() -> Path:
 
 def test_url_issues_empty(sf_export_dir: Path) -> None:
     service = URLIssuesService("test-job", sf_export_dir)
-    result = service.generate()
-    assert isinstance(result, bytes)
-    assert len(result) > 0
+    payload = service.generate()
+
+    assert detail_table(payload) == ((), [])
+    assert first_cell(payload) == "No URL issues found"
+    assert sheet_names(payload)[0] == "URL Issues"
 
 
 def test_url_issues_metadata(sf_export_dir: Path) -> None:

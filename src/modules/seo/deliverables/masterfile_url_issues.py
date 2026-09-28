@@ -1,24 +1,25 @@
 """URL Issues masterfile service (URL structure, length, parameter analysis).
 
-Reads url_issues_*.csv files and generates a single-sheet XLSX showing:
+Reads its catalogue sources and generates a single-sheet XLSX showing:
 1. Summary: URL issue counts
 2. Detailed Data: One row per affected URL, sorted by impressions
 
-Source CSVs:
-- url_issues_too_long.csv
-- url_issues_too_many_parameters.csv
-- url_issues_special_characters.csv
+Source CSVs: `SOURCE_FILES`, derived from IssueCategory.URL_ISSUES through
+`contracts/sources.py`. Never written out here - a hand-kept second
+copy of that list is what build-log 0116 found wrong in this file.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
+from src.modules.seo.contracts.issue_ids import IssueCategory
+from src.modules.seo.contracts.sources import sources_for_categories
 from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
@@ -30,15 +31,11 @@ __all__ = ["URLIssuesService"]
 
 _logger = get_logger(__name__)
 
-_URL_ISSUES_FILES: Final[list[str]] = [
-    "url_issues_too_long.csv",
-    "url_issues_too_many_parameters.csv",
-    "url_issues_special_characters.csv",
-]
-
 
 class URLIssuesService(MasterfileService):
     """Generate URL issues masterfile."""
+
+    SOURCE_FILES = sources_for_categories(IssueCategory.URL_ISSUES)
 
     @property
     def metadata(self) -> MasterfileMetadata:
@@ -51,17 +48,7 @@ class URLIssuesService(MasterfileService):
 
     def _read_all_url_issues(self) -> pd.DataFrame | None:
         """Read and combine all URL issues CSVs."""
-        dfs = []
-        for filename in _URL_ISSUES_FILES:
-            df = self._read_csv(filename)
-            if df is not None and not df.empty:
-                dfs.append(df)
-
-        if not dfs:
-            return None
-
-        combined = pd.concat(dfs, ignore_index=True)
-        return combined if not combined.empty else None
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate URL issues XLSX."""
@@ -95,11 +82,10 @@ class URLIssuesService(MasterfileService):
 
                 # Enrich
                 internal_data = internal_map.get(url, {}) if internal_map else {}
-                gsc_data = gsc_map.get(url, {}) if gsc_map else {}
+                gsc_data = self._gsc_lookup(gsc_map, url)
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
-                if indexability != "Indexable":
+                if not self._is_reportable(indexability):
                     continue
 
                 urls_with_issues.append(

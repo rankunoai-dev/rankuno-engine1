@@ -15,6 +15,18 @@ GA4 sessions, themes) and generates a styled XLSX file. This module provides:
 
 The architecture follows ADR 0011: MasterfileService reads CSVs (read-only
 transformations), no external API calls, one service == one workbook.
+
+Two rules live here rather than in each of the twenty-one subclasses, because
+build-log 0116 found both broken in all twenty-one at once:
+
+* **A service never names its own input files.** `SOURCE_FILES` is derived
+  from `ISSUE_CATALOGUE` through `contracts/sources.py`, so a filename can
+  only reach a workbook by first being in the catalogue - which is also what
+  `ALLOWED_BUNDLE_FILENAMES` derives from.
+* **`INDEXABLE_ONLY` is a declaration, not a default.** Three services report
+  on pages that are non-indexable *by definition* - a `noindex` directive, a
+  4xx response, an inlink to a broken page - and filtering those to
+  `Indexability == "Indexable"` is a rule that can never match a row.
 """
 
 from __future__ import annotations
@@ -22,13 +34,22 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
 import pandas as pd  # type: ignore[import-untyped]
 from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.modules.seo.deliverables.masterfile_enrichment import (
+    NOT_MEASURED,
+    URL_COLUMN,
+    build_ga4_map,
+    build_gsc_map,
+    build_internal_map,
+    gc,
+    normalise_url_column,
+)
 from src.modules.seo.deliverables.masterfile_source import (
     DirectoryMasterfileSource,
     MasterfileSource,
@@ -37,12 +58,14 @@ from src.modules.seo.deliverables.masterfile_source import (
 from src.modules.seo.deliverables.rulebook import OTHERS_THEME
 
 __all__ = [
-    "MasterfileService",
-    "MasterfileMetadata",
+    "NOT_MEASURED",
+    "URL_COLUMN",
     "EnrichedURLRecord",
+    "MasterfileMetadata",
+    "MasterfileService",
     "MasterfileSource",
-    "read_csv_safe",
     "gc",
+    "read_csv_safe",
 ]
 
 _logger = get_logger(__name__)
@@ -108,27 +131,6 @@ class EnrichedURLRecord(StrictModel):
     ga4_sessions: int | None = None
     theme_1: str = OTHERS_THEME
     theme_2: str | None = None
-
-
-def gc(header: list[str], column_name: str) -> int:
-    """Get column index: case-insensitive search for column name.
-
-    Args:
-        header: CSV header row
-        column_name: Column name to find (case-insensitive)
-
-    Returns:
-        0-based column index
-
-    Raises:
-        KeyError: Column not found
-    """
-    name_lower = column_name.lower()
-    for i, col in enumerate(header):
-        if col.lower() == name_lower:
-            return i
-    msg = f"Column not found: {column_name}"
-    raise KeyError(msg)
 
 
 def safe_cell(value: object) -> object:
@@ -200,6 +202,18 @@ class MasterfileService(ABC):
     may be a zip in memory, where there is no path to join.
     """
 
+    SOURCE_FILES: ClassVar[tuple[str, ...]] = ()
+    """Every export this service reads, from `contracts/sources.py`. Empty
+    means the service has no producible input today (`custom_extraction`
+    discovers its files dynamically; the two Custom Search services and
+    Functional Internal Links have no catalogue source at all)."""
+
+    INDEXABLE_ONLY: ClassVar[bool] = True
+    """Whether the detail table is restricted to `Indexability ==
+    "Indexable"`, per build-log 0104's original spec. `False` where the issue
+    is *defined* by non-indexability, which that spec already carved out for
+    Response Codes and never implemented."""
+
     def __init__(
         self,
         job_id: str,
@@ -255,119 +269,73 @@ class MasterfileService(ABC):
         self._enrichment_cache[filename] = df
         return df
 
-    def _build_internal_map(self) -> dict[str, dict[str, Any]] | None:
-        """Build enrichment map from internal_all.csv.
+    def _read_issue_frames(self, filenames: tuple[str, ...] | None = None) -> pd.DataFrame | None:
+        """The named exports, concatenated, each keyed by `Address`.
+
+        Normalising the URL column *per file* is the point: nine `_inlinks`
+        and three outlink exports are edge lists with no `Address` at all, and
+        concatenating them first would give every one of their rows a `nan`
+        address that the caller would then write into the workbook as the
+        string "nan".
+
+        Args:
+            filenames: Which exports to read. Defaults to `SOURCE_FILES`.
 
         Returns:
-            {url: {status_code, indexability, inlinks, page_type}} or None
+            One frame, or `None` when no named export was present and
+            non-empty - which means "not measured", not "no issues".
         """
-        df = self._read_enrichment("internal_all.csv")
-        if df is None or df.empty:
-            return None
-
-        result: dict[str, dict[str, Any]] = {}
-        try:
-            address_idx = gc(df.columns.tolist(), "Address")
-            status_idx = gc(df.columns.tolist(), "Status Code")
-            indexability_idx = gc(df.columns.tolist(), "Indexability")
-            inlinks_idx = gc(df.columns.tolist(), "Inlinks")
-        except KeyError:
-            return None
-
-        for _, row in df.iterrows():
-            try:
-                url = str(row.iloc[address_idx])
-                status = str(row.iloc[status_idx]) if pd.notna(row.iloc[status_idx]) else None
-                indexability = (
-                    str(row.iloc[indexability_idx])
-                    if pd.notna(row.iloc[indexability_idx])
-                    else None
-                )
-                inlinks = (
-                    int(row.iloc[inlinks_idx])
-                    if pd.notna(row.iloc[inlinks_idx]) and str(row.iloc[inlinks_idx]).isdigit()
-                    else None
-                )
-                result[url] = {
-                    "status_code": status,
-                    "indexability": indexability,
-                    "inlinks": inlinks,
-                }
-            except (ValueError, IndexError):
+        frames = []
+        for filename in self.SOURCE_FILES if filenames is None else filenames:
+            frame = self._read_csv(filename)
+            if frame is None or frame.empty:
                 continue
+            normalised = normalise_url_column(frame, filename)
+            if normalised is None:
+                # Present but not shaped like its name. Keep it in the
+                # concatenation so the caller still reports "error reading",
+                # rather than dropping it into a silent empty workbook.
+                frames.append(frame)
+                continue
+            frames.append(normalised)
 
-        return result if result else None
+        if not frames:
+            return None
+        combined = pd.concat(frames, ignore_index=True)
+        return combined if not combined.empty else None
+
+    def _build_internal_map(self) -> dict[str, dict[str, Any]] | None:
+        """`{url: {status_code, indexability, inlinks}}` from the spine."""
+        return build_internal_map(self._read_enrichment)
 
     def _build_gsc_map(self) -> dict[str, dict[str, int]] | None:
-        """Build enrichment map from search_console_all.csv.
-
-        Returns:
-            {url: {impressions, clicks}} or None
-        """
-        df = self._read_enrichment("search_console_all.csv")
-        if df is None or df.empty:
-            return None
-
-        result: dict[str, dict[str, int]] = {}
-        try:
-            address_idx = gc(df.columns.tolist(), "Address")
-            impressions_idx = gc(df.columns.tolist(), "Impressions")
-            clicks_idx = gc(df.columns.tolist(), "Clicks")
-        except KeyError:
-            return None
-
-        for _, row in df.iterrows():
-            try:
-                url = str(row.iloc[address_idx])
-                impressions = (
-                    int(row.iloc[impressions_idx])
-                    if pd.notna(row.iloc[impressions_idx])
-                    and str(row.iloc[impressions_idx]).replace(".", "", 1).isdigit()
-                    else 0
-                )
-                clicks = (
-                    int(row.iloc[clicks_idx])
-                    if pd.notna(row.iloc[clicks_idx])
-                    and str(row.iloc[clicks_idx]).replace(".", "", 1).isdigit()
-                    else 0
-                )
-                result[url] = {"impressions": impressions, "clicks": clicks}
-            except (ValueError, IndexError):
-                continue
-
-        return result if result else None
+        """`{url: {impressions, clicks}}`, or `None` when not measured."""
+        return build_gsc_map(self._read_enrichment)
 
     def _build_ga4_map(self) -> dict[str, int] | None:
-        """Build enrichment map from analytics_all.csv (GA4 sessions).
+        """`{url: sessions}`, or `None` when not measured."""
+        return build_ga4_map(self._read_enrichment)
 
-        Returns:
-            {url: sessions} or None
+    def _gsc_lookup(
+        self, gsc_map: dict[str, dict[str, int]] | None, url: str
+    ) -> dict[str, int | str]:
+        """Impressions and clicks for `url`, distinguishing zero from unknown.
+
+        A crawl that carried no `search_console_all.csv` did not measure
+        impressions; a crawl that carried one and did not list `url` measured
+        zero. ADR 0011 §5 requires a workbook to show the difference, so the
+        first case yields `NOT_MEASURED` and only the second yields 0.
         """
-        df = self._read_enrichment("analytics_all.csv")
-        if df is None or df.empty:
-            return None
+        if gsc_map is None:
+            return {"impressions": NOT_MEASURED, "clicks": NOT_MEASURED}
+        found = gsc_map.get(url)
+        if found is None:
+            return {"impressions": 0, "clicks": 0}
+        return dict(found)
 
-        result: dict[str, int] = {}
-        try:
-            address_idx = gc(df.columns.tolist(), "Address")
-            sessions_idx = gc(df.columns.tolist(), "Sessions")
-        except KeyError:
-            return None
-
-        for _, row in df.iterrows():
-            try:
-                url = str(row.iloc[address_idx])
-                sessions = (
-                    int(row.iloc[sessions_idx])
-                    if pd.notna(row.iloc[sessions_idx])
-                    and str(row.iloc[sessions_idx]).replace(".", "", 1).isdigit()
-                    else 0
-                )
-                result[url] = sessions
-            except (ValueError, IndexError):
-                continue
-
-        return result if result else None
+    def _is_reportable(self, indexability: str | None) -> bool:
+        """Whether a row survives this service's indexability rule."""
+        return not self.INDEXABLE_ONLY or indexability == "Indexable"
 
     @abstractmethod
     def generate(self) -> bytes:

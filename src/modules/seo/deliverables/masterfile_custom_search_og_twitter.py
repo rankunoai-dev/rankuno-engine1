@@ -1,23 +1,30 @@
 """Custom Search OpenGraph Twitter masterfile service.
 
-Reads custom_search_og_twitter.csv file and generates a single-sheet XLSX showing:
+Renders a single-sheet XLSX showing:
 1. Summary: OpenGraph/Twitter card metadata extraction counts
 2. Detailed Data: One row per URL with OG/Twitter metadata, sorted by impressions
 
-Source CSV:
-- custom_search_og_twitter.csv
+Source CSVs: none. `CUSTOM_SEARCH_OG_TAGS / CUSTOM_SEARCH_TWITTER_CARD` carries no `sf_sources` in
+`ISSUE_CATALOGUE`, so `SOURCE_FILES` stays empty and every build
+renders "Not measured by this crawl" rather than an empty issue list.
+
+RAE derived Open Graph and Twitter Card presence from
+`custom_extraction_all.csv`, the `Custom Extraction:All` tab. That tab is
+not in `export_manifest.EXPORT_TABS` and the filename is not
+allow-listed, so no bundle can carry it. Phase 4.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
 from src.modules.seo.deliverables.masterfile_base import (
+    NOT_MEASURED,
     MasterfileMetadata,
     MasterfileService,
     gc,
@@ -27,8 +34,6 @@ from src.modules.seo.deliverables.masterfile_base import (
 __all__ = ["CustomSearchOGTwitterService"]
 
 _logger = get_logger(__name__)
-
-_CUSTOM_SEARCH_OG_TWITTER_FILE: Final[str] = "custom_search_og_twitter.csv"
 
 
 class CustomSearchOGTwitterService(MasterfileService):
@@ -44,8 +49,14 @@ class CustomSearchOGTwitterService(MasterfileService):
         )
 
     def _read_og_twitter(self) -> pd.DataFrame | None:
-        """Read OG Twitter CSV."""
-        return self._read_csv(_CUSTOM_SEARCH_OG_TWITTER_FILE)
+        """OG/Twitter tag presence, when an export can supply it.
+
+        `SOURCE_FILES` is empty today, so this is always `None` and the
+        workbook renders "not measured". Routed through the generic
+        reader rather than hardcoding `None`, so the day a catalogue row
+        gains an `sf_sources` this service starts working unchanged.
+        """
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate OG Twitter XLSX."""
@@ -59,7 +70,7 @@ class CustomSearchOGTwitterService(MasterfileService):
             ws = wb.active
             if ws:
                 ws.title = "OG Twitter"
-                ws.append(["No OG/Twitter data found"])
+                ws.append([NOT_MEASURED])
         else:
             try:
                 address_idx = gc(og_df.columns.tolist(), "Address")
@@ -81,7 +92,6 @@ class CustomSearchOGTwitterService(MasterfileService):
                 internal_data = internal_map.get(url, {}) if internal_map else {}
                 gsc_data = gsc_map.get(url, {}) if gsc_map else {}
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
                 if indexability != "Indexable":
                     continue

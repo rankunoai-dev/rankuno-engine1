@@ -10,19 +10,22 @@ Generates 8 sheets per ADR 0011:
 7. Detailed Data — one row per URL with markup analysis
 8. Coverage Analysis — schema.org implementation coverage
 
-Source CSVs:
-- structured_data_*.csv files (various schema types)
+Source CSVs: `SOURCE_FILES`, derived from IssueCategory.STRUCTURED_DATA through
+`contracts/sources.py`. Never written out here - a hand-kept second
+copy of that list is what build-log 0116 found wrong in this file.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
+from src.modules.seo.contracts.issue_ids import IssueCategory
+from src.modules.seo.contracts.sources import sources_for_categories
 from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
@@ -34,15 +37,11 @@ __all__ = ["StructuredDataService"]
 
 _logger = get_logger(__name__)
 
-_STRUCTURED_DATA_FILES: Final[list[str]] = [
-    "structured_data_missing.csv",
-    "structured_data_invalid.csv",
-    "structured_data_incomplete.csv",
-]
-
 
 class StructuredDataService(MasterfileService):
     """Generate structured data masterfile (8 sheets)."""
+
+    SOURCE_FILES = sources_for_categories(IssueCategory.STRUCTURED_DATA)
 
     @property
     def metadata(self) -> MasterfileMetadata:
@@ -55,17 +54,7 @@ class StructuredDataService(MasterfileService):
 
     def _read_all_structured_data(self) -> pd.DataFrame | None:
         """Read and combine all structured data CSVs."""
-        dfs = []
-        for filename in _STRUCTURED_DATA_FILES:
-            df = self._read_csv(filename)
-            if df is not None and not df.empty:
-                dfs.append(df)
-
-        if not dfs:
-            return None
-
-        combined = pd.concat(dfs, ignore_index=True)
-        return combined if not combined.empty else None
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate structured data XLSX with 8 sheets."""
@@ -96,11 +85,10 @@ class StructuredDataService(MasterfileService):
             for _, row in schema_df.iterrows():
                 url = str(row.iloc[address_idx])
                 internal_data = internal_map.get(url, {}) if internal_map else {}
-                gsc_data = gsc_map.get(url, {}) if gsc_map else {}
+                gsc_data = self._gsc_lookup(gsc_map, url)
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
-                if indexability != "Indexable":
+                if not self._is_reportable(indexability):
                     continue
 
                 urls_with_schema.append(

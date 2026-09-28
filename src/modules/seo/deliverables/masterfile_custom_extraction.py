@@ -1,4 +1,4 @@
-"""Custom Extraction masterfile service (dynamic N sheets).
+r"""Custom Extraction masterfile service (dynamic N sheets).
 
 Generates N sheets dynamically, one per custom extractor registered at crawl time.
 Each sheet contains:
@@ -8,8 +8,24 @@ Each sheet contains:
 The number of sheets is determined by the number of custom extractors configured
 in the crawl's extraction rules.
 
-Source CSVs:
-- custom_extraction_*.csv files (dynamic, one per extractor registered)
+Source CSVs: every `custom_extraction_*.csv` the source holds. This is the
+one export whose filename set is not knowable in advance, so it is discovered
+rather than derived from `ISSUE_CATALOGUE`.
+
+**Unreachable through the supported input path today.** A real Screaming Frog
+19.4 export writes exactly one such file, `custom_extraction_all.csv` -
+confirmed present in all 45 populated export folders checked. That name is not
+in `ALLOWED_BUNDLE_FILENAMES`, because no `CUSTOM_SEARCH` catalogue row
+carries an `sf_sources`, and `Custom Extraction:All` is not in
+`export_manifest.EXPORT_TABS`. So the glob only ever matches when a service is
+pointed at a loose export directory, never at an uploaded bundle. Wiring the
+tab is Phase 4; widening the allow-list is an ADR 0018 decision.
+
+The extractor name reaching `create_sheet` is derived from a *client-supplied
+filename*, which is why every sheet name here goes through
+`sanitize_sheet_name`: a name over 31 characters, or holding any of
+``[ ] : ? * / \``, makes openpyxl raise, and two names that truncate to the
+same 31 characters make it raise on the second sheet.
 """
 
 from __future__ import annotations
@@ -26,6 +42,7 @@ from src.modules.seo.deliverables.masterfile_base import (
     MasterfileService,
     gc,
     safe_cell,
+    sanitize_sheet_name,
 )
 
 __all__ = ["CustomExtractionService"]
@@ -71,6 +88,17 @@ class CustomExtractionService(MasterfileService):
         filename = f"{_CUSTOM_EXTRACTION_PREFIX}{extractor_name}.csv"
         return self._read_csv(filename)
 
+    def _new_sheet(self, wb: Workbook, extractor_name: str) -> Any:
+        """A sheet for `extractor_name`, named safely and uniquely.
+
+        The name comes from an uploaded filename, so it is untrusted input on
+        its way into openpyxl. `sanitize_sheet_name` both strips the six
+        characters Excel forbids and dedupes against the names already used,
+        which is what stops two extractors whose names share a 31-character
+        prefix from colliding on the second `create_sheet`.
+        """
+        return wb.create_sheet(sanitize_sheet_name(extractor_name, set(wb.sheetnames)))
+
     def generate(self) -> bytes:
         """Generate custom extraction XLSX with dynamic sheets."""
         internal_map = self._build_internal_map()
@@ -91,14 +119,14 @@ class CustomExtractionService(MasterfileService):
                 extractor_df = self._read_extractor_csv(extractor_name)
 
                 if extractor_df is None or extractor_df.empty:
-                    ws = wb.create_sheet(extractor_name)
+                    ws = self._new_sheet(wb, extractor_name)
                     ws.append([f"No data for extractor: {extractor_name}"])
                     continue
 
                 try:
                     address_idx = gc(extractor_df.columns.tolist(), "Address")
                 except KeyError:
-                    ws = wb.create_sheet(extractor_name)
+                    ws = self._new_sheet(wb, extractor_name)
                     ws.append([f"Error reading {extractor_name} CSV"])
                     continue
 
@@ -107,11 +135,10 @@ class CustomExtractionService(MasterfileService):
                 for _, row in extractor_df.iterrows():
                     url = str(row.iloc[address_idx])
                     internal_data = internal_map.get(url, {}) if internal_map else {}
-                    gsc_data = gsc_map.get(url, {}) if gsc_map else {}
+                    gsc_data = self._gsc_lookup(gsc_map, url)
 
-                    # Filter: indexable=True
                     indexability = internal_data.get("indexability")
-                    if indexability != "Indexable":
+                    if not self._is_reportable(indexability):
                         continue
 
                     urls_with_data.append(
@@ -135,7 +162,7 @@ class CustomExtractionService(MasterfileService):
         self, wb: Workbook, extractor_name: str, urls_with_data: list[dict[str, Any]]
     ) -> None:
         """Write sheet for a single extractor."""
-        ws = wb.create_sheet(extractor_name)
+        ws = self._new_sheet(wb, extractor_name)
 
         # Header
         ws.append([])
