@@ -340,6 +340,8 @@ that; `MAX_CONCURRENT_CRAWLS` (1–10) sets the cap. It bounds memory, not CPU:
 each in-flight crawl holds its whole graph in RAM, so raise it only on a host
 with the RAM to match.
 
+`GET /api/v1/crawl-activity` (same bearer auth, scoped to the caller's org only) returns `{rankuno_active, rankuno_cap, sf_active}`, cached 5 s per org, and feeds the header indicator on every view (polled every 10 s visible / 60 s hidden). The two counts are deliberately separate: the cap governs server-run crawls only, and Screaming Frog worker dispatches are not limited by it ([build-log 0114](docs/build-log/0114-a-count-that-belongs-to-one-org.md)).
+
 A finished crawl's job-row `...` menu offers "Download URLs" alongside
 "Search Console", "Cross-check" and "Run again": one click, no intermediate
 panel, fetching `GET /jobs/{id}/urls.xlsx` — every URL the crawl found, as a

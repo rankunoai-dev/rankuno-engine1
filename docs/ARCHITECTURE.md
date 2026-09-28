@@ -213,6 +213,12 @@ src/
 │   │                            # authenticated, org-scoped, decrypt-then-
 │   │                            # stream download; fails closed if the at-rest
 │   │                            # key is absent or rotated)
+│   ├── crawl_activity.py        # GET /crawl-activity (cycle 0114): the caller's
+│   │                            # org's in-flight counts — server-run crawls
+│   │                            # against the cap, and Screaming Frog worker
+│   │                            # dispatches (0 if the dispatch store is down).
+│   │                            # 5 s per-org TTL cache; stale DISPATCHED jobs
+│   │                            # filtered read-only, no expiry UPDATE on a GET
 │   └── worker_route_helpers.py  # The ownership, liveness and body-size checks
 │                                # those routes perform before doing any work.
 │                                # read_capped_body refuses an over-cap
