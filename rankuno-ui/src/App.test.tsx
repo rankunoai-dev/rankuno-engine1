@@ -74,6 +74,31 @@ describe("App", () => {
     expect(init).toHaveBeenCalled();
   });
 
+  it("does not restore anything behind the login screen when the session expired", async () => {
+    /* Edge case in the reload brief: the view is restored at module load, but
+       `App` still gates on the session, so an expired one shows the login
+       screen and no crawl is fetched until it is replaced. Signing in then
+       lands on the restored view with its crawl, rather than the two fighting
+       over what is on screen. */
+    (fetch as any).mockResolvedValue(new Response("", { status: 200 })); // /health
+    window.localStorage.setItem("rankuno.ui", JSON.stringify({ view: "visualizer" }));
+
+    const { rerender } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("LOGIN_SCREEN")).toBeInTheDocument();
+    });
+    expect(init).not.toHaveBeenCalled();
+
+    useAuthStore.setState({ token: "t", orgId: "acme", expiresAt: "2099-01-01T00:00:00Z" });
+    rerender(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("DASHBOARD_SHELL")).toBeInTheDocument();
+    });
+    expect(init).toHaveBeenCalled();
+  });
+
   it("shows the dashboard for offline/fixture mode without requiring a session", async () => {
     (fetch as any).mockRejectedValueOnce(new TypeError("Failed to fetch")); // /health unreachable
 

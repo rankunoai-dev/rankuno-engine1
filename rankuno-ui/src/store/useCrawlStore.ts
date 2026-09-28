@@ -152,6 +152,55 @@ interface CrawlState {
   cancel: (jobId: string) => Promise<void>;
 }
 
+const STORAGE_KEY = "rankuno.crawl";
+
+/**
+ * What is kept in `localStorage`: the id of the crawl on screen, and nothing else.
+ *
+ * Never the result. A crawl result is megabytes — the repo ships a 16 MB
+ * synthetic fixture and real ones reach that scale — so writing one here would
+ * risk the storage quota on every job switch and cost a JSON parse of the same
+ * size on every boot. The id is re-fetched through the adapter instead, down
+ * the same path the crawl picker already uses.
+ *
+ * No org id and no token: the session has its own storage in `useAuthStore`,
+ * and a second copy of identity is a second thing to get wrong at logout.
+ */
+interface StoredCrawl {
+  jobId: string;
+}
+
+/**
+ * The crawl a previous session had open, or `null`.
+ *
+ * Trusts nothing about the stored shape — an older build, a hand edit, or a
+ * write truncated by a quota error all read as "no stored crawl", which is the
+ * same state a first-ever visit is in.
+ */
+function readStoredJobId(): string | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredCrawl>;
+    return typeof parsed?.jobId === "string" && parsed.jobId ? parsed.jobId : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredJobId(jobId: string | null): void {
+  try {
+    if (jobId) {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ jobId } satisfies StoredCrawl));
+    } else {
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
+  } catch {
+    // Storage disabled or full. The crawl is still on screen for this session;
+    // only the restore on the next reload is lost.
+  }
+}
+
 /*
  * This store owns the *crawl*: which job is selected, its result, and the
  * lifecycle of starting a new one. Everything about how that result is
@@ -200,8 +249,35 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     try {
       const jobs = await adapter.listJobs();
       set({ jobs, status: "idle" });
-      const first = jobs[0];
-      if (first) await get().selectJob(first.id);
+
+      // Restoring the view alone would land the operator back on the visualizer
+      // reading "No crawl loaded", which is the same complaint in a different
+      // place. The crawl comes back with it.
+      //
+      // Checked against the list rather than fetched blind: a job that was
+      // deleted, that belongs to another org, or that was only ever on another
+      // machine is simply not in it, and asking for it anyway would spend a
+      // round trip to be told 404 and put a banner over a screen the operator
+      // did not choose. In fixture mode the same check is what makes a stored
+      // live-engine id a no-op instead of an error.
+      const stored = readStoredJobId();
+      // Holds the id only while it is still restorable, so the branch below
+      // narrows to a string instead of needing a cast.
+      const restored = stored !== null && jobs.some((job) => job.id === stored) ? stored : null;
+      if (stored !== null && restored === null) writeStoredJobId(null);
+
+      const target = restored ?? jobs[0]?.id;
+      if (!target) return;
+      await get().selectJob(target);
+
+      // A restored job that is in the list but will not load — still running,
+      // so it has no result yet, or its result was pruned from under it — lands
+      // on the ordinary empty state. An error banner about a crawl the operator
+      // never selected this session is not something they can act on, and it is
+      // the first thing they would see on opening the app.
+      if (restored !== null && get().status === "failed") {
+        set({ activeJobId: null, status: "idle", error: null, result: null });
+      }
     } catch (cause) {
       set({ status: "failed", error: describe(cause) });
     }
@@ -543,3 +619,15 @@ async function watchJob(
   await get().refreshJobs();
 }
 
+/*
+ * One writer for the restored job id, subscribed rather than called from each
+ * action.
+ *
+ * `selectJob`, `loadCheckpoint` and the failed-restore path in `init` all move
+ * `activeJobId`, and a future one would have to remember to persist. A
+ * subscription is the single place that cannot be forgotten, and it fires only
+ * when the id actually changes, so polling the job list costs no storage write.
+ */
+useCrawlStore.subscribe((state, previous) => {
+  if (state.activeJobId !== previous.activeJobId) writeStoredJobId(state.activeJobId);
+});

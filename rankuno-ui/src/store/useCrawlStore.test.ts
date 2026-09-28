@@ -151,3 +151,177 @@ describe("selectJob and the cross-check", () => {
     expect(useCrawlStore.getState().reconciliation).toBeNull();
   });
 });
+
+/**
+ * Restoring the crawl the operator was reading, across a reload.
+ *
+ * The reported bug was "reloading is not persisting page UI" — the tab came
+ * back on the Launch chooser with nothing loaded. `useUiStore` restores the
+ * view; this half restores what was on it, because a visualizer restored to
+ * "No crawl loaded" is the same complaint one screen along.
+ *
+ * Only the id is stored, never the result: results reach the size of the 16 MB
+ * synthetic fixture, and `localStorage` is neither large enough nor fast enough
+ * for that.
+ */
+describe("init — restoring the crawl across a reload", () => {
+  const STORAGE_KEY = "rankuno.crawl";
+  const result = crawl();
+
+  /** Two finished crawls, the restorable one deliberately not first. */
+  const JOBS = [
+    { id: "job-newest", label: "newest.com", status: "succeeded" },
+    { id: "job-older", label: "older.com", status: "succeeded" },
+  ];
+
+  function restoring(
+    getResult: CrawlDataAdapter["getResult"],
+    jobs: unknown[] = JOBS,
+  ): CrawlDataAdapter {
+    return {
+      listJobs: vi.fn().mockResolvedValue(jobs),
+      getResult,
+      getProgress: vi.fn(),
+    } as unknown as CrawlDataAdapter;
+  }
+
+  function stored(): unknown {
+    return JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "null");
+  }
+
+  beforeEach(() => {
+    useCrawlStore.setState({
+      adapter: null,
+      jobs: [],
+      activeJobId: null,
+      result: null,
+      reconciliation: null,
+      status: "idle",
+      error: null,
+    });
+    // After the reset, not before: clearing `activeJobId` is itself a change
+    // the store persists, so a clear that ran first would be undone by it.
+    window.localStorage.clear();
+  });
+
+  it("writes the job id whenever the crawl on screen changes", async () => {
+    useCrawlStore.setState({ adapter: restoring(vi.fn().mockResolvedValue(result)) });
+
+    await useCrawlStore.getState().selectJob("job-older");
+
+    expect(stored()).toEqual({ jobId: "job-older" });
+  });
+
+  it("reopens the crawl the last session was reading, not the newest one", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ jobId: "job-older" }));
+    const getResult = vi.fn().mockResolvedValue(result);
+
+    await useCrawlStore.getState().init(restoring(getResult));
+
+    expect(getResult).toHaveBeenCalledWith("job-older");
+    expect(getResult).not.toHaveBeenCalledWith("job-newest");
+    expect(useCrawlStore.getState().activeJobId).toBe("job-older");
+    expect(useCrawlStore.getState().result).toBe(result);
+    expect(useCrawlStore.getState().status).toBe("succeeded");
+    expect(useCrawlStore.getState().error).toBeNull();
+  });
+
+  it("opens the newest crawl on a first-ever visit, as it always did", async () => {
+    const getResult = vi.fn().mockResolvedValue(result);
+
+    await useCrawlStore.getState().init(restoring(getResult));
+
+    expect(getResult).toHaveBeenCalledWith("job-newest");
+    expect(useCrawlStore.getState().activeJobId).toBe("job-newest");
+  });
+
+  it("does not ask for a stored job the engine no longer lists", async () => {
+    /* Deleted, expired, belonging to another org, or stored on a machine that
+       talks to a different engine. The list already answers that, so the 404
+       round trip and the banner it would raise never happen. */
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ jobId: "job-deleted" }));
+    const getResult = vi.fn().mockResolvedValue(result);
+
+    await useCrawlStore.getState().init(restoring(getResult));
+
+    expect(getResult).not.toHaveBeenCalledWith("job-deleted");
+    expect(useCrawlStore.getState().activeJobId).toBe("job-newest");
+    expect(useCrawlStore.getState().error).toBeNull();
+    expect(stored()).toEqual({ jobId: "job-newest" });
+  });
+
+  it("lands on the empty state, with no banner, when there is nothing to fall back to", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ jobId: "job-deleted" }));
+    const getResult = vi.fn();
+
+    await useCrawlStore.getState().init(restoring(getResult, []));
+
+    expect(getResult).not.toHaveBeenCalled();
+    expect(useCrawlStore.getState().activeJobId).toBeNull();
+    expect(useCrawlStore.getState().result).toBeNull();
+    expect(useCrawlStore.getState().status).toBe("idle");
+    expect(useCrawlStore.getState().error).toBeNull();
+    // The unusable id is dropped rather than retried on every future boot.
+    expect(stored()).toBeNull();
+  });
+
+  it("lands on the empty state when the restored job is listed but will not load", async () => {
+    /* Still running, so it has no result yet, or its result was pruned from
+       under it. An error banner naming a crawl the operator never selected
+       this session is the first thing they would see, and there is nothing
+       they can do about it. */
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ jobId: "job-older" }));
+    const getResult = vi.fn().mockRejectedValue(new Error("404 job not found"));
+
+    await useCrawlStore.getState().init(restoring(getResult));
+
+    expect(getResult).toHaveBeenCalledWith("job-older");
+    expect(useCrawlStore.getState().activeJobId).toBeNull();
+    expect(useCrawlStore.getState().result).toBeNull();
+    expect(useCrawlStore.getState().status).toBe("idle");
+    expect(useCrawlStore.getState().error).toBeNull();
+    expect(stored()).toBeNull();
+  });
+
+  it("still reports a genuine failure of the job the operator picked", async () => {
+    /* The quiet landing above is for the restore only. A crawl chosen by hand
+       that fails to load must still say so. */
+    useCrawlStore.setState({ adapter: restoring(vi.fn().mockRejectedValue(new Error("boom"))) });
+
+    await useCrawlStore.getState().selectJob("job-older");
+
+    expect(useCrawlStore.getState().status).toBe("failed");
+    expect(useCrawlStore.getState().error).toBe("boom");
+  });
+
+  it("boots normally when the stored value is corrupt", async () => {
+    window.localStorage.setItem(STORAGE_KEY, "{not json at all");
+    const getResult = vi.fn().mockResolvedValue(result);
+
+    await expect(useCrawlStore.getState().init(restoring(getResult))).resolves.toBeUndefined();
+
+    expect(useCrawlStore.getState().activeJobId).toBe("job-newest");
+    expect(useCrawlStore.getState().error).toBeNull();
+  });
+
+  it("ignores a stored value of the wrong shape", async () => {
+    /* An older build, a hand edit, or a write truncated by a quota error.
+       Nothing out of storage is trusted to be the shape it was written in. */
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ jobId: 42 }));
+    const getResult = vi.fn().mockResolvedValue(result);
+
+    await useCrawlStore.getState().init(restoring(getResult));
+
+    expect(useCrawlStore.getState().activeJobId).toBe("job-newest");
+  });
+
+  it("restores nothing but an id — no result is ever written to storage", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ jobId: "job-older" }));
+
+    await useCrawlStore.getState().init(restoring(vi.fn().mockResolvedValue(result)));
+
+    expect(Object.keys(stored() as object)).toEqual(["jobId"]);
+    // The 16 MB argument, pinned: nothing in storage may grow with the crawl.
+    expect((window.localStorage.getItem(STORAGE_KEY) ?? "").length).toBeLessThan(200);
+  });
+});
