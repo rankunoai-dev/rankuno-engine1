@@ -375,3 +375,13 @@ export interface PageClassificationOutput {
   nav_coverage: NavCoverageReport;
   gsc: GscEnrichmentReport | null;
 }
+
+/** Integers only: nothing here identifies a job, a URL, or another org. */
+export interface CrawlActivityView {
+  /** The caller's org's Rankuno-engine jobs currently queued or running. */
+  rankuno_active: number;
+  /** Server-wide maximum concurrent Rankuno crawls (what try_reserve enforces). */
+  rankuno_cap: number;
+  /** The caller's org's Screaming Frog worker jobs currently queued or dispatched. */
+  sf_active: number;
+}
