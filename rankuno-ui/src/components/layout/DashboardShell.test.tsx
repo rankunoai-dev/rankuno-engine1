@@ -103,3 +103,61 @@ describe("DashboardShell — entering the engine from Launch", () => {
     expect(railItems()).toEqual(["Launch"]);
   });
 });
+
+/**
+ * What the visualizer says while a crawl is on its way.
+ *
+ * Added with the reload restore: a restored crawl is re-fetched by id on boot,
+ * and until it lands `result` is `null` — which used to render "No crawl
+ * loaded". Showing the empty state during a fetch is both wrong and exactly the
+ * complaint the restore was written to answer, one screen along.
+ */
+describe("DashboardShell — the visualizer while a crawl is loading", () => {
+  beforeEach(() => {
+    useUiStore.setState({ view: "visualizer", lastEngineView: "visualizer" });
+    useCrawlStore.setState({
+      adapter: null,
+      result: null,
+      jobs: [],
+      activeJobId: null,
+      liveJobs: {},
+      status: "idle",
+      error: null,
+    });
+    useAuthStore.setState({
+      token: null,
+      orgId: null,
+      expiresAt: null,
+      loggingIn: false,
+      loginError: null,
+    });
+  });
+
+  it("announces the wait instead of claiming nothing is loaded", () => {
+    useCrawlStore.setState({ status: "running", activeJobId: "job-older" });
+
+    render(<DashboardShell />);
+
+    const loading = screen.getByText("Loading the crawl…");
+    // Live-announced, so the wait reaches a screen reader and is not carried
+    // by the spinner graphic alone.
+    expect(loading.closest('[role="status"]')).not.toBeNull();
+    expect(screen.queryByText(/Select one above/)).not.toBeInTheDocument();
+  });
+
+  it("resolves to the failure message rather than spinning for ever", () => {
+    useCrawlStore.setState({ status: "failed" });
+
+    render(<DashboardShell />);
+
+    expect(screen.queryByText("Loading the crawl…")).not.toBeInTheDocument();
+    expect(screen.getByText(/This crawl failed and produced no result/)).toBeInTheDocument();
+  });
+
+  it("still says nothing is loaded when nothing is on its way", () => {
+    render(<DashboardShell />);
+
+    expect(screen.queryByText("Loading the crawl…")).not.toBeInTheDocument();
+    expect(screen.getByText(/No crawl loaded\. Select one above/)).toBeInTheDocument();
+  });
+});

@@ -1,4 +1,4 @@
-import { Alert, Button } from "antd";
+import { Alert, Button, Spin } from "antd";
 import { useEffect, useMemo } from "react";
 import { buildDashModel, EMPTY_MODEL } from "../../lib/dashboardModel";
 import { gscWarningFor, gscWarningTone } from "../../lib/gscEnrichment";
@@ -294,6 +294,16 @@ export function DashboardShell(): JSX.Element {
                   </section>
                 </div>
               </>
+            ) : status === "queued" || status === "running" ? (
+              /* A fetch is in flight — the job list on boot, a crawl restored
+                 from the last session, or a job just picked. Saying "No crawl
+                 loaded" while one is on its way is both wrong and the exact
+                 thing a restore was added to stop showing. Announced politely
+                 rather than drawn only as a spinner, so the wait is readable
+                 without sight of it. */
+              <div className="rk-empty" role="status" aria-live="polite">
+                <Spin size="small" /> <span>Loading the crawl…</span>
+              </div>
             ) : (
               <div className="rk-empty">
                 {status === "failed"

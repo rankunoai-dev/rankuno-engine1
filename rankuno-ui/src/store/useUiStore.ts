@@ -1,13 +1,26 @@
 import { create } from "zustand";
 
+/**
+ * Every rail destination, as a value and not a type alone.
+ *
+ * `RailView` is derived from this tuple so the runtime list and the compile-time
+ * union cannot drift. Restoring the view from `localStorage` has to check a
+ * string of unknown provenance against the real set of destinations, and a
+ * hand-maintained second copy of that set is precisely what goes stale when a
+ * view is renamed or retired — leaving the restore trusting a name nothing
+ * renders any more.
+ */
+export const RAIL_VIEWS = [
+  "launch",
+  "visualizer",
+  "jobs",
+  "audit",
+  "gsc-accounts",
+  "screaming-frog",
+] as const;
+
 /** Which rail destination is on screen. */
-export type RailView =
-  | "launch"
-  | "visualizer"
-  | "jobs"
-  | "audit"
-  | "gsc-accounts"
-  | "screaming-frog";
+export type RailView = (typeof RAIL_VIEWS)[number];
 
 /**
  * Which product the operator is working in.
@@ -44,6 +57,54 @@ export function modeOfView(view: RailView): ProductMode | null {
   return view === "screaming-frog" ? "screaming-frog" : "engine";
 }
 
+const STORAGE_KEY = "rankuno.ui";
+
+/** What is kept in `localStorage`. No identity, no credentials — one view name. */
+interface StoredUi {
+  view: RailView;
+}
+
+/** Whether a value out of storage names a destination this build still has. */
+function isRailView(value: unknown): value is RailView {
+  return typeof value === "string" && (RAIL_VIEWS as readonly string[]).includes(value);
+}
+
+/** The engine view to return to, for a restored view that is one. */
+function engineViewOf(view: RailView | null): EngineView | null {
+  if (view === null || view === "launch" || view === "screaming-frog") return null;
+  return view;
+}
+
+/**
+ * The view a previous session left open, or `null`.
+ *
+ * Nothing that comes out of `localStorage` is trusted: it can be from an older
+ * build that had a view this one does not, hand-edited, truncated by a quota
+ * error mid-write, or not JSON at all. Anything that is not a currently
+ * rendered destination reads as no stored view, and the app opens on the
+ * chooser exactly as a first-ever visit does.
+ */
+function readStoredView(): RailView | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredUi>;
+    return isRailView(parsed?.view) ? parsed.view : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredView(view: RailView): void {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ view } satisfies StoredUi));
+  } catch {
+    // Private mode, a full quota, or storage disabled outright. The session
+    // still navigates; it only fails to survive a reload, which is a smaller
+    // loss than a rail button that throws.
+  }
+}
+
 /*
  * Rail navigation, kept out of the other two stores on purpose.
  *
@@ -56,9 +117,13 @@ export function modeOfView(view: RailView): ProductMode | null {
  * deep linked to. A router would add a dependency and a build step to express
  * an enum.
  *
- * Not persisted: a reload always opens on Launch. If persistence is added,
- * persist `view` alone — every piece of product chrome derives from it through
- * `modeOfView`, so there is no second field a restore could contradict.
+ * Persisted, and `view` alone. A reload used to drop the operator back on the
+ * Launch chooser from wherever they were, which reads as the application
+ * forgetting what it was doing. Every piece of product chrome derives from the
+ * view through `modeOfView`, so there is no second field a restore could
+ * contradict — which is the same reason the deleted `lastMode` is not coming
+ * back. `lastEngineView` is not stored either: it is re-derived from the
+ * restored view, so it can never disagree with it across a reload.
  *
  * `launch` is the opening view rather than `visualizer`. A session starts with
  * nothing loaded, and the visualizer's answer to that was one line of grey text
@@ -73,9 +138,14 @@ export function modeOfView(view: RailView): ProductMode | null {
  * itself, so a rail that shows nothing strands nobody — including in fixture
  * mode, where no crawl can be started but the bundled results still open.
  */
+const restoredView = readStoredView();
+
 export const useUiStore = create<UiState>((set) => ({
-  view: "launch",
-  lastEngineView: "visualizer",
+  view: restoredView ?? "launch",
+  // Derived from the restored view rather than stored beside it, so "back to
+  // the engine" after a reload lands on the engine view that is actually on
+  // screen instead of a default that contradicts it.
+  lastEngineView: engineViewOf(restoredView) ?? "visualizer",
   setView: (view) =>
     set(() => {
       // Only an engine view is remembered: "back to the engine" must never
@@ -88,3 +158,15 @@ export const useUiStore = create<UiState>((set) => ({
       view: mode === "engine" ? state.lastEngineView : "screaming-frog",
     })),
 }));
+
+/*
+ * One writer, subscribed rather than called from each action.
+ *
+ * `setView` and `enterMode` are not the only ways the view moves — tests set it
+ * directly, and any action added later would have to remember to persist. A
+ * subscription is the one place that cannot be forgotten, and it writes only on
+ * an actual change, so an unrelated store write costs no storage round trip.
+ */
+useUiStore.subscribe((state, previous) => {
+  if (state.view !== previous.view) writeStoredView(state.view);
+});

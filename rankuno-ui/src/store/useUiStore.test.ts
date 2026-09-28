@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { modeOfView, useUiStore, type RailView } from "./useUiStore";
 
 /**
@@ -82,5 +82,145 @@ describe("useUiStore", () => {
     useUiStore.getState().setView("launch");
 
     expect(useUiStore.getState().lastEngineView).toBe("gsc-accounts");
+  });
+});
+
+/**
+ * Restoring the view across a reload.
+ *
+ * The reported bug: a reload dropped the operator back on the Launch chooser
+ * from wherever they were. The store is read once at module load, so each test
+ * here plants storage, resets the module registry and imports a fresh copy —
+ * the statically imported store above is a different instance and is not used.
+ *
+ * Every case that is not a view this build renders must come out as the
+ * chooser, because a rail derived from a name nothing renders shows a
+ * product's tabs over a broken page.
+ */
+describe("useUiStore — restoring the view", () => {
+  const STORAGE_KEY = "rankuno.ui";
+
+  async function boot(): Promise<typeof useUiStore> {
+    vi.resetModules();
+    const module = await import("./useUiStore");
+    return module.useUiStore;
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("opens on the chooser on a first-ever visit", async () => {
+    const store = await boot();
+
+    expect(store.getState().view).toBe("launch");
+    expect(store.getState().lastEngineView).toBe("visualizer");
+  });
+
+  it("reopens the view the last session left open", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ view: "audit" }));
+
+    const store = await boot();
+
+    expect(store.getState().view).toBe("audit");
+    // Re-derived, never stored: "back to the engine" must not contradict the
+    // engine view already on screen.
+    expect(store.getState().lastEngineView).toBe("audit");
+  });
+
+  it("reopens the other product's view without inventing an engine view", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ view: "screaming-frog" }));
+
+    const store = await boot();
+
+    expect(store.getState().view).toBe("screaming-frog");
+    expect(modeOfView(store.getState().view)).toBe("screaming-frog");
+    expect(store.getState().lastEngineView).toBe("visualizer");
+  });
+
+  it("falls back to the chooser for a view this build no longer has", async () => {
+    /* A name from an older build, or a hand edit. The rail is derived from the
+       view, so an unknown name would render a product's tabs beside a page
+       that does not exist. */
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ view: "screaming-frog-legacy" }));
+
+    const store = await boot();
+
+    expect(store.getState().view).toBe("launch");
+  });
+
+  it("falls back to the chooser for a value of the wrong type", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ view: 7 }));
+
+    const store = await boot();
+
+    expect(store.getState().view).toBe("launch");
+  });
+
+  it("boots at all when storage is corrupt", async () => {
+    window.localStorage.setItem(STORAGE_KEY, "{not json at all");
+
+    const store = await boot();
+
+    expect(store.getState().view).toBe("launch");
+  });
+
+  it("boots when the stored payload is not an object", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify("visualizer"));
+
+    const store = await boot();
+
+    expect(store.getState().view).toBe("launch");
+  });
+
+  it("writes the view on every navigation, however it was made", async () => {
+    const store = await boot();
+
+    store.getState().enterMode("engine");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "null")).toEqual({
+      view: "visualizer",
+    });
+
+    store.getState().setView("gsc-accounts");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "null")).toEqual({
+      view: "gsc-accounts",
+    });
+  });
+
+  it("stores the view and nothing else", async () => {
+    /* No product mode, and nothing identifying. `lastMode` was deleted because
+       a mode stored apart from the view could contradict it; the session token
+       has its own storage and is not duplicated here. */
+    const store = await boot();
+    store.getState().setView("jobs");
+
+    const raw = window.localStorage.getItem(STORAGE_KEY) ?? "null";
+    expect(Object.keys(JSON.parse(raw) as object)).toEqual(["view"]);
+    expect(raw).not.toMatch(/token|org|mode/i);
+  });
+
+  it("survives storage being unavailable entirely", async () => {
+    /* Private mode, or a full quota. Failing to remember the view is a far
+       smaller loss than a rail button that throws. */
+    const getItem = vi
+      .spyOn(Storage.prototype, "getItem")
+      .mockImplementation(() => {
+        throw new Error("storage disabled");
+      });
+    const setItem = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new Error("storage disabled");
+      });
+
+    try {
+      const store = await boot();
+      expect(store.getState().view).toBe("launch");
+      expect(() => store.getState().setView("audit")).not.toThrow();
+      expect(store.getState().view).toBe("audit");
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+    }
   });
 });
