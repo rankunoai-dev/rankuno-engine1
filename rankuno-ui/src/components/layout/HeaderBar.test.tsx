@@ -41,7 +41,9 @@ function mount(result = crawl({ base_url: "https://www.gep.com/" })) {
 
 beforeEach(() => {
   useCrawlStore.setState({ result: null, jobs: [], activeJobId: null, liveJobs: {} });
-  useUiStore.setState({ view: "launch", lastMode: "engine", lastEngineView: "visualizer" });
+  // An engine view, not `launch`: the engine controls are keyed on the view, and
+  // `launch` belongs to neither product.
+  useUiStore.setState({ view: "visualizer", lastMode: "engine", lastEngineView: "visualizer" });
 });
 
 describe("HeaderBar", () => {
@@ -108,6 +110,27 @@ describe("HeaderBar", () => {
     useCrawlStore.setState({ adapter: null });
     mount();
     expect(screen.queryByText("New crawl")).not.toBeInTheDocument();
+  });
+
+  it("drops every engine control on the launch chooser", () => {
+    /* Launch belongs to neither product. It used to inherit the last mode, so
+       the engine header — including "New crawl" — rendered over the chooser. */
+    useCrawlStore.setState({
+      adapter: {
+        listJobs: vi.fn(),
+        getResult: vi.fn(),
+        getProgress: vi.fn(),
+        startJob: vi.fn(),
+      } as never,
+    });
+    useUiStore.setState({ view: "launch", lastMode: "engine" });
+    mount();
+
+    expect(screen.queryByText("New crawl")).not.toBeInTheDocument();
+    expect(screen.queryByText("PDF")).not.toBeInTheDocument();
+    expect(screen.queryByText("Navigation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No crawl loaded/)).not.toBeInTheDocument();
   });
 
   it("drops every engine control in Screaming Frog mode", () => {
