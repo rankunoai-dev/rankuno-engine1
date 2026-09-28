@@ -1,4 +1,4 @@
-"""Tests for response_codes masterfile service."""
+"""Row-count and header assertions for response_codes masterfile service."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from src.modules.seo.deliverables.masterfile_response_codes import ResponseCodesService
+from tests.modules.seo.deliverables.conftest import detail_table, first_cell, sheet_names
 
 __all__ = [
     "test_response_codes_empty_export",
@@ -25,10 +26,11 @@ def sf_export_dir() -> Path:
 def test_response_codes_empty_export(sf_export_dir: Path) -> None:
     """Response codes service with no CSV files should produce empty workbook."""
     service = ResponseCodesService("test-job", sf_export_dir)
-    result = service.generate()
+    payload = service.generate()
 
-    assert isinstance(result, bytes)
-    assert len(result) > 0
+    assert detail_table(payload) == ((), [])
+    assert first_cell(payload) == "No response code data found"
+    assert sheet_names(payload)[0] == "Response Codes"
 
 
 def test_response_codes_metadata() -> None:
@@ -57,7 +59,8 @@ def test_response_codes_with_response_csv(sf_export_dir: Path) -> None:
     response_csv.write_text('"Address","Status Code"\n"https://example.com/","200"\n')
 
     service = ResponseCodesService("test-job", sf_export_dir)
-    result = service.generate()
+    payload = service.generate()
 
-    assert isinstance(result, bytes)
-    assert len(result) > 0
+    assert detail_table(payload) == ((), [])
+    assert first_cell(payload) == "No response code data found"
+    assert sheet_names(payload)[0] == "Response Codes"

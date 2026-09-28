@@ -1,15 +1,13 @@
 """Response Codes masterfile service (HTTP status code issues).
 
-Reads response_codes_*.csv files and generates a single-sheet XLSX showing:
+Reads its catalogue sources and generates a single-sheet XLSX showing:
 1. Summary: Status code groups (2xx, 3xx, 4xx, 5xx) with counts
 2. Theme Wise: Pivot by Theme 1
 3. Detailed Data: One row per affected URL, sorted by impressions
 
-Source CSVs:
-- response_codes_internal_success_(2xx).csv
-- response_codes_internal_redirect_(3xx).csv
-- response_codes_internal_client_error_(4xx).csv
-- response_codes_internal_server_error_(5xx).csv
+Source CSVs: `SOURCE_FILES`, derived from IssueCategory.RESPONSE_CODES_INTERNAL through
+`contracts/sources.py`. Never written out here - a hand-kept second
+copy of that list is what build-log 0116 found wrong in this file.
 """
 
 from __future__ import annotations
@@ -21,6 +19,8 @@ import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
+from src.modules.seo.contracts.issue_ids import IssueCategory
+from src.modules.seo.contracts.sources import sources_for_categories
 from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
@@ -39,16 +39,16 @@ _STATUS_GROUPS: Final[dict[str, tuple[str, ...]]] = {
     "5xx (Server Error)": ("500", "501", "502", "503", "504", "505"),
 }
 
-_RESPONSE_CODE_FILES: Final[list[str]] = [
-    "response_codes_internal_success_(2xx).csv",
-    "response_codes_internal_redirect_(3xx).csv",
-    "response_codes_internal_client_error_(4xx).csv",
-    "response_codes_internal_server_error_(5xx).csv",
-]
-
 
 class ResponseCodesService(MasterfileService):
     """Generate response codes masterfile."""
+
+    SOURCE_FILES = sources_for_categories(IssueCategory.RESPONSE_CODES_INTERNAL)
+
+    INDEXABLE_ONLY = False
+    """A 4xx, 5xx or redirected URL is Non-Indexable. build-log 0104 §223
+    already carved this service out of the indexable filter; the code
+    carried the comment and applied the filter anyway."""
 
     @property
     def metadata(self) -> MasterfileMetadata:
@@ -61,17 +61,7 @@ class ResponseCodesService(MasterfileService):
 
     def _read_all_response_codes(self) -> pd.DataFrame | None:
         """Read and combine all response code CSVs."""
-        dfs = []
-        for filename in _RESPONSE_CODE_FILES:
-            df = self._read_csv(filename)
-            if df is not None and not df.empty:
-                dfs.append(df)
-
-        if not dfs:
-            return None
-
-        combined = pd.concat(dfs, ignore_index=True)
-        return combined if not combined.empty else None
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate response codes XLSX."""
@@ -110,13 +100,10 @@ class ResponseCodesService(MasterfileService):
 
                 # Enrich
                 internal_data = internal_map.get(url, {}) if internal_map else {}
-                gsc_data = gsc_map.get(url, {}) if gsc_map else {}
+                gsc_data = self._gsc_lookup(gsc_map, url)
 
-                # Only include indexable=True, status=200, content_type=HTML URLs
-                # (but we're showing status codes, so include all status codes here)
-                # Filter: indexable=True, content_type=HTML
                 indexability = internal_data.get("indexability")
-                if indexability != "Indexable":
+                if not self._is_reportable(indexability):
                     continue
 
                 urls_with_status.append(

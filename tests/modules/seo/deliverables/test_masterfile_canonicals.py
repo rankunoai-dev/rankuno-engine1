@@ -1,4 +1,4 @@
-"""Tests for canonicals masterfile service."""
+"""Row-count and header assertions for canonicals masterfile service."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from src.modules.seo.deliverables.masterfile_canonicals import CanonicalService
+from tests.modules.seo.deliverables.conftest import detail_table, first_cell, sheet_names
 
 
 @pytest.fixture
@@ -19,10 +20,11 @@ def sf_export_dir() -> Path:
 def test_canonicals_empty(sf_export_dir: Path) -> None:
     """Canonical service with no CSV files should produce empty workbook."""
     service = CanonicalService("test-job", sf_export_dir)
-    result = service.generate()
+    payload = service.generate()
 
-    assert isinstance(result, bytes)
-    assert len(result) > 0
+    assert detail_table(payload) == ((), [])
+    assert first_cell(payload) == "No canonical tag data found"
+    assert sheet_names(payload)[0] == "Canonicals"
 
 
 def test_canonicals_metadata(sf_export_dir: Path) -> None:

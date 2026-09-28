@@ -1,4 +1,4 @@
-"""Tests for page_titles masterfile service."""
+"""Row-count and header assertions for page_titles masterfile service."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from src.modules.seo.deliverables.masterfile_page_titles import PageTitlesService
+from tests.modules.seo.deliverables.conftest import detail_table, first_cell, sheet_names
 
 __all__ = ["test_page_titles_empty_export", "test_page_titles_metadata"]
 
@@ -21,10 +22,11 @@ def sf_export_dir() -> Path:
 def test_page_titles_empty_export(sf_export_dir: Path) -> None:
     """Page titles service with no CSV files should produce empty workbook."""
     service = PageTitlesService("test-job", sf_export_dir)
-    result = service.generate()
+    payload = service.generate()
 
-    assert isinstance(result, bytes)
-    assert len(result) > 0
+    assert detail_table(payload) == ((), [])
+    assert first_cell(payload) == "No page title data found"
+    assert sheet_names(payload)[0] == "Page Titles"
 
 
 def test_page_titles_metadata() -> None:

@@ -1,4 +1,4 @@
-"""Tests for meta_description masterfile service."""
+"""Row-count and header assertions for meta_description masterfile service."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from src.modules.seo.deliverables.masterfile_base import NOT_MEASURED
 from src.modules.seo.deliverables.masterfile_meta_description import MetaDescriptionService
+from tests.modules.seo.deliverables.conftest import detail_table, first_cell, sheet_names
 
 __all__ = ["test_meta_description_empty", "test_meta_description_metadata"]
 
@@ -21,10 +23,11 @@ def sf_export_dir() -> Path:
 def test_meta_description_empty(sf_export_dir: Path) -> None:
     """Meta description service with no CSV files should produce empty workbook."""
     service = MetaDescriptionService("test-job", sf_export_dir)
-    result = service.generate()
+    payload = service.generate()
 
-    assert isinstance(result, bytes)
-    assert len(result) > 0
+    assert detail_table(payload) == ((), [])
+    assert first_cell(payload) == "No meta description data found"
+    assert sheet_names(payload)[0] == "Meta Descriptions"
 
 
 def test_meta_description_metadata(sf_export_dir: Path) -> None:
@@ -39,47 +42,45 @@ def test_meta_description_metadata(sf_export_dir: Path) -> None:
 
 
 def test_meta_description_with_data(sf_export_dir: Path) -> None:
-    """Meta description service with data should generate workbook."""
-    # Create test CSVs
-    internal_csv = sf_export_dir / "internal_all.csv"
-    internal_csv.write_text(
+    """Two real exports, one enriched URL, and a URL absent from the spine.
+
+    `meta_description_over_985_pixels.csv` replaces the
+    `meta_description_too_long.csv` this test used to write: that name is not
+    a Screaming Frog export and never reached the service (build-log 0116).
+    """
+    (sf_export_dir / "internal_all.csv").write_text(
         '"Address","Status Code","Indexability","Inlinks"\n'
         '"https://example.com/","200","Indexable","5"\n'
         '"https://example.com/old/","404","Non-Indexable","2"\n'
     )
+    (sf_export_dir / "search_console_all.csv").write_text(
+        '"Address","Impressions","Clicks"\n"https://example.com/","100","10"\n'
+    )
+    (sf_export_dir / "meta_description_missing.csv").write_text(
+        '"Address"\n"https://example.com/"\n'
+    )
+    (sf_export_dir / "meta_description_over_985_pixels.csv").write_text(
+        '"Address"\n"https://example.com/product"\n'
+    )
 
-    gsc_csv = sf_export_dir / "search_console_all.csv"
-    gsc_csv.write_text('"Address","Impressions","Clicks"\n"https://example.com/","100","10"\n')
+    header, body = detail_table(MetaDescriptionService("test-job", sf_export_dir).generate())
 
-    meta_csv = sf_export_dir / "meta_description_missing.csv"
-    meta_csv.write_text('"Address"\n"https://example.com/"\n')
-
-    meta_csv2 = sf_export_dir / "meta_description_too_long.csv"
-    meta_csv2.write_text('"Address"\n"https://example.com/product"\n')
-
-    service = MetaDescriptionService("test-job", sf_export_dir)
-    result = service.generate()
-
-    assert isinstance(result, bytes)
-    assert len(result) > 0
+    assert header == ("URL", "Inlinks", "Impressions", "Clicks")
+    assert body == [("https://example.com/", 5, 100, 10)]
 
 
 def test_meta_description_with_non_indexable(sf_export_dir: Path) -> None:
-    """Meta description service filters non-indexable pages."""
-    internal_csv = sf_export_dir / "internal_all.csv"
-    internal_csv.write_text(
+    """A Non-Indexable page is dropped; this service declares INDEXABLE_ONLY."""
+    (sf_export_dir / "internal_all.csv").write_text(
         '"Address","Status Code","Indexability","Inlinks"\n'
         '"https://example.com/indexable","200","Indexable","5"\n'
         '"https://example.com/non-indexable","200","Non-Indexable","2"\n'
     )
-
-    meta_csv = sf_export_dir / "meta_description_missing.csv"
-    meta_csv.write_text(
+    (sf_export_dir / "meta_description_missing.csv").write_text(
         '"Address"\n"https://example.com/indexable"\n"https://example.com/non-indexable"\n'
     )
 
-    service = MetaDescriptionService("test-job", sf_export_dir)
-    result = service.generate()
+    header, body = detail_table(MetaDescriptionService("test-job", sf_export_dir).generate())
 
-    assert isinstance(result, bytes)
-    assert len(result) > 0
+    assert header == ("URL", "Inlinks", "Impressions", "Clicks")
+    assert body == [("https://example.com/indexable", 5, NOT_MEASURED, NOT_MEASURED)]

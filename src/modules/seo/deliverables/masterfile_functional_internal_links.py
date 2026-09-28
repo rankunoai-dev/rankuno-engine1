@@ -1,23 +1,32 @@
 """Functional Internal Links masterfile service (internal links that work).
 
-Reads functional_internal_links.csv file and generates a single-sheet XLSX showing:
+Renders a single-sheet XLSX showing:
 1. Summary: Functional link counts
 2. Detailed Data: One row per page with functional internal links, sorted by impressions
 
-Source CSV:
-- functional_internal_links.csv
+Source CSVs: none. `INTERNAL_LINKS_FUNCTIONAL_ANALYSIS` carries no `sf_sources` in
+`ISSUE_CATALOGUE`, so `SOURCE_FILES` stays empty and every build
+renders "Not measured by this crawl" rather than an empty issue list.
+
+RAE built this from `internal_success_(2xx)_inlinks.csv`. That file is
+real - it appears in all 45 populated Screaming Frog 19.4 export folders
+checked - but `Response Codes:Internal:Internal Success (2xx) Inlinks` is
+not in `export_manifest.BULK_EXPORT` and the filename is not in
+`ALLOWED_BUNDLE_FILENAMES`, so it can never reach a build. Adding it
+widens a security-reviewed allow-list (ADR 0018) and is Phase 4.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
 from src.modules.seo.deliverables.masterfile_base import (
+    NOT_MEASURED,
     MasterfileMetadata,
     MasterfileService,
     gc,
@@ -27,8 +36,6 @@ from src.modules.seo.deliverables.masterfile_base import (
 __all__ = ["FunctionalInternalLinksService"]
 
 _logger = get_logger(__name__)
-
-_FUNCTIONAL_LINKS_FILE: Final[str] = "functional_internal_links.csv"
 
 
 class FunctionalInternalLinksService(MasterfileService):
@@ -44,8 +51,14 @@ class FunctionalInternalLinksService(MasterfileService):
         )
 
     def _read_functional_links(self) -> pd.DataFrame | None:
-        """Read functional internal links CSV."""
-        return self._read_csv(_FUNCTIONAL_LINKS_FILE)
+        """Functional internal links, when an export can supply them.
+
+        `SOURCE_FILES` is empty today, so this is always `None` and the
+        workbook renders "not measured". Routed through the generic
+        reader rather than hardcoding `None`, so the day a catalogue row
+        gains an `sf_sources` this service starts working unchanged.
+        """
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate functional internal links XLSX."""
@@ -59,7 +72,7 @@ class FunctionalInternalLinksService(MasterfileService):
             ws = wb.active
             if ws:
                 ws.title = "Functional Links"
-                ws.append(["No functional internal links data found"])
+                ws.append([NOT_MEASURED])
         else:
             try:
                 address_idx = gc(links_df.columns.tolist(), "Address")
@@ -81,7 +94,6 @@ class FunctionalInternalLinksService(MasterfileService):
                 internal_data = internal_map.get(url, {}) if internal_map else {}
                 gsc_data = gsc_map.get(url, {}) if gsc_map else {}
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
                 if indexability != "Indexable":
                     continue

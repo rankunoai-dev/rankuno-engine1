@@ -1,23 +1,30 @@
 """Custom Search GA4 GTM masterfile service (user-defined GA4/GTM metrics extraction).
 
-Reads custom_search_ga4_gtm.csv file and generates a single-sheet XLSX showing:
+Renders a single-sheet XLSX showing:
 1. Summary: Custom GA4/GTM metric extraction counts
 2. Detailed Data: One row per URL with metrics, sorted by impressions
 
-Source CSV:
-- custom_search_ga4_gtm.csv
+Source CSVs: none. `CUSTOM_SEARCH_GA4_TAGS / CUSTOM_SEARCH_GTM_TAGS` carries no `sf_sources` in
+`ISSUE_CATALOGUE`, so `SOURCE_FILES` stays empty and every build
+renders "Not measured by this crawl" rather than an empty issue list.
+
+RAE derived GA4 and GTM presence from `custom_extraction_all.csv`, the
+`Custom Extraction:All` tab. That tab is not in
+`export_manifest.EXPORT_TABS` and the filename is not allow-listed, so
+no bundle can carry it. Phase 4.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
 from src.modules.seo.deliverables.masterfile_base import (
+    NOT_MEASURED,
     MasterfileMetadata,
     MasterfileService,
     gc,
@@ -27,8 +34,6 @@ from src.modules.seo.deliverables.masterfile_base import (
 __all__ = ["CustomSearchGA4GTMService"]
 
 _logger = get_logger(__name__)
-
-_CUSTOM_SEARCH_GA4_GTM_FILE: Final[str] = "custom_search_ga4_gtm.csv"
 
 
 class CustomSearchGA4GTMService(MasterfileService):
@@ -44,8 +49,14 @@ class CustomSearchGA4GTMService(MasterfileService):
         )
 
     def _read_ga4_gtm(self) -> pd.DataFrame | None:
-        """Read GA4 GTM CSV."""
-        return self._read_csv(_CUSTOM_SEARCH_GA4_GTM_FILE)
+        """GA4/GTM tag presence, when an export can supply it.
+
+        `SOURCE_FILES` is empty today, so this is always `None` and the
+        workbook renders "not measured". Routed through the generic
+        reader rather than hardcoding `None`, so the day a catalogue row
+        gains an `sf_sources` this service starts working unchanged.
+        """
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate GA4 GTM XLSX."""
@@ -59,7 +70,7 @@ class CustomSearchGA4GTMService(MasterfileService):
             ws = wb.active
             if ws:
                 ws.title = "GA4 GTM"
-                ws.append(["No GA4/GTM data found"])
+                ws.append([NOT_MEASURED])
         else:
             try:
                 address_idx = gc(ga4_df.columns.tolist(), "Address")
@@ -81,7 +92,6 @@ class CustomSearchGA4GTMService(MasterfileService):
                 internal_data = internal_map.get(url, {}) if internal_map else {}
                 gsc_data = gsc_map.get(url, {}) if gsc_map else {}
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
                 if indexability != "Indexable":
                     continue

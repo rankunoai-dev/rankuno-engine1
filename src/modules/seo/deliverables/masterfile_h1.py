@@ -1,24 +1,25 @@
 """H1 tag masterfile service (H1 tag analysis).
 
-Reads h1_*.csv files and generates a single-sheet XLSX showing:
+Reads its catalogue sources and generates a single-sheet XLSX showing:
 1. Summary: H1 issue types with counts
 2. Detailed Data: One row per affected URL, sorted by impressions
 
-Source CSVs:
-- h1_missing.csv
-- h1_multiple.csv
-- h1_empty.csv
+Source CSVs: `SOURCE_FILES`, derived from IssueCategory.H1 through
+`contracts/sources.py`. Never written out here - a hand-kept second
+copy of that list is what build-log 0116 found wrong in this file.
 """
 
 from __future__ import annotations
 
 import io
-from typing import Any, Final
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from openpyxl import Workbook
 
 from src.core.logger import get_logger
+from src.modules.seo.contracts.issue_ids import IssueCategory
+from src.modules.seo.contracts.sources import sources_for_categories
 from src.modules.seo.deliverables.masterfile_base import (
     MasterfileMetadata,
     MasterfileService,
@@ -30,15 +31,11 @@ __all__ = ["H1Service"]
 
 _logger = get_logger(__name__)
 
-_H1_FILES: Final[list[str]] = [
-    "h1_missing.csv",
-    "h1_multiple.csv",
-    "h1_empty.csv",
-]
-
 
 class H1Service(MasterfileService):
     """Generate H1 tag masterfile."""
+
+    SOURCE_FILES = sources_for_categories(IssueCategory.H1)
 
     @property
     def metadata(self) -> MasterfileMetadata:
@@ -51,17 +48,7 @@ class H1Service(MasterfileService):
 
     def _read_all_h1_data(self) -> pd.DataFrame | None:
         """Read and combine all H1 CSVs."""
-        dfs = []
-        for filename in _H1_FILES:
-            df = self._read_csv(filename)
-            if df is not None and not df.empty:
-                dfs.append(df)
-
-        if not dfs:
-            return None
-
-        combined = pd.concat(dfs, ignore_index=True)
-        return combined if not combined.empty else None
+        return self._read_issue_frames()
 
     def generate(self) -> bytes:
         """Generate H1 tags XLSX."""
@@ -95,11 +82,10 @@ class H1Service(MasterfileService):
 
                 # Enrich
                 internal_data = internal_map.get(url, {}) if internal_map else {}
-                gsc_data = gsc_map.get(url, {}) if gsc_map else {}
+                gsc_data = self._gsc_lookup(gsc_map, url)
 
-                # Filter: indexable=True
                 indexability = internal_data.get("indexability")
-                if indexability != "Indexable":
+                if not self._is_reportable(indexability):
                     continue
 
                 urls_with_h1.append(
