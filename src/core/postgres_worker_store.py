@@ -27,10 +27,12 @@ Design choices worth stating, because they differ from
   `org_configs` row first; the constraint that actually matters is already
   enforced one step later, where `worker_jobs` refuses to queue a job for an
   unknown org.
-* **`template_names` is a JSON array in a `TEXT` column**, not `TEXT[]`. The
-  column is read and written whole, never queried element-wise, and a JSON
-  string maps identically through psycopg and through the in-memory fake the
-  tests use.
+* **`templates` is a JSON array in a `TEXT` column**, not `TEXT[]` or
+  `JSONB`. The column is read and written whole, never queried
+  element-wise, and a JSON string maps identically through psycopg and
+  through the in-memory fake the tests use. It holds objects
+  (`{"name": ..., "description": ...}`) since migration 005; the array of
+  bare names it held before is migrated in place there.
 
 Every failure is raised as `WorkerStoreUnavailableError`, never swallowed:
 an unreachable identity store must produce a `503`, not an implicit "no such
@@ -47,6 +49,7 @@ from typing import TYPE_CHECKING, cast
 from src.core.logger import get_logger
 from src.core.postgres_config import get_postgres_settings
 from src.core.worker_auth import Worker, WorkerNotFoundError, WorkerStoreUnavailableError
+from src.core.worker_templates import WorkerTemplate, WorkerTemplateReport
 
 if TYPE_CHECKING:
     from psycopg import Connection
@@ -57,17 +60,27 @@ _logger = get_logger("core.postgres_worker_store")
 
 _COLUMNS = (
     "worker_id, org_id, secret_hash, display_name, is_active, created_at, "
-    "last_seen_at, template_names"
+    "last_seen_at, templates, unrecognised_template_count"
 )
 """Column list every read uses, in the order `_row_to_worker` expects."""
+
+
+def _templates_json(templates: tuple[WorkerTemplate, ...]) -> str:
+    """Serialise a template report for the `templates` TEXT column.
+
+    Dumped through Pydantic rather than by hand so a future field on
+    `WorkerTemplate` is persisted without anyone remembering to edit this.
+    """
+    return json.dumps([entry.model_dump(mode="json") for entry in templates])
 
 
 def _row_to_worker(row: tuple[object, ...]) -> Worker:
     """Map one `_COLUMNS`-shaped row onto a `Worker`.
 
-    `template_names` is re-validated by `Worker`'s own field pattern on the
-    way through, so even a row written by some other process cannot
-    reintroduce a name that fails `TEMPLATE_NAME_PATTERN`.
+    `templates` is re-validated by `WorkerTemplate`'s own rules on the way
+    through, so even a row written by some other process cannot reintroduce
+    a name that fails `TEMPLATE_NAME_PATTERN` or a description carrying a
+    control or bidi-override character.
     """
     (
         worker_id,
@@ -77,7 +90,8 @@ def _row_to_worker(row: tuple[object, ...]) -> Worker:
         is_active,
         created_at,
         last_seen_at,
-        template_names,
+        templates,
+        unrecognised_template_count,
     ) = row
     return Worker(
         worker_id=str(worker_id),
@@ -87,7 +101,10 @@ def _row_to_worker(row: tuple[object, ...]) -> Worker:
         is_active=bool(is_active),
         created_at=cast("datetime", created_at),
         last_seen_at=None if last_seen_at is None else cast("datetime", last_seen_at),
-        template_names=tuple(json.loads(str(template_names or "[]"))),
+        templates=tuple(
+            WorkerTemplate.model_validate(entry) for entry in json.loads(str(templates or "[]"))
+        ),
+        unrecognised_template_count=cast("int", unrecognised_template_count or 0),
     )
 
 
@@ -140,8 +157,8 @@ class PostgresWorkerStore:
                 cur.execute(
                     "INSERT INTO workers "
                     "(worker_id, org_id, secret_hash, display_name, is_active, created_at, "
-                    "last_seen_at, template_names) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                    "last_seen_at, templates, unrecognised_template_count) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (worker_id) DO NOTHING",
                     (
                         worker.worker_id,
@@ -151,7 +168,8 @@ class PostgresWorkerStore:
                         worker.is_active,
                         worker.created_at,
                         worker.last_seen_at,
-                        json.dumps(list(worker.template_names)),
+                        _templates_json(worker.templates),
+                        worker.unrecognised_template_count,
                     ),
                 )
                 inserted = cur.rowcount
@@ -227,19 +245,22 @@ class PostgresWorkerStore:
         worker_id: str,
         *,
         seen_at: datetime,
-        template_names: tuple[str, ...] | None = None,
+        templates: WorkerTemplateReport | None = None,
     ) -> Worker:
         """Record a check-in in one statement, returning the updated row.
 
-        `COALESCE(%s, template_names)` keeps a poll (which reports no
-        templates) from wiping the set a heartbeat reported earlier, without
-        a read-modify-write that two replicas could interleave.
+        `COALESCE(%s, templates)` keeps a poll (which reports no templates)
+        from wiping the set a heartbeat reported earlier, without a
+        read-modify-write that two replicas could interleave. The
+        unrecognised-file count is coalesced in the same statement so the
+        two halves of one report can never be stored out of step.
 
         Raises:
             WorkerNotFoundError: If no such worker exists.
             WorkerStoreUnavailableError: If Postgres is unreachable.
         """
-        payload = None if template_names is None else json.dumps(list(template_names))
+        payload = None if templates is None else _templates_json(templates.templates)
+        skipped = None if templates is None else templates.unrecognised_count
         conn = self._connect()
         try:
             with conn, conn.cursor() as cur:
@@ -247,9 +268,11 @@ class PostgresWorkerStore:
                 # are bound via `%s` placeholders.
                 cur.execute(
                     "UPDATE workers SET last_seen_at = %s, "  # noqa: S608
-                    "template_names = COALESCE(%s, template_names) "
+                    "templates = COALESCE(%s, templates), "
+                    "unrecognised_template_count = "
+                    "COALESCE(%s, unrecognised_template_count) "
                     f"WHERE worker_id = %s RETURNING {_COLUMNS}",
-                    (seen_at, payload, worker_id),
+                    (seen_at, payload, skipped, worker_id),
                 )
                 row = cur.fetchone()
         except Exception as exc:  # noqa: BLE001

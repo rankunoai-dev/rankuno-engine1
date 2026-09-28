@@ -174,7 +174,8 @@ export function worker(overrides: Partial<WorkerSummary> = {}): WorkerSummary {
     created_at: "2026-09-01T09:00:00Z",
     last_seen_at: null,
     is_online: false,
-    template_names: [],
+    templates: [],
+    unrecognised_template_count: 0,
     ...overrides,
   };
 }

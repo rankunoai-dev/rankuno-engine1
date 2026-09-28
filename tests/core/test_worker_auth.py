@@ -24,6 +24,12 @@ from src.core.worker_auth import (
     verify_worker_credential,
     worker_is_online,
 )
+from src.core.worker_templates import WorkerTemplate, WorkerTemplateReport
+
+
+def _report(*names: str) -> WorkerTemplateReport:
+    """A well-formed report of `names`, each without a description."""
+    return WorkerTemplateReport(templates=tuple(WorkerTemplate(name=n) for n in names))
 
 
 def _worker(**overrides: object) -> Worker:
@@ -246,29 +252,75 @@ def test_touch_records_last_seen_and_persists_it(tmp_path):
 def test_touch_replaces_templates_when_given_and_leaves_them_otherwise(tmp_path):
     store = DiskWorkerStore(tmp_path / "workers")
     store.create(_worker())
-    store.touch("wkr-alice-desktop", seen_at=datetime.now(UTC), template_names=("a-b", "c_d"))
+    store.touch("wkr-alice-desktop", seen_at=datetime.now(UTC), templates=_report("a-b", "c_d"))
     store.touch("wkr-alice-desktop", seen_at=datetime.now(UTC))
-    assert store.get("wkr-alice-desktop").template_names == ("a-b", "c_d")
+    assert [t.name for t in store.get("wkr-alice-desktop").templates] == ["a-b", "c_d"]
+
+
+def test_touch_stores_the_description_that_came_with_each_template(tmp_path):
+    store = DiskWorkerStore(tmp_path / "workers")
+    store.create(_worker())
+    store.touch(
+        "wkr-alice-desktop",
+        seen_at=datetime.now(UTC),
+        templates=WorkerTemplateReport(
+            templates=(WorkerTemplate(name="js-crawl", description="Renders JavaScript."),)
+        ),
+    )
+    reopened = DiskWorkerStore(tmp_path / "workers")
+    stored = reopened.get("wkr-alice-desktop").templates[0]
+    assert (stored.name, stored.description) == ("js-crawl", "Renders JavaScript.")
+
+
+def test_touch_records_how_many_files_the_worker_could_not_name(tmp_path):
+    store = DiskWorkerStore(tmp_path / "workers")
+    store.create(_worker())
+    store.touch(
+        "wkr-alice-desktop",
+        seen_at=datetime.now(UTC),
+        templates=WorkerTemplateReport(unrecognised_count=3),
+    )
+    assert store.get("wkr-alice-desktop").unrecognised_template_count == 3
 
 
 def test_touch_refuses_a_template_name_that_could_become_a_path(tmp_path):
+    """`touch` re-validates, so bypassing the model's own guard still fails.
+
+    Built with `model_construct` deliberately: `WorkerTemplate` refuses this
+    name at construction, and the property under test is the *second* check —
+    that nothing reaches `workers.json` without passing the pattern again.
+    """
     store = DiskWorkerStore(tmp_path / "workers")
     store.create(_worker())
+    smuggled = WorkerTemplateReport.model_construct(
+        templates=(WorkerTemplate.model_construct(name="../../etc/passwd", description=""),),
+        unrecognised_count=0,
+    )
     with pytest.raises(ValidationError):
-        store.touch(
-            "wkr-alice-desktop", seen_at=datetime.now(UTC), template_names=("../../etc/passwd",)
-        )
+        store.touch("wkr-alice-desktop", seen_at=datetime.now(UTC), templates=smuggled)
+
+
+def test_touch_refuses_a_description_carrying_a_bidi_override(tmp_path):
+    """The character that makes a label render as something else it is not."""
+    store = DiskWorkerStore(tmp_path / "workers")
+    store.create(_worker())
+    smuggled = WorkerTemplateReport.model_construct(
+        templates=(WorkerTemplate.model_construct(name="ok", description="safe‮gnp.exe"),),
+        unrecognised_count=0,
+    )
+    with pytest.raises(ValidationError):
+        store.touch("wkr-alice-desktop", seen_at=datetime.now(UTC), templates=smuggled)
 
 
 def test_touch_refuses_more_templates_than_the_cap(tmp_path):
     store = DiskWorkerStore(tmp_path / "workers")
     store.create(_worker())
+    smuggled = WorkerTemplateReport.model_construct(
+        templates=tuple(WorkerTemplate(name=f"t{i}") for i in range(MAX_REPORTED_TEMPLATES + 1)),
+        unrecognised_count=0,
+    )
     with pytest.raises(ValidationError):
-        store.touch(
-            "wkr-alice-desktop",
-            seen_at=datetime.now(UTC),
-            template_names=tuple(f"t{i}" for i in range(MAX_REPORTED_TEMPLATES + 1)),
-        )
+        store.touch("wkr-alice-desktop", seen_at=datetime.now(UTC), templates=smuggled)
 
 
 def test_touch_of_an_unknown_worker_raises_not_found(tmp_path):

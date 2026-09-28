@@ -83,7 +83,8 @@ def _summarise(worker: Worker, *, offline_after_s: float) -> WorkerSummary:
         created_at=worker.created_at,
         last_seen_at=worker.last_seen_at,
         is_online=worker_is_online(worker, offline_after_s=offline_after_s),
-        template_names=list(worker.template_names),
+        templates=list(worker.templates),
+        unrecognised_template_count=worker.unrecognised_template_count,
     )
 
 
@@ -168,7 +169,8 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
         worker = owned_worker(state, worker_id, principal.org_id)
         return WorkerTemplatesView(
             worker_id=worker.worker_id,
-            templates=list(worker.template_names),
+            templates=list(worker.templates),
+            unrecognised_count=worker.unrecognised_template_count,
             reported_at=worker.last_seen_at,
         )
 

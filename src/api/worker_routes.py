@@ -80,6 +80,7 @@ from src.core.worker_auth import WorkerStoreUnavailableError
 from src.core.worker_bundle_crypto import encrypt_bytes
 from src.core.worker_dispatch_signing import issue_dispatch_assignment
 from src.core.worker_dispatch_store import DispatchStoreUnavailableError
+from src.core.worker_templates import WorkerTemplateReport
 from src.modules.seo.screaming_frog_control.upload_manifest import (
     SPINE_FILENAME,
     BundleUploadError,
@@ -141,14 +142,18 @@ def build_worker_router(state: ApiState) -> APIRouter:
             worker = state.worker_store.touch(
                 principal.worker_id,
                 seen_at=datetime.now(UTC),
-                template_names=tuple(payload.template_names),
+                templates=WorkerTemplateReport(
+                    templates=tuple(payload.templates),
+                    unrecognised_count=payload.unrecognised_count,
+                ),
             )
         except WorkerStoreUnavailableError as exc:
             raise worker_store_unavailable(exc) from exc
         return WorkerHeartbeatResponse(
             worker_id=worker.worker_id,
             last_seen_at=worker.last_seen_at or datetime.now(UTC),
-            template_names=list(worker.template_names),
+            templates=list(worker.templates),
+            unrecognised_count=worker.unrecognised_template_count,
         )
 
     @router.get("/workers/dispatch/poll", response_model=PollResponse)

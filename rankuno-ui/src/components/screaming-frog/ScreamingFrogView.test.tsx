@@ -80,6 +80,7 @@ describe("ScreamingFrogView", () => {
       getWorkerTemplates: vi.fn().mockResolvedValue({
         worker_id: "wkr-aaaa",
         templates: [],
+        unrecognised_count: 0,
         // Never checked in. Absence of a report, not a report of absence.
         reported_at: null,
       }),
@@ -106,6 +107,7 @@ describe("ScreamingFrogView", () => {
       getWorkerTemplates: vi.fn().mockResolvedValue({
         worker_id: "wkr-aaaa",
         templates: [],
+        unrecognised_count: 0,
         reported_at: "2026-09-21T10:00:00Z",
       }),
       previewDispatch: vi.fn(),
@@ -116,6 +118,95 @@ describe("ScreamingFrogView", () => {
     await waitFor(() => {
       expect(screen.getByText(/reported no saved templates/i)).toBeInTheDocument();
     });
+  });
+
+  it("shows the note a human wrote about the chosen template, as text", async () => {
+    // The whole point of the feature: a `.seospiderconfig` is an opaque binary,
+    // so this sentence is the only description of it that can ever exist.
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue({
+        workers: [worker({ is_online: true, last_seen_at: "2026-09-21T10:00:00Z" })],
+        offline_after_s: 60,
+      }),
+      getWorkerTemplates: vi.fn().mockResolvedValue({
+        worker_id: "wkr-aaaa",
+        templates: [
+          { name: "js-crawl", description: "Extracts SKU, price & stock <status>." },
+          { name: "plain", description: "" },
+        ],
+        unrecognised_count: 0,
+        reported_at: "2026-09-21T10:00:00Z",
+      }),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/2 templates reported/i)).toBeInTheDocument();
+    });
+    // Nothing is shown until a template is chosen: "None" has no description.
+    expect(screen.queryByText(/Extracts SKU/)).not.toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByLabelText("Screaming Frog template"));
+    fireEvent.click(await screen.findByTitle("js-crawl"));
+
+    const note = await screen.findByText("Extracts SKU, price & stock <status>.");
+    // A text node, not markup: the string came from a machine outside the
+    // trust boundary, and the angle brackets must stay visible characters.
+    expect(note.innerHTML).toBe("Extracts SKU, price &amp; stock &lt;status&gt;.");
+  });
+
+  it("drops the note when the chosen template does not carry one", async () => {
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue({
+        workers: [worker({ is_online: true, last_seen_at: "2026-09-21T10:00:00Z" })],
+        offline_after_s: 60,
+      }),
+      getWorkerTemplates: vi.fn().mockResolvedValue({
+        worker_id: "wkr-aaaa",
+        templates: [{ name: "plain", description: "" }],
+        unrecognised_count: 0,
+        reported_at: "2026-09-21T10:00:00Z",
+      }),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/1 template reported/i)).toBeInTheDocument();
+    });
+    fireEvent.mouseDown(screen.getByLabelText("Screaming Frog template"));
+    fireEvent.click(await screen.findByTitle("plain"));
+
+    expect(document.querySelector(".sfd-template-note")).toBeNull();
+  });
+
+  it("says how many config files the machine could not offer, and why", async () => {
+    // The trap: Screaming Frog's own Save As writes
+    // `SEO Spider Config - Basic.seospiderconfig`, which is not a slug. Those
+    // files used to vanish, leaving an empty dropdown over a full folder.
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue({
+        workers: [worker({ is_online: true, last_seen_at: "2026-09-21T10:00:00Z" })],
+        offline_after_s: 60,
+      }),
+      getWorkerTemplates: vi.fn().mockResolvedValue({
+        worker_id: "wkr-aaaa",
+        templates: [],
+        unrecognised_count: 3,
+        reported_at: "2026-09-21T10:00:00Z",
+      }),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/3 files were not recognised/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/rename it on that machine/i)).toBeInTheDocument();
   });
 
   it("previews before it confirms, and confirms with the server's normalized URL", async () => {

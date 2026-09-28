@@ -61,6 +61,11 @@ from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_consumed_ledger import ConsumedJobLedger
 from src.core.worker_dispatch_schemas import DispatchAssignmentClaims, WorkerJobKind
 from src.core.worker_dispatch_signing import DispatchAssignmentError, verify_dispatch_assignment
+from src.core.worker_templates import (
+    MAX_REPORTED_TEMPLATES,
+    WorkerTemplate,
+    WorkerTemplateReport,
+)
 from src.integrations.worker_cloud_client import WorkerCloudClient
 from src.modules.seo.screaming_frog_control.progress_parser import make_progress_callback
 from src.modules.seo.screaming_frog_control.schemas import (
@@ -180,7 +185,7 @@ def run_worker_daemon(  # noqa: C901, PLR0912 - one loop, every branch a named f
 
     poll_interval_s = settings.worker_poll_interval_s
     backoff_s = poll_interval_s
-    reported_templates: tuple[str, ...] | None = None
+    reported_templates: WorkerTemplateReport | None = None
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
         if should_stop is not None and should_stop():
@@ -220,8 +225,8 @@ def run_worker_daemon(  # noqa: C901, PLR0912 - one loop, every branch a named f
 
 
 def _report_templates(
-    client: WorkerCloudClient, templates: TemplateRegistry, reported: tuple[str, ...] | None
-) -> tuple[str, ...] | None:
+    client: WorkerCloudClient, templates: TemplateRegistry, reported: WorkerTemplateReport | None
+) -> WorkerTemplateReport | None:
     """Send a heartbeat when this worker's local template set has changed.
 
     Re-sent on change rather than on a timer, and `reported` stays `None`
@@ -231,8 +236,30 @@ def _report_templates(
     tell a credential rejection from a transient outage — silently swallowing
     it here would mean a worker whose templates never reach the dashboard and
     no log line saying why.
+
+    A description change counts as a change: editing a sidecar note and
+    restarting nothing is enough for the dashboard to pick it up on the next
+    cycle, because the comparison is over the whole report.
+
+    Both halves of the report are clamped to `MAX_REPORTED_TEMPLATES` here
+    rather than at the wire, so a desktop with an unusually full template
+    folder sends a truncated list the cloud accepts instead of a valid-looking
+    body the cloud rejects whole. The clamp is logged; a silently short list
+    is the failure this cycle is about.
     """
-    current = tuple(t.name for t in templates.list_templates())
+    scan = templates.scan()
+    kept = scan.templates[:MAX_REPORTED_TEMPLATES]
+    if len(scan.templates) > len(kept):
+        _logger.warning(
+            "worker_templates_report_clamped",
+            extra={"found": len(scan.templates), "reported": len(kept)},
+        )
+    current = WorkerTemplateReport(
+        templates=tuple(
+            WorkerTemplate(name=entry.name, description=entry.description) for entry in kept
+        ),
+        unrecognised_count=min(len(scan.unrecognised), MAX_REPORTED_TEMPLATES),
+    )
     if current == reported:
         return reported
     client.heartbeat(current)

@@ -14,6 +14,7 @@ from pydantic import Field
 
 from src.core.schemas import StrictModel
 from src.core.worker_dispatch_schemas import WorkerJobPhase
+from src.core.worker_templates import TemplateDescription
 
 __all__ = [
     "FIELD_MAPPING",
@@ -126,7 +127,13 @@ class ScreamingFrogTemplate(StrictModel):
     """
 
     name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9_-]+$")
-    description: str = Field(default="", max_length=500)
+    description: TemplateDescription = ""
+    """What a human wrote beside this config in a `<name>.md` sidecar, or
+    `""` when nobody has. Empty is the normal state and means "undescribed",
+    never "does nothing". The constraints are imported from
+    `src.core.worker_templates` rather than restated, so this model and the
+    `WorkerTemplate` the same text is carried in over the heartbeat cannot
+    disagree about what a description may contain."""
 
 
 class LicenceStatus(StrictModel):

@@ -102,7 +102,7 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
   const selected = workers.find((worker) => worker.worker_id === workerId) ?? null;
 
   // Re-read on every selection rather than trusting the list's own
-  // `template_names`: that snapshot is as old as the last `GET /workers`, and
+  // `templates`: that snapshot is as old as the last `GET /workers`, and
   // this endpoint is the only one that reports *when* the machine last spoke,
   // which is what separates "holds none" from "has never said".
   useEffect(() => {
@@ -113,13 +113,14 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
     const fetchTemplates = api?.getWorkerTemplates;
     if (!fetchTemplates) {
       // Fall back to the summary, which carries the same two facts the server
-      // builds that view from — `template_names` and `last_seen_at`.
+      // builds that view from — `templates` and `last_seen_at`.
       const fallback = workers.find((worker) => worker.worker_id === workerId);
       setTemplates(
         fallback
           ? {
               worker_id: fallback.worker_id,
-              templates: fallback.template_names,
+              templates: fallback.templates,
+              unrecognised_count: fallback.unrecognised_template_count,
               reported_at: fallback.last_seen_at,
             }
           : null,
@@ -150,10 +151,17 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
   // machine change drops a choice that no longer applies rather than carrying
   // it silently into the next dispatch.
   useEffect(() => {
-    if (template !== NO_TEMPLATE && !(templates?.templates ?? []).includes(template)) {
+    const held = (templates?.templates ?? []).some((entry) => entry.name === template);
+    if (template !== NO_TEMPLATE && !held) {
       setTemplate(NO_TEMPLATE);
     }
   }, [templates, template]);
+
+  // The note a human wrote beside the chosen config on the worker. Looked up
+  // from the list rather than stored alongside the selection: the list is
+  // re-read on every machine change, and a stale copy of a description is a
+  // description of a different config.
+  const chosen = (templates?.templates ?? []).find((entry) => entry.name === template);
 
   async function startPreview(): Promise<void> {
     if (!api?.previewDispatch || workerId === null) return;
@@ -321,12 +329,19 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
                   value: NO_TEMPLATE,
                   label: "None — that machine's own default configuration",
                 },
-                ...(templates?.templates ?? []).map((name) => ({
-                  value: name,
-                  label: name,
+                ...(templates?.templates ?? []).map((entry) => ({
+                  value: entry.name,
+                  label: entry.name,
                 })),
               ]}
             />
+            {/* Beneath the Select, matching where RAE put it. A `.seospiderconfig`
+                is binary, so this sentence is the only description of the chosen
+                config that exists anywhere. Rendered as a text node — it comes
+                from a machine outside the trust boundary and is never HTML. */}
+            {chosen?.description ? (
+              <p className="sfd-template-note">{chosen.description}</p>
+            ) : null}
             <span className="sfd-hint">{describeTemplates(templates, templatesLoading)}</span>
           </div>
 
@@ -488,9 +503,29 @@ function describeTemplates(
     return "This machine has not reported its templates yet — it has never checked in. Start the worker daemon on it; the list fills in on its first check-in. A crawl can still run without a template.";
   }
   if (templates.templates.length === 0) {
-    return `This machine checked in ${formatCrawlTime(templates.reported_at)} and reported no saved templates. The crawl will use Screaming Frog's default configuration.`;
+    return `This machine checked in ${formatCrawlTime(templates.reported_at)} and reported no saved templates.${describeSkipped(templates.unrecognised_count)} The crawl will use Screaming Frog's default configuration.`;
   }
-  return `${templates.templates.length} template${templates.templates.length === 1 ? "" : "s"} reported ${formatCrawlTime(templates.reported_at)}.`;
+  return `${templates.templates.length} template${templates.templates.length === 1 ? "" : "s"} reported ${formatCrawlTime(templates.reported_at)}.${describeSkipped(templates.unrecognised_count)}`;
+}
+
+/**
+ * Say that files were skipped, and why, or say nothing.
+ *
+ * The case this exists for: Screaming Frog's own Save As names a config
+ * `SEO Spider Config - Basic.seospiderconfig`, which is not a slug, so the
+ * worker cannot offer it. Before this line the operator saw an empty dropdown
+ * over a full folder and no reason for it anywhere in the product. The
+ * filenames themselves stay on the worker — they are arbitrary text from
+ * outside the trust boundary, they are logged on the machine that holds them,
+ * and that is the only place a human can rename anything.
+ */
+function describeSkipped(count: number): string {
+  // `!count` and not `count <= 0`: an older engine that does not send the
+  // field at all leaves this `undefined`, and `undefined <= 0` is false, which
+  // would put the words "undefined files were not recognised" on the screen.
+  if (!count || count <= 0) return "";
+  const files = count === 1 ? "file was" : "files were";
+  return ` ${count} ${files} not recognised: a config file's name must be lower-case letters, digits, hyphens or underscores, so rename it on that machine to offer it here.`;
 }
 
 /** Reject what the server would reject, before spending a round trip on it. */

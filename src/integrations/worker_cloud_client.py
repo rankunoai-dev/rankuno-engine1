@@ -30,6 +30,7 @@ from src.core.config import Settings
 from src.core.errors import WorkerCredentialRejectedError
 from src.core.logger import get_logger
 from src.core.worker_dispatch_schemas import SignedDispatchAssignment, WorkerJobPhase
+from src.core.worker_templates import WorkerTemplateReport
 from src.integrations.base_client import BaseAPIClient
 
 __all__ = ["WorkerCloudClient"]
@@ -157,25 +158,29 @@ class WorkerCloudClient(BaseAPIClient):
 
         self.call("upload_bundle", _do)
 
-    def heartbeat(self, template_names: tuple[str, ...]) -> None:
+    def heartbeat(self, report: WorkerTemplateReport) -> None:
         """Tell the cloud this worker is awake and which templates it holds.
 
         The poll call already records last-seen, so this exists for the
         second half: `.seospiderconfig` files live only on the machine that
         runs Screaming Frog, and the cloud cannot list a directory it does
         not have. Reporting them is what lets the dashboard show a dropdown
-        for *this* desktop.
+        for *this* desktop — and, since the file format is an opaque binary,
+        the sidecar description carried alongside each name is the only
+        account of what one does that the operator will ever see.
 
         Args:
-            template_names: Names from the local `TemplateRegistry`. The
-                cloud re-validates every one against its own pattern before
-                storing it — this client makes no claim to be trusted.
+            report: The local `TemplateRegistry`'s scan: the templates it
+                recognised, each with its description, and how many files it
+                had to skip. The cloud re-validates every field against its
+                own rules before storing any of it — this client makes no
+                claim to be trusted.
         """
 
         def _do() -> None:
             response = self._client.post(
                 "/api/v1/workers/heartbeat",
-                json={"template_names": list(template_names)},
+                json=report.model_dump(mode="json"),
                 headers=self._auth_headers(),
             )
             _raise_for_credential(response, "heartbeat")

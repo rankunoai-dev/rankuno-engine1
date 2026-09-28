@@ -52,6 +52,7 @@ from src.core.worker_dispatch_store import (
     DEFAULT_PREVIEW_TTL_S,
     DispatchStoreUnavailableError,
 )
+from src.core.worker_templates import MAX_TEMPLATE_DESCRIPTION_CHARS
 
 from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
 
@@ -971,7 +972,7 @@ def test_preview_reports_liveness_so_the_modal_can_warn_first(client):
 
 
 def test_heartbeat_requires_worker_authentication(client):
-    response = client.post(f"{API_PREFIX}/workers/heartbeat", json={"template_names": []})
+    response = client.post(f"{API_PREFIX}/workers/heartbeat", json={"templates": []})
     assert response.status_code == 401
 
 
@@ -979,18 +980,75 @@ def test_heartbeat_records_templates_and_liveness(client):
     worker = _register_worker(client, online=False)
     response = client.post(
         f"{API_PREFIX}/workers/heartbeat",
-        json={"template_names": ["default-crawl", "js_rendering"]},
+        json={
+            "templates": [
+                {"name": "default-crawl", "description": "Everything, default speed."},
+                {"name": "js_rendering"},
+            ],
+            "unrecognised_count": 3,
+        },
         headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
     )
     assert response.status_code == 200, response.text
-    assert response.json()["template_names"] == ["default-crawl", "js_rendering"]
+    assert [t["name"] for t in response.json()["templates"]] == ["default-crawl", "js_rendering"]
+    assert response.json()["unrecognised_count"] == 3
 
     templates = client.get(
         f"{API_PREFIX}/workers/{worker['worker_id']}/templates", headers=auth_headers()
     )
     assert templates.status_code == 200
-    assert templates.json()["templates"] == ["default-crawl", "js_rendering"]
+    assert templates.json()["templates"] == [
+        {"name": "default-crawl", "description": "Everything, default speed."},
+        {"name": "js_rendering", "description": ""},
+    ]
+    assert templates.json()["unrecognised_count"] == 3
     assert templates.json()["reported_at"] is not None
+
+
+def test_a_worker_with_no_sidecar_note_reports_an_empty_description(client):
+    """The sidecar is optional. An undescribed template is still a template."""
+    worker = _register_worker(client, online=False)
+    response = client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={"templates": [{"name": "plain"}]},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["templates"] == [{"name": "plain", "description": ""}]
+
+
+def test_heartbeat_rejects_a_description_over_the_cap(client):
+    """A worker is a machine on a desk; its free text is bounded server-side."""
+    worker = _register_worker(client)
+    headers = _worker_headers(worker["worker_id"], worker["worker_secret"])
+    at_cap = client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={"templates": [{"name": "big", "description": "x" * MAX_TEMPLATE_DESCRIPTION_CHARS}]},
+        headers=headers,
+    )
+    assert at_cap.status_code == 200, at_cap.text
+
+    over_cap = client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={
+            "templates": [
+                {"name": "big", "description": "x" * (MAX_TEMPLATE_DESCRIPTION_CHARS + 1)}
+            ]
+        },
+        headers=headers,
+    )
+    assert over_cap.status_code == 422
+
+
+def test_heartbeat_rejects_a_description_that_would_not_render_as_itself(client):
+    """A bidi override reverses everything after it in a browser."""
+    worker = _register_worker(client)
+    response = client.post(
+        f"{API_PREFIX}/workers/heartbeat",
+        json={"templates": [{"name": "ok", "description": "safe‮gnp.exe"}]},
+        headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+    )
+    assert response.status_code == 422
 
 
 def test_heartbeat_rejects_a_template_name_that_could_become_a_path(client):
@@ -998,7 +1056,7 @@ def test_heartbeat_rejects_a_template_name_that_could_become_a_path(client):
     worker = _register_worker(client)
     response = client.post(
         f"{API_PREFIX}/workers/heartbeat",
-        json={"template_names": ["../../etc/passwd"]},
+        json={"templates": [{"name": "../../etc/passwd"}]},
         headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
     )
     assert response.status_code == 422
@@ -1008,7 +1066,7 @@ def test_heartbeat_rejects_more_templates_than_the_cap(client):
     worker = _register_worker(client)
     response = client.post(
         f"{API_PREFIX}/workers/heartbeat",
-        json={"template_names": [f"t{i}" for i in range(MAX_REPORTED_TEMPLATES + 1)]},
+        json={"templates": [{"name": f"t{i}"} for i in range(MAX_REPORTED_TEMPLATES + 1)]},
         headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
     )
     assert response.status_code == 422
@@ -1018,7 +1076,7 @@ def test_polling_does_not_wipe_previously_reported_templates(client):
     worker = _register_worker(client, online=False)
     client.post(
         f"{API_PREFIX}/workers/heartbeat",
-        json={"template_names": ["default-crawl"]},
+        json={"templates": [{"name": "default-crawl"}]},
         headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
     )
     client.get(
@@ -1028,7 +1086,7 @@ def test_polling_does_not_wipe_previously_reported_templates(client):
     templates = client.get(
         f"{API_PREFIX}/workers/{worker['worker_id']}/templates", headers=auth_headers()
     )
-    assert templates.json()["templates"] == ["default-crawl"]
+    assert [t["name"] for t in templates.json()["templates"]] == ["default-crawl"]
 
 
 def test_worker_templates_are_org_scoped(client):
@@ -1300,7 +1358,7 @@ def test_a_worker_facing_route_answers_503_not_401_when_the_store_is_down(broken
 
     heartbeat = broken_worker_client.post(
         f"{API_PREFIX}/workers/heartbeat",
-        json={"template_names": []},
+        json={"templates": []},
         headers=_worker_headers("wkr-alice", "secret"),
     )
     assert heartbeat.status_code == 503

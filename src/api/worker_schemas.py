@@ -10,12 +10,11 @@ the domain records they map to or from (`Worker`, `WorkerJob`, ...) live in
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
 
 from pydantic import Field
 
 from src.core.schemas import StrictModel
-from src.core.worker_auth import MAX_REPORTED_TEMPLATES, TEMPLATE_NAME_PATTERN
+from src.core.worker_auth import MAX_REPORTED_TEMPLATES, WorkerTemplate
 from src.core.worker_dispatch_schemas import (
     SignedDispatchAssignment,
     WorkerJobEnvelope,
@@ -42,16 +41,13 @@ __all__ = [
     "WorkerTemplatesView",
 ]
 
-TemplateName = Annotated[str, Field(pattern=TEMPLATE_NAME_PATTERN)]
-"""A worker-reported template name, constrained at the HTTP boundary.
-
-The first of two independent checks. A worker daemon is a machine on
-someone's desk, not part of the trust boundary, so what it says about itself
-is untrusted input: the name is validated here before it is stored and
-validated again by `Worker.template_names` before it is persisted. Either
-alone would be enough today; together they mean a future caller that builds
-a `Worker` without going through this request model still cannot store a
-name that could become a path component."""
+# `WorkerTemplate` is the wire shape for a worker-reported template as well
+# as the stored one. A worker daemon is a machine on someone's desk, not
+# part of the trust boundary, so what it says about itself is untrusted
+# input: reusing the model means the name pattern and the description rules
+# (capped length, no control, zero-width or bidi-override characters) are
+# applied at the HTTP boundary *and* again by `Worker` on the way to the
+# store, from one definition that cannot drift between the two.
 
 
 class WorkerRegisterRequest(StrictModel):
@@ -83,9 +79,14 @@ class WorkerSummary(StrictModel):
             the browser so there is exactly one staleness rule in the
             system; a dashboard that invented its own would be the copy
             nothing tests.
-        template_names: What this worker reported it holds locally. Empty
-            until its daemon sends a heartbeat — the API host has no
-            `.seospiderconfig` files of its own and never did.
+        templates: What this worker reported it holds locally, each with
+            the note a human wrote beside it. Empty until its daemon sends a
+            heartbeat — the API host has no `.seospiderconfig` files of its
+            own and never did.
+        unrecognised_template_count: How many files in that directory the
+            worker had to skip because their names are not slugs. Rendered
+            so an operator can tell "this machine holds nothing" from "this
+            machine holds files I refused to name".
     """
 
     worker_id: str
@@ -95,7 +96,8 @@ class WorkerSummary(StrictModel):
     created_at: datetime
     last_seen_at: datetime | None = None
     is_online: bool = False
-    template_names: list[str] = Field(default_factory=list)
+    templates: list[WorkerTemplate] = Field(default_factory=list)
+    unrecognised_template_count: int = 0
 
 
 class WorkerListView(StrictModel):
@@ -119,9 +121,8 @@ class WorkerHeartbeatRequest(StrictModel):
     describe itself.
     """
 
-    template_names: list[TemplateName] = Field(
-        default_factory=list, max_length=MAX_REPORTED_TEMPLATES
-    )
+    templates: list[WorkerTemplate] = Field(default_factory=list, max_length=MAX_REPORTED_TEMPLATES)
+    unrecognised_count: int = Field(default=0, ge=0, le=MAX_REPORTED_TEMPLATES)
 
 
 class WorkerHeartbeatResponse(StrictModel):
@@ -129,13 +130,21 @@ class WorkerHeartbeatResponse(StrictModel):
 
     worker_id: str
     last_seen_at: datetime
-    template_names: list[str]
+    templates: list[WorkerTemplate]
+    unrecognised_count: int = 0
 
 
 class WorkerTemplatesView(StrictModel):
     """One worker's locally available Screaming Frog templates.
 
     Attributes:
+        templates: Each template the worker reported, with the description
+            a human wrote beside the config. The description is the only
+            account of what a `.seospiderconfig` does that can exist: the
+            file itself is an opaque Java-serialised blob.
+        unrecognised_count: How many `.seospiderconfig` files the worker
+            skipped because their names are not slugs. Non-zero is the
+            answer to "why is this dropdown empty when the folder is full".
         reported_at: When the worker last told the cloud anything at all.
             `None` means it never has, which is why `templates` may be empty
             for a machine that in fact holds several — absence of a report
@@ -143,7 +152,8 @@ class WorkerTemplatesView(StrictModel):
     """
 
     worker_id: str
-    templates: list[str]
+    templates: list[WorkerTemplate]
+    unrecognised_count: int = 0
     reported_at: datetime | None = None
 
 

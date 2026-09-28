@@ -27,6 +27,7 @@ from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_consumed_ledger import ConsumedJobLedger
 from src.core.worker_dispatch_schemas import DispatchAssignmentClaims, WorkerJobKind, WorkerJobPhase
 from src.core.worker_dispatch_signing import issue_dispatch_assignment, verify_dispatch_assignment
+from src.core.worker_templates import WorkerTemplate, WorkerTemplateReport
 from src.modules.seo.screaming_frog_control import worker_daemon
 from src.modules.seo.screaming_frog_control.schemas import (
     LicenceStatus,
@@ -99,11 +100,11 @@ class _FakeClient:
         self._poll_results = list(poll_results or [])
         self.failures: list[tuple[str, str]] = []
         self.uploads: list[tuple[str, bytes]] = []
-        self.heartbeats: list[tuple[str, ...]] = []
+        self.heartbeats: list[WorkerTemplateReport] = []
         self.progress_reports: list[tuple[str, dict[str, object]]] = []
 
-    def heartbeat(self, template_names: tuple[str, ...]) -> None:
-        self.heartbeats.append(template_names)
+    def heartbeat(self, report: WorkerTemplateReport) -> None:
+        self.heartbeats.append(report)
 
     def poll(self) -> object:
         if not self._poll_results:
@@ -582,7 +583,7 @@ def test_upload_bundle_reports_failure_over_the_size_cap(tmp_path):
 
 def test_run_worker_daemon_backs_off_on_repeated_poll_failures(tmp_path):
     class _FailingClient:
-        def heartbeat(self, template_names) -> None:
+        def heartbeat(self, report) -> None:
             return None
 
         def poll(self) -> object:
@@ -601,7 +602,7 @@ def test_run_worker_daemon_backs_off_on_repeated_poll_failures(tmp_path):
 
 def test_run_worker_daemon_resets_backoff_after_a_successful_empty_poll(tmp_path):
     class _AlwaysEmptyClient:
-        def heartbeat(self, template_names) -> None:
+        def heartbeat(self, report) -> None:
             return None
 
         def poll(self) -> object:
@@ -640,7 +641,76 @@ def test_the_daemon_reports_its_local_templates_before_polling(tmp_path):
         sleep=lambda s: None,
         cloud_client=client,  # type: ignore[arg-type]
     )
-    assert client.heartbeats == [("default-crawl",)]
+    assert client.heartbeats == [
+        WorkerTemplateReport(templates=(WorkerTemplate(name="default-crawl"),))
+    ]
+
+
+def test_the_daemon_carries_the_sidecar_description_up_with_the_name(tmp_path):
+    """The whole point: a binary config gets a human sentence attached to it."""
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "js-crawl.seospiderconfig").write_bytes(b"not-really-java")
+    (templates / "js-crawl.md").write_text("Renders JavaScript.\n", encoding="utf-8")
+
+    client = _FakeClient()
+    worker_daemon.run_worker_daemon(
+        settings=_settings(tmp_path, screaming_frog_template_dir=templates),
+        max_iterations=1,
+        sleep=lambda s: None,
+        cloud_client=client,  # type: ignore[arg-type]
+    )
+    assert client.heartbeats == [
+        WorkerTemplateReport(
+            templates=(WorkerTemplate(name="js-crawl", description="Renders JavaScript."),)
+        )
+    ]
+
+
+def test_the_daemon_reports_how_many_files_it_could_not_name(tmp_path):
+    """A GUI-saved config is called `SEO Spider Config - Basic.seospiderconfig`."""
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "SEO Spider Config - Basic.seospiderconfig").write_bytes(b"x")
+    (templates / "Manulife JS.seospiderconfig").write_bytes(b"x")
+
+    client = _FakeClient()
+    worker_daemon.run_worker_daemon(
+        settings=_settings(tmp_path, screaming_frog_template_dir=templates),
+        max_iterations=1,
+        sleep=lambda s: None,
+        cloud_client=client,  # type: ignore[arg-type]
+    )
+    assert client.heartbeats == [WorkerTemplateReport(unrecognised_count=2)]
+
+
+def test_an_edited_description_alone_is_enough_to_re_report(tmp_path):
+    """The comparison is over the whole report, not just the set of names."""
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "js-crawl.seospiderconfig").write_bytes(b"x")
+    note = templates / "js-crawl.md"
+    note.write_text("First.", encoding="utf-8")
+
+    client = _FakeClient()
+    settings = _settings(tmp_path, screaming_frog_template_dir=templates)
+    worker_daemon.run_worker_daemon(
+        settings=settings,
+        max_iterations=1,
+        sleep=lambda s: None,
+        cloud_client=client,  # type: ignore[arg-type]
+    )
+    note.write_text("Second.", encoding="utf-8")
+    worker_daemon.run_worker_daemon(
+        settings=settings,
+        max_iterations=1,
+        sleep=lambda s: None,
+        cloud_client=client,  # type: ignore[arg-type]
+    )
+    assert [t.description for report in client.heartbeats for t in report.templates] == [
+        "First.",
+        "Second.",
+    ]
 
 
 def test_an_unchanged_template_set_is_not_re_reported_every_cycle(tmp_path):
@@ -651,7 +721,7 @@ def test_an_unchanged_template_set_is_not_re_reported_every_cycle(tmp_path):
         sleep=lambda s: None,
         cloud_client=client,  # type: ignore[arg-type]
     )
-    assert client.heartbeats == [()]
+    assert client.heartbeats == [WorkerTemplateReport()]
 
 
 def test_a_heartbeat_lost_to_an_unreachable_cloud_is_retried_next_cycle(tmp_path):
@@ -662,11 +732,11 @@ def test_a_heartbeat_lost_to_an_unreachable_cloud_is_retried_next_cycle(tmp_path
             super().__init__()
             self.attempts = 0
 
-        def heartbeat(self, template_names: tuple[str, ...]) -> None:
+        def heartbeat(self, report: WorkerTemplateReport) -> None:
             self.attempts += 1
             if self.attempts == 1:
                 raise IntegrationError("worker.cloud", "unreachable")
-            super().heartbeat(template_names)
+            super().heartbeat(report)
 
     client = _FlakyHeartbeat()
     worker_daemon.run_worker_daemon(
@@ -676,7 +746,7 @@ def test_a_heartbeat_lost_to_an_unreachable_cloud_is_retried_next_cycle(tmp_path
         cloud_client=client,  # type: ignore[arg-type]
     )
     assert client.attempts == 2
-    assert client.heartbeats == [()]
+    assert client.heartbeats == [WorkerTemplateReport()]
 
 
 def test_a_rejected_credential_stops_the_daemon_instead_of_hot_looping(tmp_path):
@@ -731,4 +801,4 @@ def test_shutdown_requested_mid_run_finishes_the_cycle_it_is_in(tmp_path):
         cloud_client=client,  # type: ignore[arg-type]
         should_stop=lambda: stop[0],
     )
-    assert client.heartbeats == [()]  # exactly one cycle ran, and it ran fully
+    assert client.heartbeats == [WorkerTemplateReport()]  # exactly one cycle ran, and it ran fully

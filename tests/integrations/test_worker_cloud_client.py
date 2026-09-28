@@ -20,6 +20,7 @@ from src.core.errors import (
 )
 from src.core.worker_dispatch_schemas import SignedDispatchAssignment, WorkerJobKind, WorkerJobPhase
 from src.core.worker_dispatch_signing import issue_dispatch_assignment
+from src.core.worker_templates import WorkerTemplate, WorkerTemplateReport
 from src.integrations.worker_cloud_client import WorkerCloudClient
 
 SECRET = SecretStr("unit-test-dispatch-signing-key")
@@ -214,7 +215,7 @@ def test_context_manager_closes_on_exit(tmp_path):
 # --- Heartbeat: templates live on this machine, not on the cloud host ----------
 
 
-def test_heartbeat_posts_the_local_template_names(tmp_path):
+def test_heartbeat_posts_the_local_templates_with_their_descriptions(tmp_path):
     captured: dict[str, httpx.Request] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -224,16 +225,25 @@ def test_heartbeat_posts_the_local_template_names(tmp_path):
             json={
                 "worker_id": "wkr-alice-desktop",
                 "last_seen_at": "2026-09-21T00:00:00Z",
-                "template_names": ["default-crawl"],
+                "templates": [{"name": "default-crawl", "description": ""}],
+                "unrecognised_count": 0,
             },
         )
 
     client = WorkerCloudClient(_settings(tmp_path), transport=httpx.MockTransport(handler))
-    client.heartbeat(("default-crawl",))
+    client.heartbeat(
+        WorkerTemplateReport(
+            templates=(WorkerTemplate(name="default-crawl", description="Everything, once."),),
+            unrecognised_count=2,
+        )
+    )
 
     request = captured["request"]
     assert request.url.path == "/api/v1/workers/heartbeat"
-    assert json.loads(request.content) == {"template_names": ["default-crawl"]}
+    assert json.loads(request.content) == {
+        "templates": [{"name": "default-crawl", "description": "Everything, once."}],
+        "unrecognised_count": 2,
+    }
     assert request.headers["Authorization"] == "Bearer wkr-alice-desktop:worker-secret-value"
 
 
@@ -304,4 +314,4 @@ def test_upload_and_report_failure_also_stop_on_a_refused_credential(tmp_path):
     with pytest.raises(WorkerCredentialRejectedError):
         client.report_failure("job-1", "whatever")
     with pytest.raises(WorkerCredentialRejectedError):
-        client.heartbeat(())
+        client.heartbeat(WorkerTemplateReport())

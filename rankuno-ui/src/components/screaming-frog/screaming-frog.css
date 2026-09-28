@@ -190,6 +190,18 @@
   color: var(--dim);
 }
 
+/* The worker-authored note about the chosen config. Wraps and breaks on long
+   words: the text comes from another machine and cannot be assumed to contain
+   a space anywhere in 500 characters. */
+.sfd-template-note {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .sfd-invalid {
   font-size: 11.5px;
   color: var(--danger);

@@ -36,7 +36,7 @@ import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Protocol
+from typing import Protocol
 
 from pydantic import Field
 
@@ -44,6 +44,12 @@ from src.core.auth import hash_password, verify_password
 from src.core.errors import RankunoError
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.core.worker_templates import (
+    MAX_REPORTED_TEMPLATES,
+    TEMPLATE_NAME_PATTERN,
+    WorkerTemplate,
+    WorkerTemplateReport,
+)
 
 __all__ = [
     "MAX_REPORTED_TEMPLATES",
@@ -55,6 +61,8 @@ __all__ = [
     "WorkerPrincipal",
     "WorkerStore",
     "WorkerStoreUnavailableError",
+    "WorkerTemplate",
+    "WorkerTemplateReport",
     "mint_worker_secret",
     "verify_worker_credential",
     "worker_is_online",
@@ -65,21 +73,12 @@ _logger = get_logger("core.worker_auth")
 _IDENTIFIER_PATTERN = r"^[a-z0-9_-]{1,64}$"
 """Same rule `Operator.operator_id`/`OrgConfig.org_id` already use."""
 
-TEMPLATE_NAME_PATTERN = r"^[a-z0-9_-]{1,128}$"
-"""Must stay identical to `screaming_frog_control.template_registry.
-TEMPLATE_NAME_PATTERN`, which is the rule that actually decides whether a
-name can become a path component. It is restated here rather than imported
-because `core` may not import from `modules` (CLAUDE.md §1.1); a test asserts
-the two literals agree, so a change to one that forgets the other fails
-loudly instead of opening a traversal hole in the worker-reported half."""
-
-MAX_REPORTED_TEMPLATES = 200
-"""Ceiling on how many template names one worker may report about itself.
-
-A worker is *untrusted input* on this path — it is a machine on someone's
-desk, not part of the trust boundary — so the number of names it can make
-the cloud store is bounded, the same way `upload_manifest.MAX_ZIP_MEMBERS`
-bounds what it can make the cloud unzip."""
+# `TEMPLATE_NAME_PATTERN`, `MAX_REPORTED_TEMPLATES`, `WorkerTemplate` and
+# `WorkerTemplateReport` are re-exported from `src.core.worker_templates`.
+# They moved there so the HTTP wire models, the daemon-side registry and the
+# Postgres store can share them without importing worker identity and its
+# password hashing; every existing `from src.core.worker_auth import ...`
+# still resolves.
 
 _SECRET_BYTES = 32
 """256 bits of entropy for a long-lived, network-facing bearer credential —
@@ -139,12 +138,19 @@ class Worker(StrictModel):
         last_seen_at: When this worker last proved it was awake, by polling
             or sending a heartbeat. `None` means it has never checked in —
             registered, but its daemon has not started even once.
-        template_names: The `.seospiderconfig` names this worker reported it
-            holds *locally*. The cloud host does not have those files and
-            never did; the machine that runs Screaming Frog is the only
-            place they exist. Every name here passed
-            `TEMPLATE_NAME_PATTERN` before being stored — a worker is
-            untrusted input on this path.
+        templates: The `.seospiderconfig` files this worker reported it
+            holds *locally*, each with the note a human wrote beside it.
+            The cloud host does not have those files and never did; the
+            machine that runs Screaming Frog is the only place they exist,
+            and because the format is an opaque Java-serialised blob the
+            note is the only description of one that can ever exist. Every
+            entry passed `TEMPLATE_NAME_PATTERN` and the description rules
+            before being stored — a worker is untrusted input on this path.
+        unrecognised_template_count: How many `.seospiderconfig` files in
+            that same directory the worker had to leave out because their
+            names fail `TEMPLATE_NAME_PATTERN`. Stored so the dashboard can
+            say "3 files were not recognised" instead of showing a short
+            list that looks complete.
     """
 
     worker_id: str = Field(pattern=_IDENTIFIER_PATTERN)
@@ -154,9 +160,8 @@ class Worker(StrictModel):
     is_active: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     last_seen_at: datetime | None = None
-    template_names: tuple[Annotated[str, Field(pattern=TEMPLATE_NAME_PATTERN)], ...] = Field(
-        default=(), max_length=MAX_REPORTED_TEMPLATES
-    )
+    templates: tuple[WorkerTemplate, ...] = Field(default=(), max_length=MAX_REPORTED_TEMPLATES)
+    unrecognised_template_count: int = Field(default=0, ge=0, le=MAX_REPORTED_TEMPLATES)
 
 
 class WorkerPrincipal(StrictModel):
@@ -283,7 +288,7 @@ class WorkerStore(Protocol):
         worker_id: str,
         *,
         seen_at: datetime,
-        template_names: tuple[str, ...] | None = None,
+        templates: WorkerTemplateReport | None = None,
     ) -> Worker:
         """Record that this worker is awake, and optionally what it holds.
 
@@ -292,9 +297,11 @@ class WorkerStore(Protocol):
                 principal's id at every call site — never a value a request
                 merely claims.
             seen_at: The check-in instant.
-            template_names: Validated template names to replace the stored
-                set with, or `None` to leave them untouched. A poll passes
-                `None`; only an explicit heartbeat reports templates.
+            templates: A validated report to replace the stored one with, or
+                `None` to leave it untouched. A poll passes `None`; only an
+                explicit heartbeat reports templates. Passed whole rather
+                than as two arguments so the template list and the
+                unrecognised-file count can never be stored out of step.
 
         Returns:
             The updated worker.
@@ -407,7 +414,7 @@ class DiskWorkerStore:
         worker_id: str,
         *,
         seen_at: datetime,
-        template_names: tuple[str, ...] | None = None,
+        templates: WorkerTemplateReport | None = None,
     ) -> Worker:
         """Record a check-in, rewriting the whole file under the lock.
 
@@ -421,13 +428,14 @@ class DiskWorkerStore:
                 raise WorkerNotFoundError(msg)
             worker = Worker.model_validate(data)
             update: dict[str, object] = {"last_seen_at": seen_at}
-            if template_names is not None:
-                update["template_names"] = template_names
+            if templates is not None:
+                update["templates"] = templates.templates
+                update["unrecognised_template_count"] = templates.unrecognised_count
             worker = worker.model_copy(update=update)
             # Re-validate rather than trusting `model_copy`: `StrictModel`
             # sets `validate_assignment`, but `model_copy(update=...)` is
-            # documented to bypass validation entirely, and `template_names`
-            # is the one field here that originates outside this process.
+            # documented to bypass validation entirely, and the template
+            # fields are the ones here that originate outside this process.
             worker = Worker.model_validate(worker.model_dump())
             self._workers[worker_id] = json.loads(worker.model_dump_json())
             self._save()

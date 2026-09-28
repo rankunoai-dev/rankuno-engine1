@@ -323,7 +323,27 @@ export interface WorkerSummary {
   last_seen_at: string | null;
   is_online: boolean;
   /** What the machine reported it holds. Empty until its daemon checks in. */
-  template_names: string[];
+  templates: WorkerTemplate[];
+  /**
+   * How many `.seospiderconfig` files that machine had to skip because their
+   * names are not slugs. Non-zero is the answer to "the folder is full, why is
+   * the dropdown empty".
+   */
+  unrecognised_template_count: number;
+}
+
+/**
+ * Mirrors `WorkerTemplate`.
+ *
+ * `description` is what a human wrote beside the config on the worker, and it
+ * is the only account of what a `.seospiderconfig` does that can exist — the
+ * file is an opaque Java-serialised blob that nothing here can read. It is
+ * also **text from a machine outside the trust boundary**: render it as a text
+ * node, never as HTML, and never build a URL or a selector out of it.
+ */
+export interface WorkerTemplate {
+  name: string;
+  description: string;
 }
 
 /** Mirrors `WorkerListView`. */
@@ -339,7 +359,9 @@ export interface WorkerListView {
 /** Mirrors `WorkerTemplatesView`. */
 export interface WorkerTemplatesView {
   worker_id: string;
-  templates: string[];
+  templates: WorkerTemplate[];
+  /** How many config files that machine could not offer. See `WorkerSummary`. */
+  unrecognised_count: number;
   /**
    * When the worker last told the cloud anything at all.
    *

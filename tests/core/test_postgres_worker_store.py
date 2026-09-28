@@ -10,7 +10,7 @@ set, that every failure becomes `WorkerStoreUnavailableError` rather than
 something a caller would read as "no such worker".
 
 It cannot prove the SQL is valid PostgreSQL, that `COALESCE(%s,
-template_names)` behaves as intended against a real planner, or that
+templates)` behaves as intended against a real planner, or that
 `ON CONFLICT (worker_id) DO NOTHING` reports `rowcount == 0` on conflict the
 way psycopg does. Those are asserted by construction and remain unverified
 until this runs against a real database. Said plainly here rather than left
@@ -37,6 +37,13 @@ from src.core.worker_auth import (
     WorkerStoreUnavailableError,
     verify_worker_credential,
 )
+from src.core.worker_templates import WorkerTemplate, WorkerTemplateReport
+
+
+def _report(*names: str) -> WorkerTemplateReport:
+    """A well-formed report of `names`, each without a description."""
+    return WorkerTemplateReport(templates=tuple(WorkerTemplate(name=n) for n in names))
+
 
 _COLUMNS = (
     "worker_id",
@@ -46,7 +53,8 @@ _COLUMNS = (
     "is_active",
     "created_at",
     "last_seen_at",
-    "template_names",
+    "templates",
+    "unrecognised_template_count",
 )
 
 
@@ -100,14 +108,15 @@ class _FakeCursor:
         self._result = [self._row(r) for r in records]
 
     def _touch(self, params: tuple[object, ...]) -> None:
-        seen_at, template_names, worker_id = params
+        seen_at, templates, unrecognised, worker_id = params
         record = self._db.get(str(worker_id))
         if record is None:
             self._result = None
             return
         record["last_seen_at"] = seen_at
-        if template_names is not None:  # the COALESCE
-            record["template_names"] = template_names
+        if templates is not None:  # the COALESCE
+            record["templates"] = templates
+            record["unrecognised_template_count"] = unrecognised
         self._result = self._row(record)
 
     def fetchone(self) -> object:
@@ -167,7 +176,8 @@ def test_create_then_get_round_trips_a_worker(store):
     assert read.worker_id == created.worker_id
     assert read.org_id == "acme"
     assert read.last_seen_at is None
-    assert read.template_names == ()
+    assert read.templates == ()
+    assert read.unrecognised_template_count == 0
 
 
 def test_create_preserves_the_pbkdf2_hash_untouched(store, db):
@@ -218,17 +228,32 @@ def test_touch_records_last_seen(store):
 
 def test_touch_with_templates_replaces_the_stored_set(store):
     store.create(_worker())
-    store.touch("wkr-alice", seen_at=datetime.now(UTC), template_names=("a", "b"))
-    store.touch("wkr-alice", seen_at=datetime.now(UTC), template_names=("c",))
-    assert store.get("wkr-alice").template_names == ("c",)
+    store.touch("wkr-alice", seen_at=datetime.now(UTC), templates=_report("a", "b"))
+    store.touch("wkr-alice", seen_at=datetime.now(UTC), templates=_report("c"))
+    assert [t.name for t in store.get("wkr-alice").templates] == ["c"]
+
+
+def test_touch_round_trips_a_description_through_the_json_column(store):
+    store.create(_worker())
+    store.touch(
+        "wkr-alice",
+        seen_at=datetime.now(UTC),
+        templates=WorkerTemplateReport(
+            templates=(WorkerTemplate(name="js-crawl", description="Renders JavaScript."),),
+            unrecognised_count=2,
+        ),
+    )
+    read = store.get("wkr-alice")
+    assert read.templates[0].description == "Renders JavaScript."
+    assert read.unrecognised_template_count == 2
 
 
 def test_touch_without_templates_leaves_the_stored_set_alone(store):
     """A poll reports no templates and must not wipe what a heartbeat sent."""
     store.create(_worker())
-    store.touch("wkr-alice", seen_at=datetime.now(UTC), template_names=("default-crawl",))
+    store.touch("wkr-alice", seen_at=datetime.now(UTC), templates=_report("default-crawl"))
     store.touch("wkr-alice", seen_at=datetime.now(UTC) + timedelta(seconds=1))
-    assert store.get("wkr-alice").template_names == ("default-crawl",)
+    assert [t.name for t in store.get("wkr-alice").templates] == ["default-crawl"]
 
 
 def test_touch_of_an_unknown_worker_raises_not_found(store):
@@ -239,8 +264,16 @@ def test_touch_of_an_unknown_worker_raises_not_found(store):
 def test_a_stored_template_name_that_could_become_a_path_is_refused_on_read(store, db):
     """Defense in depth: even a row written past the HTTP layer is re-checked."""
     store.create(_worker())
-    db["wkr-alice"]["template_names"] = json.dumps(["../../etc/passwd"])
-    with pytest.raises(ValueError, match="template_names"):
+    db["wkr-alice"]["templates"] = json.dumps([{"name": "../../etc/passwd", "description": ""}])
+    with pytest.raises(ValueError, match="name"):
+        store.get("wkr-alice")
+
+
+def test_a_stored_description_with_a_bidi_override_is_refused_on_read(store, db):
+    """The same defence for the half that reaches a browser, not a path."""
+    store.create(_worker())
+    db["wkr-alice"]["templates"] = json.dumps([{"name": "ok", "description": "safe‮gnp.exe"}])
+    with pytest.raises(ValueError, match="description"):
         store.get("wkr-alice")
 
 
