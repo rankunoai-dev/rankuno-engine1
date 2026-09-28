@@ -71,6 +71,7 @@ from openpyxl.utils import get_column_letter
 from pydantic import Field, SecretStr, ValidationError
 
 from src.api.auth import build_auth_router, org_scoped_or_404, require_principal
+from src.api.crawl_activity import CrawlActivityCounter, build_crawl_activity_router
 from src.api.deliverables_routes import build_deliverables_router
 from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password
@@ -924,6 +925,11 @@ class ApiState:
         self.session_ttl_s = session_ttl_s or get_settings().auth_session_ttl_s
         self.worker_store = worker_store or get_settings().worker_store
         self.worker_dispatch_store = worker_dispatch_store or PostgresWorkerDispatchStore()
+        # Per-org, TTL-cached counts behind `GET /crawl-activity`. A member of
+        # the state, not of the router, so a test can drive its clock.
+        self.crawl_activity = CrawlActivityCounter(
+            store, self.worker_dispatch_store, exclude_tool_name=SF_TOOL_NAME
+        )
         self.dispatch_signing_secret = (
             dispatch_signing_secret or get_settings().dispatch_signing_secret
         )
@@ -1452,6 +1458,7 @@ def create_app(
     app.include_router(build_deliverables_router(state), prefix=API_PREFIX)
     app.include_router(build_auth_router(state), prefix=API_PREFIX)
     app.include_router(build_worker_router(state), prefix=API_PREFIX)
+    app.include_router(build_crawl_activity_router(state), prefix=API_PREFIX)
 
     ui_dist_dir = Path("rankuno-ui/dist")
     if not ui_dist_dir.is_absolute():
