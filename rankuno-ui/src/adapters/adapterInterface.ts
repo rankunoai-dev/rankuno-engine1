@@ -597,6 +597,29 @@ export interface CrawlDataAdapter {
    * 401 every time.
    */
   downloadWorkerBundle?(jobId: string): Promise<Blob>;
+
+  /**
+   * How many crawls are running for the caller's org, on any device.
+   *
+   * Optional like `startJob`: fixtures have no server to ask, and the header
+   * indicator is simply not rendered when this is absent.
+   */
+  getCrawlActivity?(): Promise<CrawlActivityView>;
+}
+
+/**
+ * `GET /crawl-activity`. Hand-written: the generated schema does not cover it.
+ *
+ * `rankuno_cap` is the server's own concurrent-crawl limit and must be read
+ * from here, never hardcoded in the UI.
+ */
+export interface CrawlActivityView {
+  /** Running Rankuno-engine crawls in the caller's org, all users and devices. */
+  rankuno_active: number;
+  /** The server's concurrent Rankuno crawl limit. */
+  rankuno_cap: number;
+  /** Running Screaming Frog desktop-worker crawls in the caller's org. */
+  sf_active: number;
 }
 
 /**

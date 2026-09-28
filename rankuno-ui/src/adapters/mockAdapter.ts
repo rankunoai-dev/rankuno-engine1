@@ -1,5 +1,6 @@
 import type { PageClassificationOutput } from "../types/schema";
 import type {
+  CrawlActivityView,
   CrawlDataAdapter,
   CrawlJobSummary,
   JobProgress,
@@ -129,6 +130,11 @@ export class MockAdapter implements CrawlDataAdapter {
   /** No dispatch can have happened in a mode that cannot dispatch. */
   async listWorkerJobs(): Promise<WorkerJobView[]> {
     return [];
+  }
+
+  /** Fixed, plausible figures: fixtures have no org and no running crawls. */
+  async getCrawlActivity(): Promise<CrawlActivityView> {
+    return { rankuno_active: 2, rankuno_cap: 5, sf_active: 1 };
   }
 
   async getProgress(jobId: string): Promise<JobProgress> {

@@ -698,6 +698,75 @@
   }
 }
 
+/* Org-wide crawl activity: a server-side count, not this session's progress, so
+   it is deliberately quieter than `.bgpill` (no fill, no button). */
+.crawlact {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  white-space: nowrap;
+  color: var(--dim);
+  cursor: default;
+}
+/* The pill and the perf readout already own the free space to their left. Two
+   auto margins would split it and strand the pill mid-header. */
+.bgpill ~ .crawlact,
+.perf ~ .crawlact {
+  margin-left: 0;
+}
+.crawlact:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.crawlact-num {
+  font-weight: 700;
+}
+.crawlact-sep {
+  opacity: 0.5;
+}
+.crawlact-running {
+  color: var(--primary-ink);
+  border-color: var(--primary);
+  background: var(--primary-bg);
+}
+.crawlact-full {
+  color: var(--warn);
+  border-color: var(--warn-line);
+  background: var(--warn-bg);
+}
+.crawlact-flag {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.crawlact-spin {
+  animation: crawlact-spin 1s linear infinite;
+}
+@keyframes crawlact-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .crawlact-spin {
+    animation: none;
+  }
+}
+/* Narrow: keep the icon and the numbers, drop the words. The aria-label and
+   tooltip still carry the full sentence. */
+@media (max-width: 1180px) {
+  .crawlact-name,
+  .crawlact-flag {
+    display: none;
+  }
+}
+
 .perf {
   margin-left: auto;
   font-family: var(--mono);

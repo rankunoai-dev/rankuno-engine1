@@ -5,6 +5,7 @@ import type {
   PageClassificationOutput,
 } from "../types/schema";
 import type {
+  CrawlActivityView,
   CrawlDataAdapter,
   CrawlJobSummary,
   DeliverableRecord,
@@ -222,6 +223,11 @@ export class HttpAdapter implements CrawlDataAdapter {
       throw new ApiError(response.status, await describeFailure(response));
     }
     return (await response.json()) as T;
+  }
+
+  /** Running crawls for the caller's org, for the header indicator. */
+  async getCrawlActivity(): Promise<CrawlActivityView> {
+    return this.request<CrawlActivityView>("/crawl-activity");
   }
 
   async listJobs(): Promise<CrawlJobSummary[]> {
