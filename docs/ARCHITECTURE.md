@@ -463,7 +463,6 @@ src/
 | A cross-process-safe PID ledger | `reconcile_orphans` reads the whole ledger then writes the surviving set, and `_process_ledger._lock` is intra-process only and documented as such. A child enrolled in that window loses its entry and becomes untracked. Pre-existing; cycle 0113 makes `surviving` non-empty more often, so the window is marginally more consequential ([build-log 0113 §6.2](build-log/0113-the-test-suite-was-killing-live-crawls.md)) |
 | Audit-log rotation | `setup_logging` attaches a plain `FileHandler`, never a `RotatingFileHandler`, in production as well as under test. `logs/audit.jsonl` reached 510 MB. The test suite no longer feeds it (cycle 0113 redirects `AUDIT_LOG_PATH` in `tests/conftest.py`), which removes the largest contributor but not the growth |
 | A masterfile that is actually populated | The route, the in-memory bundle seam and the registry work (ADR 0017). The services do not: 13 of 21 render an **empty workbook** against a real Screaming Frog export, `overview_report` **crashes** (`masterfile_overview_report.py:235`, an unsanitised sheet name, with `sanitize_sheet_name()` already available at `masterfile_base.py:164`), the 6 with data are partial, 37 of 49 requested CSV filenames do not exist in an export, and no multi-file service records which issue put a URL in the sheet. Commit `0d26e26`'s "Complete RAE masterfile parity" and build-log 0105's "Phase 1 COMPLETE" are both false ([build-log 0107 §5](build-log/0107-a-directory-that-could-never-exist.md)) |
-| Any UI for masterfiles | `POST /jobs/{id}/masterfile/{slug}` and `GET /masterfiles/available` are served and nothing consumes either |
 | A UI for URL include/exclude patterns | `url_filter.py`, the two `PageClassificationInput` fields and their `schema.ts` entries all shipped (build-log 0106). No component sets them, so the feature is reachable only by posting to `/api/v1/jobs` by hand |
 | Any UI or backend for proxy, HTTP auth, custom headers, an SSL-verification opt-out or a GA4 property id | The 4-stage crawl wizard collected all five in `AdvancedStage.tsx`, and nothing accepted them: no `PageClassificationInput` field exists for any of them, and posting them returned `422` on every crawl start until build-log 0109. The wizard was **removed** in cycle 0112 and `DashboardShell` renders `LiveCrawlModal` again, so the fields are no longer collected either. They cannot simply be moved to the Screaming Frog path: `ScreamingFrogJobInput` and `WorkerJobEnvelope` carry only `seed_url` and `template_name` (ADR 0015 condition 8), and `template_registry.py` records that none of these settings has a Screaming Frog CLI flag — they exist only inside an opaque `.seospiderconfig` ([build-log 0112 §3.1](build-log/0112-a-wizard-wired-to-the-wrong-crawler.md)) |
 | A UI that consumes `rankuno-ui/src/lib/validation.ts` or `lib/urlParser.ts` | Both modules are retained with **zero importers** except their own tests, deliberately, awaiting a Screaming Frog dispatch form (cycle 0112 §6.1). `validateProxyUrl`, `validateRate`, `validateConcurrency`, `validateCustomHeaders`, `validateGA4PropertyId`, `estimateCrawlSeconds`, `formatCrawlTimeEstimate` and `normalizeDomain` are all unconsumed. `--crawl-list` appears nowhere in `src/`, so the URL-list upload `urlParser.ts` is held for does not exist yet either |
@@ -500,6 +499,15 @@ src/
 > Nothing wires it, or any circuit breaker, to the ADR 0015 worker-dispatch
 > HTTP channel specifically — that remains an accepted v1 gap (ADR 0015
 > condition 10), distinct from the file not existing at all.
+>
+> A row, "Any UI for masterfiles", was removed in cycle 0115: a "Masterfiles"
+> popover on finished Screaming Frog worker-job rows in `WorkerJobsPanel.tsx`
+> (`useMasterfileBuild.ts`) now calls `POST /jobs/{id}/masterfile/{slug}` with
+> the worker job id and `GET /masterfiles/available` for its button list. It
+> replaced a menu on native crawl rows that sent a native id, which the route
+> refuses with 409. The workbook contents are unchanged and still partial, per
+> the row above; no live build against a real dispatched bundle has been run
+> from the browser ([build-log 0115](build-log/0115-a-menu-that-sent-the-wrong-id.md)).
 >
 > A fifth row, "A live progress bar on `WorkerJobsPanel.tsx`", was removed in
 > cycle 0101: the panel now renders one (`DispatchProgress`, gated on
