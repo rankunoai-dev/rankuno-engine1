@@ -6,7 +6,7 @@ Create Date: 2026-09-29
 
 Railway wipes the container's own disk on every redeploy, and the live job
 store (`DiskJobStore`) writes to that disk — every crawl job vanishes on
-redeploy, not merely its result (`docs/adr/0021-postgres-backed-job-store.md`).
+redeploy, not merely its result (`docs/adr/0022-postgres-backed-job-store.md`).
 `jobs` (migration 0001) already holds job metadata; this migration adds the
 one column metadata was missing (`has_checkpoint`, mirroring `has_result`)
 and a companion table for the three payloads a job can carry:

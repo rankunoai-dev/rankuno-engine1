@@ -49,6 +49,28 @@ src/
 │   │                            # WRITE/FINANCIAL action may do*, unchanged
 │   ├── state_store.py           # Durable background-job records. Domain-agnostic:
 │   │                            # opaque request/result mappings, atomic writes
+│   ├── postgres_config.py       # PostgresSettings (host/port/db/user/password or
+│   │                            # a full DATABASE_URL) + is_configured(), which
+│   │                            # decides whether postgres_store.py should even
+│   │                            # attempt a connection rather than raising until
+│   │                            # its own circuit breaker opens on a workstation
+│   │                            # with no Postgres installed
+│   ├── postgres_store.py        # PostgresJobStore (ADR 0022): the same JobStore
+│   │                            # Protocol as state_store.py's DiskJobStore, over
+│   │                            # real Postgres (jobs + job_payloads, migration
+│   │                            # 0006), so a job's status/result/checkpoint/
+│   │                            # homepage snapshot survive a Railway redeploy.
+│   │                            # Every method checks CircuitBreaker first and
+│   │                            # falls back to DiskJobStore once it opens.
+│   │                            # write_reconciliation/read_reconciliation/
+│   │                            # write_performance/read_performance always
+│   │                            # delegate to the fallback store unconditionally
+│   │                            # -- out of scope for this cycle, and a Protocol's
+│   │                            # own ... body would otherwise silently no-op
+│   │                            # those calls once this store becomes the default.
+│   │                            # create_app() picks this store automatically
+│   │                            # whenever PostgresSettings.is_configured() is
+│   │                            # true; DiskJobStore otherwise (build-log 0118)
 │   ├── process_supervisor.py    # Windows Job Object process supervision (ADR
 │   │                            # 0013). Domain-agnostic core infrastructure,
 │   │                            # not SEO-specific: launch_supervised(),
