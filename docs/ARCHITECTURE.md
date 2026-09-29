@@ -83,9 +83,27 @@ src/
 │   │                            # a substitute for ADR 0016's session tokens.
 │   │                            # Also holds liveness (last_seen_at +
 │   │                            # worker_is_online) and the worker-reported
-│   │                            # template names, and TEMPLATE_NAME_PATTERN,
-│   │                            # restated from template_registry.py because core
-│   │                            # may not import modules (a test asserts they agree)
+│   │                            # template report (Worker.templates +
+│   │                            # unrecognised_template_count). The template
+│   │                            # value objects themselves live in
+│   │                            # worker_templates.py -- three layers need them
+│   │                            # that must not import worker identity
+│   ├── worker_templates.py      # What a worker reports about its own config
+│   │                            # templates: WorkerTemplate (name + the
+│   │                            # human-written description),
+│   │                            # WorkerTemplateReport (+ unrecognised_count),
+│   │                            # normalise_description(), and the caps
+│   │                            # MAX_REPORTED_TEMPLATES=200 /
+│   │                            # MAX_TEMPLATE_DESCRIPTION_CHARS=500. A
+│   │                            # .seospiderconfig is an opaque Java blob, so a
+│   │                            # human-authored sentence is the only account of
+│   │                            # one that can exist (ADR 0021). Treated as
+│   │                            # hostile: control, zero-width and bidi-override
+│   │                            # characters are REFUSED, not stripped -- React
+│   │                            # escapes HTML, nothing escapes U+202E. Also
+│   │                            # holds TEMPLATE_NAME_PATTERN, restated from
+│   │                            # template_registry.py because core may not
+│   │                            # import modules (a test asserts they agree)
 │   ├── postgres_worker_store.py # The durable WorkerStore. DiskWorkerStore is
 │   │                            # correct for a workstation and destructive on a
 │   │                            # container host, where the filesystem is rebuilt
@@ -189,8 +207,14 @@ src/
 │   │                            # the UI never invents its own staleness rule);
 │   │                            # POST /workers/heartbeat (worker-authenticated
 │   │                            # check-in reporting this machine's local
-│   │                            # .seospiderconfig names -- untrusted input,
-│   │                            # pattern- and count-checked server-side);
+│   │                            # .seospiderconfig templates, each with its
+│   │                            # sidecar description, plus the count of files
+│   │                            # whose names are not slugs -- untrusted input,
+│   │                            # pattern-, length- and content-checked
+│   │                            # server-side. Only the COUNT of unrecognised
+│   │                            # files crosses the network: a filename can
+│   │                            # carry a client's name, and the worker's own
+│   │                            # log already has them);
 │   │                            # GET /workers/{id}/templates (per-worker
 │   │                            # dropdown source; the API host has no template
 │   │                            # directory of its own on a cloud deployment);
@@ -494,8 +518,8 @@ src/
 | A UI for URL include/exclude patterns | `url_filter.py`, the two `PageClassificationInput` fields and their `schema.ts` entries all shipped (build-log 0106). No component sets them, so the feature is reachable only by posting to `/api/v1/jobs` by hand |
 | Any UI or backend for proxy, HTTP auth, custom headers, an SSL-verification opt-out or a GA4 property id | The 4-stage crawl wizard collected all five in `AdvancedStage.tsx`, and nothing accepted them: no `PageClassificationInput` field exists for any of them, and posting them returned `422` on every crawl start until build-log 0109. The wizard was **removed** in cycle 0112 and `DashboardShell` renders `LiveCrawlModal` again, so the fields are no longer collected either. They cannot simply be moved to the Screaming Frog path: `ScreamingFrogJobInput` and `WorkerJobEnvelope` carry only `seed_url` and `template_name` (ADR 0015 condition 8), and `template_registry.py` records that none of these settings has a Screaming Frog CLI flag — they exist only inside an opaque `.seospiderconfig` ([build-log 0112 §3.1](build-log/0112-a-wizard-wired-to-the-wrong-crawler.md)) |
 | A UI that consumes `rankuno-ui/src/lib/validation.ts` or `lib/urlParser.ts` | Both modules are retained with **zero importers** except their own tests, deliberately, awaiting a Screaming Frog dispatch form (cycle 0112 §6.1). `validateProxyUrl`, `validateRate`, `validateConcurrency`, `validateCustomHeaders`, `validateGA4PropertyId`, `estimateCrawlSeconds`, `formatCrawlTimeEstimate` and `normalizeDomain` are all unconsumed. `--crawl-list` appears nowhere in `src/`, so the URL-list upload `urlParser.ts` is held for does not exist yet either |
-| The React UI for `modules/seo/screaming_frog_control/` (ADR 0013) | The API surface (`preview`/confirm/templates) is implemented; no confirmation-modal UI consumes it yet — an operator would call it directly today |
-| A cloud dashboard or worker-management screen for ADR 0015's worker dispatch | The backend the UI needs is complete (`api/worker_routes.py`, including liveness, per-worker templates and bundle download); the React screens themselves belong to a separate task and do not exist yet |
+| ~~The React UI for `modules/seo/screaming_frog_control/` (ADR 0013)~~ | **Closed.** `ScreamingFrogView.tsx` consumes the preview/confirm/templates surface, and `WorkerJobsPanel.tsx` renders dispatched jobs, their progress and their masterfile builds. Row kept rather than deleted so a reader who remembers it can see it was closed and not merely dropped |
+| ~~A cloud dashboard or worker-management screen for ADR 0015's worker dispatch~~ | **Closed.** `ScreamingFrogView.tsx` (worker picker, liveness, template dropdown with each template's description and a count of skipped files — [build-log 0117](build-log/0117-a-sentence-beside-a-binary.md)) and `WorkerJobsPanel.tsx` (job list, progress bar, bundle and masterfile downloads). Row kept rather than deleted so the closure is visible |
 | A purge job for expired uploaded bundles | Still read-time filtering only (`read_upload` checks `expires_at`). Nothing deletes the row, so storage grows without bound — unchanged from build-log 0098 |
 | A migration of existing disk-backed worker registrations into Postgres | Impossible by construction: the `workers.json` it would read lives on a container filesystem that has already been rebuilt. Switching `WORKER_STORE_BACKEND` to `postgres` requires re-registering each desktop once (see `alembic/versions/0003_worker_identity_table.py`) |
 | Any Postgres SQL in `postgres_worker_store.py` or migration 0003 verified against a real database | `psycopg` is not installed in the local venv and no server is reachable from it. Both are covered only by an in-memory fake cursor, which cannot validate SQL syntax or `COALESCE`/`ON CONFLICT` semantics |
@@ -606,6 +630,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0018](adr/0018-bundle-allow-list-derives-from-the-issue-catalogue.md) | `ALLOWED_BUNDLE_FILENAMES` derives from `ISSUE_CATALOGUE.sf_sources` plus the spine, not from Screaming Frog's `--export-tabs`/`--bulk-export` argument strings. That transform is unsatisfiable for 7 files: 5 embed a threshold Screaming Frog takes from an operator-authored `.seospiderconfig` (an opaque Java-serialised binary this codebase cannot read), and 2 mangle `" & "`. The worker filtered those files out silently, so 7 of 110 issue ids read `NOT_MEASURED` forever. Seven exact literals, never a numeric wildcard — a pattern would hand the admissible-filename set at an untrusted boundary to whoever authors that config. Status: APPROVED. A skipped file is now logged, and the correspondence is pinned in both directions [build-log 0108](build-log/0108-a-literal-x-where-a-number-belongs.md) |
 | [0019](adr/0019-an-export-bundle-decides-its-own-job-status.md) | The contents of an uploaded export bundle decide the job's terminal status; the worker reports evidence, the cloud decides meaning. Zero members → `FAILED` and the bundle is **not stored** (a 22-byte empty zip offered as a download was the failure being removed); members without `internal_all.csv` → `PARTIAL`, stored but never a deliverable, because `load_screaming_frog_bundle` requires the spine non-optionally; otherwise `SUCCEEDED`. All three return **`200`** deliberately — `WorkerCloudClient.upload_bundle` calls `raise_for_status()`, so a 4xx becomes a daemon-side exception about an already-terminal job no retry can improve; the upload *report* was accepted, the *job* failed. A non-`SUCCEEDED` transition carries a reason in the existing `error` column, because `WorkerJobsPanel.tsx` renders `job.error ?? "No reason was recorded."` for `partial` too. Makes `WorkerJobStatus.PARTIAL`, previously documented as unreachable, reachable. Status: APPROVED. Implemented in `api/worker_routes.py`, `core/worker_dispatch_store.py`/`core/postgres_worker_dispatch_store.py`, `modules/seo/screaming_frog_control/worker_daemon.py`/`upload_manifest.py` [build-log 0113](build-log/0113-the-test-suite-was-killing-live-crawls.md). Covers the cloud upload boundary only — the direct `ScreamingFrogControlTool.execute()` path still returns success for a killed crawl |
 | [0020](adr/0020-a-deliverable-declares-whether-it-reports-on-indexable-pages.md) | Whether a deliverable reports on indexable pages only is a **declared property of the service** — `MasterfileService.INDEXABLE_ONLY: ClassVar[bool]`, defaulting `True`, never inferred and never implicit. `False` on exactly `directives`, `response_codes`, `non_functional_internal_links` and `overview_report`, pinned as an exact set by a test, each with a docstring saying why in terms of the finding. Those three report on pages that are Non-Indexable **by definition** (a `noindex` directive, a 4xx response, an inlink to a broken page), so the previous unconditional `Indexability == "Indexable"` filter could not match a row by construction — 10,309 / 7,756 / 51,127 rows lost on a real 24,000-page export, and a service that filters everything away produces a valid, well-formed, **empty** workbook that raises nothing and fails no test. Implements the exception build-log 0104 §223 specified and never shipped. Rejected: inferring it from source filenames (couples correctness to a vendor substring, the coupling ADR 0018 removed) and a helper each service calls (`sanitize_sheet_name` shows that pattern failing in the same subsystem — present, correct, zero callers). Per service, not per issue: `pagination` is the known casualty, deferred to the output reshape. Status: APPROVED. Implemented in `deliverables/masterfile_base.py` and four services [build-log 0116](build-log/0116-three-causes-for-one-empty-workbook.md) |
+| [0021](adr/0021-no-binary-config-upload-to-a-worker.md) | **A browser may not upload a `.seospiderconfig` to a worker**; a description may travel the other way. A `.seospiderconfig` is a Java `ObjectInputStream` blob this codebase cannot parse, so [ADR 0015](adr/0015-cloud-local-desktop-worker-architecture.md) condition 8's worker-side re-validation is structurally impossible for it, and `Principal` has no role field so "only an admin may upload" is inexpressible. No upload endpoint, no engine→worker byte channel, and the dispatch envelope chain carries a template **name** and never template **content** — unchanged, so gate (b)'s HMAC covers exactly what it covered before. Populating the template directory stays a one-time operator action in the Screaming Frog GUI. What ships instead is rung 1 of a three-rung ladder: a sidecar `<name>.md` description carried worker→cloud→browser, documentation only, never configuration, and treated as hostile at every boundary. Rung 2 (hash-pinned allow-list) and rung 3 (upload to quarantine, gated on `Principal` gaining a role field) are not built. Status: APPROVED. Implemented as `core/worker_templates.py`, `screaming_frog_control/template_registry.py` `scan()`, `alembic/versions/0005_worker_template_descriptions.py` [build-log 0117](build-log/0117-a-sentence-beside-a-binary.md) |
 
 ---
 
