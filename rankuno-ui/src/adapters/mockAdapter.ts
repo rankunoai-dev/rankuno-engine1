@@ -122,6 +122,14 @@ export class MockAdapter implements CrawlDataAdapter {
    * one would be manufacturing approval for a run that cannot happen. Their
    * absence is what makes the launcher disable the control with a reason,
    * instead of offering a button that fails on click.
+   *
+   * `listUrlListSources` (ADR 0023) is absent for a second, narrower reason.
+   * Whether "Orphans Only" is available is decided by a saved Screaming Frog
+   * cross-check, which fixture mode has no way to hold; any answer invented
+   * here would be the client deciding availability, which is exactly what
+   * that endpoint exists to stop. The gap report that launches a list crawl
+   * is unreachable in fixture mode anyway — `reconcileScreamingFrog` is
+   * absent too, so no cross-check can be produced to read a gap from.
    */
   async listWorkers(): Promise<WorkerListView> {
     return { workers: [], offline_after_s: 60 };

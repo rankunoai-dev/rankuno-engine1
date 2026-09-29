@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { WorkerJobAccepted } from "../../adapters/adapterInterface";
 import { ApiError } from "../../adapters/httpAdapter";
-import { dispatchPreview } from "../../test/factories";
+import { dispatchPreview, urlListView } from "../../test/factories";
 import { DispatchConfirmModal } from "./DispatchConfirmModal";
 
 /**
@@ -17,6 +17,8 @@ function renderModal(
   overrides: {
     preview?: ReturnType<typeof dispatchPreview>;
     confirm?: (request: unknown) => Promise<WorkerJobAccepted>;
+    /** Absent for a list dispatch: nobody typed an address there. */
+    typedUrl?: string;
   } = {},
 ) {
   const confirm = vi.fn(
@@ -29,7 +31,7 @@ function renderModal(
     <DispatchConfirmModal
       preview={overrides.preview ?? dispatchPreview()}
       workerName="Studio desktop"
-      typedUrl="https://www.example.com/"
+      typedUrl={"typedUrl" in overrides ? overrides.typedUrl : "https://www.example.com/"}
       confirm={confirm}
       onDispatched={onDispatched}
       onClose={onClose}
@@ -159,5 +161,145 @@ describe("DispatchConfirmModal", () => {
     expect(
       await screen.findByText(/only one Screaming Frog crawl runs at a time/i),
     ).toBeInTheDocument();
+  });
+
+  it("shows what a list run will actually audit, not only where it starts", async () => {
+    renderModal({
+      typedUrl: undefined,
+      preview: dispatchPreview({
+        seed_url: "https://www.example.com/",
+        url_list: urlListView({
+          url_count: 4_312,
+          source_label: "example.com weekly",
+          counts: {
+            source_rows: 4_360,
+            duplicates_dropped: 30,
+            non_http_dropped: 0,
+            off_domain_dropped: 18,
+            unsafe_host_dropped: 0,
+            kept: 4_312,
+          },
+        }),
+      }),
+    });
+
+    // The count, in the heading, with the crawl it came from beside it. An
+    // operator approving "4,312 orphan URLs" and getting a site crawl is the
+    // failure this whole summary exists to prevent.
+    expect(screen.getByText(/4,312 URLs from example\.com weekly/)).toBeInTheDocument();
+    // And that this is not a crawl of the site, said in the dialog.
+    expect(screen.getByText(/does not spider outward/i)).toBeInTheDocument();
+    expect(screen.getByText(/\(orphans only\)/i)).toBeInTheDocument();
+    // The exclusion count with the rule that produced it: a number with no
+    // rule beside it cannot be checked by the person approving it.
+    expect(screen.getByText(/18 external URLs/)).toBeInTheDocument();
+    expect(screen.getByText(/outside example\.com/)).toBeInTheDocument();
+    // A sample, verbatim, so a five-figure count is checkable at all.
+    expect(screen.getByText("https://www.example.com/orphan-a")).toBeInTheDocument();
+    // The seed is labelled as the site, not as where the spider starts.
+    expect(screen.getByText("Site")).toBeInTheDocument();
+    expect(screen.queryByText("Seed URL")).not.toBeInTheDocument();
+  });
+
+  it("echoes the approved digest back verbatim and nothing else", async () => {
+    const list = urlListView({ sha256: "b".repeat(64) });
+    const { confirm } = renderModal({
+      typedUrl: undefined,
+      preview: dispatchPreview({ url_list: list }),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /launch on studio desktop/i }));
+
+    await waitFor(() => {
+      expect(confirm).toHaveBeenCalledWith({
+        token: "tok-1",
+        seed_url: "https://www.example.com/",
+        template_name: null,
+        correlation_id: "ui-test-1",
+        // Not recomputed from `sample`, which holds three of 4,312 URLs, and
+        // not normalised: the digest names the exact bytes the worker fetches.
+        url_list_sha256: "b".repeat(64),
+      });
+    });
+  });
+
+  it("omits the digest entirely for an ordinary spidering crawl", async () => {
+    const { confirm } = renderModal();
+
+    fireEvent.click(screen.getByRole("button", { name: /launch on studio desktop/i }));
+
+    await waitFor(() => {
+      expect(confirm).toHaveBeenCalledTimes(1);
+    });
+    // Absent, not `null` or `""`: the field's presence is what puts the worker
+    // into list mode, and an empty string would fail the server's pattern.
+    expect(Object.keys(confirm.mock.calls[0]?.[0] as object)).not.toContain(
+      "url_list_sha256",
+    );
+  });
+
+  it("does not blame the machine when it is the approved list that is gone", async () => {
+    // Both are 404s on the same route. The list is stored under a retention
+    // window, so an approval can outlive the bytes it names — and sending that
+    // operator to check a PC that is fine is the wrong errand entirely.
+    const detail =
+      "the approved URL list is no longer available; it expired or was never generated for this organization. Preview again.";
+    renderModal({
+      typedUrl: undefined,
+      preview: dispatchPreview({ url_list: urlListView() }),
+      confirm: () => Promise.reject(new ApiError(404, detail)),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /launch on studio desktop/i }));
+
+    expect(await screen.findByText(detail)).toBeInTheDocument();
+    expect(screen.queryByText(/no longer registered/i)).not.toBeInTheDocument();
+    // Re-posting the same digest would fail identically forever.
+    expect(screen.getByRole("button", { name: /start again/i })).toBeInTheDocument();
+  });
+
+  it("still names the machine for a 404 on an ordinary crawl", async () => {
+    renderModal({ confirm: () => Promise.reject(new ApiError(404, "no worker wkr-aaaa")) });
+
+    fireEvent.click(screen.getByRole("button", { name: /launch on studio desktop/i }));
+
+    expect(await screen.findByText(/no longer registered/i)).toBeInTheDocument();
+  });
+
+  it("says nothing about a normalization when nobody typed an address", () => {
+    renderModal({
+      typedUrl: undefined,
+      preview: dispatchPreview({ url_list: urlListView() }),
+    });
+
+    // The seed was filled in from the source crawl. A note comparing it to
+    // "what you typed" would be about text that was never entered.
+    expect(screen.queryByText(/normalized form of what you typed/i)).not.toBeInTheDocument();
+  });
+
+  it("says Screaming Frog is busy in its own words, and keeps the approval alive", async () => {
+    // One crawl at a time, on purpose: Screaming Frog appends to a `trace.txt`
+    // shared by every invocation on the machine, and the licence read depends
+    // on exactly one supervised process writing to it. The server explains all
+    // of that; paraphrasing it would leave "409" on screen instead.
+    const detail =
+      "Screaming Frog runs 1 crawl at a time on a worker, because its licence log is " +
+      "shared across every invocation on that machine. Job wj-7 is already running. " +
+      "Wait for it to finish, or cancel it, then try again.";
+    renderModal({
+      typedUrl: undefined,
+      preview: dispatchPreview({ url_list: urlListView() }),
+      confirm: () => Promise.reject(new ApiError(409, detail)),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /launch on studio desktop/i }));
+
+    expect(await screen.findByText(detail)).toBeInTheDocument();
+    // The token was refused before it was spent, so the same approval still
+    // stands: the operator waits and launches, rather than starting over.
+    expect(
+      screen.getByRole("button", { name: /launch on studio desktop/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start again/i })).not.toBeInTheDocument();
   });
 });

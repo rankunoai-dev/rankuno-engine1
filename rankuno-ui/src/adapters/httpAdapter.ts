@@ -21,6 +21,7 @@ import type {
   JobStatus,
   WorkerJobAccepted,
   WorkerJobView,
+  UrlListSourcesView,
   WorkerListView,
   WorkerTemplatesView,
 } from "./adapterInterface";
@@ -415,6 +416,22 @@ export class HttpAdapter implements CrawlDataAdapter {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
       },
+    );
+  }
+
+  /**
+   * Which `--crawl-list` sources one finished crawl can offer.
+   *
+   * A `/jobs` route rather than a `/workers` one, because the question is
+   * about the crawl, not about the machine that would run the list. The
+   * answer is never second-guessed here: `available: false` with a reason is
+   * the server telling the UI that a preview using that source would fail,
+   * and "Orphans Only" is unavailable until a Screaming Frog export has been
+   * reconciled against this crawl — a fact only the server holds.
+   */
+  async listUrlListSources(jobId: string): Promise<UrlListSourcesView> {
+    return this.request<UrlListSourcesView>(
+      `/jobs/${encodeURIComponent(jobId)}/url-list/sources`,
     );
   }
 

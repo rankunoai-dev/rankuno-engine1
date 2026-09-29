@@ -57,7 +57,33 @@ describe("useUiStore", () => {
       "lastEngineView",
       "setView",
       "enterMode",
+      // A one-shot navigation request, not a mode: it names a crawl, never a
+      // product, and it is cleared the moment the launcher reads it. Listed
+      // here so that anything added beside it has to be argued for.
+      "listCrawlSourceJobId",
+      "startListCrawl",
+      "clearListCrawl",
     ]);
+  });
+
+  it("carries a crawl to the Screaming Frog launcher, once, and never stores it", () => {
+    /* "Run in Screaming Frog" on a cross-check. The request is consumed by the
+       launcher; left standing it would re-arm list mode on every later visit,
+       which is a crawl setting the operator chose once. */
+    useUiStore.getState().startListCrawl("job-1");
+
+    expect(useUiStore.getState().view).toBe("screaming-frog");
+    expect(useUiStore.getState().listCrawlSourceJobId).toBe("job-1");
+
+    useUiStore.getState().clearListCrawl();
+    expect(useUiStore.getState().listCrawlSourceJobId).toBeNull();
+
+    // And nothing about it survives a reload: only `view` is written, so a
+    // session resumed days later cannot point the launcher at a crawl nobody
+    // remembers choosing.
+    const stored = window.localStorage.getItem("rankuno.ui");
+    expect(stored).not.toBeNull();
+    expect(JSON.parse(stored as string)).toEqual({ view: "screaming-frog" });
   });
 
   it("neither product answers for Launch, however it was reached", () => {

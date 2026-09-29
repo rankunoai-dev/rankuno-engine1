@@ -1,4 +1,4 @@
-import { Alert, Button, Input, Select, Spin, Tag, message } from "antd";
+import { Alert, Button, Input, Radio, Select, Spin, Tag, message } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import type {
   DispatchPreview,
@@ -7,10 +7,15 @@ import type {
   WorkerSummary,
   WorkerTemplatesView,
 } from "../../adapters/adapterInterface";
+import { ApiError } from "../../adapters/httpAdapter";
 import { formatCrawlTime } from "../../lib/time";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { useUiStore } from "../../store/useUiStore";
 import { DispatchConfirmModal } from "./DispatchConfirmModal";
 import { WorkerJobsPanel } from "./WorkerJobsPanel";
+import { newCorrelationId } from "./correlationId";
+import type { UrlListChoice } from "./UrlListSourcePicker";
+import { UrlListSourcePicker } from "./UrlListSourcePicker";
 import "./screaming-frog.css";
 
 interface Props {
@@ -20,6 +25,18 @@ interface Props {
 
 /** The "no template" option's value. antd shows a `null` value as unchosen. */
 const NO_TEMPLATE = "";
+
+/**
+ * What Screaming Frog is pointed at.
+ *
+ * `spider` is `--crawl <url>`: follow links from a seed. `list` is
+ * `--crawl-list <file>`: fetch exactly the supplied URLs and nothing else.
+ * There is no default beyond `spider` and the choice is never implied by
+ * another field, because the two produce different artefacts — a list run
+ * describes a set of pages and must never be read as a crawl of the site
+ * (ADR 0023).
+ */
+type CrawlMode = "spider" | "list";
 
 /**
  * Launch a Screaming Frog crawl on a machine the operator owns.
@@ -42,6 +59,14 @@ const NO_TEMPLATE = "";
  *   holding none: the machine has never spoken. A dropdown saying "no templates
  *   available" would be a claim about a PC nobody has heard from.
  * * **Fixture mode.** No engine to ask, so nothing is offered.
+ *
+ * The one control that is not a crawl option is the mode (ADR 0023). In list
+ * mode the URLs come from a finished crawl **this engine** ran — a `/jobs`
+ * record, never a `/workers/jobs` dispatch; the two id spaces have no join,
+ * and `UrlListSourcePicker` is the only place either is read. The seed URL
+ * stays required there and is filled from the source crawl's own root: it
+ * names the site in every log line, and it is the domain the list was filtered
+ * against.
  */
 export function ScreamingFrogView({ adapter }: Props): JSX.Element {
   const storeAdapter = useCrawlStore((state) => state.adapter);
@@ -60,10 +85,32 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
   const [template, setTemplate] = useState<string>(NO_TEMPLATE);
   const [urlError, setUrlError] = useState<string | null>(null);
 
+  const [mode, setMode] = useState<CrawlMode>("spider");
+  const [listChoice, setListChoice] = useState<UrlListChoice | null>(null);
+  const [listSourceJobId, setListSourceJobId] = useState<string | null>(null);
+
   const [preview, setPreview] = useState<DispatchPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<PreviewFailure | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
+
+  // "Run in Screaming Frog", clicked on a cross-check over on the jobs screen.
+  // Consumed once and cleared: left standing it would re-arm list mode every
+  // time the operator came back here, which is a crawl setting they asked for
+  // once and would then have to undo on every visit.
+  const requestedListJob = useUiStore((state) => state.listCrawlSourceJobId);
+  const clearListCrawl = useUiStore((state) => state.clearListCrawl);
+  useEffect(() => {
+    if (requestedListJob === null) return;
+    setMode("list");
+    setListSourceJobId(requestedListJob);
+    // Which URLs is still unanswered — only the crawl was carried across.
+    setListChoice(null);
+    setPreview(null);
+    setPreviewError(null);
+    setUrlError(null);
+    clearListCrawl();
+  }, [requestedListJob, clearListCrawl]);
 
   // Keyed on the adapter object, never on `api.listWorkers.bind(api)`: `bind`
   // returns a fresh function on every render, so a dependency on one would make
@@ -169,6 +216,10 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
     const invalid = validateUrl(trimmed);
     setUrlError(invalid);
     if (invalid) return;
+    // Belt and braces with `whyBlocked`: a list-mode preview with no chosen
+    // source would build no list and queue an ordinary site crawl under a
+    // heading that says otherwise.
+    if (mode === "list" && listChoice === null) return;
 
     setPreviewing(true);
     setPreviewError(null);
@@ -178,15 +229,50 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
           seed_url: trimmed,
           template_name: template === NO_TEMPLATE ? null : template,
           correlation_id: newCorrelationId(),
+          // This call is what builds and stores the list, so the count and the
+          // digest in the response describe bytes that already exist. Nothing
+          // shown for approval is ever carried over from the picker above.
+          ...(mode === "list" && listChoice
+            ? {
+                url_list: {
+                  source_job_id: listChoice.source_job_id,
+                  source: listChoice.source,
+                },
+              }
+            : {}),
         }),
       );
     } catch (cause) {
-      setPreviewError(
-        cause instanceof Error ? cause.message : "The crawl could not be prepared.",
-      );
+      setPreviewError(describePreviewFailure(cause));
     } finally {
       setPreviewing(false);
     }
+  }
+
+  // Stable across renders: the picker holds it as a prop and calls it from its
+  // own handlers, and a fresh closure every render would be a new prop every
+  // render. Dropping any standing preview is the point — an approval describes
+  // one list, and this is the moment that list stopped being the chosen one.
+  const chooseList = useCallback((choice: UrlListChoice | null): void => {
+    setListChoice(choice);
+    setPreview(null);
+    setPreviewError(null);
+    if (choice && choice.base_url) {
+      // The source crawl's own root, not something typed. It is the domain the
+      // list was filtered against, so any other address would name a site the
+      // URLs are not from.
+      setSeedUrl(choice.base_url);
+      setUrlError(null);
+    }
+  }, []);
+
+  function changeMode(next: CrawlMode): void {
+    setMode(next);
+    setListChoice(null);
+    setListSourceJobId(null);
+    setPreview(null);
+    setPreviewError(null);
+    setUrlError(null);
   }
 
   function reuse(job: WorkerJobView): void {
@@ -195,6 +281,11 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
     setTemplate(job.envelope.template_name ?? NO_TEMPLATE);
     setUrlError(null);
     setPreviewError(null);
+    // Reuse copies the envelope, and the envelope carries a digest, not a
+    // list. Re-running a list job means choosing its source again — silently
+    // dropping back to a site crawl with the same seed would be a different
+    // crawl wearing the old one's settings.
+    changeMode("spider");
   }
 
   // Bound once, here, rather than inside the JSX: the modal is only rendered
@@ -202,11 +293,14 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
   // assertion that TypeScript cannot check across the closure.
   const confirmDispatch = api?.confirmDispatch?.bind(api);
   const canDispatch = api?.previewDispatch !== undefined;
+  const canListCrawl = api?.listUrlListSources !== undefined && api?.listJobs !== undefined;
   const blockedReason = whyBlocked({
     canDispatch,
     selected,
     seedUrl: seedUrl.trim(),
     offlineAfterS,
+    mode,
+    hasList: listChoice !== null,
   });
 
   return (
@@ -288,8 +382,55 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
             />
           )}
 
+          {/* A fieldset and a legend, not a styled label: this is a group of
+              radios, and grouping is what a screen reader announces before
+              reading either option. */}
+          <fieldset className="sfd-fieldset">
+            <legend>What to crawl</legend>
+            <Radio.Group
+              value={mode}
+              onChange={(event) => changeMode(event.target.value as CrawlMode)}
+            >
+              <Radio value="spider" className="sfd-source">
+                <span className="sfd-source-body">
+                  <span className="sfd-source-name">Spider from a seed URL</span>
+                  <span className="sfd-hint">
+                    Screaming Frog follows links outward from one address. The
+                    ordinary crawl.
+                  </span>
+                </span>
+              </Radio>
+              <Radio value="list" className="sfd-source" disabled={!canListCrawl}>
+                <span className="sfd-source-body">
+                  <span className="sfd-source-name">
+                    A list of URLs from a finished Rankuno crawl
+                  </span>
+                  <span className="sfd-hint">
+                    Screaming Frog fetches exactly those URLs and does not
+                    spider outward. This is the only way to audit orphans — a
+                    page nothing links to cannot be reached by following links.
+                  </span>
+                  {!canListCrawl && (
+                    <span className="sfd-source-why">
+                      This mode cannot read the engine's own crawls, so there is
+                      nothing to take URLs from.
+                    </span>
+                  )}
+                </span>
+              </Radio>
+            </Radio.Group>
+          </fieldset>
+
+          {mode === "list" && (
+            <UrlListSourcePicker
+              api={api}
+              initialJobId={listSourceJobId}
+              onChange={chooseList}
+            />
+          )}
+
           <div className="sfd-field">
-            <label htmlFor="sfd-seed">Seed URL</label>
+            <label htmlFor="sfd-seed">{mode === "list" ? "Site" : "Seed URL"}</label>
             <Input
               id="sfd-seed"
               value={seedUrl}
@@ -309,8 +450,9 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
               </span>
             ) : (
               <span className="sfd-hint" id="sfd-seed-hint">
-                Where the crawl starts. The server normalizes it and shows you
-                the result before anything runs.
+                {mode === "list"
+                  ? "Filled in from the source crawl. A list run still needs an address: it names the site in the job record, and its domain is what the list was filtered against. It is not spidered."
+                  : "Where the crawl starts. The server normalizes it and shows you the result before anything runs."}
               </span>
             )}
           </div>
@@ -347,10 +489,11 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
 
           {previewError && (
             <Alert
-              type="error"
+              type={previewError.refusal ? "warning" : "error"}
               showIcon
               style={{ marginBottom: 14 }}
-              message={previewError}
+              message={previewError.heading}
+              description={previewError.detail}
             />
           )}
 
@@ -383,7 +526,10 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
         <DispatchConfirmModal
           preview={preview}
           workerName={selected?.display_name ?? preview.worker_id}
-          typedUrl={seedUrl.trim()}
+          /* Only in spider mode. In list mode the address was filled in from
+             the source crawl, so a note about "what you typed" would be about
+             text the operator never entered. */
+          typedUrl={mode === "spider" ? seedUrl.trim() : undefined}
           confirm={(request) => confirmDispatch(preview.worker_id, request)}
           onDispatched={() => {
             setPreview(null);
@@ -452,17 +598,103 @@ Authorization: Bearer <your session token>
   );
 }
 
+/**
+ * A refused preview, as the form should present it.
+ *
+ * `refusal` separates "the server decided against this, and told you why" from
+ * "something went wrong". A 409 or a 422 here is a *decision about the data* —
+ * this crawl has never been cross-checked, or its list is over the ceiling —
+ * and an operator who reads that as a fault goes looking for a bug instead of
+ * choosing the other source.
+ */
+interface PreviewFailure {
+  heading: string;
+  /** The server's own sentence, verbatim. */
+  detail: string;
+  /** A decision to act on rather than a failure to report. */
+  refusal: boolean;
+}
+
+/**
+ * Turn a refused preview into something an operator can act on.
+ *
+ * `detail` is always the server's own text and is never paraphrased: the 422
+ * names both numbers, says why a shorter list is not substituted, and points
+ * at the smaller source; the 409 explains what a cross-check has to do with an
+ * orphan. Rewriting either would lose the part that says what to do next.
+ *
+ * The headings exist because the server's sentence alone does not say whether
+ * anything ran. Nothing did — a preview builds and stores a list, and a
+ * refusal means it built none — and "nothing will run" is the claim the
+ * over-ceiling case most needs, because a ceiling that trimmed rather than
+ * refused would be the reasonable guess.
+ */
+function describePreviewFailure(cause: unknown): PreviewFailure {
+  if (!(cause instanceof ApiError)) {
+    return {
+      heading: "The crawl could not be prepared.",
+      detail: cause instanceof Error ? cause.message : "No reason was given.",
+      refusal: false,
+    };
+  }
+  switch (cause.status) {
+    case 409:
+      return {
+        heading: "Nothing was prepared — that crawl cannot supply those URLs.",
+        detail: cause.message,
+        refusal: true,
+      };
+    case 422:
+      return {
+        // Said first and plainly. The one wrong conclusion available here is
+        // "it will run, just with fewer URLs", and the engine refuses rather
+        // than trimming precisely so that never happens.
+        heading: "Nothing was prepared, and no shortened crawl will run.",
+        detail: cause.message,
+        refusal: true,
+      };
+    case 404:
+      return {
+        heading: "That crawl is not available.",
+        detail: cause.message,
+        refusal: true,
+      };
+    case 403:
+      return {
+        heading: "That crawl is not yours to send.",
+        detail: cause.message,
+        refusal: true,
+      };
+    case 400:
+      return {
+        heading: "That address cannot be crawled.",
+        detail: cause.message,
+        refusal: true,
+      };
+    default:
+      return {
+        heading: "The crawl could not be prepared.",
+        detail: cause.message,
+        refusal: false,
+      };
+  }
+}
+
 /** Why the launch button is disabled, or `null` when it is not. */
 function whyBlocked({
   canDispatch,
   selected,
   seedUrl,
   offlineAfterS,
+  mode,
+  hasList,
 }: {
   canDispatch: boolean;
   selected: WorkerSummary | null;
   seedUrl: string;
   offlineAfterS: number | null;
+  mode: CrawlMode;
+  hasList: boolean;
 }): string | null {
   if (!canDispatch) return "Fixture mode cannot dispatch a crawl.";
   if (!selected) return "Choose the machine that will run the crawl.";
@@ -472,6 +704,12 @@ function whyBlocked({
     return selected.last_seen_at === null
       ? `${selected.display_name} has never checked in — start the worker daemon on it${threshold}.`
       : `${selected.display_name} was last seen ${formatCrawlTime(selected.last_seen_at)}${threshold}.`;
+  }
+  // Before the seed check, and deliberately: in list mode the address is
+  // filled in *by* choosing a source, so "enter a URL" would be an instruction
+  // to do something the operator cannot do yet.
+  if (mode === "list" && !hasList) {
+    return "Choose the crawl to take URLs from, and which of its URLs to send.";
   }
   if (!seedUrl) return "Enter the URL the crawl should start from.";
   return null;
@@ -541,15 +779,4 @@ function validateUrl(value: string): string | null {
     return "Only http:// and https:// addresses can be crawled.";
   }
   return null;
-}
-
-/**
- * A per-attempt correlation id.
- *
- * `crypto.randomUUID` is deliberately not used: it is absent from insecure
- * origins and from some test environments, and this value only has to be unique
- * enough to tie one preview to its confirm in the logs.
- */
-function newCorrelationId(): string {
-  return `ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }

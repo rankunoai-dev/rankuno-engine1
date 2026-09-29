@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type {
   DispatchConfirmRequest,
   DispatchPreview,
+  UrlListView,
   WorkerJobAccepted,
 } from "../../adapters/adapterInterface";
 import { ApiError } from "../../adapters/httpAdapter";
@@ -14,8 +15,14 @@ interface Props {
   preview: DispatchPreview;
   /** The machine's display name. The preview carries only its id. */
   workerName: string;
-  /** What the operator typed, so a normalization can be pointed out. */
-  typedUrl: string;
+  /**
+   * What the operator typed, so a normalization can be pointed out.
+   *
+   * Omitted for a list-mode dispatch: nobody typed a URL there — the seed is
+   * the source crawl's own root — so there is no difference to point out and
+   * the note would be about text the operator never entered.
+   */
+  typedUrl?: string;
   confirm: (request: DispatchConfirmRequest) => Promise<WorkerJobAccepted>;
   onDispatched: (job: WorkerJobAccepted) => void;
   onClose: () => void;
@@ -51,6 +58,14 @@ interface Failure {
  *   statement about a token and an alarming one about a crawl.
  * * **An offline machine.** `worker_online: false` on the *preview* means the
  *   confirm will 409, so it is said here, before the operator commits.
+ *
+ * When the preview carries a `url_list` (ADR 0023), the dialog also has to
+ * show **what will be crawled**, not only where it starts. A confirmation
+ * reading "12,431 URLs" with no way to check them is precisely what an
+ * approval gate is supposed to prevent, so the source, the count, the
+ * excluded-off-domain figure and a verbatim sample are all on screen before
+ * the button is reachable. The `sha256` goes back untouched: the server
+ * compares it inside the same statement that spends the token.
  */
 export function DispatchConfirmModal({
   preview,
@@ -82,10 +97,15 @@ export function DispatchConfirmModal({
         seed_url: preview.seed_url,
         template_name: preview.template_name,
         correlation_id: preview.correlation_id,
+        // Echoed verbatim. Not recomputed from `sample`, which holds only the
+        // first few URLs, and not normalised: the digest names the exact bytes
+        // the worker will fetch, and any transformation of it here would turn
+        // a correct approval into a 403.
+        ...(preview.url_list ? { url_list_sha256: preview.url_list.sha256 } : {}),
       });
       onDispatched(accepted);
     } catch (cause) {
-      const described = describeFailure(cause);
+      const described = describeFailure(cause, preview.url_list != null);
       // Only unlock when the token survived the refusal. A 403 means it is
       // gone, and re-posting it would fail identically forever.
       if (described.canRetry) spent.current = false;
@@ -135,7 +155,7 @@ export function DispatchConfirmModal({
         <dd>
           {workerName} <span className="sfc-none">({preview.worker_id})</span>
         </dd>
-        <dt>Seed URL</dt>
+        <dt>{preview.url_list ? "Site" : "Seed URL"}</dt>
         <dd>{preview.seed_url}</dd>
         <dt>Template</dt>
         <dd>
@@ -147,7 +167,9 @@ export function DispatchConfirmModal({
         </dd>
       </dl>
 
-      {preview.seed_url !== typedUrl && (
+      {preview.url_list && <UrlListSummary list={preview.url_list} />}
+
+      {typedUrl !== undefined && preview.seed_url !== typedUrl && (
         <p className="sfc-normalized">
           The address above is the server's normalized form of what you typed
           (<code>{typedUrl}</code>). The normalized one is what will be crawled.
@@ -195,6 +217,86 @@ export function DispatchConfirmModal({
 }
 
 /**
+ * What a list-mode dispatch will actually audit.
+ *
+ * Four things, and each is here because its absence would let a false
+ * approval through:
+ *
+ * * **List mode is not a site crawl.** Screaming Frog is given `--crawl-list`
+ *   and audits exactly these addresses; it does not follow links outward.
+ *   Said in the dialog, not in a tooltip, because an operator who reads this
+ *   as a crawl of the site will read the export as a site audit.
+ * * **The source.** "Orphans Only" and "All Discovered URLs" differ by orders
+ *   of magnitude, and the label is the server's own wording.
+ * * **The exclusions.** `counts.off_domain_dropped` is the number behind
+ *   "Excluded N external URLs", shown with the domain that produced it — a
+ *   count with no rule beside it cannot be checked.
+ * * **A sample.** The one thing that makes a five-figure count checkable by a
+ *   human at all. Rendered as text nodes; these are URLs from a crawled site,
+ *   outside the trust boundary.
+ */
+function UrlListSummary({ list }: { list: UrlListView }): JSX.Element {
+  const excluded = list.counts.off_domain_dropped;
+  return (
+    <section className="sfc-list" aria-labelledby="sfc-list-h">
+      <h4 id="sfc-list-h" className="sfc-list-h">
+        {list.url_count.toLocaleString()} URL{list.url_count === 1 ? "" : "s"} from{" "}
+        {list.source_label}
+      </h4>
+      <p className="sfc-list-mode">
+        <strong>List mode.</strong> Screaming Frog audits exactly these{" "}
+        {list.url_count.toLocaleString()} addresses and does not spider outward
+        from them. The result is not a crawl of the site.
+      </p>
+      <dl className="sfc-rows">
+        <dt>URLs</dt>
+        <dd>
+          {list.url_count.toLocaleString()}{" "}
+          <span className="sfc-none">({labelFor(list.source)})</span>
+        </dd>
+        {excluded > 0 && (
+          <>
+            <dt>Excluded</dt>
+            <dd>
+              {excluded.toLocaleString()} external URL{excluded === 1 ? "" : "s"}{" "}
+              <span className="sfc-none">
+                {list.registrable_domain
+                  ? `— outside ${list.registrable_domain}`
+                  : "— outside the crawled domain"}
+              </span>
+            </dd>
+          </>
+        )}
+      </dl>
+      {list.sample.length > 0 && (
+        <>
+          <p className="sfc-normalized">
+            The first {list.sample.length.toLocaleString()} of them, exactly as
+            they will be sent:
+          </p>
+          <ul className="sfc-sample">
+            {list.sample.map((url) => (
+              <li key={url}>{url}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * A plain-English name for a source, for the line beside the count.
+ *
+ * Deliberately short: `UrlListSourceOption.label` is the server's wording and
+ * is already shown on the picker and in the heading above, so repeating it
+ * here in full would read as two different facts.
+ */
+function labelFor(source: UrlListView["source"]): string {
+  return source === "orphans" ? "orphans only" : "all discovered URLs";
+}
+
+/**
  * Seconds until `expiresAt`, ticking once a second and never below zero.
  *
  * Stops once it reaches zero: an expired token cannot become valid again, and a
@@ -231,8 +333,15 @@ function secondsUntil(expiresAt: string): number {
  * The server's own `detail` is used verbatim wherever it already says what to
  * do — the 409 names the worker and tells you to start the daemon, and
  * paraphrasing it would only lose the worker id.
+ *
+ * `hadList` is not decoration. A `404` means "unknown worker" for an ordinary
+ * crawl and "the approved URL list is gone" for a list one, and the second is
+ * the failure mode this feature introduced: the list is stored under a
+ * retention window and the confirm re-checks the digest, so an approval can
+ * outlive the bytes it names. Telling that operator their PC was unregistered
+ * would send them to the wrong machine entirely.
  */
-function describeFailure(cause: unknown): Failure {
+function describeFailure(cause: unknown, hadList: boolean): Failure {
   if (!(cause instanceof ApiError)) {
     return {
       message:
@@ -261,10 +370,18 @@ function describeFailure(cause: unknown): Failure {
         canRetry: true,
       };
     case 404:
-      return {
-        message: `That machine is no longer registered. ${cause.message}`,
-        canRetry: false,
-      };
+      // Two different 404s answer this route, and they are not the same news.
+      // In list mode the likely one is the *list*: its bytes are stored with a
+      // retention window, and a confirm naming bytes that have expired is
+      // refused before the token is touched. The server's own detail already
+      // says which and says to preview again, so it is shown verbatim rather
+      // than wrapped in a sentence about a machine that is probably fine.
+      return hadList
+        ? { message: cause.message, canRetry: false }
+        : {
+            message: `That machine is no longer registered. ${cause.message}`,
+            canRetry: false,
+          };
     default:
       return { message: cause.message, canRetry: true };
   }

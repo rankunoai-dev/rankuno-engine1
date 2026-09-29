@@ -417,4 +417,118 @@ describe("WorkerJobsPanel masterfiles", () => {
     await waitFor(() => expect(error).toHaveBeenCalledWith("bad bundle"));
     expect(api.downloadDeliverable).not.toHaveBeenCalled();
   });
+
+  it("says a shortfall cannot be established rather than reporting none", async () => {
+    // A finished list run whose worker never reported a page count. `null` is
+    // "cannot say", and rendering it as 0 would be the positive claim that
+    // nothing was missed — which is exactly how a silently capped licence goes
+    // unnoticed for months.
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({
+          status: "succeeded",
+          finished_at: "2026-09-21T11:00:00Z",
+          url_list_url_count: 4_312,
+          url_list_shortfall: null,
+          url_list_shortfall_note: "",
+        }),
+      ]),
+    };
+
+    renderPanel(api);
+
+    expect(await screen.findByText(/list mode · 4,312 URLs supplied/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/how many were crawled was never reported/i),
+    ).toBeInTheDocument();
+    // Neither claim is made: not "0 missing", and not "all crawled".
+    expect(screen.queryByText(/every URL supplied was crawled/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\b0\b.*not crawled/i)).not.toBeInTheDocument();
+  });
+
+  it("reports a real shortfall in the server's words, naming the licence cap", async () => {
+    const note =
+      "This run was given 4,312 URLs and crawled 500 — exactly Screaming Frog's " +
+      "free-tier ceiling. That is the licence expiring, not the site: the crawl keeps " +
+      "running and is silently capped. Check the licence on the worker machine and run " +
+      "this again.";
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({
+          status: "succeeded",
+          finished_at: "2026-09-21T11:00:00Z",
+          pages_crawled: 500,
+          url_list_url_count: 4_312,
+          url_list_shortfall: 3_812,
+          url_list_shortfall_note: note,
+        }),
+      ]),
+    };
+
+    renderPanel(api);
+
+    // Verbatim: the note is what distinguishes a capped licence from pages
+    // that redirected or stopped answering, and those need opposite actions.
+    expect(await screen.findByText(note)).toBeInTheDocument();
+    // And never a colour alone — the whole finding is in the text.
+    expect(screen.getByText(/free-tier ceiling/i)).toBeInTheDocument();
+  });
+
+  it("states plainly when a list run crawled everything it was given", async () => {
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({
+          status: "succeeded",
+          finished_at: "2026-09-21T11:00:00Z",
+          pages_crawled: 37,
+          url_list_url_count: 37,
+          url_list_shortfall: 0,
+          url_list_shortfall_note: "",
+        }),
+      ]),
+    };
+
+    renderPanel(api);
+
+    // Zero is a claim, and it is one this record can support.
+    expect(await screen.findByText(/every URL supplied was crawled/i)).toBeInTheDocument();
+    expect(screen.getByText(/list mode · 37 URLs supplied/i)).toBeInTheDocument();
+  });
+
+  it("says nothing about a list for an ordinary spidering crawl", async () => {
+    // `url_list_url_count` absent is every record written before ADR 0023 and
+    // every `--crawl` dispatch since. Neither is a list run.
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi
+        .fn()
+        .mockResolvedValue([workerJob({ status: "succeeded", finished_at: "2026-09-21T11:00:00Z" })]),
+    };
+
+    renderPanel(api);
+
+    await screen.findByText("SUCCEEDED");
+    expect(screen.queryByText(/list mode/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/URLs supplied/i)).not.toBeInTheDocument();
+  });
+
+  it("holds its tongue about a shortfall while the list run is still going", async () => {
+    // A dispatched job has no page count yet *by definition*. "Never reported"
+    // would be wrong, not merely premature.
+    const api: WorkerDispatchAdapter = {
+      listWorkerJobs: vi.fn().mockResolvedValue([
+        workerJob({
+          status: "dispatched",
+          dispatched_at: new Date().toISOString(),
+          url_list_url_count: 4_312,
+        }),
+      ]),
+    };
+
+    renderPanel(api);
+
+    expect(await screen.findByText(/list mode · 4,312 URLs supplied/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/how many were crawled was never reported/i),
+    ).not.toBeInTheDocument();
+  });
 });

@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { WorkerDispatchAdapter } from "../../adapters/adapterInterface";
-import { dispatchPreview, worker } from "../../test/factories";
+import {
+  crawlJob,
+  dispatchPreview,
+  urlListSources,
+  urlListView,
+  worker,
+} from "../../test/factories";
+import { ApiError } from "../../adapters/httpAdapter";
+import { useUiStore } from "../../store/useUiStore";
 import { ScreamingFrogView } from "./ScreamingFrogView";
 
 /**
@@ -23,6 +31,46 @@ function makeApi(overrides: Partial<WorkerDispatchAdapter> = {}): WorkerDispatch
     listWorkerJobs: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
+}
+
+
+/** An online machine, which every list-mode test below needs first. */
+function onlineWorker() {
+  return {
+    workers: [worker({ is_online: true, last_seen_at: "2026-09-21T10:00:00Z" })],
+    offline_after_s: 60,
+  };
+}
+
+/** Switch to list mode and pick a crawl and a subset from the default fixtures. */
+async function chooseOrphanList(): Promise<void> {
+  fireEvent.click(
+    await screen.findByRole("radio", { name: /A list of URLs from a finished Rankuno crawl/ }),
+  );
+  await waitFor(() => {
+    expect(screen.getByLabelText("Source crawl")).toBeEnabled();
+  });
+  fireEvent.mouseDown(screen.getByLabelText("Source crawl"));
+  fireEvent.click(await screen.findByTitle("example.com — https://www.example.com/"));
+  fireEvent.click(await screen.findByRole("radio", { name: /Orphans Only/ }));
+  // Settle anything the choice started inside act; see the picker's own suite.
+  await act(async () => {});
+}
+
+/** Sources with orphans available, which the factory default deliberately lacks. */
+function withOrphans(candidate: number) {
+  const base = urlListSources();
+  return urlListSources({
+    sources: [
+      {
+        ...base.sources[0]!,
+        available: true,
+        unavailable_reason: "",
+        candidate_url_count: candidate,
+      },
+      base.sources[1]!,
+    ],
+  });
 }
 
 describe("ScreamingFrogView", () => {
@@ -299,5 +347,210 @@ describe("ScreamingFrogView", () => {
     await waitFor(() => {
       expect(screen.getByText(/fixture mode/i)).toBeInTheDocument();
     });
+  });
+
+  it("sends a list dispatch, and approves the count the server built, not the estimate", async () => {
+    // The two numbers differ on purpose. 4,330 is what the source picker can
+    // say before filtering; 4,312 is what the preview actually generated,
+    // deduped and domain-filtered, and it is the only one an approval may
+    // show. A count in an approval that is not the count dispatched is the
+    // exact failure this feature had at the backend level.
+    const preview = dispatchPreview({
+      seed_url: "https://www.example.com/",
+      url_list: urlListView({ url_count: 4_312, sha256: "c".repeat(64) }),
+    });
+    const confirmDispatch = vi.fn().mockResolvedValue({ id: "wj-9", status: "queued" });
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      listJobs: vi.fn().mockResolvedValue([crawlJob()]),
+      listUrlListSources: vi.fn().mockResolvedValue(withOrphans(4_330)),
+      previewDispatch: vi.fn().mockResolvedValue(preview),
+      confirmDispatch,
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    await chooseOrphanList();
+
+    // The seed came from the source crawl, not from a keyboard: it is the
+    // domain the list was filtered against.
+    expect(screen.getByLabelText("Site")).toHaveValue("https://www.example.com/");
+    fireEvent.click(screen.getByRole("button", { name: /review and launch/i }));
+
+    await waitFor(() => {
+      expect(api.previewDispatch).toHaveBeenCalledWith("wkr-aaaa", {
+        seed_url: "https://www.example.com/",
+        template_name: null,
+        correlation_id: expect.stringMatching(/^ui-/),
+        url_list: { source_job_id: "job-1", source: "orphans" },
+      });
+    });
+
+    // Scoped to the dialog: the form behind it still shows the estimate, and
+    // that is fine. What must never happen is the estimate appearing inside
+    // the approval, where it would be read as the number being dispatched.
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText(/4,312 URLs from example\.com/)).toBeInTheDocument();
+    expect(dialog.queryByText(/4,330/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /launch on studio desktop/i }));
+    await waitFor(() => {
+      expect(confirmDispatch).toHaveBeenCalledWith("wkr-aaaa", {
+        token: "tok-1",
+        seed_url: "https://www.example.com/",
+        template_name: null,
+        correlation_id: "ui-test-1",
+        url_list_sha256: "c".repeat(64),
+      });
+    });
+  });
+
+  it("will not preview a list dispatch with no list chosen", async () => {
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      listJobs: vi.fn().mockResolvedValue([crawlJob()]),
+      listUrlListSources: vi.fn().mockResolvedValue(urlListSources()),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    const input = await screen.findByLabelText("Seed URL");
+    fireEvent.change(input, { target: { value: "https://www.example.com/" } });
+    fireEvent.click(
+      screen.getByRole("radio", { name: /A list of URLs from a finished Rankuno crawl/ }),
+    );
+
+    // A seed alone is enough for a spidering crawl and is not enough here: a
+    // list preview with no source would build no list and queue a plain site
+    // crawl under a heading that says otherwise.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /review and launch/i })).toBeDisabled();
+    });
+    expect(screen.getByText(/Choose the crawl to take URLs from/i)).toBeInTheDocument();
+    expect(api.previewDispatch).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the engine's refusal to trim an oversized list, in its own words", async () => {
+    // 422 from the preview, not a generic failure: this is a decision the
+    // operator has to make differently, not something to retry.
+    const detail =
+      "this crawl's 'all' URL list holds 12,431 URLs, over the 10,000 ceiling (SCREAMING_FROG_URL_LIST_MAX_URLS), so nothing was generated. A shorter list is not silently substituted because the run would then audit fewer pages than the approval says. Choose 'Orphans Only', which is smaller and is the recommended source.";
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      listJobs: vi.fn().mockResolvedValue([crawlJob()]),
+      listUrlListSources: vi.fn().mockResolvedValue(withOrphans(4_330)),
+      previewDispatch: vi.fn().mockRejectedValue(new ApiError(422, detail)),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    await chooseOrphanList();
+    fireEvent.click(screen.getByRole("button", { name: /review and launch/i }));
+
+    // Said before the server's sentence: nothing ran, and nothing will run
+    // with fewer URLs. "It went ahead with 10,000 of them" is the reasonable
+    // wrong guess about a ceiling, and it is the one that would be acted on.
+    expect(
+      await screen.findByText(/nothing was prepared, and no shortened crawl will run/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(detail)).toBeInTheDocument();
+    // Nothing was approved, so no dialog opened.
+    expect(screen.queryByText(/confirm this screaming frog crawl/i)).not.toBeInTheDocument();
+  });
+
+  it("drops the chosen list when the operator goes back to spidering", async () => {
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      listJobs: vi.fn().mockResolvedValue([crawlJob()]),
+      listUrlListSources: vi.fn().mockResolvedValue(withOrphans(4_330)),
+      previewDispatch: vi.fn().mockResolvedValue(dispatchPreview()),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    await chooseOrphanList();
+    fireEvent.click(screen.getByRole("radio", { name: /Spider from a seed URL/ }));
+    fireEvent.click(screen.getByRole("button", { name: /review and launch/i }));
+
+    // No `url_list` at all — absent, not an empty one. Its presence on the
+    // wire is what puts the worker into list mode.
+    await waitFor(() => {
+      expect(api.previewDispatch).toHaveBeenCalledWith("wkr-aaaa", {
+        seed_url: "https://www.example.com/",
+        template_name: null,
+        correlation_id: expect.stringMatching(/^ui-/),
+      });
+    });
+  });
+
+  it("disables list mode, with the reason, when the engine cannot be asked", async () => {
+    // `listUrlListSources` absent is what an older engine and fixture mode
+    // both look like. Offering a radio that fails on click is worse.
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+
+    const listMode = await screen.findByRole("radio", {
+      name: /A list of URLs from a finished Rankuno crawl/,
+    });
+    expect(listMode).toBeDisabled();
+    expect(screen.getByText(/cannot read the engine's own crawls/i)).toBeInTheDocument();
+    // The ordinary crawl is unaffected.
+    expect(screen.getByRole("radio", { name: /Spider from a seed URL/ })).toBeChecked();
+  });
+
+  it("reports a crawl that cannot supply the URLs as a decision, not a fault", async () => {
+    const detail =
+      "No Screaming Frog cross-check has been run against this crawl yet, and an orphan " +
+      "is defined by that comparison.";
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      listJobs: vi.fn().mockResolvedValue([crawlJob()]),
+      listUrlListSources: vi.fn().mockResolvedValue(withOrphans(37)),
+      previewDispatch: vi.fn().mockRejectedValue(new ApiError(409, detail)),
+      confirmDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    await screen.findByLabelText("Machine");
+    await chooseOrphanList();
+    fireEvent.click(screen.getByRole("button", { name: /review and launch/i }));
+
+    expect(
+      await screen.findByText(/nothing was prepared — that crawl cannot supply those URLs/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(detail)).toBeInTheDocument();
+  });
+
+  it("opens on the crawl a cross-check sent it to, without answering which URLs", async () => {
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      listJobs: vi.fn().mockResolvedValue([crawlJob({ id: "job-1" })]),
+      listUrlListSources: vi.fn().mockResolvedValue(withOrphans(37)),
+      previewDispatch: vi.fn(),
+    });
+    // What "Run in Screaming Frog" on the reconciliation panel does.
+    act(() => {
+      useUiStore.getState().startListCrawl("job-1");
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+
+    // List mode, on that crawl, with its sources already read.
+    await waitFor(() => {
+      expect(api.listUrlListSources).toHaveBeenCalledWith("job-1");
+    });
+    expect(screen.getByRole("radio", { name: /A list of URLs from a finished/ })).toBeChecked();
+    // But the subset is still unanswered — that is the decision being
+    // approved, and arriving here is not a choice of it.
+    expect(screen.getByRole("radio", { name: /Orphans Only/ })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: /All Discovered URLs/ })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /review and launch/i })).toBeDisabled();
+    expect(
+      screen.getByText(/choose the crawl to take URLs from, and which of its URLs to send/i),
+    ).toBeInTheDocument();
+
+    // Consumed once: coming back to this screen must not re-arm list mode.
+    expect(useUiStore.getState().listCrawlSourceJobId).toBeNull();
   });
 });

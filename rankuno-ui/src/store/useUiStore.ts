@@ -38,9 +38,35 @@ interface UiState {
   view: RailView;
   /** Where "back to the engine" lands, instead of always the visualizer. */
   lastEngineView: EngineView;
+  /**
+   * A crawl the operator asked to run through Screaming Frog in list mode,
+   * or `null`.
+   *
+   * A one-shot request, not a selection: the Screaming Frog launcher reads it
+   * once, opens itself on that crawl, and calls `clearListCrawl`. Left
+   * standing it would re-arm list mode every time the operator came back to
+   * that screen, which is a crawl setting they did not ask for a second time.
+   *
+   * Deliberately not persisted. It is an intent formed by one click, and a
+   * reload two days later restoring it would point the launcher at a crawl
+   * nobody remembers choosing. The storage subscription below writes `view`
+   * and nothing else, so this cannot leak into `localStorage`.
+   */
+  listCrawlSourceJobId: string | null;
   setView: (view: RailView) => void;
   /** Enter a product from the Launch screen, landing on its main view. */
   enterMode: (mode: ProductMode) => void;
+  /**
+   * Open the Screaming Frog launcher in list mode, on this crawl's URLs.
+   *
+   * Carries a `/jobs` id — a crawl this engine ran — never a `/workers/jobs`
+   * dispatch id. It navigates as well as arming the request, because the two
+   * are one operator action ("run these there") and splitting them would let
+   * a caller arm it without going anywhere.
+   */
+  startListCrawl: (jobId: string) => void;
+  /** Consume the request, so returning to the launcher does not re-apply it. */
+  clearListCrawl: () => void;
 }
 
 /**
@@ -157,6 +183,9 @@ export const useUiStore = create<UiState>((set) => ({
     set((state) => ({
       view: mode === "engine" ? state.lastEngineView : "screaming-frog",
     })),
+  listCrawlSourceJobId: null,
+  startListCrawl: (jobId) => set(() => ({ view: "screaming-frog", listCrawlSourceJobId: jobId })),
+  clearListCrawl: () => set(() => ({ listCrawlSourceJobId: null })),
 }));
 
 /*

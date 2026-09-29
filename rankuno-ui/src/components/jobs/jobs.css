@@ -216,6 +216,19 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Two actions now sit in this heading, and at a narrow width they belong
+     under the words rather than squeezed beside them. */
+  flex-wrap: wrap;
+}
+
+/* The two things that can be done with one side of the gap: take the list away
+   as a file, or send it to Screaming Frog. Grouped so the heading's own `gap`
+   does not space them differently from each other. */
+.jb-gap-acts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* Per-figure download. Sits under the label inside the tile, so the number, the

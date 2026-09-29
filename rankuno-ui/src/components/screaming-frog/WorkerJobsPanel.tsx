@@ -32,6 +32,15 @@ interface Props {
 /** Statuses that can still change, so the list is worth polling. */
 const ACTIVE: ReadonlySet<string> = new Set(["queued", "dispatched"]);
 
+/**
+ * Statuses where nothing further will be reported.
+ *
+ * Not the complement of `ACTIVE`: a status this build does not recognise is in
+ * neither set, and treating it as settled would put "never reported" against a
+ * job that may still be running.
+ */
+const SETTLED: ReadonlySet<string> = new Set(["succeeded", "partial", "failed"]);
+
 /** How often to refetch while anything is still moving. */
 const POLL_MS = 5_000;
 
@@ -133,6 +142,10 @@ export function WorkerJobsPanel({
           <span className="sfj-sub">
             {workerNames[job.worker_id] ?? job.worker_id} ·{" "}
             {job.envelope.template_name ?? "no template"}
+            {/* Said on the row, not only inside the outcome: a list run and a
+                site crawl of the same address produce different artefacts, and
+                the seed URL above is identical for both. */}
+            {job.url_list_url_count != null && " · list mode"}
           </span>
         </div>
       ),
@@ -173,7 +186,12 @@ export function WorkerJobsPanel({
       title: "Outcome",
       key: "outcome",
       width: 300,
-      render: (_value, job) => <Outcome job={job} onReuse={onReuse} />,
+      render: (_value, job) => (
+        <div className="sfj-outcome">
+          <ListModeOutcome job={job} />
+          <Outcome job={job} onReuse={onReuse} />
+        </div>
+      ),
     },
     {
       title: "",
@@ -245,6 +263,64 @@ export function WorkerJobsPanel({
         }}
       />
     </section>
+  );
+}
+
+/**
+ * What a list-mode run was given, and whether all of it was crawled.
+ *
+ * `null` for `url_list_shortfall` means **"cannot say"**, and the three states
+ * are deliberately three different sentences rather than one number:
+ *
+ * * **A number above zero.** URLs supplied and never fetched. The server's own
+ *   note is shown verbatim because it distinguishes the two causes that share
+ *   this symptom, and they need opposite actions: landing exactly on Screaming
+ *   Frog's 500-URL free-tier ceiling is the licence silently capping the run,
+ *   anything else is pages that redirected or stopped answering. This is the
+ *   first truncation signal this system can produce at all — without a known
+ *   list length, "the crawl stopped early" and "the site is that size" are the
+ *   same observation.
+ * * **Zero.** The positive claim that nothing was missed.
+ * * **`null`.** No page count has arrived, so neither claim can be made.
+ *   Rendering it as `0` would assert the second one on no evidence, which is
+ *   exactly how a capped licence goes unnoticed for months. Said only once the
+ *   job has settled — for a queued or running one, "not yet known" is the
+ *   ordinary state and does not need saying.
+ *
+ * Returns `null` for an ordinary `--crawl` job, and for any record written
+ * before ADR 0023, where `url_list_url_count` is absent.
+ */
+function ListModeOutcome({ job }: { job: WorkerJobView }): JSX.Element | null {
+  const supplied = job.url_list_url_count;
+  if (supplied == null) return null;
+  const shortfall = job.url_list_shortfall;
+  const settled = SETTLED.has(job.status);
+
+  return (
+    <div className="sfj-status">
+      <span className="sfj-detail">
+        List mode · {supplied.toLocaleString()} URL{supplied === 1 ? "" : "s"}{" "}
+        supplied
+      </span>
+      {shortfall == null ? (
+        settled && (
+          <span className="sfj-detail">
+            How many were crawled was never reported, so whether any were missed
+            cannot be said.
+          </span>
+        )
+      ) : shortfall === 0 ? (
+        <span className="sfj-detail">Every URL supplied was crawled.</span>
+      ) : (
+        /* The server's sentence, not a recomposed one: it names the free-tier
+           ceiling when the numbers fit it, and that is the finding. Never a
+           colour alone — the whole explanation is in the text. */
+        <span className="sfj-error">
+          {job.url_list_shortfall_note ||
+            `${shortfall.toLocaleString()} of the ${supplied.toLocaleString()} URLs supplied were not crawled.`}
+        </span>
+      )}
+    </div>
   );
 }
 

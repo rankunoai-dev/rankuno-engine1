@@ -347,3 +347,61 @@ describe("ReconcilePanel", () => {
     expect(await screen.findByText(/reconciliation failed/i)).toBeInTheDocument();
   });
 });
+
+/**
+ * The action beside the download, which is the whole point of reading the
+ * engine-only gap: these are pages nothing links to, so the only way to audit
+ * them with Screaming Frog is to hand it the list.
+ */
+describe("run in Screaming Frog", () => {
+  /** An adapter that can both read a saved cross-check and dispatch. */
+  function stubDispatchable(value: SavedReconciliation | null = saved()): void {
+    useCrawlStore.setState({
+      adapter: {
+        getReconciliation: vi.fn().mockResolvedValue(value),
+        listUrlListSources: vi.fn(),
+        previewDispatch: vi.fn(),
+      },
+    } as never);
+  }
+
+  it("sends the crawl to the launcher and closes, without dispatching anything", async () => {
+    stubReconcile();
+    stubDispatchable();
+    const onClose = vi.fn();
+    render(<ReconcilePanel jobId="job-1" label="e.com" open onClose={onClose} />);
+
+    const run = await screen.findByRole("button", { name: /run in screaming frog/i });
+    fireEvent.click(run);
+
+    // Navigated, with the crawl carried across — and nothing approved: which
+    // URLs is still unanswered, and the approval gate is over there.
+    expect(useUiStore.getState().view).toBe("screaming-frog");
+    expect(useUiStore.getState().listCrawlSourceJobId).toBe("job-1");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("says list mode audits only these URLs, beside the button that sends them", async () => {
+    stubReconcile();
+    stubDispatchable();
+    render(<ReconcilePanel jobId="job-1" label="e.com" open onClose={() => {}} />);
+
+    // Said where the operator acts, not in a tooltip: a list run is not a
+    // crawl of the site and must never be read as one.
+    expect(await screen.findByText(/audits exactly the URLs it is given/i)).toBeInTheDocument();
+    expect(screen.getByText(/does not spider outward/i)).toBeInTheDocument();
+  });
+
+  it("is absent, not disabled, when nothing can be dispatched", async () => {
+    // Fixture mode: no `previewDispatch`, no `listUrlListSources`. A control
+    // that fails on click is worse than one that is not there.
+    stubReconcile();
+    stubSaved(saved());
+    open();
+
+    await screen.findByRole("button", { name: "Download 2" });
+    expect(
+      screen.queryByRole("button", { name: /run in screaming frog/i }),
+    ).not.toBeInTheDocument();
+  });
+});

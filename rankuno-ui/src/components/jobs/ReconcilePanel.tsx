@@ -278,7 +278,15 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
               }
             />
           )}
-          <GapReport summary={summary} lists={lists} jobId={jobId} />
+          <GapReport
+            summary={summary}
+            lists={lists}
+            jobId={jobId}
+            onLeaving={() => {
+              onClose();
+              reset();
+            }}
+          />
           {/* Buttons, not `<a href>`: every export route requires a session
               token since ADR 0016, and a browser navigation cannot carry one.
               `downloadFile` fetches the bytes through the same authorized
@@ -317,10 +325,13 @@ function GapReport({
   summary,
   lists,
   jobId,
+  onLeaving,
 }: {
   summary: ReconciliationSummary;
   lists: SavedReconciliation | null;
   jobId: string;
+  /** Close this dialog, for an action that navigates away from it. */
+  onLeaving: () => void;
 }): JSX.Element {
   const site = hostSlug(summary.base_url);
   const bareList = isBareList(summary);
@@ -434,7 +445,10 @@ function GapReport({
 
       <h4 className="jb-gap-h">
         We found, Screaming Frog did not
-        <GapDownload rows={lists?.engine_only} jobId={jobId} side="engine" />
+        <span className="jb-gap-acts">
+          <GapDownload rows={lists?.engine_only} jobId={jobId} side="engine" />
+          <RunInScreamingFrog jobId={jobId} onLeaving={onLeaving} />
+        </span>
       </h4>
       <Table
         size="small"
@@ -452,6 +466,18 @@ function GapReport({
           { title: "URLs", dataIndex: "count", align: "right" as const, width: 80 },
         ]}
       />
+
+      {/* Said under the engine-only table, beside the button that acts on it:
+          a link-following crawl can never reach an orphan, because nothing
+          links to one. That is why running these URLs through Screaming Frog
+          needs list mode, and why the result is a report on exactly this set
+          of pages rather than a crawl of the site. */}
+      <p className="jb-dim jb-gap-note">
+        Screaming Frog cannot reach these by following links — that is what
+        makes them orphans. Sending them to it runs Screaming Frog in{" "}
+        <b>list mode</b>: it audits exactly the URLs it is given and does not
+        spider outward from them.
+      </p>
 
       {/* The two directions need opposite fixes, and that is the whole point of
           reading them side by side. Said in words because a table of enum names
@@ -510,6 +536,62 @@ function GapDownload({
       onClick={() => void download()}
     >
       {downloading ? "Downloading…" : `Download ${rows.length.toLocaleString()}`}
+    </button>
+  );
+}
+
+/**
+ * Send this crawl's URLs to Screaming Frog, beside the button that downloads
+ * them.
+ *
+ * The two actions answer the same question — "what do I do with these?" — and
+ * the answer used to be "download a spreadsheet and drive Screaming Frog by
+ * hand". This one hands the job to the launcher instead of running it here,
+ * for two reasons that both matter more than staying in the dialog:
+ *
+ * * **Preview → confirm is not duplicated.** The approval token is the only
+ *   evidence of approval that exists (ADR 0013), and a second dispatch path is
+ *   a second place for that to be got wrong. The launcher already owns it.
+ * * **Which URLs is still a choice.** Orphans are the recommended set but not
+ *   the only one, and availability is the server's call, not this panel's —
+ *   this crawl *has* a cross-check, so orphans will be offered, but whether
+ *   there are any is a fact only `GET /jobs/{id}/url-list/sources` holds.
+ *
+ * Absent, not disabled, when the adapter cannot dispatch or cannot ask what a
+ * crawl can offer: fixture mode has no engine behind it, and a control that
+ * fails on click is worse than one that is not there.
+ */
+function RunInScreamingFrog({
+  jobId,
+  onLeaving,
+}: {
+  jobId: string;
+  onLeaving: () => void;
+}): JSX.Element | null {
+  const startListCrawl = useUiStore((state) => state.startListCrawl);
+  // Two capabilities, both required: one to read what the crawl can offer, one
+  // to mint the approval. Either alone leads to a dead end further in.
+  const canSend = useCrawlStore(
+    (state) =>
+      state.adapter?.listUrlListSources !== undefined &&
+      state.adapter?.previewDispatch !== undefined,
+  );
+  if (!canSend) return null;
+
+  return (
+    <button
+      type="button"
+      className="jb-stat-dl jb-gap-dl"
+      title="Open the Screaming Frog launcher with this crawl selected, and choose which of its URLs to send"
+      onClick={() => {
+        // Closed first, then navigated: leaving a modal open over a screen it
+        // does not belong to is how a dialog ends up unreachable behind the
+        // view that replaced it.
+        onLeaving();
+        startListCrawl(jobId);
+      }}
+    >
+      Run in Screaming Frog
     </button>
   );
 }

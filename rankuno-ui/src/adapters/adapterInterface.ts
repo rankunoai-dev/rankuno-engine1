@@ -372,11 +372,120 @@ export interface WorkerTemplatesView {
   reported_at: string | null;
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * `--crawl-list` URL lists (ADR 0023).
+ *
+ * Hand-written beside the worker shapes above and for the same reason: these
+ * live in `src/api/worker_schemas.py`, which `export_ui_contract.py` does not
+ * read. Field names match the wire exactly.
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * Which subset of a finished crawl's URLs to hand to Screaming Frog.
+ *
+ * A closed union, like `CrawlSpeed["key"]` below and unlike
+ * `WorkerJobView.status`: the UI never branches on this value, it only echoes
+ * back the `source` the server put on an option. A member added server-side
+ * would still render — label, description and availability all come from the
+ * response — so the union costs nothing at runtime.
+ */
+export type UrlListSource = "orphans" | "all";
+
+/**
+ * One offered — or refused — list source. Mirrors `UrlListSourceOption`.
+ *
+ * `available` is the **server's** verdict and the only one that exists.
+ * "Orphans Only" is unavailable until a Screaming Frog export has been
+ * reconciled against the crawl, because that comparison is what defines an
+ * orphan, and nothing in the browser can know whether one has been run. Never
+ * re-derive it here; render `unavailable_reason`, which is never empty when
+ * `available` is false.
+ *
+ * `candidate_url_count` counts candidates *before* filtering, and is `null`
+ * when nothing could be counted. The preview reports the truthful post-filter
+ * number.
+ */
+export interface UrlListSourceOption {
+  source: UrlListSource;
+  label: string;
+  description: string;
+  available: boolean;
+  unavailable_reason: string;
+  candidate_url_count: number | null;
+  /** Counting stopped at the ceiling, so `candidate_url_count` is a floor. */
+  exceeds_ceiling: boolean;
+}
+
+/** Mirrors `UrlListSourcesView` — `GET /jobs/{id}/url-list/sources`. */
+export interface UrlListSourcesView {
+  job_id: string;
+  label: string;
+  /** The crawl's own root. Used as the dispatch seed URL in list mode. */
+  base_url: string;
+  /** The server's ceiling for one list. Never hardcode it in the UI. */
+  max_urls: number;
+  sources: UrlListSourceOption[];
+}
+
+/**
+ * What each filtering stage dropped. Mirrors `UrlListCounts`.
+ *
+ * `off_domain_dropped` is the number behind "Excluded N external URLs". The
+ * fields reconcile exactly: `source_rows` minus every `*_dropped` equals
+ * `kept`.
+ */
+export interface UrlListCounts {
+  source_rows: number;
+  duplicates_dropped: number;
+  non_http_dropped: number;
+  off_domain_dropped: number;
+  unsafe_host_dropped: number;
+  kept: number;
+}
+
+/**
+ * A generated, stored list as a confirmation modal should render it.
+ * Mirrors `UrlListView`.
+ *
+ * Everything except `sha256` exists so a human can tell *which* list this is —
+ * an approval reading "12,431 URLs" with no way to check them is the thing the
+ * gate exists to prevent. `sha256` is the only field the server compares, and
+ * the confirm must echo it back verbatim.
+ */
+export interface UrlListView {
+  source: UrlListSource;
+  source_job_id: string;
+  source_label: string;
+  /** The domain every kept URL sits inside — the rule behind the exclusions. */
+  registrable_domain: string;
+  url_count: number;
+  sha256: string;
+  sample: string[];
+  counts: UrlListCounts;
+}
+
+/** Which crawl's URLs, and which subset. Mirrors `UrlListRequest`. */
+export interface UrlListRequest {
+  source_job_id: string;
+  /** No default on the wire: "which URLs" is the decision being approved. */
+  source: UrlListSource;
+}
+
 /** What `POST /workers/{id}/dispatch/preview` accepts. */
 export interface DispatchPreviewRequest {
   seed_url: string;
   template_name: string | null;
   correlation_id: string;
+  /**
+   * Present for a `--crawl-list` dispatch; omitted for an ordinary crawl.
+   *
+   * The preview call is what builds and stores the list, before anyone has
+   * approved anything, so that the bytes the returned fingerprint names
+   * already exist.
+   */
+  url_list?: UrlListRequest;
 }
 
 /**
@@ -395,11 +504,26 @@ export interface DispatchPreview {
   /** False here means the confirm will 409 — warn before the operator commits. */
   worker_online: boolean;
   worker_last_seen_at: string | null;
+  /**
+   * The generated list, when one was asked for. Absent or `null` for an
+   * ordinary `--crawl` preview, and for any engine predating ADR 0023.
+   */
+  url_list?: UrlListView | null;
 }
 
 /** What `POST /workers/{id}/dispatch` accepts. The token is the approval. */
 export interface DispatchConfirmRequest extends DispatchPreviewRequest {
   token: string;
+  /**
+   * The preview's `url_list.sha256`, echoed back **verbatim**.
+   *
+   * Never recomputed, reordered or normalised here: the server checks it
+   * inside the same atomic statement that consumes the token, so a confirm
+   * naming a different list fails without burning the approval. Echoing it
+   * rather than letting the server look it up from the token is what makes
+   * the mismatch detectable at all.
+   */
+  url_list_sha256?: string;
 }
 
 /** Mirrors `WorkerJobAccepted`. An id to poll, not a result. */
@@ -456,6 +580,21 @@ export interface WorkerJobView {
   pages_crawled?: number | null;
   progress_pct?: number | null;
   current_phase?: "crawling" | "exporting" | null;
+  /** How many URLs a list-mode job was given. Absent for an ordinary crawl. */
+  url_list_url_count?: number | null;
+  /**
+   * URLs supplied but never crawled, once both numbers are known.
+   *
+   * `null` (or absent) means **"cannot say"** — either this was not a list
+   * job, or no page count has arrived — and must never be rendered as `0`.
+   * `0` is the positive claim that nothing was missed. A positive value is
+   * the first truncation signal this system can produce: before a known list
+   * length, "the crawl stopped early" and "the site is that size" were
+   * indistinguishable, which is how a free-tier licence cap goes unnoticed.
+   */
+  url_list_shortfall?: number | null;
+  /** The explanation of a non-zero shortfall. Empty when there is none. */
+  url_list_shortfall_note?: string;
 }
 
 /**
@@ -608,6 +747,17 @@ export interface CrawlDataAdapter {
     request: DispatchConfirmRequest,
   ): Promise<WorkerJobAccepted>;
 
+  /**
+   * Which `--crawl-list` sources a finished crawl can offer, and the ceiling.
+   *
+   * Asked rather than worked out locally: "Orphans Only" exists only for a
+   * crawl that has already been cross-checked against a Screaming Frog
+   * export, and the browser has no way to know that. Optional like
+   * `startJob` — fixture mode has no engine to ask, so the control is absent
+   * rather than offering a choice that fails on click.
+   */
+  listUrlListSources?(jobId: string): Promise<UrlListSourcesView>;
+
   /** Every Screaming Frog dispatch for the caller's org. Not `/jobs`. */
   listWorkerJobs?(): Promise<WorkerJobView[]>;
 
@@ -658,13 +808,28 @@ export type WorkerDispatchAdapter = Pick<
   | "getWorkerTemplates"
   | "previewDispatch"
   | "confirmDispatch"
+  | "listUrlListSources"
   | "listWorkerJobs"
   | "downloadWorkerBundle"
   | "listAvailableMasterfiles"
   | "buildMasterfile"
   | "getDeliverable"
   | "downloadDeliverable"
->;
+> &
+  /**
+   * The engine's own crawls, which list mode takes its URLs from.
+   *
+   * `Partial` and not a plain `Pick`: `listJobs` is *required* on
+   * `CrawlDataAdapter`, and widening it here would force every test double
+   * in this folder to implement a method the launcher needs only in list
+   * mode. It also keeps the rule above true — ask before calling, always.
+   *
+   * These are `/jobs` ids: the engine's own crawl records. They are not
+   * `/workers/jobs` ids, and the two are never interchangeable. A URL list
+   * is built from a crawl **this engine** ran, never from a Screaming Frog
+   * dispatch, and `listUrlListSources` takes the former.
+   */
+  Partial<Pick<CrawlDataAdapter, "listJobs">>;
 
 /**
  * How hard to push the target server.

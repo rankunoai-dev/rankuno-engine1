@@ -9,7 +9,10 @@
  */
 
 import type {
+  CrawlJobSummary,
   DispatchPreview,
+  UrlListSourcesView,
+  UrlListView,
   WorkerJobView,
   WorkerSummary,
 } from "../adapters/adapterInterface";
@@ -222,5 +225,95 @@ export function workerJob(overrides: Partial<WorkerJobView> = {}): WorkerJobView
       correlation_id: "ui-test-1",
       ...overrides.envelope,
     },
+  };
+}
+
+/**
+ * One of the engine's own crawls, as the source picker sees it.
+ *
+ * A `/jobs` id, never a `/workers/jobs` one. `succeeded` by default because
+ * every caller of this factory is asking "which crawl could send URLs", and a
+ * queued crawl is not an answer to that.
+ */
+export function crawlJob(overrides: Partial<CrawlJobSummary> = {}): CrawlJobSummary {
+  return {
+    id: "job-1",
+    label: "example.com",
+    baseUrl: "https://www.example.com/",
+    status: "succeeded",
+    pagesClassified: 412,
+    truncated: false,
+    synthetic: false,
+    crawledAt: "2026-09-20T09:00:00Z",
+    hasCheckpoint: false,
+    ...overrides,
+  };
+}
+
+/**
+ * What one crawl can offer a `--crawl-list` dispatch.
+ *
+ * The default is the *unhelpful* answer, like `worker()` above: orphans
+ * unavailable because nothing has been cross-checked, which is the state every
+ * crawl is in until somebody uploads a Screaming Frog export. A test that
+ * wants the good state says so.
+ */
+export function urlListSources(
+  overrides: Partial<UrlListSourcesView> = {},
+): UrlListSourcesView {
+  return {
+    job_id: "job-1",
+    label: "example.com",
+    base_url: "https://www.example.com/",
+    max_urls: 10_000,
+    sources: [
+      {
+        source: "orphans",
+        label: "Orphans Only (Recommended)",
+        description: "Only the pages no internal link reaches.",
+        available: false,
+        unavailable_reason:
+          "No Screaming Frog cross-check has been run against this crawl yet.",
+        candidate_url_count: null,
+        exceeds_ceiling: false,
+      },
+      {
+        source: "all",
+        label: "All Discovered URLs",
+        description: "Every URL this crawl discovered.",
+        available: true,
+        unavailable_reason: "",
+        candidate_url_count: 412,
+        exceeds_ceiling: false,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/** A generated, stored list, as a preview hands it to the confirmation dialog. */
+export function urlListView(overrides: Partial<UrlListView> = {}): UrlListView {
+  const count = overrides.url_count ?? 4_312;
+  return {
+    source: "orphans",
+    source_job_id: "job-1",
+    source_label: "example.com",
+    registrable_domain: "example.com",
+    url_count: count,
+    sha256: "a".repeat(64),
+    sample: [
+      "https://www.example.com/orphan-a",
+      "https://www.example.com/orphan-b",
+      "https://www.example.com/orphan-c",
+    ],
+    counts: {
+      source_rows: count,
+      duplicates_dropped: 0,
+      non_http_dropped: 0,
+      off_domain_dropped: 0,
+      unsafe_host_dropped: 0,
+      kept: count,
+    },
+    ...overrides,
   };
 }

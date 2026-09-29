@@ -202,6 +202,69 @@
   overflow-wrap: anywhere;
 }
 
+/* ---- List mode: what to crawl, and which URLs (ADR 0023) ---- */
+
+/* A real fieldset, for the grouping a screen reader announces. The browser
+   default border and padding are removed rather than styled: this sits inside
+   `.sfd-card`, which already draws the only box on this form. */
+.sfd-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0 0 14px;
+  min-width: 0;
+}
+
+.sfd-fieldset > legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.sfd-list {
+  margin-bottom: 14px;
+}
+
+/* One option per line. antd lays radios out inline by default, and these carry
+   a description and sometimes a two-line reason. */
+.sfd-source {
+  display: flex;
+  align-items: flex-start;
+  margin: 0 0 10px;
+  white-space: normal;
+}
+
+.sfd-source-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 62ch;
+}
+
+.sfd-source-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* A candidate total, so it reads as an estimate rather than as the number
+   being approved. The confirmation dialog shows the real one. */
+.sfd-source-count {
+  font-weight: 400;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Why an option is unavailable. Never colour alone — the option is also
+   disabled and carries this sentence, because a colour is not a reason and a
+   disabled control receives no hover on a touch device. */
+.sfd-source-why {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--warn);
+}
+
 .sfd-invalid {
   font-size: 11.5px;
   color: var(--danger);
@@ -345,6 +408,15 @@
   color: var(--warn);
 }
 
+/* The outcome cell now stacks a list-mode account above the ordinary outcome.
+   Its own class rather than a second `.sfj-status`, so the gap between the two
+   blocks is not the gap inside either of them. */
+.sfj-outcome {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .sfj-actions {
   display: flex;
   gap: 6px;
@@ -415,6 +487,47 @@
   color: var(--dim);
   line-height: 1.5;
   margin: 0 0 12px;
+}
+
+/* The list-mode approval summary. Boxed on purpose: it is a claim about a
+   different kind of run, and it has to read as more than another row. */
+.sfc-list {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  background: var(--overlay-bg);
+}
+
+.sfc-list-h {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.sfc-list-mode {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--dim);
+}
+
+.sfc-list-mode strong {
+  color: var(--ink);
+}
+
+/* Verbatim URLs from a crawled site. They break anywhere, because nothing
+   guarantees a space in 2,000 characters of someone else's path. */
+.sfc-sample {
+  margin: 0;
+  padding-left: 18px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--ink);
+  word-break: break-all;
 }
 
 @media (max-width: 860px) {
