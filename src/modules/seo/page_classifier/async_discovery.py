@@ -43,6 +43,7 @@ pressure, which is the thing that was never bounded.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import TypeVar
 
@@ -260,6 +261,7 @@ async def _gather_bounded(
     concurrency: int,
     stall_timeout_s: float | None = None,
     graph: SiteGraph | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> list[ResultT | None]:
     """Await every factory with at most `concurrency` in flight.
 
@@ -279,10 +281,20 @@ async def _gather_bounded(
             in-flight cap can be narrowed while the origin is failing. Omitted
             by callers that fetch a handful of URLs and cannot overwhelm
             anything.
+        cancel_event: Set by an operator cancelling the job (`POST
+            /jobs/{id}/cancel`). Checked once per task, before it claims a
+            concurrency slot, so a fetch that has not yet started never starts
+            at all. Deliberately not re-checked after a task is already
+            waiting on the governor — closing that narrower race would need a
+            second wake-and-recheck path for a gap of at most one governor
+            cycle, which is not worth the complexity against a button whose
+            own bound is `REQUEST_DEADLINE_S`. An already-dispatched
+            `await fetcher.afetch(...)` is never interrupted; that is a known,
+            disclosed bound, not an oversight (see `adiscover_site`).
 
     Returns:
-        Results in input order, `None` for anything that failed or was
-        abandoned.
+        Results in input order, `None` for anything that failed, abandoned, or
+        skipped because the job was cancelled before it began.
 
     Raises:
         CrawlStalledError: If nothing completes within `stall_timeout_s`.
@@ -293,6 +305,8 @@ async def _gather_bounded(
     governor = _LoadGovernor(concurrency, graph)
 
     async def run(factory: Callable[[], Awaitable[ResultT]]) -> ResultT | None:
+        if cancel_event is not None and cancel_event.is_set():
+            return None
         await governor.acquire()
         try:
             return await factory()
@@ -417,6 +431,7 @@ async def adiscover_site(
     seed_urls: tuple[str, ...] = (),
     exclude_urls: tuple[str, ...] = (),
     url_filter: URLFilter | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths concurrently and merge them.
 
@@ -450,6 +465,14 @@ async def adiscover_site(
             like any other.
         url_filter: Optional URL filter for include/exclude patterns. If
             provided, only URLs matching the filter are added to the graph.
+        cancel_event: Set by `POST /jobs/{id}/cancel` (`ApiState`). Only Path B
+            — the DOM crawl — checks it, at each level boundary and before each
+            individual fetch claims a concurrency slot; Path A (sitemaps) and
+            Path C (CMS API) are not gated by it and run to their own natural
+            completion regardless. New fetches on Path B stop within
+            `REQUEST_DEADLINE_S` of cancellation, once whatever was already in
+            flight drains — a fetch that has already started is never aborted.
+            `None`, the default, means no caller can cancel this run.
 
     Returns:
         The merged graph and its report.
@@ -485,6 +508,7 @@ async def adiscover_site(
                 on_checkpoint,
                 seed_urls,
                 exclude_urls,
+                cancel_event=cancel_event,
             )
         except Exception as exc:  # noqa: BLE001 - a partial graph beats no graph
             # Everything discovered before the failure is real data an operator
@@ -699,6 +723,7 @@ async def _acrawl(
     on_checkpoint: CheckpointSink | None = None,
     seed_urls: tuple[str, ...] = (),
     exclude_urls: tuple[str, ...] = (),
+    cancel_event: threading.Event | None = None,
 ) -> int:
     """Path B — breadth-first traversal, one level at a time, fetched in parallel.
 
@@ -706,6 +731,14 @@ async def _acrawl(
     `max_depth=None` runs until the frontier is exhausted. That is bounded by
     `max_pages`: `graph.record_links` drops targets the graph refused, so once
     the budget is spent no new URLs can enter the next level.
+
+    `cancel_event` is checked in two places, both before this function's own
+    scope: once per level, here, so a new level never begins once an operator
+    has cancelled the job; and once per task inside `_gather_bounded`, so a
+    fetch queued but not yet dispatched within the *current* level also exits
+    without being made. Neither check reaches into a fetch already in flight —
+    that is `REQUEST_DEADLINE_S`'s bound, not this one's, and the two are not
+    the same guarantee.
     """
     graph.add(base_url, dom_link=True, depth=0)
     seen: set[str] = {normalize_url(base_url)}
@@ -741,6 +774,14 @@ async def _acrawl(
     # filled the budget, the DOM crawl fetched nothing at all — no HTML, no
     # link graph, no in-degree, and Signals 1, 4 and 5 silently starved.
     while level and (max_depth is None or depth <= max_depth):
+        if cancel_event is not None and cancel_event.is_set():
+            # A level boundary, not mid-level: the in-flight tasks of the level
+            # that just finished have already drained (`_gather_bounded`
+            # already returned). Nothing here waits on an in-flight fetch.
+            _logger.warning("crawl_cancelled", extra={"url": base_url, "depth": depth})
+            graph.stopped_reason = "cancelled by operator"
+            break
+
         crawlable = [
             url
             for url in level
@@ -770,6 +811,7 @@ async def _acrawl(
                 concurrency,
                 stall_timeout_s=STALL_TIMEOUT_S,
                 graph=graph,
+                cancel_event=cancel_event,
             )
         except CrawlStalledError as exc:
             # Ends the crawl, it does not fail it. Everything discovered so far

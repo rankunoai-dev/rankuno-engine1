@@ -32,6 +32,7 @@ degrades, it does not fail.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, ClassVar, Literal, Protocol, runtime_checkable
@@ -434,6 +435,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         checkpoint_sink: CheckpointSink | None = None,
         homepage_sink: Callable[[str], None] | None = None,
         org_id: str | None = None,
+        cancel_event: threading.Event | None = None,
         **kwargs: object,
     ) -> None:
         """Build the tool.
@@ -466,6 +468,15 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 refresh token it borrows, and the payload is persisted under
                 `.jobs/` where a credential-bearing name has no business being.
                 `None` means the default org.
+            cancel_event: Set by an operator cancelling this job (`ApiState`,
+                `POST /jobs/{id}/cancel`). Constructor-injected for the same
+                reason as the sinks: it is the caller's concurrency-control
+                primitive, not a crawl parameter, and a live `threading.Event`
+                has no business in a serialised request payload. Only honoured
+                by the async discovery path (`payload.use_async_crawl`); `None`
+                means this run cannot be cancelled, which is every caller that
+                has no concept of cancellation — direct `execute()` calls and
+                most tests.
             **kwargs: Forwarded to `BaseTool`.
         """
         super().__init__(**kwargs)  # type: ignore[arg-type]
@@ -478,6 +489,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         self._checkpoint_sink = checkpoint_sink
         self._homepage_sink = homepage_sink
         self._org_id = org_id
+        self._cancel_event = cancel_event
 
     def describe_invocation(self, payload: PageClassificationInput) -> str:
         """Operator-facing summary. Names the site, not the object graph."""
@@ -782,6 +794,12 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         per-request. `asyncio.run` is safe here because `BaseTool.run()` is
         synchronous — but if a caller has somehow arranged otherwise, falling
         back to the serial path is far better than raising.
+
+        `self._cancel_event` is only wired to the async path. The serial
+        fallback below has no `await` points to check it between — it is
+        already the documented fallback for the rare case of a loop already
+        running, and adding cooperative cancellation to a purely synchronous
+        traversal is a separate piece of work, not attempted here.
         """
         # Create URL filter if patterns provided
         url_filter = None
@@ -812,7 +830,13 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
 
         if payload.use_async_crawl and not _event_loop_running():
             return asyncio.run(
-                adiscover_site(fetcher, payload.base_url, concurrency=payload.concurrency, **kwargs)  # type: ignore[arg-type]
+                adiscover_site(
+                    fetcher,
+                    payload.base_url,
+                    concurrency=payload.concurrency,
+                    cancel_event=self._cancel_event,
+                    **kwargs,  # type: ignore[arg-type]
+                )
             )
 
         if payload.use_async_crawl:

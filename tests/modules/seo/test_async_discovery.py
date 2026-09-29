@@ -8,6 +8,7 @@ it is not an optimisation, it is a different crawler.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 import httpx
@@ -840,3 +841,129 @@ class TestLoadGovernor:
             return governor.low_water
 
         assert asyncio.run(run()) == 5
+
+
+class TestCooperativeCancellation:
+    """The `Event` `POST /jobs/{id}/cancel` sets on a running crawl.
+
+    Two independent checks close over it, and this class proves both actually
+    stop a fetch rather than merely observing that a flag was set:
+
+    * `_gather_bounded`'s per-task wrapper, checked before a queued task
+      claims a concurrency slot.
+    * `_acrawl`'s outer level loop, checked before a new BFS level begins.
+
+    Neither reaches into a fetch already in flight — an already-dispatched
+    `await fetcher.afetch(...)` finishes or hits `REQUEST_DEADLINE_S` on its
+    own. That bound is disclosed, not tested here; what these tests prove is
+    that nothing *new* starts once the event is set.
+    """
+
+    def test_a_pre_cancelled_task_never_calls_its_factory(self):
+        """The `_gather_bounded` half, in isolation.
+
+        A cancel `Event` already set before a batch is dispatched means every
+        task in it must bail before ever awaiting its factory — not just
+        return `None`, but never invoke the thing that would have made the
+        request.
+        """
+        event = threading.Event()
+        event.set()
+        calls = 0
+
+        async def poison() -> str:
+            nonlocal calls
+            calls += 1
+            return "must never run"
+
+        async def scenario() -> list[str | None]:
+            return await _gather_bounded(
+                [lambda: poison(), lambda: poison(), lambda: poison()],
+                concurrency=2,
+                cancel_event=event,
+            )
+
+        results = asyncio.run(scenario())
+        assert results == [None, None, None]
+        assert calls == 0, "a queued-but-undispatched fetch must never be made"
+
+    def test_no_new_bfs_level_starts_after_cancellation(self, settings):
+        """The `_acrawl` half, end to end through `adiscover_site`.
+
+        The home page links to one URL that would hang forever if ever
+        requested. Cancellation is set the moment the home page itself lands
+        (depth 0), so the next level — the only place that URL could be
+        fetched — must never begin. If the outer-loop check were missing,
+        this test would hang until `pytest`'s own timeout, not fail cleanly;
+        wrapping it in `asyncio.wait_for` turns that into a fast, readable
+        failure instead while still proving the same thing.
+        """
+        calls: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            calls.append(path)
+            if path == "/robots.txt":
+                return httpx.Response(200, text=ROBOTS)
+            if path == "/sitemap.xml":
+                return httpx.Response(404, text="none")
+            if path == "/":
+                return html('<html><body><a href="/blocked/">Next</a></body></html>')
+            if path == "/blocked/":
+                # Past the point cancellation lands. A real hang, deliberately:
+                # proof the level was never dispatched, not an assumption.
+                await asyncio.sleep(3600)
+                return html(LEAF_HTML)  # pragma: no cover - never reached
+            return httpx.Response(404, text="not found")
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(lambda r: httpx.Response(404, text="unused")),
+            async_transport=httpx.MockTransport(handler),
+        )
+        cancel_event = threading.Event()
+
+        def on_progress(done: int, _total: int, _recent: tuple[str, ...]) -> None:
+            # Fires once per completed DOM fetch. Only the home page should
+            # ever reach this — setting the event here is what "cancellation
+            # lands right after the level that was already in flight" means.
+            if done >= 1:
+                cancel_event.set()
+
+        async def scenario() -> tuple[SiteGraph, DiscoveryReport]:
+            async with fetcher:
+                return await adiscover_site(
+                    fetcher,
+                    "https://e.com",
+                    cancel_event=cancel_event,
+                    on_progress=on_progress,
+                )
+
+        graph, report = asyncio.run(asyncio.wait_for(scenario(), timeout=5.0))
+
+        assert "/blocked/" not in calls, "a fetch was made to a URL past the cancellation point"
+        assert report.pages_fetched == 1, "only the home page, from the level already in flight"
+        assert report.stopped_reason == "cancelled by operator"
+        # The link is a real node — `record_links` adds targets whether or not
+        # they were ever fetched, which is how in-degree and orphans work —
+        # but it must never have been requested, so it carries no body.
+        assert graph.html_for("https://e.com/blocked/") is None
+
+    def test_an_already_cancelled_run_fetches_no_dom_pages_at_all(self, settings):
+        """An `Event` set before discovery begins stops Path B at depth zero.
+
+        Path A (sitemaps) is not gated by `cancel_event` and still runs to its
+        own completion — only the DOM crawl is affected. See `adiscover_site`
+        for why.
+        """
+        event = threading.Event()
+        event.set()
+
+        graph, report = run_async(settings, cancel_event=event)
+
+        assert report.pages_fetched == 0
+        assert report.stopped_reason == "cancelled by operator"
+        # Path A still ran: the sitemap URLs are real, unaffected data.
+        assert report.from_sitemap > 0
+        assert graph.html_for("https://e.com/") is None, "the homepage was never fetched"

@@ -947,6 +947,15 @@ class ApiState:
         self.principal_rate_limiter = RateLimiterRegistry()
         self._active: set[str] = set()
         self._facet_active: dict[str, set[str]] = {}  # facet_id -> active job ids
+        # The cooperative-cancellation signal for the Python crawler
+        # (`PageClassificationTool`; Screaming Frog is out of scope and has its
+        # own process-level supervisor). Lives here rather than on `JobRecord`
+        # because a `threading.Event` cannot be persisted or survive a restart,
+        # and `JobRecord` is a `StrictModel` written atomically to disk — the
+        # two lifecycles do not belong on the same object. Same lock, same
+        # admit/release lifecycle as `_active`/`_facet_active` so a job's
+        # bookkeeping never gets half-cleaned-up.
+        self._cancel_flags: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         # Strong references to in-flight tasks. `asyncio` only holds weak ones,
         # so without this the garbage collector may cancel a running crawl.
@@ -1001,6 +1010,10 @@ class ApiState:
 
             active.add(job_id)
             self._active.add(job_id)
+            # Same admission, same lifecycle as the slot itself: a job that
+            # never got a slot has nothing to cancel, and a job that did gets
+            # exactly one `Event`, cleared up in `release()`.
+            self._cancel_flags[job_id] = threading.Event()
             return True
 
     def release(self, job_id: str, facet_id: str) -> None:
@@ -1020,6 +1033,10 @@ class ApiState:
             self._active.discard(job_id)
             if facet_id in self._facet_active:
                 self._facet_active[facet_id].discard(job_id)
+            # Dropped here rather than left to leak: a workstation that runs
+            # for weeks accumulates one `Event` per job otherwise, and nothing
+            # after this point can still meaningfully cancel a slot-less job.
+            self._cancel_flags.pop(job_id, None)
 
     def rekey(self, provisional: str, job_id: str, facet_id: str) -> None:
         """Move a reservation from a provisional id onto the real one.
@@ -1032,6 +1049,9 @@ class ApiState:
         set, and the normal-exit release is keyed on the real id — so a
         provisional id left behind in the facet set could never be released,
         and each crawl cost the facet one slot for the life of the process.
+        The cancel flag moves with them for the same reason: left behind under
+        the provisional id, `cancel_job` would look it up by the real id, find
+        nothing, and silently do less than it claims to.
         """
         with self._lock:
             self._active.discard(provisional)
@@ -1039,6 +1059,18 @@ class ApiState:
             facet = self._facet_active.setdefault(facet_id, set())
             facet.discard(provisional)
             facet.add(job_id)
+            event = self._cancel_flags.pop(provisional, None)
+            self._cancel_flags[job_id] = event if event is not None else threading.Event()
+
+    def cancel_event(self, job_id: str) -> threading.Event | None:
+        """The cooperative-cancellation signal for a job, if it holds a slot.
+
+        `None` for a job that was never admitted (or has already been
+        released) — a crawl has nothing to check in that case, so there is
+        nothing to hand it.
+        """
+        with self._lock:
+            return self._cancel_flags.get(job_id)
 
     def is_active(self, job_id: str) -> bool:
         """Whether this job currently holds a concurrency slot."""
@@ -1087,12 +1119,26 @@ class ApiState:
             self._deliverable_active.add(deliverable_id)
 
 
-def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> None:
+def _run_job(
+    state: ApiState,
+    job_id: str,
+    payload: PageClassificationInput,
+    cancel_event: threading.Event,
+) -> None:
     """Execute one crawl to completion. Runs on a worker thread.
 
     Never raises: this runs detached, so an exception escaping here would be
     logged by asyncio and leave the job `RUNNING` forever with nothing to move
     it. Every path ends in a terminal status.
+
+    Args:
+        state: Shared application state.
+        job_id: The job to run.
+        payload: The tool's input.
+        cancel_event: Set by `cancel_job` if an operator abandons this job
+            while it runs. Forwarded to the tool so the async discovery path
+            can stop dispatching new fetches — see `cancel_job` for the exact
+            guarantee this gives.
     """
     store = state.store
     try:
@@ -1109,6 +1155,7 @@ def _run_job(state: ApiState, job_id: str, payload: PageClassificationInput) -> 
             # Kept so a later fix to the header-menu parser can be applied to
             # this result without re-crawling. One page; the menu is global.
             homepage_sink=lambda html: store.write_homepage(job_id, html),
+            cancel_event=cancel_event,
         ).run(payload)
 
         if not result.ok or result.data is None:
@@ -1159,8 +1206,14 @@ async def _dispatch(
         payload: The tool's input.
         facet_id: The facet this job belongs to (for per-facet concurrency release).
     """
+    # Admission (`try_reserve`/`rekey`, both already complete by the time this
+    # coroutine body runs — they happen synchronously in `_start` before the
+    # task is created) always registers a flag under the real job id. The
+    # fallback is defensive, for a caller that reaches `_run_job` some other
+    # way: a never-set `Event` means "cannot be cancelled", not a crash.
+    cancel_event = state.cancel_event(job_id) or threading.Event()
     try:
-        await asyncio.to_thread(_run_job, state, job_id, payload)
+        await asyncio.to_thread(_run_job, state, job_id, payload, cancel_event)
     finally:
         state.release(job_id, facet_id)
 
@@ -3331,23 +3384,32 @@ def create_app(
     async def cancel_job(
         job_id: str, authorization: str | None = Header(default=None)
     ) -> JobRecord:
-        """Abandon a job and give its concurrency slot back.
+        """Abandon a job and stop it from making new requests.
 
-        **This releases the slot; it does not stop the crawl.** The work runs on
-        a worker thread via `asyncio.to_thread`, and a Python thread cannot be
-        killed from outside — cancelling the awaiting task does not reach into
-        it either. The thread keeps fetching until it finishes or the process
-        exits, and its result is discarded when it does.
+        Applies to the Python crawler (`PageClassificationTool`) only —
+        Screaming Frog jobs are cancelled through their own process supervisor,
+        not this cooperative flag, and this route's effect on one does not
+        reach the other.
 
-        That is a weaker guarantee than the button implies, and it is still
-        worth having. The failure this exists for is a crawl wedged in network
-        I/O for hours: two stripe.com jobs held two of three slots for sixteen
-        hours on one workstation, so every new crawl was refused by a server
-        that was, for practical purposes, doing nothing. Releasing the slot
-        restores the ability to work; waiting for the thread does not.
+        **This is cooperative, not instant, and does not reach into a fetch
+        already under way.** The crawl runs on a worker thread via
+        `asyncio.to_thread`, and a Python thread cannot be killed from outside.
+        What actually happens: setting the job's cancellation `Event` here
+        makes `async_discovery` stop dispatching *new* fetches — both at the
+        next BFS level boundary and for any fetch still queued behind the
+        concurrency limit within the current level — but it does not abort
+        whatever is already mid-request. Every request is itself bounded by
+        `REQUEST_DEADLINE_S` (200 seconds), so the worst case is: cancel lands
+        the instant a batch of up to `concurrency` (default 10) fetches just
+        started, and the thread keeps making progress on only those until each
+        one resolves or that deadline fires. New fetches stop well before
+        that; the crawl's own visible work stops within that bound.
 
-        A real stop needs a cancellation flag the crawl checks between fetches.
-        That does not exist yet — see the build log for this cycle.
+        Releasing the slot restores admission capacity immediately, which does
+        not wait on any of the above — the failure this exists for is a crawl
+        wedged in network I/O for hours: two stripe.com jobs held two of three
+        slots for sixteen hours on one workstation, so every new crawl was
+        refused by a server that was, for practical purposes, doing nothing.
 
         Args:
             job_id: The job to cancel.
@@ -3373,6 +3435,12 @@ def create_app(
                 detail=f"job is {record.status.value} and has already finished",
             )
 
+        # Set *before* `release()`, which drops this job's entry from the
+        # registry `cancel_event` reads — looked up the other way round, the
+        # flag would already be gone and this would silently do nothing.
+        event = state.cancel_event(job_id)
+        if event is not None:
+            event.set()
         state.release(job_id, record.facet_id)
         updated = state.store.mark_failed(
             job_id,

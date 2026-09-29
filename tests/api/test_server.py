@@ -12,6 +12,7 @@ it out of. Most of these tests are about those two properties.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import re
@@ -1377,6 +1378,80 @@ class TestCancel:
         )
         with TestClient(app, headers=auth_headers()) as client:
             assert client.post(f"{API_PREFIX}/jobs/nope/cancel").status_code == 404
+
+    def test_cancelling_sets_the_jobs_cancel_event(self, store):
+        """The cooperative signal `async_discovery` checks between fetches.
+
+        `test_cancelling_frees_the_slot` proves the slot comes back;
+        `TestCooperativeCancellation` in `test_async_discovery.py` proves a set
+        `Event` actually stops new fetches. This is the join between the two:
+        the endpoint must set the *same* `Event` object the crawl was handed.
+        """
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        state = app.state.api
+        record = store.create("tool", {"base_url": "https://e.com/"}, label="stuck")
+
+        with TestClient(app, headers=auth_headers()) as client:
+            assert state.recovery_done.wait(timeout=5), "recovery did not finish in time"
+            store.mark_running(record.id)
+            state.try_reserve(record.id)
+            event = state.cancel_event(record.id)
+            assert event is not None
+            assert not event.is_set(), "must not read as cancelled before the request"
+
+            response = client.post(f"{API_PREFIX}/jobs/{record.id}/cancel")
+
+        assert response.status_code == 200
+        assert event.is_set()
+
+    def test_dispatch_forwards_the_registered_cancel_event_to_the_tool(
+        self, store, mock_org_store, monkeypatch
+    ):
+        """The other half of the join.
+
+        `_dispatch` must hand the crawl the exact `Event` `cancel_job` can
+        reach by job id — not a fresh one that cancellation can never touch.
+        """
+        captured: list[object] = []
+
+        class CapturingTool:
+            """Records what it was constructed with, and finishes instantly."""
+
+            def __init__(self, **kwargs: object) -> None:
+                captured.append(kwargs.get("cancel_event"))
+
+            def run(self, _payload: object) -> StubResult:
+                return StubResult(ok=True, data=_fake_output(truncated=False))
+
+        monkeypatch.setattr(server_module, "PageClassificationTool", CapturingTool)
+
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        state = app.state.api
+        record = store.create(
+            server_module.TOOL_NAME,
+            {"base_url": SAFE_URL, "max_pages": 5, "crawl_dom": False},
+            label="x",
+        )
+        assert state.try_reserve(record.id, record.facet_id) is True
+        registered = state.cancel_event(record.id)
+        payload = server_module.PageClassificationInput(
+            base_url=SAFE_URL, max_pages=5, crawl_dom=False
+        )
+
+        asyncio.run(server_module._dispatch(state, record.id, payload, record.facet_id))
+
+        assert captured == [registered]
+        # `_dispatch` always releases, cancelled or not — the slot is not what
+        # cooperative cancellation is guarding.
+        assert state.is_active(record.id) is False
 
 
 class TestHomepageSidecar:
