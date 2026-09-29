@@ -23,6 +23,8 @@ from openpyxl import load_workbook
 from src.api import server as server_module
 from src.api.server import API_PREFIX, GAP_MEANINGS, SHEET_TITLES, create_app
 from src.core.config import REPO_ROOT, Settings, get_settings
+from src.core.postgres_config import reset_postgres_settings_cache
+from src.core.postgres_store import PostgresJobStore
 from src.core.schemas import OrgConfig
 from src.core.state_store import (
     MAX_HOMEPAGE_BYTES,
@@ -658,6 +660,44 @@ class TestStartupRecovery:
             assert app.state.api.recovery_done.wait(timeout=5), "recovery did not finish in time"
 
         assert store.get(job_id).status is JobStatus.FAILED
+
+
+class TestDefaultJobStoreSelection:
+    """`create_app()` picks a store based on whether Postgres is configured.
+
+    `PostgresJobStore` only when it looks configured; otherwise
+    `DiskJobStore`, matching every other test in this suite that never sets
+    a `DATABASE_URL`.
+    """
+
+    def test_defaults_to_disk_job_store_when_postgres_not_configured(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("POSTGRES_URL", raising=False)
+        monkeypatch.delenv("DATABASE_PRIVATE_URL", raising=False)
+        monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+        reset_postgres_settings_cache()
+        try:
+            app = create_app(jobs_root=tmp_path / "jobs", session_secret=TEST_SESSION_SECRET)
+            assert isinstance(app.state.api.store, DiskJobStore)
+        finally:
+            reset_postgres_settings_cache()
+
+    def test_defaults_to_postgres_job_store_when_configured(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost/db")
+        reset_postgres_settings_cache()
+        try:
+            app = create_app(jobs_root=tmp_path / "jobs", session_secret=TEST_SESSION_SECRET)
+            assert isinstance(app.state.api.store, PostgresJobStore)
+            # Its disk fallback still lands under this test's own tmp_path,
+            # not the repo's real `.jobs/` — no real Postgres call happens at
+            # `create_app()` time, so this only checks the wiring.
+            assert isinstance(app.state.api.store.fallback_store, DiskJobStore)
+        finally:
+            reset_postgres_settings_cache()
 
 
 class TestStartupOrphanReconciliationIsolation:

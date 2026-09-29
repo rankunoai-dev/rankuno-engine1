@@ -64,6 +64,35 @@ class TestPostgresSettings:
         assert settings.postgres_port == 65535
 
 
+class TestPostgresSettingsIsConfigured:
+    """`is_configured()` distinguishes real credentials from the all-default shape.
+
+    `create_app()`'s `_default_job_store` reads this to decide whether to
+    even attempt a Postgres connection.
+    """
+
+    def test_all_defaults_is_not_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("POSTGRES_URL", raising=False)
+        monkeypatch.delenv("DATABASE_PRIVATE_URL", raising=False)
+        settings = PostgresSettings(_env_file=None)
+        assert settings.is_configured() is False
+
+    def test_database_url_field_is_configured(self) -> None:
+        settings = PostgresSettings(_env_file=None, database_url="postgresql://u:p@host/db")
+        assert settings.is_configured() is True
+
+    def test_database_url_env_var_is_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@host/db")
+        settings = PostgresSettings(_env_file=None)
+        assert settings.is_configured() is True
+
+    def test_postgres_password_alone_is_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        settings = PostgresSettings(_env_file=None, postgres_password="secret")  # noqa: S106
+        assert settings.is_configured() is True
+
+
 class TestPostgresSettingsCaching:
     """Tests for caching behavior of get_postgres_settings()."""
 

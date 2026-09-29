@@ -950,16 +950,26 @@ class DiskOrgConfigStore:
 def get_job_store() -> JobStore:
     """Get the configured job store instance.
 
-    Returns the appropriate job store based on configuration:
-    - PostgresJobStore if PostgreSQL is configured and circuit is closed
-    - DiskJobStore as fallback
+    Used by `src.workers.job_executor`'s Celery tasks — a separate entry
+    point from `src.api.server.create_app`, which builds its own store via
+    `_default_job_store` rather than calling this. Kept in sync with that
+    function's logic (Postgres when configured, disk otherwise) rather than
+    importing it, since `core/` must not import from `src/api/` (CLAUDE.md
+    §1) and `src/api/server` imports from `core/`, not the other way round.
 
     Returns:
-        The configured JobStore instance.
+        A `PostgresJobStore` when `PostgresSettings.is_configured()`, else a
+        `DiskJobStore` under `.jobs/`.
     """
-    # Deferred: full implementation requires PostgreSQL client
-    # For now, return DiskJobStore
     from pathlib import Path
 
+    from src.core.postgres_config import get_postgres_settings
+
     repo_root = Path(__file__).resolve().parents[2]
-    return DiskJobStore(repo_root / ".jobs")
+    disk_store = DiskJobStore(repo_root / ".jobs")
+    if not get_postgres_settings().is_configured():
+        return disk_store
+
+    from src.core.postgres_store import PostgresJobStore
+
+    return PostgresJobStore(fallback_store=disk_store)
