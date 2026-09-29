@@ -301,26 +301,41 @@ class TestRealWindowsKillOnJobClose:
         code of ours.
         """
         ledger_path = tmp_path / "ledger.json"
+        pid_path = tmp_path / "supervised.pid"
+        stderr_path = tmp_path / "supervised.stderr"
+        # `ping` inherits both of the child interpreter's output streams, so
+        # neither may be a pipe this test waits on. stdout was the loud failure:
+        # ping's first reply line landed in the same captured buffer as the pid,
+        # and the parse died before the assertion below ever ran. stderr was the
+        # quiet one — a `ping` that *survives*, which is the regression this test
+        # exists to catch, holds the pipe open, so `communicate()` blocks past
+        # its own `timeout` and the test hangs rather than failing. Files carry
+        # the pid and the traceback instead: a handle the child keeps open
+        # cannot block a reader. `write_text` closes the file, so the pid reaches
+        # the OS before `os._exit` discards every unflushed buffer.
         script = (
             "import os\n"
             "from pathlib import Path\n"
             "from src.core.process_supervisor import launch_supervised\n"
             "sp = launch_supervised(['ping', '-t', '127.0.0.1'], "
             f"ledger_path=Path(r'{ledger_path}'))\n"
-            "print(sp.pid, flush=True)\n"
+            f"Path(r'{pid_path}').write_text(str(sp.pid), encoding='utf-8')\n"
             "os._exit(1)\n"
         )
 
-        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-only child
-            [sys.executable, "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
+        with stderr_path.open("wb") as stderr_file:
+            result = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-only child
+                [sys.executable, "-c", script],
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                timeout=20,
+                check=False,
+            )
+        child_stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
 
-        assert result.returncode == 1, result.stderr
-        pid = int(result.stdout.strip())
+        assert result.returncode == 1, child_stderr
+        assert pid_path.exists(), f"child recorded no pid; stderr: {child_stderr}"
+        pid = int(pid_path.read_text(encoding="utf-8"))
 
         time.sleep(0.5)  # let the kernel finish tearing the job down
         assert not _pid_is_alive(pid), f"pid {pid} survived an unclean supervisor exit"
