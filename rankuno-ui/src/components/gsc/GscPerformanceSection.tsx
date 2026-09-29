@@ -4,6 +4,7 @@ import {
   calculateSiteMetrics,
   findTopOpportunities,
 } from "../../lib/gscMetrics";
+import { pathnameOf } from "../../lib/url";
 import "./gsc.css";
 
 interface Props {
@@ -117,7 +118,7 @@ export function GscPerformanceSection({ pages }: Props) {
           {opportunities.map(({ page, score }) => (
             <div key={page.url} className={`gsc-opp-item gsc-opp-item--${score.category}`}>
               <div>
-                <div className="gsc-opp-item-url">{new URL(page.url).pathname}</div>
+                <div className="gsc-opp-item-url">{pathnameOf(page.url)}</div>
                 <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
                   {score.reason}
                 </div>

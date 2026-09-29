@@ -161,6 +161,52 @@ describe("CrawlReport", () => {
     expect(screen.queryByText(/Sitemap access blocked/)).not.toBeInTheDocument();
   });
 
+  it("does not throw when a page's URL cannot be parsed by the browser's URL constructor", () => {
+    /*
+     * The PDF-button regression, pinned. `url` on
+     * `FullPageIntelligenceProfile` is `Field(min_length=1)` on the engine side --
+     * a non-empty string, never a validated `HttpUrl` -- so nothing guarantees
+     * `new URL()` can parse it. `GscPerformanceSection`'s Top Opportunities list
+     * called `new URL(page.url).pathname` directly, with no guard: every other
+     * place in this codebase that turns a page URL into a display string
+     * (`hostOf`, `pathnameOf`) already wraps the call in a try/catch for exactly
+     * this reason.
+     *
+     * A throw here is caught by `CrawlReport`'s `ErrorBoundary`, which replaces
+     * the *entire* printable report with an error banner -- so `window.print()`
+     * still opens, but the PDF it produces carries no report at all. That is
+     * what "the PDF button doesn't work" looks like from the user's side: no
+     * exception reaches them, no failed network request, just a document with
+     * nothing in it.
+     */
+    const malformed = page("/just-a-path/no-scheme", {
+      gsc_clicks: 0,
+      gsc_impressions: 500,
+      gsc_avg_position: 25,
+      gsc_ctr: 0,
+    });
+    const result = crawl({
+      pages: [malformed],
+      gsc: {
+        status: "succeeded",
+        pages_matched: 1,
+        pages_crawled: 1,
+        unmatched_gsc_urls: 0,
+        account: null,
+        property_url: "https://e.com/",
+        reason: "",
+      },
+    });
+    const model = buildDashModel(result, "path");
+
+    expect(() =>
+      render(<CrawlReport model={model} result={result} generatedAt={AT} />),
+    ).not.toThrow();
+    // Falls back to the raw string rather than blanking the row, matching
+    // `hostOf`'s established behaviour for the same failure.
+    expect(screen.getByText("/just-a-path/no-scheme")).toBeInTheDocument();
+  });
+
   it("prints sections rather than every leaf", () => {
     /*
      * `REPORT_MAX_DEPTH` is why the report is readable: kinsta.com's first
