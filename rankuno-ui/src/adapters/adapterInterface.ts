@@ -660,6 +660,15 @@ export interface CrawlDataAdapter {
   downloadUrlList?(jobId: string): Promise<Blob>;
 
   /**
+   * Every URL a finished crawl found, as a printable PDF.
+   *
+   * `.xlsx` sibling of `downloadUrlList`, same reasoning throughout: a
+   * `Blob` because the route is bearer-guarded, optional because fixtures
+   * have no server behind them to build it.
+   */
+  downloadUrlListPdf?(jobId: string): Promise<Blob>;
+
+  /**
    * Start a new crawl, returning its job id.
    *
    * Optional, and that is the point: `MockAdapter` reads files that were

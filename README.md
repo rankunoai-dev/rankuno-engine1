@@ -361,7 +361,16 @@ A finished crawl's job-row `...` menu offers "Download URLs" alongside
 "Search Console", "Cross-check" and "Run again": one click, no intermediate
 panel, fetching `GET /jobs/{id}/urls.xlsx` — every URL the crawl found, as a
 3-sheet workbook (All URLs, By Indexability, By HTTP Status) built by
-`MasterURLReport` (`modules/seo/page_classifier/reports.py`).
+`MasterURLReport` (`modules/seo/page_classifier/reports.py`). A "Download URLs
+(PDF)" entry sits directly below it, fetching `GET /jobs/{id}/urls.pdf` —
+the same "All URLs" columns as a flat, printable table (landscape A4, via
+`MasterURLReport.generate_pdf`), for a client deliverable or an email
+attachment rather than a spreadsheet ([ADR 0024](docs/adr/0024-pdf-url-export-uses-reportlab-in-core-dependencies.md);
+[build-log 0124](docs/build-log/0124-a-pdf-beside-the-workbook.md)). The
+"HTTP Status" column both exports show is a genuine absence, not a code —
+no per-page HTTP status reaches either report anywhere in the pipeline, so
+the column reads `Unknown` rather than substitute the URL
+([build-log 0123](docs/build-log/0123-a-status-cell-that-was-a-url-cell.md)).
 
 ### Search Console accounts (optional)
 

@@ -189,6 +189,10 @@ src/
 │   │                            # one click from the job-row "..." menu — no
 │   │                            # panel, unlike reconciliation.xlsx/
 │   │                            # opportunities.xlsx which need an upload first
+│   │                            # GET /jobs/{id}/urls.pdf (cycle 0124): same
+│   │                            # MasterURLReport, generate_pdf() instead of
+│   │                            # generate() — same eleven columns, flat,
+│   │                            # landscape A4, via reportlab (ADR 0024)
 │   │                            # Almost every route requires a bearer session
 │   │                            # token (ADR 0016); org_id is derived from its
 │   │                            # verified claim, never from X-Org-Id or a URL
@@ -339,7 +343,13 @@ src/
     │       │                         # discovery-method, By Indexability, By
     │       │                         # HTTP Status). Shipped with zero callers
     │       │                         # until GET /jobs/{id}/urls.xlsx (cycle
-    │       │                         # 0102) became its first exerciser
+    │       │                         # 0102) became its first exerciser.
+    │       │                         # generate_pdf() (cycle 0124, ADR 0024)
+    │       │                         # is the flat "All URLs" PDF twin, via
+    │       │                         # GET /jobs/{id}/urls.pdf. "HTTP Status"
+    │       │                         # reads "Unknown" in both — no per-page
+    │       │                         # status code is ever carried this far
+    │       │                         # (cycle 0123; was page.final_url before)
     │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
     │       │                         # crawl job, RiskClass.READ (ADR 0003).
     │       │                         # Input carries gsc_account: the named

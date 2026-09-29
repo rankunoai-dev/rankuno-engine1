@@ -355,6 +355,31 @@ export class HttpAdapter implements CrawlDataAdapter {
     return response.blob();
   }
 
+  /**
+   * Every URL a finished crawl found, as a printable PDF.
+   *
+   * `.xlsx` sibling of `downloadUrlList`, same reasoning throughout: bypasses
+   * `request` because the body is binary, one click from the closed job-row
+   * menu with no panel needing to be open first.
+   */
+  async downloadUrlListPdf(jobId: string): Promise<Blob> {
+    const url = `${this.baseUrl}/jobs/${encodeURIComponent(jobId)}/urls.pdf`;
+    let response: Response;
+    try {
+      response = await authorizedFetch(url);
+    } catch (cause) {
+      throw new ApiError(
+        0,
+        `Cannot reach the engine at ${this.baseUrl}. Is the API server running?`,
+        { cause },
+      );
+    }
+    if (!response.ok) {
+      throw new ApiError(response.status, await describeFailure(response));
+    }
+    return response.blob();
+  }
+
   /*
    * -------------------------------------------------------------------------
    * Worker dispatch (ADR 0015). A *different* job system from `/jobs` above:

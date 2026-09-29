@@ -12,8 +12,11 @@ it out of. Most of these tests are about those two properties.
 
 from __future__ import annotations
 
+import base64
 import io
+import re
 import time
+import zlib
 from pathlib import Path
 
 import httpx
@@ -597,6 +600,70 @@ class TestUrlsWorkbookDownload:
         store.finish(record.id, {"base_url": SAFE_URL})
 
         response = client.get(f"{API_PREFIX}/jobs/{record.id}/urls.xlsx")
+        assert response.status_code == 409
+
+
+def _pdf_text_bytes(pdf_bytes: bytes) -> bytes:
+    """Decode every content stream in a `generate_pdf` PDF to raw text bytes.
+
+    No PDF-reading library is a declared dependency here — this decodes only
+    the chain `SimpleDocTemplate` itself produces (ASCII85Decode wrapping
+    FlateDecode), which is enough to assert real page data reached the
+    rendered bytes. It is not a general-purpose PDF text extractor.
+    """
+    chunks: list[bytes] = []
+    for match in re.finditer(rb"stream\r?\n(.*?)endstream", pdf_bytes, re.DOTALL):
+        raw = match.group(1).rstrip(b"\r\n")
+        if raw.endswith(b"~>"):
+            raw = raw[:-2]
+        try:
+            chunks.append(zlib.decompress(base64.a85decode(raw, adobe=False)))
+        except (ValueError, zlib.error):
+            continue
+    return b"".join(chunks)
+
+
+class TestUrlsPdfDownload(TestUrlsWorkbookDownload):
+    """The `.xlsx` sibling's twin: same source, same checks, a PDF instead.
+
+    Inherits `_finished_with_pages` rather than duplicating it — the point of
+    this class is that `urls.pdf` enforces the exact same prerequisites as
+    `urls.xlsx`, so the fixture builder has to be identical, not merely
+    similar.
+    """
+
+    def test_an_unknown_job_is_404(self, client):
+        assert client.get(f"{API_PREFIX}/jobs/nope/urls.pdf").status_code == 404
+
+    def test_a_missing_result_is_409_not_404(self, client, store):
+        job_id = store.create("seo.page_classifier", {"base_url": SAFE_URL}).id
+        store.mark_running(job_id)
+
+        response = client.get(f"{API_PREFIX}/jobs/{job_id}/urls.pdf")
+        assert response.status_code == 409
+
+    def test_the_pdf_carries_every_url_the_crawl_found(self, client, store):
+        record = self._finished_with_pages(store)
+
+        response = client.get(f"{API_PREFIX}/jobs/{record.id}/urls.pdf")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/pdf"
+        assert f'filename="urls-{record.id[:8]}-' in response.headers["content-disposition"]
+        assert response.content.startswith(b"%PDF")
+        text = _pdf_text_bytes(response.content)
+        assert b"https://e.com/a/" in text
+        # `FullPageIntelligenceProfile` carries no HTTP status field (see
+        # `MasterURLReport._extract_status_code`), so the column must show an
+        # honest "not tracked" marker, matching the `.xlsx` sibling exactly —
+        # never a fabricated code, and never the URL reused in its place.
+        assert b"Unknown" in text
+
+    def test_a_result_predating_the_output_contract_is_409(self, client, store):
+        record = store.create(server_module.TOOL_NAME, {"base_url": SAFE_URL})
+        store.finish(record.id, {"base_url": SAFE_URL})
+
+        response = client.get(f"{API_PREFIX}/jobs/{record.id}/urls.pdf")
         assert response.status_code == 409
 
 

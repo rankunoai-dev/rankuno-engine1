@@ -143,6 +143,88 @@ describe("CrawlJobsView download URLs", () => {
 });
 
 /**
+ * "Download URLs (PDF)" — the `.xlsx` item's sibling, directly below it in
+ * the same menu. Gated by its own adapter method (`downloadUrlListPdf`), not
+ * by whether `downloadUrlList` is present, so the two can appear or vanish
+ * independently of each other.
+ */
+describe("CrawlJobsView download URLs PDF", () => {
+  it("offers Download URLs (PDF) for a finished job and downloads the PDF on click", async () => {
+    const blob = new Blob(["pdf"], { type: "application/pdf" });
+    const downloadUrlListPdf = vi.fn().mockResolvedValue(blob);
+    withJob({ status: "succeeded" });
+    useCrawlStore.setState({
+      adapter: { downloadUrlListPdf } as unknown as CrawlDataAdapter,
+    });
+    URL.createObjectURL = vi.fn(() => "blob:x");
+    URL.revokeObjectURL = vi.fn();
+
+    render(<CrawlJobsView />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions for this crawl/i }));
+    fireEvent.click(await screen.findByText("Download URLs (PDF)"));
+
+    await waitFor(() => {
+      expect(downloadUrlListPdf).toHaveBeenCalledWith("job-1");
+    });
+  });
+
+  it("does not open a panel when Download URLs (PDF) is clicked", async () => {
+    const downloadUrlListPdf = vi.fn().mockResolvedValue(new Blob(["pdf"]));
+    withJob({ status: "succeeded" });
+    useCrawlStore.setState({
+      adapter: { downloadUrlListPdf } as unknown as CrawlDataAdapter,
+    });
+    URL.createObjectURL = vi.fn(() => "blob:x");
+    URL.revokeObjectURL = vi.fn();
+
+    render(<CrawlJobsView />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions for this crawl/i }));
+    fireEvent.click(await screen.findByText("Download URLs (PDF)"));
+
+    await waitFor(() => expect(downloadUrlListPdf).toHaveBeenCalled());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("hides Download URLs (PDF) when the adapter cannot build it", () => {
+    withJob({ status: "succeeded" });
+    // No adapter set at all — `MockAdapter` and a fixture session both leave
+    // `downloadUrlListPdf` undefined.
+    render(<CrawlJobsView />);
+    expect(
+      screen.queryByRole("button", { name: /more actions for this crawl/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides Download URLs (PDF) for a job that has not finished", () => {
+    const downloadUrlListPdf = vi.fn();
+    withJob({ status: "running" });
+    useCrawlStore.setState({
+      adapter: { downloadUrlListPdf } as unknown as CrawlDataAdapter,
+    });
+
+    render(<CrawlJobsView />);
+    expect(
+      screen.queryByRole("button", { name: /more actions for this crawl/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers both Download URLs items independently when both methods exist", async () => {
+    const downloadUrlList = vi.fn().mockResolvedValue(new Blob(["xlsx"]));
+    const downloadUrlListPdf = vi.fn().mockResolvedValue(new Blob(["pdf"]));
+    withJob({ status: "succeeded" });
+    useCrawlStore.setState({
+      adapter: { downloadUrlList, downloadUrlListPdf } as unknown as CrawlDataAdapter,
+    });
+
+    render(<CrawlJobsView />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions for this crawl/i }));
+
+    expect(await screen.findByText("Download URLs")).toBeInTheDocument();
+    expect(await screen.findByText("Download URLs (PDF)")).toBeInTheDocument();
+  });
+});
+
+/**
  * The masterfile menu no longer lives on this table.
  *
  * It posted a NATIVE crawl id to a route that reads a Screaming Frog worker

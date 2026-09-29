@@ -89,6 +89,10 @@ export function CrawlJobsView(): JSX.Element {
   // Same reasoning again: fixtures have no server behind them to build the
   // workbook, so the menu item is absent rather than present and failing.
   const downloadUrlList = useCrawlStore((state) => state.adapter?.downloadUrlList);
+  // Own flag, not reused from `downloadUrlList` — an adapter could in
+  // principle build one export and not the other, and each menu item's
+  // visibility should answer only for the method it calls.
+  const downloadUrlListPdf = useCrawlStore((state) => state.adapter?.downloadUrlListPdf);
   const [reconciling, setReconciling] = useState<JobRow | null>(null);
   const [performing, setPerforming] = useState<JobRow | null>(null);
 
@@ -106,6 +110,19 @@ export function CrawlJobsView(): JSX.Element {
     try {
       const stamp = row.crawledAt ? row.crawledAt.slice(0, 10) : "undated";
       saveBlob(`urls-${row.id.slice(0, 8)}-${stamp}.xlsx`, await downloadUrlList(row.id));
+    } catch (cause) {
+      message.error(
+        cause instanceof Error ? cause.message : "The URL list could not be downloaded.",
+      );
+    }
+  }
+
+  /** Same shape as `downloadUrls`, for the PDF sibling. */
+  async function downloadUrlsPdf(row: JobRow): Promise<void> {
+    if (!downloadUrlListPdf) return;
+    try {
+      const stamp = row.crawledAt ? row.crawledAt.slice(0, 10) : "undated";
+      saveBlob(`urls-${row.id.slice(0, 8)}-${stamp}.pdf`, await downloadUrlListPdf(row.id));
     } catch (cause) {
       message.error(
         cause instanceof Error ? cause.message : "The URL list could not be downloaded.",
@@ -180,10 +197,12 @@ export function CrawlJobsView(): JSX.Element {
           onReconcile={() => setReconciling(row)}
           onPerformance={() => setPerforming(row)}
           onDownloadUrls={() => void downloadUrls(row)}
+          onDownloadUrlsPdf={() => void downloadUrlsPdf(row)}
           canRelaunch={canRelaunch}
           canReconcile={canReconcile}
           canIngestGsc={canIngestGsc}
           canDownloadUrls={downloadUrlList !== undefined}
+          canDownloadUrlsPdf={downloadUrlListPdf !== undefined}
         />
       ),
     },
@@ -329,10 +348,12 @@ function ActionCell({
   onReconcile,
   onPerformance,
   onDownloadUrls,
+  onDownloadUrlsPdf,
   canRelaunch,
   canReconcile,
   canIngestGsc,
   canDownloadUrls,
+  canDownloadUrlsPdf,
 }: {
   row: JobRow;
   onOpen: () => void;
@@ -341,10 +362,12 @@ function ActionCell({
   onReconcile: () => void;
   onPerformance: () => void;
   onDownloadUrls: () => void;
+  onDownloadUrlsPdf: () => void;
   canRelaunch: boolean;
   canReconcile: boolean;
   canIngestGsc: boolean;
   canDownloadUrls: boolean;
+  canDownloadUrlsPdf: boolean;
 }): JSX.Element {
   const ready = row.status === "succeeded" || row.status === "partial";
   const finished = ready || row.status === "failed";
@@ -408,6 +431,19 @@ function ActionCell({
         </span>
       ),
       onClick: onDownloadUrls,
+    });
+  }
+
+  if (canDownloadUrlsPdf && ready) {
+    extras.push({
+      key: "urls-pdf",
+      label: (
+        <span className="jb-menuitem">
+          Download URLs (PDF)
+          <em>Every URL this crawl found, as a PDF.</em>
+        </span>
+      ),
+      onClick: onDownloadUrlsPdf,
     });
   }
 

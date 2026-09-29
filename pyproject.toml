@@ -27,6 +27,15 @@ dependencies = [
     "tenacity>=8.3",
     "httpx>=0.27.0,<1.0.0",
     "openpyxl>=3.1.0,<4.0.0",
+    # PDF generation for the URL-list download's PDF sibling (`urls.pdf`,
+    # `MasterURLReport.generate_pdf`). weasyprint was rejected: it needs an
+    # OS-level GTK3 runtime, which complicates local Windows dev under ADR
+    # 0004. reportlab is a plain pip wheel, matching every other dependency
+    # here. Core rather than the `seo` extra for the same reason as
+    # `openpyxl` above — `reports.py` must stay importable without the full
+    # `seo` extra — though that precedent works against this list's own
+    # "keep it MINIMAL" instruction; see ADR 0024.
+    "reportlab>=4.0,<5.0",
     "psycopg[binary]>=3.1.0,<4.0.0",
     "sqlalchemy>=2.0.0,<3.0.0",
     "redis>=5.0.0,<6.0.0",
@@ -192,6 +201,14 @@ disallow_untyped_defs = false
 # fails on a fresh clone for a dependency that is deliberately optional.
 [[tool.mypy.overrides]]
 module = "openpyxl.*"
+ignore_missing_imports = true
+
+# `reportlab` ships no `py.typed` marker either. Same treatment as
+# `openpyxl` immediately above, for the same reason: without this,
+# `mypy --strict` fails on the PDF generator's import for a dependency this
+# project deliberately installs unconditionally.
+[[tool.mypy.overrides]]
+module = "reportlab.*"
 ignore_missing_imports = true
 
 # `pywin32` ships no type information and is Windows-only (`sys_platform`
