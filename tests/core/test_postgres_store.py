@@ -410,6 +410,51 @@ class TestPostgresJobStoreRealSql:
         with pytest.raises(JobNotFoundError, match="no result"):
             store.read_result(job.id)
 
+    def test_iter_result_page_urls_yields_every_url_in_order(self) -> None:
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        job = store.create(tool_name="t", request={})
+        result = {
+            "pages": [{"url": f"https://example.com/{i}", "title": f"Page {i}"} for i in range(5)]
+        }
+        store.finish(job.id, result)
+
+        urls = list(store.iter_result_page_urls(job.id))
+
+        assert urls == [f"https://example.com/{i}" for i in range(5)]
+
+    def test_iter_result_page_urls_skips_malformed_page_entries(self) -> None:
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        job = store.create(tool_name="t", request={})
+        result = {
+            "pages": [
+                {"url": "https://example.com/a"},
+                "not-a-page-object",
+                {"title": "no url field"},
+                {"url": 123},
+                {"url": "https://example.com/b"},
+            ]
+        }
+        store.finish(job.id, result)
+
+        urls = list(store.iter_result_page_urls(job.id))
+
+        assert urls == ["https://example.com/a", "https://example.com/b"]
+
+    def test_iter_result_page_urls_raises_when_job_has_no_result(self) -> None:
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        job = store.create(tool_name="t", request={})
+        with pytest.raises(JobNotFoundError, match="no result"):
+            list(store.iter_result_page_urls(job.id))
+
+    def test_iter_result_page_urls_raises_for_a_nonexistent_job(self) -> None:
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        with pytest.raises(JobNotFoundError):
+            list(store.iter_result_page_urls("ghost-job"))
+
     def test_checkpoint_write_and_read_round_trip(self) -> None:
         db = _FakeDB()
         store, _fallback = _make_store(db)
@@ -580,6 +625,18 @@ class TestPostgresJobStoreCircuitBreakerFallback:
         fallback.finish.assert_called_once_with(
             "job-id", {"key": "value"}, partial=False, error=None
         )
+
+    def test_iter_result_page_urls_uses_fallback_when_circuit_open(self) -> None:
+        fallback = MagicMock()
+        fallback.read_result.return_value = {"pages": [{"url": "https://example.com/a"}]}
+        breaker = CircuitBreaker(failure_threshold=1)
+        breaker.record_failure(RuntimeError("test"))
+        store = PostgresJobStore(circuit_breaker=breaker, fallback_store=fallback)
+
+        urls = list(store.iter_result_page_urls("job-id"))
+
+        assert urls == ["https://example.com/a"]
+        fallback.read_result.assert_called_once_with("job-id")
 
     def test_operational_error_below_threshold_raises_not_falls_back(self) -> None:
         """A single transient failure must not silently swap stores.
