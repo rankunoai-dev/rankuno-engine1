@@ -231,6 +231,66 @@ describe("ScreamingFrogView", () => {
     expect(document.querySelector(".sfd-template-note")).toBeNull();
   });
 
+  it("answers 'where are the include and exclude boxes' with the chosen template's own note", async () => {
+    // The RAE screen had two pattern textareas here. Neither reaches
+    // Screaming Frog from a command line, so the form offers a disclosure
+    // rather than a box that discards what is typed into it — and the
+    // disclosure ends on the one thing that is actually actionable: what the
+    // config the operator just picked says it skips.
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      getWorkerTemplates: vi.fn().mockResolvedValue({
+        worker_id: "wkr-aaaa",
+        templates: [{ name: "js-crawl", description: "Skips /admin/ and /login/." }],
+        unrecognised_count: 0,
+        reported_at: "2026-09-21T10:00:00Z",
+      }),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/1 template reported/i)).toBeInTheDocument();
+    });
+    fireEvent.mouseDown(screen.getByLabelText("Screaming Frog template"));
+    fireEvent.click(await screen.findByTitle("js-crawl"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Include & Exclude/ }));
+    expect(
+      screen.getByText(/no command-line setting for include or exclude patterns/i),
+    ).toBeInTheDocument();
+    // The disclosure reads the live selection, not a copy taken when it
+    // rendered: this is the sentence the operator came here for.
+    expect(screen.getAllByText("Skips /admin/ and /login/.")).toHaveLength(2);
+
+    // And nowhere on the form is there anything to type a pattern into. Only
+    // the seed URL takes free text.
+    expect(document.querySelectorAll("textarea")).toHaveLength(0);
+    expect(screen.getAllByRole("textbox")).toHaveLength(1);
+  });
+
+  it("offers no GA4 fields, and says why adding them would not be enough", async () => {
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Screaming Frog template")).toBeInTheDocument();
+    });
+    // The four boxes RAE drew, by their labels. None of them exists here.
+    for (const label of [/gmail/i, /GA4 account/i, /GA4 property/i, /data stream/i]) {
+      expect(screen.queryByLabelText(label)).not.toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: /Google Analytics 4/ }));
+    expect(screen.getByText(/recorded with the crawl and then dropped/)).toBeInTheDocument();
+    expect(screen.getByText(/ask for the Analytics tab/)).toBeInTheDocument();
+  });
+
   it("says how many config files the machine could not offer, and why", async () => {
     // The trap: Screaming Frog's own Save As writes
     // `SEO Spider Config - Basic.seospiderconfig`, which is not a slug. Those

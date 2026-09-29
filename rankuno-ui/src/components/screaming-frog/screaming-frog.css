@@ -333,6 +333,80 @@
   word-break: break-all;
 }
 
+/* ---- Settings that are not on this form (RAE's include/exclude and GA4) ----
+
+   Disclosures, not fields. They sit between the template picker and the launch
+   button, so they are deliberately quieter than either: a rule above, a small
+   heading, and antd's `ghost` Collapse so nothing draws a second box inside
+   `.sfd-card`. The one thing they must never look like is somewhere to type. */
+
+.sfd-elsewhere {
+  margin: 0 0 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  max-width: 78ch;
+}
+
+.sfd-elsewhere h3 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* Pull the ghost panel back to the form's own left edge — antd pads the header
+   for a collapse arrow that `ghost` still renders inside the row. */
+.sfd-elsewhere .ant-collapse-ghost > .ant-collapse-item > .ant-collapse-header {
+  padding-left: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.sfd-elsewhere .ant-collapse-ghost > .ant-collapse-item > .ant-collapse-content > .ant-collapse-content-box {
+  padding-left: 0;
+  padding-top: 2px;
+}
+
+/* The header sentence is long on purpose — it is the answer an operator gets
+   without opening anything — so it must wrap rather than push the card wide.
+   antd lays the header out as a flex row, and a flex item will not shrink
+   below its content without this. */
+.sfd-elsewhere .ant-collapse-header-text {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.sfd-elsewhere p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+
+/* The template's own note, quoted inside the explanation. Same treatment as
+   the copy under the Select: it is the same untrusted string, and it must read
+   as the worker's words rather than as ours. */
+.sfd-elsewhere .sfd-template-note {
+  margin: 0 0 8px;
+  color: var(--ink);
+  border-left: 2px solid var(--line2);
+  padding-left: 10px;
+}
+
+.sfd-elsewhere strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.sfd-elsewhere p code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--overlay-bg);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  word-break: break-all;
+}
+
 /* ---- Dispatched jobs ---- */
 
 .sfj-head {

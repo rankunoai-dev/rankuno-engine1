@@ -16,6 +16,7 @@ import { WorkerJobsPanel } from "./WorkerJobsPanel";
 import { newCorrelationId } from "./correlationId";
 import type { UrlListChoice } from "./UrlListSourcePicker";
 import { UrlListSourcePicker } from "./UrlListSourcePicker";
+import { UnavailableSettings } from "./UnavailableSettings";
 import "./screaming-frog.css";
 
 interface Props {
@@ -486,6 +487,12 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
             ) : null}
             <span className="sfd-hint">{describeTemplates(templates, templatesLoading)}</span>
           </div>
+
+          {/* Directly under the template picker, because that is the answer it
+              gives: include and exclude patterns are decided by which config
+              is chosen, and the chosen config's own note is what the panel
+              shows. No control inside it collects anything. */}
+          <UnavailableSettings template={chosen ?? null} />
 
           {previewError && (
             <Alert
