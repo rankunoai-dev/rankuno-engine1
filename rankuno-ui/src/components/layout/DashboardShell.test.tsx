@@ -1,8 +1,10 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAuthStore } from "../../store/useAuthStore";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { useNoticeStore } from "../../store/useNoticeStore";
 import { useUiStore } from "../../store/useUiStore";
+import { crawl, crawlJob, discovery } from "../../test/factories";
 import { DashboardShell } from "./DashboardShell";
 
 /**
@@ -159,5 +161,110 @@ describe("DashboardShell — the visualizer while a crawl is loading", () => {
 
     expect(screen.queryByText("Loading the crawl…")).not.toBeInTheDocument();
     expect(screen.getByText(/No crawl loaded\. Select one above/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * The dismissible banners, and the one banner that is not.
+ *
+ * `NoticeStack.test.tsx` covers dismissal itself. What is pinned here is the
+ * judgement call the shell makes: the error banner keeps no close button,
+ * because it is the only banner carrying a recovery action and the only one
+ * with no crawl to scope a dismissal to.
+ */
+describe("DashboardShell — dismissing the safety banners", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    useNoticeStore.setState({ dismissed: {} });
+    useUiStore.setState({ view: "visualizer", lastEngineView: "visualizer" });
+    useCrawlStore.setState({
+      adapter: null,
+      result: null,
+      jobs: [],
+      activeJobId: null,
+      liveJobs: {},
+      status: "idle",
+      error: null,
+      reconciliation: null,
+      grouping: "path",
+      includeDefaulters: false,
+    });
+    useAuthStore.setState({
+      token: null,
+      orgId: null,
+      expiresAt: null,
+      loggingIn: false,
+      loginError: null,
+    });
+  });
+
+  /**
+   * The banner stack alone.
+   *
+   * The printable report is always mounted beside the dashboard — it is
+   * revealed by `@media print`, not by a render — and it says its own version
+   * of "this is a partial view of the site". A document-wide query therefore
+   * finds two, and would keep passing if the banner disappeared entirely.
+   */
+  function stack(): HTMLElement {
+    const app = document.querySelector(".rk-app");
+    if (!app) throw new Error("the dashboard did not render");
+    return app as HTMLElement;
+  }
+
+  /** A loaded crawl that stopped at its page ceiling. */
+  function loadTruncatedCrawl(jobId: string): void {
+    useCrawlStore.setState({
+      activeJobId: jobId,
+      status: "succeeded",
+      jobs: [crawlJob({ id: jobId, truncated: true })],
+      result: crawl({ discovery: discovery({ truncated: true }) }),
+    });
+  }
+
+  it("closes the partial-crawl warning against the crawl it describes", () => {
+    loadTruncatedCrawl("job-a");
+    render(<DashboardShell />);
+
+    const message = /partial view of the site, not the whole of it/;
+    expect(within(stack()).getByText(message)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss the partial crawl notice" }));
+
+    expect(within(stack()).queryByText(message)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /1 hidden notice/ })).toBeInTheDocument();
+    expect(useNoticeStore.getState().dismissed["job-a"]).toEqual(["truncated"]);
+  });
+
+  it("says it again for a different crawl", () => {
+    /* The difference between "this site has 405 pages" and "I looked at 405
+       pages of this site". A dismissal on one crawl cannot answer for
+       another. */
+    useNoticeStore.setState({ dismissed: { "job-a": ["truncated"] } });
+    loadTruncatedCrawl("job-b");
+
+    render(<DashboardShell />);
+
+    expect(
+      within(stack()).getByText(/partial view of the site, not the whole of it/),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the recovery action out of reach of a close button", () => {
+    /* The judgement call. "Render partial tree" is the only way back for a
+       failed job that left a checkpoint on disk, and a recovery path behind a
+       × is worse than the clutter it would save. The banner also fires for a
+       rejected submission, which has no job row — so the only dismissal
+       available to it would be a global one, which this design refuses. */
+    useCrawlStore.setState({
+      error: "The crawl failed after 1,204 pages.",
+      activeJobId: "job-a",
+      jobs: [crawlJob({ id: "job-a", status: "failed" })],
+    });
+
+    render(<DashboardShell />);
+
+    expect(screen.getByText("The crawl failed after 1,204 pages.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Dismiss/i })).toBeNull();
   });
 });

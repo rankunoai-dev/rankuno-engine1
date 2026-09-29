@@ -1,7 +1,7 @@
 import { Alert, Button, Spin } from "antd";
 import { useEffect, useMemo } from "react";
 import { buildDashModel, EMPTY_MODEL } from "../../lib/dashboardModel";
-import { gscWarningFor, gscWarningTone } from "../../lib/gscEnrichment";
+import { dashboardNotices } from "../../lib/dashboardNotices";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useDashboardStore } from "../../store/useDashboardStore";
@@ -21,6 +21,7 @@ import { ScreamingFrogView } from "../screaming-frog/ScreamingFrogView";
 import { HeaderBar } from "./HeaderBar";
 import { LiveCrawlModal } from "./LiveCrawlModal";
 import { NavigationRail } from "./NavigationRail";
+import { NoticeStack } from "./NoticeStack";
 import { useAuthStore } from "../../store/useAuthStore";
 import { useUiStore } from "../../store/useUiStore";
 import { useState } from "react";
@@ -33,6 +34,21 @@ import { useState } from "react";
  * are each a way to read this screen confidently and wrongly, and each one cost
  * a cycle to make visible (build-logs 0012 and 0013). A redesign is not a reason
  * to stop saying them.
+ *
+ * They are now dismissible, which is not a retraction of that. A dismissal is
+ * recorded against one crawl and one banner, `NoticeStack` keeps a count of
+ * what is hidden on screen with a control that restores it, and a different
+ * crawl starts with everything showing. The finding is put away, never lost.
+ *
+ * The error banner below is the exception and stays permanent. It is the only
+ * banner that carries an *action* — "Render partial tree" is the recovery path
+ * for a failed job with a checkpoint on disk — and a recovery button behind a
+ * close button is worse than the clutter it saves. It is also the one banner
+ * with nothing to scope a dismissal to: it fires for a rejected submission,
+ * which has no job row and therefore no crawl id, so the only dismissal
+ * available for it would be the global one this design forbids. It is already
+ * transient in a way the others are not — the store clears `error` on the next
+ * action — so it goes away by itself as soon as anything happens.
  */
 export function DashboardShell(): JSX.Element {
   const result = useCrawlStore((state) => state.result);
@@ -75,11 +91,15 @@ export function DashboardShell(): JSX.Element {
   }, [model, setModel]);
 
   const active = jobs.find((job) => job.id === activeJobId);
-  const discovery = result?.discovery;
-  // Empty string when enrichment matched pages, and for any result stored
-  // before the engine recorded an outcome — both mean "nothing to say here".
-  const gscWarning = gscWarningFor(result);
   const navParsed = (result?.navigation?.roots.length ?? 0) > 0;
+
+  // Every banner that applies to the loaded crawl. Rebuilt only when the result
+  // or the job's synthetic flag changes, so a dismissal — which lives in its
+  // own store — does not re-derive the list it is filtering.
+  const notices = useMemo(
+    () => dashboardNotices(result, active?.synthetic ?? false),
+    [result, active?.synthetic],
+  );
 
   return (
     // The report is a *sibling* of `.rk-dash`, not a child. Printing hides
@@ -176,90 +196,13 @@ export function DashboardShell(): JSX.Element {
             </ErrorBoundary>
           )}
 
-          {view === "visualizer" && active?.synthetic && (
-            <Alert
-              type="warning"
-              banner
-              showIcon
-              message="Synthetic dataset — generated for performance testing. Not crawl output, and not evidence about the engine."
-            />
-          )}
-
-          {view === "visualizer" && discovery && discovery.pages_fetched === 0 && (
-            <Alert
-              type="error"
-              banner
-              showIcon
-              message={
-                discovery.fetch_failures > 0
-                  ? `0 pages fetched — ${discovery.fetch_failures} requests were refused. Classifications rest on URL string patterns alone.`
-                  : "0 pages fetched over the network. Classifications rest on URL string patterns alone."
-              }
-            />
-          )}
-
-          {/* Distinct from "no sitemap exists" (`sitemaps_fetched === 0` with
-              `sitemaps_blocked === false`), which is the ordinary, unremarkable
-              shape of most sites and gets no banner at all. This fires only
-              when every sitemap attempt this crawl made — the two hardcoded
-              probes, anything `robots.txt` named, and anything the homepage
-              named — was refused. States what happened; no retry or identity
-              change was attempted and none is offered here. */}
-          {view === "visualizer" && discovery?.sitemaps_blocked && (
-            <Alert
-              type="warning"
-              banner
-              showIcon
-              message={`Sitemap access blocked — every sitemap request this crawl made was refused (${discovery.sitemap_fetch_attempts} attempt${discovery.sitemap_fetch_attempts === 1 ? "" : "s"}). Discovery continued from the page's own links instead. If this site should be crawlable, ask the site owner to allow this crawler.`}
-            />
-          )}
-
-          {/* Distinct from truncation. Truncated means the crawl stopped at a
-              ceiling it was told about; this means it was abandoned, and there is
-              no way to know how much of the site is missing. */}
-          {view === "visualizer" && discovery?.stopped_reason && (
-            <Alert
-              type="warning"
-              banner
-              showIcon
-              message={`Crawl stopped early — ${discovery.stopped_reason}. Showing the ${discovery.total_urls.toLocaleString()} URLs found before it stopped; this is not the whole site, and how much is missing is unknown.`}
-            />
-          )}
-
-          {/* The GSC columns go blank on four different outcomes and look
-              identical on all four, because enrichment degrades silently so a
-              Search Console problem never fails a crawl. This is the only
-              place an operator can learn which one happened — and, for the
-              blank property URL, that the cause is an input they can fill in. */}
-          {view === "visualizer" && gscWarning && (
-            <Alert type={gscWarningTone(result?.gsc)} banner showIcon message={gscWarning} />
-          )}
-
-          {view === "visualizer" && discovery?.truncated && (
-            <Alert
-              type="warning"
-              banner
-              showIcon
-              message="Crawl stopped at its page ceiling. This is a partial view of the site, not the whole of it."
-            />
-          )}
-
-          {/* Not gated on `grouping === "navigation"`. `selectJob` switches the
-              grouping to "path" the moment it sees an unparsed menu, so that
-              condition was false exactly when this needed to be said — the
-              banner could never fire. It is the fallback itself that has to be
-              announced, not the toggle position. */}
-          {view === "visualizer" && result && !navParsed && (
-            <Alert
-              type="warning"
-              banner
-              showIcon
-              message={
-                discovery?.pages_fetched === 0
-                  ? "No header menu was parsed because no page was fetched. The tree below groups by URL path, and its lane numbers are path depth — not navigation depth. Each row's badge shows the level the engine classified, which is the reliable figure."
-                  : "No header menu could be parsed, so the tree groups by URL path. Lane numbers are path depth, not navigation depth. Each row's badge shows the level the engine classified."
-              }
-            />
+          {/* Seven banners that describe the loaded result, each dismissible
+              against this crawl alone. The wording and the firing conditions
+              moved to `dashboardNotices` unchanged — a stack of conditional
+              JSX cannot be counted, and "2 hidden notices" needs to know how
+              many banners apply, not how many are on screen. */}
+          {view === "visualizer" && (
+            <NoticeStack notices={notices} crawlId={activeJobId} />
           )}
 
           {view === "visualizer" && (

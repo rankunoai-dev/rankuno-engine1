@@ -1461,3 +1461,34 @@ svg.wires {
   color: var(--faint);
   font-weight: 400;
 }
+
+
+/* The "N hidden notices" control, standing exactly where the banners it
+   restores were. A full-width strip rather than a floating chip, so it reads as
+   the last row of the banner stack and not as a detached button: the one thing
+   it must never look like is decoration, because it is the only remaining trace
+   of a finding the operator put away. Bordered on the bottom like a banner and
+   kept off the page background, so the boundary between chrome and content
+   stays where it was. */
+.rk-notice-restore {
+  flex: none;
+  display: flex;
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 2px 8px;
+}
+/* Scoped under `.rk-dash` for specificity, not for nesting. The local button
+   reset above exempts antd (`:not(:where([class*="ant-"]))`), so what has to be
+   beaten here is antd's own `.ant-btn` rules; three classes clears them without
+   `!important`. */
+.rk-dash .rk-notice-restore .ant-btn {
+  font-size: 12px;
+  color: var(--dim);
+  height: auto;
+  padding: 3px 6px;
+}
+.rk-dash .rk-notice-restore .ant-btn:hover,
+.rk-dash .rk-notice-restore .ant-btn:focus-visible {
+  color: var(--ink);
+}
