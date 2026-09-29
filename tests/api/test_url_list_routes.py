@@ -32,6 +32,8 @@ from src.api.server import API_PREFIX, create_app
 from src.core.state_store import DiskJobStore, JobRecord
 from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_auth import DiskWorkerStore
+from src.core.worker_dispatch_schemas import DispatchAssignmentClaims
+from src.core.worker_dispatch_signing import verify_dispatch_assignment
 from src.modules.seo.screaming_frog_control.url_list import fingerprint, render_url_list
 
 from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
@@ -612,6 +614,92 @@ class TestWorkerFetch:
 
         assert response.status_code == 200
         assert fingerprint(response.content) == preview["url_list"]["sha256"]
+
+
+# --- gate (b) in list mode ----------------------------------------------------
+
+
+class TestSignedAssignment:
+    """The digest must survive being *minted*, not merely being queued.
+
+    Everything either side of this was already covered when cycle 0119's defect
+    shipped: preview bound the digest, confirm persisted it, and
+    `test_worker_url_list.py` proved `prepare_url_list` does the right thing
+    when handed claims that carry one. What nothing exercised was the step
+    between — `issue_dispatch_assignment`, which never received the field at
+    all and minted it at its `None` default on every poll. The worker's
+    `if claims.url_list_sha256 is not None:` was therefore always False, so
+    every approved `--crawl-list` dispatch ran as an ordinary link-following
+    crawl of the seed URL while the operator had approved a list.
+
+    These tests walk the real path and read the field off *verified* claims,
+    never a hand-built `DispatchAssignmentClaims`: a constructed claims object
+    tests the consumer and assumes the producer, which is what let the defect
+    through a suite that already covered both ends around it.
+    """
+
+    def _poll_claims(self, client, worker) -> DispatchAssignmentClaims:
+        poll = client.get(
+            f"{API_PREFIX}/workers/dispatch/poll",
+            headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+        )
+        assert poll.status_code == 200, poll.text
+        assert poll.json()["assignment"] is not None, "nothing was queued to claim"
+        return verify_dispatch_assignment(
+            poll.json()["assignment"]["token"],
+            secret=DISPATCH_SECRET,
+            worker_id=worker["worker_id"],
+            org_id="default",
+        )
+
+    def test_the_verified_claims_carry_the_approved_digest(self, client, job_store):
+        crawl = _finished_crawl(job_store, ["https://example.com/a", "https://example.com/b"])
+        worker = _register_worker(client)
+        preview = _preview(client, worker, source_job_id=crawl.id).json()
+        assert _confirm(client, worker, preview).status_code == 202
+
+        claims = self._poll_claims(client, worker)
+
+        assert claims.url_list_sha256 == preview["url_list"]["sha256"]
+
+    def test_a_plain_crawl_assignment_carries_no_digest(self, client, job_store):
+        """The negative half: `None` here has to mean "no list was approved".
+
+        Without it the assertion above could be satisfied by a mint that
+        stamped some digest onto every job, and list mode would stop being a
+        decision the operator made.
+        """
+        worker = _register_worker(client)
+        preview = _preview(client, worker).json()
+        assert _confirm(client, worker, preview, sha256=None).status_code == 202
+
+        claims = self._poll_claims(client, worker)
+
+        assert claims.url_list_sha256 is None
+
+    def test_the_signed_digest_matches_the_bytes_the_worker_then_downloads(self, client, job_store):
+        """The integrity guarantee `worker_url_list` states, end to end.
+
+        The worker checks downloaded list bytes against the digest inside its
+        own signed claims — the only copy it may trust, which is why the
+        download route deliberately sends no digest header. While the mint
+        dropped the field there was no signed value to check against at all,
+        so that guarantee was unreachable code rather than a wrong check.
+        """
+        crawl = _finished_crawl(job_store, ["https://example.com/a", "https://example.com/b"])
+        worker = _register_worker(client)
+        preview = _preview(client, worker, source_job_id=crawl.id).json()
+        job = _confirm(client, worker, preview).json()
+
+        claims = self._poll_claims(client, worker)
+        listing = client.get(
+            f"{API_PREFIX}/workers/jobs/{job['id']}/url-list",
+            headers=_worker_headers(worker["worker_id"], worker["worker_secret"]),
+        )
+
+        assert listing.status_code == 200, listing.text
+        assert claims.url_list_sha256 is not None
+        assert fingerprint(listing.content) == claims.url_list_sha256
 
 
 # --- truncation reporting on the finished job ---------------------------------
