@@ -71,11 +71,13 @@ src/
 │   │                            # Every method checks CircuitBreaker first and
 │   │                            # falls back to DiskJobStore once it opens.
 │   │                            # write_reconciliation/read_reconciliation/
-│   │                            # write_performance/read_performance always
-│   │                            # delegate to the fallback store unconditionally
-│   │                            # -- out of scope for this cycle, and a Protocol's
-│   │                            # own ... body would otherwise silently no-op
-│   │                            # those calls once this store becomes the default.
+│   │                            # write_performance/read_performance follow the
+│   │                            # same circuit-breaker/upsert pattern into
+│   │                            # job_payloads (migration 0008, ADR 0022
+│   │                            # amendment, build-log 0121) -- unconditional
+│   │                            # disk delegation was the production bug: a
+│   │                            # Postgres-only job's reconciliation/performance
+│   │                            # write silently no-oped and every GET 404'd.
 │   │                            # create_app() picks this store automatically
 │   │                            # whenever PostgresSettings.is_configured() is
 │   │                            # true; DiskJobStore otherwise (build-log 0118)
