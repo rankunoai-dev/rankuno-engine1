@@ -149,3 +149,42 @@ they would have shipped invisibly:
 - `docs-scribe` still needs to add this ADR to the summary table in
   `CLAUDE.md` §6 and write the cycle's build-log entry; neither is done by
   this change.
+
+---
+
+## Amendment (follow-up cycle): decision 5 reversed — reconciliation and
+performance are now in Postgres too
+
+Decision 5 above scoped `reconciliation`/`performance` out and left them
+delegating to `fallback_store` unconditionally. That framing understated
+what the choice actually did: `create()` (circuit closed) writes a job's row
+to Postgres only, while `DiskJobStore.write_reconciliation`/
+`write_performance` both require the job to exist *on disk* before writing
+the sidecar file. For any job created while Postgres was healthy — which is
+every job, in production, once this store became the default — the
+unconditional disk delegation meant the write silently no-oped and every
+later read returned `None`. `POST /jobs/{id}/reconcile/screaming-frog`
+returned 200 with a correctly computed `ReconciliationSummary`, but nothing
+durable was ever written, and every subsequent GET (including the download
+buttons) 404'd. This was not a deferred feature; it was a production bug
+introduced by this ADR's own decision 5, for every job since build-log 0118.
+
+**Fix**: migration 0008 adds `reconciliation` and `performance` JSON columns
+to `job_payloads` — same table, same nullable-column shape `result`/
+`checkpoint`/`homepage_html` already have, for the same reason (decision 2's
+`list_jobs()` cost argument applies identically to these two payloads).
+`PostgresJobStore.write_reconciliation`/`read_reconciliation`/
+`write_performance`/`read_performance` now follow the exact circuit-breaker
+pattern every other method in this class uses: attempt Postgres, record
+success/failure, fall back to disk only once the breaker opens. `DiskJobStore`
+itself is unchanged — it remains correct for local/no-Postgres development,
+and its existence-check semantics (a write to a job that does not exist on
+disk logs a warning rather than raising) are untouched.
+
+No new ADR: this is the same table, the same upsert/read pattern already
+established by `finish()`/`write_checkpoint()`, closing a gap decision 5
+itself flagged rather than introducing a new architectural choice.
+
+The `.orgs`/`.operators` stores mentioned in decision 5 and the Consequences
+section remain untouched and out of scope — this amendment is reconciliation
+and performance only.

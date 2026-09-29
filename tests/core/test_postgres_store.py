@@ -126,6 +126,10 @@ class _FakeCursor:
             self._upsert_payload(params, "checkpoint")
         elif q.startswith("INSERT INTO job_payloads (job_id, homepage_html"):
             self._upsert_payload(params, "homepage_html")
+        elif q.startswith("INSERT INTO job_payloads (job_id, reconciliation"):
+            self._upsert_payload(params, "reconciliation")
+        elif q.startswith("INSERT INTO job_payloads (job_id, performance"):
+            self._upsert_payload(params, "performance")
         elif (
             q == "SELECT 1 FROM jobs WHERE id = %s FOR UPDATE"
             or q == "SELECT 1 FROM jobs WHERE id = %s"
@@ -161,23 +165,40 @@ class _FakeCursor:
             (job_id,) = params
             payload = self._db.payloads.get(job_id)
             self._one = (payload.get("homepage_html"),) if payload is not None else None
+        elif q == "SELECT reconciliation FROM job_payloads WHERE job_id = %s":
+            (job_id,) = params
+            payload = self._db.payloads.get(job_id)
+            self._one = (payload.get("reconciliation"),) if payload is not None else None
+        elif q == "SELECT performance FROM job_payloads WHERE job_id = %s":
+            (job_id,) = params
+            payload = self._db.payloads.get(job_id)
+            self._one = (payload.get("performance"),) if payload is not None else None
         else:  # pragma: no cover - defensive: an unmodelled query fails the test loudly
             raise AssertionError(f"fake cursor does not understand query: {q!r}")
 
     def _upsert_payload(self, params: tuple[object, ...], column: str) -> None:
-        # JSON/JSONB columns (`result`, `checkpoint`) come back from a real
-        # Postgres SELECT already deserialised into a Python object, not the
-        # JSON-text `psycopg.execute` was given — this fake must do the same
+        # JSON/JSONB columns (`result`, `checkpoint`, `reconciliation`,
+        # `performance`) come back from a real Postgres SELECT already
+        # deserialised into a Python object, not the JSON-text
+        # `psycopg.execute` was given — this fake must do the same
         # deserialisation on write so a later read sees what Postgres would
         # actually hand back, not the raw string `finish`/`write_checkpoint`
         # sent in. `homepage_html` is plain TEXT and stays a string.
         import json
 
+        json_columns = ("result", "checkpoint", "reconciliation", "performance")
         job_id, value, updated_at = params
-        if column in ("result", "checkpoint") and value is not None:
+        if column in json_columns and value is not None:
             value = json.loads(value)
         row = self._db.payloads.setdefault(
-            job_id, {"result": None, "checkpoint": None, "homepage_html": None}
+            job_id,
+            {
+                "result": None,
+                "checkpoint": None,
+                "homepage_html": None,
+                "reconciliation": None,
+                "performance": None,
+            },
         )
         row[column] = value
         row["updated_at"] = updated_at
@@ -513,6 +534,75 @@ class TestPostgresJobStoreRealSql:
         assert "partial results were saved" in (store.get(with_checkpoint.id).error or "")
         assert store.get(done.id).status.value == "succeeded"
 
+    def test_reconciliation_write_and_read_round_trip(self) -> None:
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        job = store.create(tool_name="t", request={})
+
+        assert store.read_reconciliation(job.id) is None
+        store.write_reconciliation(job.id, {"matched": 3, "unmatched": ["https://example.com/a"]})
+        assert store.read_reconciliation(job.id) == {
+            "matched": 3,
+            "unmatched": ["https://example.com/a"],
+        }
+
+    def test_reconciliation_never_raises_for_missing_job(self) -> None:
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        store.write_reconciliation("ghost-job", {"a": 1})  # must not raise
+        assert store.read_reconciliation("ghost-job") is None
+
+    def test_reconciliation_regression_postgres_backed_job_survives_round_trip(self) -> None:
+        """The exact bug this cycle fixes.
+
+        Before the fix, `write_reconciliation`/`read_reconciliation` delegated
+        straight to the disk fallback unconditionally, but `create()` (with
+        the circuit closed) wrote the job to Postgres only — so the disk
+        store's own existence check rejected the write, silently, and every
+        later read 404'd. This reproduces that exact sequence: create a job
+        through `PostgresJobStore` with a closed circuit, write a
+        reconciliation, and read it back through the same store. Fails
+        against the pre-fix code (returns `None`); passes against the fix.
+        """
+        db = _FakeDB()
+        store, fallback = _make_store(db)
+        job = store.create(tool_name="t", request={})
+
+        store.write_reconciliation(job.id, {"summary": "ok"})
+        result = store.read_reconciliation(job.id)
+
+        assert result == {"summary": "ok"}
+        fallback.write_reconciliation.assert_not_called()
+        fallback.read_reconciliation.assert_not_called()
+
+    def test_performance_write_and_read_round_trip(self) -> None:
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        job = store.create(tool_name="t", request={})
+
+        assert store.read_performance(job.id) is None
+        store.write_performance(job.id, {"clicks": 42, "impressions": 1000})
+        assert store.read_performance(job.id) == {"clicks": 42, "impressions": 1000}
+
+    def test_performance_never_raises_for_missing_job(self) -> None:
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        store.write_performance("ghost-job", {"a": 1})  # must not raise
+        assert store.read_performance("ghost-job") is None
+
+    def test_performance_regression_postgres_backed_job_survives_round_trip(self) -> None:
+        """Same bug as reconciliation, same fix, for the GSC performance report."""
+        db = _FakeDB()
+        store, fallback = _make_store(db)
+        job = store.create(tool_name="t", request={})
+
+        store.write_performance(job.id, {"summary": "ok"})
+        result = store.read_performance(job.id)
+
+        assert result == {"summary": "ok"}
+        fallback.write_performance.assert_not_called()
+        fallback.read_performance.assert_not_called()
+
     def test_redeploy_simulation_new_instance_same_db_sees_old_job(self) -> None:
         """A new store instance reads a job an earlier instance created.
 
@@ -591,6 +681,10 @@ class TestPostgresJobStoreCircuitBreakerFallback:
             ("read_checkpoint", ("job-id",), {}),
             ("write_homepage", ("job-id", "<html></html>"), {}),
             ("read_homepage", ("job-id",), {}),
+            ("write_reconciliation", ("job-id", {"a": 1}), {}),
+            ("read_reconciliation", ("job-id",), {}),
+            ("write_performance", ("job-id", {"a": 1}), {}),
+            ("read_performance", ("job-id",), {}),
             ("recover_orphans", (), {}),
         ],
     )
@@ -678,31 +772,40 @@ class TestPostgresJobStoreCircuitBreakerFallback:
 
 
 # --------------------------------------------------------------------------
-# Reconciliation / performance: always disk, never Postgres (out of scope)
+# Reconciliation / performance: Postgres when the circuit is closed, disk
+# once it opens — same split as `result`/`checkpoint`/`homepage_html`.
 # --------------------------------------------------------------------------
 
 
-class TestPostgresJobStoreReconciliationAndPerformanceStayOnDisk:
-    def test_write_reconciliation_delegates_unconditionally(self) -> None:
+class TestPostgresJobStoreReconciliationAndPerformanceCircuitOpen:
+    def test_write_reconciliation_delegates_when_circuit_open(self) -> None:
         fallback = MagicMock()
-        store = PostgresJobStore(fallback_store=fallback)
+        breaker = CircuitBreaker(failure_threshold=1)
+        breaker.record_failure(RuntimeError("test"))
+        store = PostgresJobStore(circuit_breaker=breaker, fallback_store=fallback)
         store.write_reconciliation("job-id", {"a": 1})
         fallback.write_reconciliation.assert_called_once_with("job-id", {"a": 1})
 
-    def test_read_reconciliation_delegates_unconditionally(self) -> None:
+    def test_read_reconciliation_delegates_when_circuit_open(self) -> None:
         fallback = MagicMock()
         fallback.read_reconciliation.return_value = {"a": 1}
-        store = PostgresJobStore(fallback_store=fallback)
+        breaker = CircuitBreaker(failure_threshold=1)
+        breaker.record_failure(RuntimeError("test"))
+        store = PostgresJobStore(circuit_breaker=breaker, fallback_store=fallback)
         assert store.read_reconciliation("job-id") == {"a": 1}
 
-    def test_write_performance_delegates_unconditionally(self) -> None:
+    def test_write_performance_delegates_when_circuit_open(self) -> None:
         fallback = MagicMock()
-        store = PostgresJobStore(fallback_store=fallback)
+        breaker = CircuitBreaker(failure_threshold=1)
+        breaker.record_failure(RuntimeError("test"))
+        store = PostgresJobStore(circuit_breaker=breaker, fallback_store=fallback)
         store.write_performance("job-id", {"a": 1})
         fallback.write_performance.assert_called_once_with("job-id", {"a": 1})
 
-    def test_read_performance_delegates_unconditionally(self) -> None:
+    def test_read_performance_delegates_when_circuit_open(self) -> None:
         fallback = MagicMock()
         fallback.read_performance.return_value = {"a": 1}
-        store = PostgresJobStore(fallback_store=fallback)
+        breaker = CircuitBreaker(failure_threshold=1)
+        breaker.record_failure(RuntimeError("test"))
+        store = PostgresJobStore(circuit_breaker=breaker, fallback_store=fallback)
         assert store.read_performance("job-id") == {"a": 1}

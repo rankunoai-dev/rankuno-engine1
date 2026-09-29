@@ -16,12 +16,17 @@ and fall back to disk once the breaker opens (`CircuitBreaker`). A fresh
 effect without a restart.
 
 `write_reconciliation`/`read_reconciliation`/`write_performance`/
-`read_performance` are the one exception: they always delegate straight to
-`fallback_store`, unconditionally. Neither payload is in this cycle's scope
-(the ADR), and — because `JobStore` is a `Protocol`, not an ABC — leaving
-them unoverridden here would silently no-op every call once this store
-becomes the default, rather than raising or falling back. That would be a
-regression from today's behaviour, where nothing calls this class at all.
+`read_performance` used to be the one exception, delegating straight to
+`fallback_store` unconditionally regardless of circuit state. That was a
+production bug, not a scope boundary working as intended: `create()` writes
+a Postgres-backed job's row to Postgres only, but `DiskJobStore.write_reconciliation`
+requires the job to exist *on disk* before it writes the sidecar file — so
+for any job created while Postgres was healthy, the write silently no-oped
+and every later read 404'd. A reconciliation or performance report could
+never actually be downloaded once Postgres became the default store. Fixed
+by migration 0008, which gives both payloads the same `job_payloads` column
+treatment `result`/`checkpoint`/`homepage_html` already had; see the
+amendment to `docs/adr/0022-postgres-backed-job-store.md` decision 5.
 """
 
 from __future__ import annotations
@@ -682,20 +687,126 @@ class PostgresJobStore(JobStore):
         return cast(str, row[0])
 
     def write_reconciliation(self, job_id: str, payload: Mapping[str, object]) -> None:
-        """Delegate to disk. Reconciliation reports are out of this cycle's Postgres scope."""
-        self.fallback_store.write_reconciliation(job_id, payload)
+        """Save a cross-check against a third-party crawl. Never raises — matches `DiskJobStore`.
+
+        Falls back to disk store once the circuit opens.
+        """
+        if self.circuit_breaker.is_open():
+            self.fallback_store.write_reconciliation(job_id, payload)
+            return
+
+        now = datetime.now(tz=UTC)
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT 1 FROM jobs WHERE id = %s", (job_id,))
+                if cur.fetchone() is None:
+                    raise JobNotFoundError(f"no job with id {job_id!r}")
+                cur.execute(
+                    "INSERT INTO job_payloads (job_id, reconciliation, updated_at) "
+                    "VALUES (%s, %s, %s) ON CONFLICT (job_id) DO UPDATE SET "
+                    "reconciliation = EXCLUDED.reconciliation, updated_at = EXCLUDED.updated_at",
+                    (job_id, json.dumps(dict(payload)), now),
+                )
+        except (JobNotFoundError, TypeError) as exc:
+            _logger.warning(
+                "reconciliation_write_failed", extra={"job_id": job_id, "error": str(exc)}
+            )
+            return
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            self.circuit_breaker.record_failure(err)
+            if self.circuit_breaker.is_open():
+                self.fallback_store.write_reconciliation(job_id, payload)
+                return
+            _logger.warning(
+                "reconciliation_write_failed", extra={"job_id": job_id, "error": str(err)}
+            )
+            return
+        else:
+            self.circuit_breaker.record_success()
 
     def read_reconciliation(self, job_id: str) -> Mapping[str, object] | None:
-        """Delegate to disk. Reconciliation reports are out of this cycle's Postgres scope."""
-        return self.fallback_store.read_reconciliation(job_id)
+        """Read a job's saved cross-check, or `None`. Never raises — matches `DiskJobStore`.
+
+        Falls back to disk store once the circuit opens.
+        """
+        if self.circuit_breaker.is_open():
+            return self.fallback_store.read_reconciliation(job_id)
+
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT reconciliation FROM job_payloads WHERE job_id = %s", (job_id,))
+                row = cur.fetchone()
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            self.circuit_breaker.record_failure(err)
+            if self.circuit_breaker.is_open():
+                return self.fallback_store.read_reconciliation(job_id)
+            _logger.warning(
+                "reconciliation_read_failed", extra={"job_id": job_id, "error": str(err)}
+            )
+            return None
+
+        self.circuit_breaker.record_success()
+        if row is None or row[0] is None:
+            return None
+        return cast(Mapping[str, object], row[0])
 
     def write_performance(self, job_id: str, payload: Mapping[str, object]) -> None:
-        """Delegate to disk. Performance reports are out of this cycle's Postgres scope."""
-        self.fallback_store.write_performance(job_id, payload)
+        """Save a Search Console report. Never raises — matches `DiskJobStore`.
+
+        Falls back to disk store once the circuit opens.
+        """
+        if self.circuit_breaker.is_open():
+            self.fallback_store.write_performance(job_id, payload)
+            return
+
+        now = datetime.now(tz=UTC)
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT 1 FROM jobs WHERE id = %s", (job_id,))
+                if cur.fetchone() is None:
+                    raise JobNotFoundError(f"no job with id {job_id!r}")
+                cur.execute(
+                    "INSERT INTO job_payloads (job_id, performance, updated_at) "
+                    "VALUES (%s, %s, %s) ON CONFLICT (job_id) DO UPDATE SET "
+                    "performance = EXCLUDED.performance, updated_at = EXCLUDED.updated_at",
+                    (job_id, json.dumps(dict(payload)), now),
+                )
+        except (JobNotFoundError, TypeError) as exc:
+            _logger.warning("performance_write_failed", extra={"job_id": job_id, "error": str(exc)})
+            return
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            self.circuit_breaker.record_failure(err)
+            if self.circuit_breaker.is_open():
+                self.fallback_store.write_performance(job_id, payload)
+                return
+            _logger.warning("performance_write_failed", extra={"job_id": job_id, "error": str(err)})
+            return
+        else:
+            self.circuit_breaker.record_success()
 
     def read_performance(self, job_id: str) -> Mapping[str, object] | None:
-        """Delegate to disk. Performance reports are out of this cycle's Postgres scope."""
-        return self.fallback_store.read_performance(job_id)
+        """Read a job's saved Search Console report, or `None`. Never raises.
+
+        Matches `DiskJobStore`. Falls back to disk store once the circuit opens.
+        """
+        if self.circuit_breaker.is_open():
+            return self.fallback_store.read_performance(job_id)
+
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT performance FROM job_payloads WHERE job_id = %s", (job_id,))
+                row = cur.fetchone()
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            self.circuit_breaker.record_failure(err)
+            if self.circuit_breaker.is_open():
+                return self.fallback_store.read_performance(job_id)
+            _logger.warning("performance_read_failed", extra={"job_id": job_id, "error": str(err)})
+            return None
+
+        self.circuit_breaker.record_success()
+        if row is None or row[0] is None:
+            return None
+        return cast(Mapping[str, object], row[0])
 
     def recover_orphans(self) -> list[str]:
         """Fail every job left non-terminal by a previous process.
