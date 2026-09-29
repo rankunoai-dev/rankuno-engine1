@@ -86,7 +86,7 @@ def _to_view(job: WorkerJob) -> WorkerJobView:
     The shortfall is computed here rather than stored, because both of its
     inputs already live on the job and a stored third number could disagree
     with them. `None` whenever either input is missing — "cannot say" is a
-    different claim from "nothing missing" (ADR 0022).
+    different claim from "nothing missing" (ADR 0023).
     """
     view = WorkerJobView.model_validate(job, from_attributes=True)
     expected, crawled = job.url_list_url_count, job.pages_crawled

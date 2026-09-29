@@ -1,4 +1,4 @@
-"""The worker daemon's list-mode path, end to end inside the process (ADR 0022).
+"""The worker daemon's list-mode path, end to end inside the process (ADR 0023).
 
 `test_worker_url_list.py` proves the digest check in isolation. This file
 proves the daemon *uses* it: that a job whose claims carry a digest fetches,

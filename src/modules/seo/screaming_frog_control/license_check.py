@@ -62,7 +62,7 @@ def read_licence_status(
             run (or a concurrently running GUI) and are never considered.
         expected_url_count: How many URLs a `--crawl-list` run was given, or
             `None` for a `--crawl` run. It narrows the free-tier inference
-            (ADR 0022): "crawled exactly 500" only means *capped* when more
+            (ADR 0023): "crawled exactly 500" only means *capped* when more
             than 500 were supplied. A list of 500 that crawled 500 is a
             complete run, and reporting it as degraded would fail a job that
             worked. Supplying `None` preserves the pre-ADR-0022 behaviour
@@ -128,7 +128,7 @@ def read_licence_status(
         and pages_crawled < expected_url_count
     ):
         # Not the licence cap, but still a run that did not do what it was
-        # asked. Nothing before ADR 0022 could observe this at all, because
+        # asked. Nothing before ADR 0023 could observe this at all, because
         # nothing knew how many pages the run was supposed to produce.
         _logger.warning(
             "sf_list_crawl_shortfall",

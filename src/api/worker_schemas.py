@@ -166,7 +166,7 @@ class UrlListRequest(StrictModel):
     """Which crawl's URLs, and which subset of them, to run in list mode.
 
     Optional on a dispatch preview: omitting it is an ordinary `--crawl`
-    run, which is what every caller predating ADR 0022 sends.
+    run, which is what every caller predating ADR 0023 sends.
 
     Attributes:
         source_job_id: The finished Rankuno crawl to take URLs from. The
@@ -308,7 +308,7 @@ class DispatchConfirmRequest(StrictModel):
 
     Checked inside the same atomic statement that consumes the token, not
     afterwards in Python: a confirm naming a different list must fail
-    without burning the approval (ADR 0022). Echoing it rather than having
+    without burning the approval (ADR 0023). Echoing it rather than having
     the server look it up from the token is deliberate — it is what makes
     the mismatch detectable at all."""
 
@@ -341,7 +341,7 @@ class WorkerJobView(StrictModel):
             numbers are known. `None` means "cannot say" — either this was
             not a list job, or no page count has arrived — and must not be
             rendered as zero. A positive value is the first truncation
-            signal this system has ever been able to produce (ADR 0022):
+            signal this system has ever been able to produce (ADR 0023):
             before a known list length, "the crawl stopped early" and "the
             site is that size" were indistinguishable.
         url_list_shortfall_note: The operator-facing explanation of a

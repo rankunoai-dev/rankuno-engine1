@@ -1,4 +1,4 @@
-"""Tests for the bounded-memory array-field extractor (ADR 0022).
+"""Tests for the bounded-memory array-field extractor (ADR 0023).
 
 The property that matters here is not "it reads JSON" — `json.load` does that.
 It is that it reads only the array it was asked for, keeps its window bounded

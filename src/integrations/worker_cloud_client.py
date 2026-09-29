@@ -137,7 +137,7 @@ class WorkerCloudClient(BaseAPIClient):
         return self.call("poll", _do)
 
     def fetch_url_list(self, job_id: str) -> bytes:
-        """Download this job's approved `--crawl-list` file (ADR 0022).
+        """Download this job's approved `--crawl-list` file (ADR 0023).
 
         The first call in this client that brings bytes *into* the worker
         rather than sending them out, so it is worth being explicit about what

@@ -314,7 +314,7 @@ class TestFacetTracking:
 
 
 class TestIterResultPageUrls:
-    """ADR 0022: read the URL column without materialising the document.
+    """ADR 0023: read the URL column without materialising the document.
 
     `read_result` on a real 100,687-page crawl costs 292 MB of Python objects
     for a column that is 6.9 MB of text. These tests pin the contract, not the

@@ -1,4 +1,4 @@
-"""The worker's own check on the list it was handed (ADR 0022).
+"""The worker's own check on the list it was handed (ADR 0023).
 
 This is the last gate of the four, and the only one that runs on the machine
 that will actually execute the crawl. Its whole job is to refuse bytes that

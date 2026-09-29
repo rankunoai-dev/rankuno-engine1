@@ -439,7 +439,7 @@ def _report_final_page_count(
     while the crawl is open; this sends the authoritative figure from the
     "Completed the spider of ... crawled N urls" line, once, at the end. The
     cloud compares it against the approved list length to produce
-    `WorkerJobView.url_list_shortfall` (ADR 0022) — without this call the
+    `WorkerJobView.url_list_shortfall` (ADR 0023) — without this call the
     comparison would be made against whatever the last live sample happened
     to say, which is not the same number.
 

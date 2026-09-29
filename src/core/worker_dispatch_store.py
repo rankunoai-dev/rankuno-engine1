@@ -77,7 +77,7 @@ class WorkerDispatchStore(Protocol):
         """Mint gate (a)'s preview token. Nothing is queued yet.
 
         `url_list_sha256` binds an already-generated, already-stored URL
-        list into the token (ADR 0022). It defaults to `None` so every
+        list into the token (ADR 0023). It defaults to `None` so every
         existing caller keeps its exact behaviour for an ordinary `--crawl`
         dispatch.
         """
@@ -102,7 +102,7 @@ class WorkerDispatchStore(Protocol):
         `url_list_sha256` that does not match the one the preview was
         minted with is exactly such a mismatch, and it is the check that
         stops an operator being shown one list and confirming another
-        (ADR 0022).
+        (ADR 0023).
         """
         ...
 

@@ -1,4 +1,4 @@
-"""`ScreamingFrogControlTool` in `--crawl-list` list mode (ADR 0022).
+"""`ScreamingFrogControlTool` in `--crawl-list` list mode (ADR 0023).
 
 A separate file from `test_tool.py`, which was already at this codebase's
 length target and covers the `--crawl` path it has always covered. The fakes
@@ -168,7 +168,7 @@ class TestListModeApprovalText:
 
 
 class TestListModeTruncationDetection:
-    """The first check in this codebase that can see a short crawl (ADR 0022)."""
+    """The first check in this codebase that can see a short crawl (ADR 0023)."""
 
     def test_a_complete_list_run_reports_no_shortfall(self, tmp_path, monkeypatch) -> None:
         _install_fake_launch(

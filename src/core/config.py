@@ -328,7 +328,7 @@ class Settings(BaseSettings):
         default=10_000,
         gt=0,
         description=(
-            "Ceiling on one generated --crawl-list URL list (ADR 0022). "
+            "Ceiling on one generated --crawl-list URL list (ADR 0023). "
             "Exceeding it REFUSES the dispatch with an explanation; the list "
             "is never silently trimmed, because a trimmed list audits fewer "
             "pages than the approval text says it does and would also destroy "
@@ -567,7 +567,7 @@ class Settings(BaseSettings):
         ge=1,
         description=(
             "Automatic-expiry retention window for a stored --crawl-list URL "
-            "list (ADR 0022). Much shorter than the bundle window: this blob "
+            "list (ADR 0023). Much shorter than the bundle window: this blob "
             "is an input a worker fetches once, minutes after approval, not a "
             "deliverable anyone downloads later. Long enough that a worker "
             "which was asleep for a few days still finds the exact bytes its "

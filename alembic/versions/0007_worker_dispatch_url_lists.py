@@ -4,7 +4,7 @@ Revision ID: 007
 Revises: 006
 Create Date: 2026-09-29
 
-ADR 0022. Screaming Frog's `--crawl` mode can only audit what the site links
+ADR 0023. Screaming Frog's `--crawl` mode can only audit what the site links
 to; `--crawl-list` audits a supplied set. The set this engine supplies is
 generated from a finished Rankuno crawl, frozen at preview time, and
 identified everywhere afterwards by its SHA-256.

@@ -9,7 +9,7 @@ engine already holds both. `--crawl-list` is how they get handed over.
 the supplied URLs and nothing else — it does not spider outward from them, so
 the resulting export describes a set of pages, never a site. Nothing built
 from it may be presented as a crawl of the site (see `FIELD_MAPPING`'s
-`url_list_source` row, and ADR 0022).
+`url_list_source` row, and ADR 0023).
 
 What this module is, precisely
 ------------------------------

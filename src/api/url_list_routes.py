@@ -1,6 +1,6 @@
 """Generating and offering the `--crawl-list` URL lists a dispatch may use.
 
-ADR 0022. Split out of `worker_dashboard_routes.py` rather than added to it:
+ADR 0023. Split out of `worker_dashboard_routes.py` rather than added to it:
 that module was already at this codebase's 400-line target, and this is a
 separable concern — everything here answers "which URLs, and are they even
 available", while everything there answers "may this operator dispatch to this

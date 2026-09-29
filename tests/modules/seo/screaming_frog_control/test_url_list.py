@@ -1,4 +1,4 @@
-"""Tests for the `--crawl-list` generator (ADR 0022).
+"""Tests for the `--crawl-list` generator (ADR 0023).
 
 Two classes of claim are pinned here, and they fail differently:
 

@@ -115,7 +115,7 @@ class TestReadLicenceStatus:
 
 
 class TestExpectedUrlCount:
-    """ADR 0022: a known list length narrows the free-tier inference."""
+    """ADR 0023: a known list length narrows the free-tier inference."""
 
     def test_five_hundred_of_more_than_five_hundred_is_still_capped(self, tmp_path) -> None:
         trace = _trace(tmp_path, _ACTIVE + _completed(500))

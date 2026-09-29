@@ -773,7 +773,7 @@ def test_the_sweep_fails_closed_when_postgres_is_unreachable():
         broken.expire_stale_dispatched(org_id="acme", older_than_s=3600)
 
 
-# --- ADR 0022: the URL-list binding and the concurrency lookup ------------------
+# --- ADR 0023: the URL-list binding and the concurrency lookup ------------------
 
 _LIST_SHA = "b" * 64
 _OTHER_SHA = "c" * 64

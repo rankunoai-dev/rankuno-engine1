@@ -209,7 +209,7 @@ def build_worker_router(state: ApiState) -> APIRouter:
     def download_url_list(
         job_id: str, authorization: str | None = Header(default=None)
     ) -> Response:
-        """Hand a claimed job its approved `--crawl-list` file (ADR 0022).
+        """Hand a claimed job its approved `--crawl-list` file (ADR 0023).
 
         The only channel by which bytes travel cloud -> worker. Everything
         else in ADR 0015 goes the other way, so this route is a genuine change

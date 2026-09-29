@@ -317,7 +317,7 @@ def test_upload_and_report_failure_also_stop_on_a_refused_credential(tmp_path):
         client.heartbeat(WorkerTemplateReport())
 
 
-# --- fetch_url_list: the one inbound-bytes call (ADR 0022) ---------------------
+# --- fetch_url_list: the one inbound-bytes call (ADR 0023) ---------------------
 
 _LIST_PATH = "/api/v1/workers/jobs/job-1/url-list"
 _LIST_BODY = b"https://example.com/a\r\nhttps://example.com/b\r\n"

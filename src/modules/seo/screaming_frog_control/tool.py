@@ -187,7 +187,7 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
 
         This string is the approval. A human reads it and decides, so it has
         to carry everything the decision turns on — which for a `--crawl-list`
-        run is *which URLs*, and a SHA-256 does not answer that (ADR 0022).
+        run is *which URLs*, and a SHA-256 does not answer that (ADR 0023).
         The list line therefore names the crawl the URLs came from, how many
         there are, and the first few verbatim, with the digest alongside for
         anyone who wants to check the binding rather than the content. A bare
@@ -296,7 +296,7 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
             # than the list held. Not raised: the export is real and worth
             # keeping, and the operator is the one who decides whether a
             # partial audit is useful. Logged and carried on the output so the
-            # finished job can say so (ADR 0022).
+            # finished job can say so (ADR 0023).
             _logger.warning(
                 "sf_list_crawl_shortfall",
                 extra={
@@ -346,7 +346,7 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
 
         Two mutually exclusive start modes, and exactly one is ever emitted:
         `--crawl <url>` follows links from a seed, `--crawl-list <file>`
-        fetches the listed URLs and does not spider outward (ADR 0022; the
+        fetches the listed URLs and does not spider outward (ADR 0023; the
         flag is documented by this workstation's own
         `ScreamingFrogSEOSpiderCli.exe --help` as "Start crawling the
         specified URLs in list mode"). `seed_url` is still validated on the

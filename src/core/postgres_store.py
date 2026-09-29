@@ -527,7 +527,7 @@ class PostgresJobStore(JobStore):
         return cast(Mapping[str, object], row[1])
 
     def iter_result_page_urls(self, job_id: str) -> Iterator[str]:
-        """Every discovered URL for one job (ADR 0022).
+        """Every discovered URL for one job (ADR 0023).
 
         **This backend does not get the bounded-memory property, and saying so
         is the point of this docstring.** `DiskJobStore.iter_result_page_urls`

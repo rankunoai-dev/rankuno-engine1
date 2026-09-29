@@ -16,7 +16,7 @@ network hop needs. No `extra_args`, `raw_command`, or path-override field —
 `StrictModel`'s `extra="forbid"` enforces that mechanically, not just by
 convention.
 
-`url_list_sha256` (ADR 0022) is the one field added since, and it is a
+`url_list_sha256` (ADR 0023) is the one field added since, and it is a
 **digest, never bytes**. A list-mode dispatch can carry up to 10,000 URLs;
 putting them here would turn a poll response into a multi-megabyte body, put
 operator-supplied strings inside a signed artifact that gets logged, and
@@ -233,7 +233,7 @@ class DispatchPreviewToken(StrictModel):
     correlation_id: str = Field(min_length=1, max_length=128)
     expires_at: datetime
     url_list_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
-    """Bound into gate (a) alongside the triple above (ADR 0022).
+    """Bound into gate (a) alongside the triple above (ADR 0023).
 
     Without it an operator could be shown a preview of a three-URL list and
     confirm a hundred-thousand-URL one: the confirm request would carry a
@@ -267,7 +267,7 @@ class DispatchAssignmentClaims(StrictModel):
     correlation_id: str = Field(min_length=1, max_length=128)
     url_list_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     """Inside the claims, so the existing HMAC covers it with no change to the
-    signing code at all (ADR 0022).
+    signing code at all (ADR 0023).
 
     A network attacker who swapped this digest for one naming a different
     stored list would invalidate the same signature that protects `seed_url` —

@@ -137,7 +137,7 @@ def issue_dispatch_assignment(
         template_name: As above.
         correlation_id: As above.
         url_list_sha256: Digest of the approved `--crawl-list` file, or
-            `None` for an ordinary `--crawl` job (ADR 0022). Carried inside
+            `None` for an ordinary `--crawl` job (ADR 0023). Carried inside
             the same claims for the same reason as `seed_url`: swapping it in
             transit for a digest naming a different stored list invalidates
             this one signature, so no separate signing step — and no change

@@ -450,7 +450,7 @@ def test_confirm_token_is_single_use(client, dispatch_store):
 
     The first job is driven to a terminal state before the replay, so the
     403 here can only be the single-use check. Replaying while the first
-    job is still in flight would be refused by ADR 0022's concurrency gate
+    job is still in flight would be refused by ADR 0023's concurrency gate
     instead (see `test_a_second_dispatch_is_refused_while_one_is_running`),
     which would pass for the wrong reason and hide a regression in this
     one.
@@ -1333,7 +1333,7 @@ def test_two_daemons_sharing_one_worker_id_never_claim_the_same_job(client):
 def test_a_double_clicked_confirm_queues_exactly_one_job(client):
     """The second click must not queue a twin, whichever gate catches it.
 
-    Since ADR 0022 the second click is refused by the concurrency gate
+    Since ADR 0023 the second click is refused by the concurrency gate
     (409) before the single-use gate (403) ever sees it, because the first
     click has already queued a job for this worker and Screaming Frog runs
     one at a time. The property this test exists for is unchanged and is

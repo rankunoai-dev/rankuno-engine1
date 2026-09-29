@@ -211,7 +211,7 @@ class LicenceStatus(StrictModel):
         expected_url_count: How many URLs this run was *asked* to crawl, for
             a `--crawl-list` run; `None` for a `--crawl` run, where nothing
             knows the answer in advance. Two things become possible with it
-            (ADR 0022):
+            (ADR 0023):
 
             * The free-tier false positive shrinks. A list of exactly 500
               URLs that crawled 500 is complete, not capped, and is no
@@ -258,7 +258,7 @@ class ScreamingFrogJobInput(StrictModel):
             the tool instance so that `describe_invocation(payload)` stays a
             pure function of the thing being approved: what the operator
             reads and what the tool runs are then the same object, and
-            neither can drift from the other (ADR 0022).
+            neither can drift from the other (ADR 0023).
     """
 
     seed_url: str = Field(min_length=1, max_length=2048)

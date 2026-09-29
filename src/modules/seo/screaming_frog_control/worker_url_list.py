@@ -1,4 +1,4 @@
-"""Fetch, verify and lay down the approved `--crawl-list` file (ADR 0022).
+"""Fetch, verify and lay down the approved `--crawl-list` file (ADR 0023).
 
 The one place bytes travel cloud -> worker in this whole architecture, and
 therefore the one place a worker must not take delivery on trust. The check

@@ -1,4 +1,4 @@
-"""End-to-end HTTP tests for the `--crawl-list` dispatch surface (ADR 0022).
+"""End-to-end HTTP tests for the `--crawl-list` dispatch surface (ADR 0023).
 
 What this file exists to prove, in the order the risk runs:
 
