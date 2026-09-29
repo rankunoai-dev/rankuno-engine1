@@ -41,6 +41,23 @@ class TestFieldMapping:
         assert by_name["seed_url"] is FieldMappingStatus.VERIFIED
         assert by_name["template_name"] is FieldMappingStatus.VERIFIED
 
+    def test_url_list_source_is_verified_against_the_real_cli(self) -> None:
+        """ADR 0013 condition 5: no flag is assumed correct without the marker."""
+        by_name = {entry.ui_field: entry.status for entry in FIELD_MAPPING}
+        assert by_name["url_list_source"] is FieldMappingStatus.VERIFIED
+
+    def test_the_url_list_row_records_that_list_mode_is_not_a_site_crawl(self) -> None:
+        """The single most misreadable fact about this feature lives in the note.
+
+        A `--crawl-list` export describes a set of pages, not a site. If the
+        mapping table stops saying so, the next person to read it will present
+        the result as a crawl.
+        """
+        note = next(e.note for e in FIELD_MAPPING if e.ui_field == "url_list_source")
+        assert "--crawl-list" in note
+        assert "LIST MODE IS NOT A SITE CRAWL" in note
+        assert "does not spider outward" in note
+
 
 class TestScreamingFrogTemplate:
     def test_accepts_a_lowercase_slug_name(self) -> None:

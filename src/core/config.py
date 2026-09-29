@@ -324,6 +324,23 @@ class Settings(BaseSettings):
             "one-shot licence read this repeats instead of replacing."
         ),
     )
+    screaming_frog_url_list_max_urls: int = Field(
+        default=10_000,
+        gt=0,
+        description=(
+            "Ceiling on one generated --crawl-list URL list (ADR 0022). "
+            "Exceeding it REFUSES the dispatch with an explanation; the list "
+            "is never silently trimmed, because a trimmed list audits fewer "
+            "pages than the approval text says it does and would also destroy "
+            "the free-tier truncation check, which works by comparing list "
+            "length against pages actually crawled. 10,000 is a starting "
+            "point chosen against real crawls on this workstation (100,687 / "
+            "33,439 / 26,255 pages): every one of them exceeds it, which is "
+            "the point — 'All Discovered URLs' on a large site is exactly the "
+            "request that should have to be reconsidered, and 'Orphans Only' "
+            "is the smaller, recommended source."
+        ),
+    )
 
     # -- Multi-tenant organization configs -----------------------------------
     org_config_path: Path = Field(
@@ -544,6 +561,18 @@ class Settings(BaseSettings):
         default=30,
         ge=1,
         description="Automatic-expiry retention window for uploaded bundles (ADR 0015 §11).",
+    )
+    worker_url_list_retention_days: int = Field(
+        default=7,
+        ge=1,
+        description=(
+            "Automatic-expiry retention window for a stored --crawl-list URL "
+            "list (ADR 0022). Much shorter than the bundle window: this blob "
+            "is an input a worker fetches once, minutes after approval, not a "
+            "deliverable anyone downloads later. Long enough that a worker "
+            "which was asleep for a few days still finds the exact bytes its "
+            "job was approved against."
+        ),
     )
     worker_consumed_jobs_path: Path = Field(
         default=REPO_ROOT / ".worker_consumed_jobs.json",

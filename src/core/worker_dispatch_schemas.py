@@ -15,6 +15,15 @@ string-keyed dict of callables, `eval`, or `pickle`. One member today.
 network hop needs. No `extra_args`, `raw_command`, or path-override field —
 `StrictModel`'s `extra="forbid"` enforces that mechanically, not just by
 convention.
+
+`url_list_sha256` (ADR 0022) is the one field added since, and it is a
+**digest, never bytes**. A list-mode dispatch can carry up to 10,000 URLs;
+putting them here would turn a poll response into a multi-megabyte body, put
+operator-supplied strings inside a signed artifact that gets logged, and
+leave `extra="forbid"`'s minimality with nothing left to protect. The worker
+fetches the bytes over its own authenticated, org-scoped channel and
+re-computes this digest before it launches anything, so the hash travels and
+the data does not.
 """
 
 from __future__ import annotations
@@ -38,6 +47,11 @@ __all__ = [
 ]
 
 _IDENTIFIER_PATTERN = r"^[a-z0-9_-]{1,64}$"
+_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+"""Lowercase hex SHA-256, exactly as `hashlib.sha256().hexdigest()` produces
+it. Pinned as a pattern rather than a bare `str` so a truncated, upper-cased
+or prefixed digest is refused at the boundary instead of quietly never
+matching anything downstream."""
 
 
 class WorkerJobKind(StrEnum):
@@ -115,15 +129,30 @@ class WorkerJobEnvelope(StrictModel):
     ADR 0015 condition 8. Deliberately carries nothing else: no crawl
     options, no path override, no raw command. The worker re-validates
     every field itself (`UrlSafetyPolicy.validate()` on `seed_url`,
-    `TemplateRegistry.resolve()` on `template_name`) rather than trusting
-    the cloud's own admission check — across an untrusted network hop that
-    second check is the load-bearing one, not defense in depth.
+    `TemplateRegistry.resolve()` on `template_name`, and a fresh SHA-256 over
+    the URL-list bytes it fetched) rather than trusting the cloud's own
+    admission check — across an untrusted network hop that second check is
+    the load-bearing one, not defense in depth.
+
+    Attributes:
+        job_id: The job this envelope describes.
+        seed_url: The crawl root. Still present and still validated in list
+            mode: it names the site in every log line and approval summary,
+            and its registrable domain is what the list was filtered against.
+            It is simply not what `--crawl-list` is given.
+        template_name: A `.seospiderconfig` the worker holds, by name.
+        correlation_id: Transport metadata.
+        url_list_sha256: Digest of the approved URL-list file, or `None` for
+            an ordinary link-following `--crawl` run. Its presence is what
+            puts the worker into list mode; the bytes are fetched separately
+            (see the module docstring).
     """
 
     job_id: str = Field(min_length=1, max_length=64)
     seed_url: str = Field(min_length=1, max_length=2048)
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
     correlation_id: str = Field(min_length=1, max_length=128)
+    url_list_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
 
 
 class WorkerJob(StrictModel):
@@ -160,6 +189,11 @@ class WorkerJob(StrictModel):
             previous report. A UI must not treat a drop as an error.
         current_phase: The worker's most recently reported coarse phase.
             `None` until the first report arrives.
+        url_list_url_count: How many URLs the approved list held, or `None`
+            for an ordinary `--crawl` job. Kept on the job rather than derived
+            from the stored list so the finished-job truncation check costs no
+            second read, and so it outlives the list blob's own retention
+            expiry.
     """
 
     id: str = Field(min_length=1, max_length=64)
@@ -177,6 +211,7 @@ class WorkerJob(StrictModel):
     pages_crawled: int | None = Field(default=None, ge=0)
     progress_pct: float | None = Field(default=None, ge=0.0)
     current_phase: WorkerJobPhase | None = None
+    url_list_url_count: int | None = Field(default=None, ge=0)
 
 
 class DispatchPreviewToken(StrictModel):
@@ -197,6 +232,14 @@ class DispatchPreviewToken(StrictModel):
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
     correlation_id: str = Field(min_length=1, max_length=128)
     expires_at: datetime
+    url_list_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    """Bound into gate (a) alongside the triple above (ADR 0022).
+
+    Without it an operator could be shown a preview of a three-URL list and
+    confirm a hundred-thousand-URL one: the confirm request would carry a
+    different digest, every field the token actually checked would still
+    match, and the approval would mean nothing.
+    """
 
 
 class DispatchAssignmentClaims(StrictModel):
@@ -222,6 +265,14 @@ class DispatchAssignmentClaims(StrictModel):
     seed_url: str = Field(min_length=1, max_length=2048)
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
     correlation_id: str = Field(min_length=1, max_length=128)
+    url_list_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    """Inside the claims, so the existing HMAC covers it with no change to the
+    signing code at all (ADR 0022).
+
+    A network attacker who swapped this digest for one naming a different
+    stored list would invalidate the same signature that protects `seed_url` —
+    which is exactly why condition 4 signs one object and not two.
+    """
     jti: str = Field(min_length=1)
     issued_at: datetime
     expires_at: datetime

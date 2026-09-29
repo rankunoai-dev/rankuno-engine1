@@ -50,7 +50,9 @@ _LICENCE_LINE = re.compile(r"Licence Status:\s*(?P<body>.+)$")
 _COMPLETED_LINE = re.compile(r"Completed the spider of .+ crawled (?P<count>\d+) urls?$")
 
 
-def read_licence_status(trace_log_path: Path, *, since_offset: int) -> LicenceStatus:
+def read_licence_status(
+    trace_log_path: Path, *, since_offset: int, expected_url_count: int | None = None
+) -> LicenceStatus:
     """Parse the licence and completion lines one run appended to `trace.txt`.
 
     Args:
@@ -58,6 +60,13 @@ def read_licence_status(trace_log_path: Path, *, since_offset: int) -> LicenceSt
         since_offset: Byte offset recorded immediately before the supervised
             process was launched. Bytes before this offset belong to a prior
             run (or a concurrently running GUI) and are never considered.
+        expected_url_count: How many URLs a `--crawl-list` run was given, or
+            `None` for a `--crawl` run. It narrows the free-tier inference
+            (ADR 0022): "crawled exactly 500" only means *capped* when more
+            than 500 were supplied. A list of 500 that crawled 500 is a
+            complete run, and reporting it as degraded would fail a job that
+            worked. Supplying `None` preserves the pre-ADR-0022 behaviour
+            exactly, which is what every `--crawl` caller still gets.
 
     Returns:
         A `LicenceStatus`. `active=False` (fail closed) if the file is
@@ -98,11 +107,36 @@ def read_licence_status(trace_log_path: Path, *, since_offset: int) -> LicenceSt
             pages_crawled = int(match.group("count"))
             break
 
-    free_tier_capped = pages_crawled == FREE_TIER_URL_CEILING
+    # A list-mode run that was asked for no more than the ceiling cannot be
+    # evidence of the cap, however many pages it reports: crawling all 500 of
+    # 500 supplied URLs is a finished job, not a truncated one.
+    free_tier_capped = pages_crawled == FREE_TIER_URL_CEILING and (
+        expected_url_count is None or expected_url_count > FREE_TIER_URL_CEILING
+    )
     if free_tier_capped:
         _logger.warning(
             "sf_free_tier_cap_suspected",
-            extra={"pages_crawled": pages_crawled, "ceiling": FREE_TIER_URL_CEILING},
+            extra={
+                "pages_crawled": pages_crawled,
+                "ceiling": FREE_TIER_URL_CEILING,
+                "expected_url_count": expected_url_count,
+            },
+        )
+    elif (
+        expected_url_count is not None
+        and pages_crawled is not None
+        and pages_crawled < expected_url_count
+    ):
+        # Not the licence cap, but still a run that did not do what it was
+        # asked. Nothing before ADR 0022 could observe this at all, because
+        # nothing knew how many pages the run was supposed to produce.
+        _logger.warning(
+            "sf_list_crawl_shortfall",
+            extra={
+                "pages_crawled": pages_crawled,
+                "expected_url_count": expected_url_count,
+                "shortfall": expected_url_count - pages_crawled,
+            },
         )
     if not active:
         _logger.warning("sf_licence_not_active", extra={"raw_line": raw_line})
@@ -112,4 +146,5 @@ def read_licence_status(trace_log_path: Path, *, since_offset: int) -> LicenceSt
         raw_line=raw_line,
         pages_crawled=pages_crawled,
         free_tier_capped=free_tier_capped,
+        expected_url_count=expected_url_count,
     )

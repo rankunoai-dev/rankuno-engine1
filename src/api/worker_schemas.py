@@ -21,6 +21,7 @@ from src.core.worker_dispatch_schemas import (
     WorkerJobKind,
     WorkerJobPhase,
 )
+from src.modules.seo.screaming_frog_control.url_list import UrlListCounts, UrlListSource
 
 __all__ = [
     "DispatchConfirmRequest",
@@ -39,6 +40,10 @@ __all__ = [
     "WorkerRegisterResponse",
     "WorkerSummary",
     "WorkerTemplatesView",
+    "UrlListRequest",
+    "UrlListSourceOption",
+    "UrlListSourcesView",
+    "UrlListView",
 ]
 
 # `WorkerTemplate` is the wire shape for a worker-reported template as well
@@ -157,12 +162,108 @@ class WorkerTemplatesView(StrictModel):
     reported_at: datetime | None = None
 
 
+class UrlListRequest(StrictModel):
+    """Which crawl's URLs, and which subset of them, to run in list mode.
+
+    Optional on a dispatch preview: omitting it is an ordinary `--crawl`
+    run, which is what every caller predating ADR 0022 sends.
+
+    Attributes:
+        source_job_id: The finished Rankuno crawl to take URLs from. The
+            caller's org must own it; ownership is re-checked server-side
+            against the authenticated principal, never inferred from this
+            id.
+        source: Which subset. No default — "which URLs" is the decision
+            being approved, and a default would make the large one
+            reachable without a choice.
+    """
+
+    source_job_id: str = Field(min_length=1, max_length=64)
+    source: UrlListSource
+
+
+class UrlListView(StrictModel):
+    """A generated, stored list as a confirmation modal should render it.
+
+    Everything here except `sha256` exists so a human can tell *which*
+    list this is. `sha256` is the only field any gate compares, and it is
+    the field a caller must echo back on confirm.
+
+    Attributes:
+        source: Which subset was generated.
+        source_job_id: The crawl it came from.
+        source_label: That crawl's human-facing name.
+        registrable_domain: The domain every kept URL sits inside — the
+            rule that produced `counts.off_domain_dropped`.
+        url_count: How many URLs the list holds.
+        sha256: The fingerprint to echo back on confirm.
+        sample: The first few URLs, verbatim.
+        counts: The full per-stage filtering account, so a modal can say
+            "Excluded 18 external URLs" and have it be true.
+    """
+
+    source: UrlListSource
+    source_job_id: str
+    source_label: str = ""
+    registrable_domain: str = ""
+    url_count: int = Field(ge=1)
+    sha256: str
+    sample: list[str] = Field(default_factory=list)
+    counts: UrlListCounts
+
+
+class UrlListSourceOption(StrictModel):
+    """One offered (or refused) list source, with the reason either way.
+
+    Attributes:
+        source: The enum value to send back on preview.
+        label: Exactly what the operator should see, including the
+            "(Recommended)" marker — served rather than hard-coded in a UI
+            so the recommendation has one owner.
+        description: What this source is, in one sentence.
+        available: Whether a preview using it would succeed.
+        unavailable_reason: Why not, when `available` is false. Empty
+            otherwise. Never empty when unavailable: "the option is greyed
+            out and nobody knows why" is the failure this field exists to
+            prevent.
+        candidate_url_count: URLs available *before* filtering, or `None`
+            when nothing could be counted. Not the number that will be
+            dispatched — the preview reports that, after deduping and the
+            off-domain filter have run.
+        exceeds_ceiling: Whether counting stopped because the source is
+            over `max_urls`, in which case `candidate_url_count` is a
+            lower bound rather than a total.
+    """
+
+    source: UrlListSource
+    label: str
+    description: str = ""
+    available: bool = False
+    unavailable_reason: str = ""
+    candidate_url_count: int | None = Field(default=None, ge=0)
+    exceeds_ceiling: bool = False
+
+
+class UrlListSourcesView(StrictModel):
+    """Which list sources one finished crawl can offer, and the ceiling."""
+
+    job_id: str
+    label: str = ""
+    base_url: str = ""
+    max_urls: int = Field(ge=1)
+    sources: list[UrlListSourceOption] = Field(default_factory=list)
+
+
 class DispatchPreviewRequest(StrictModel):
     """What `POST /workers/{worker_id}/dispatch/preview` accepts."""
 
     seed_url: str = Field(min_length=1, max_length=2048)
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
     correlation_id: str = Field(min_length=1, max_length=128)
+    url_list: UrlListRequest | None = None
+    """Present for a `--crawl-list` dispatch. The list is generated and
+    stored by this preview call, before anyone has approved anything, so
+    that the bytes the returned fingerprint names already exist."""
 
 
 class DispatchPreviewResponse(StrictModel):
@@ -185,6 +286,9 @@ class DispatchPreviewResponse(StrictModel):
     modal can warn *before* the operator commits rather than after: confirm
     refuses an offline worker outright, and a 409 at that point is a worse
     way to learn the PC is asleep than a line in the dialog."""
+    url_list: UrlListView | None = None
+    """The generated list, when one was asked for. `None` for an ordinary
+    `--crawl` preview."""
 
 
 class DispatchConfirmRequest(StrictModel):
@@ -199,6 +303,14 @@ class DispatchConfirmRequest(StrictModel):
     seed_url: str = Field(min_length=1, max_length=2048)
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
     correlation_id: str = Field(min_length=1, max_length=128)
+    url_list_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    """The fingerprint from the preview response, echoed back verbatim.
+
+    Checked inside the same atomic statement that consumes the token, not
+    afterwards in Python: a confirm naming a different list must fail
+    without burning the approval (ADR 0022). Echoing it rather than having
+    the server look it up from the token is deliberate — it is what makes
+    the mismatch detectable at all."""
 
 
 class WorkerJobAccepted(StrictModel):
@@ -223,6 +335,18 @@ class WorkerJobView(StrictModel):
             decrease between two reports (`WorkerJob.progress_pct`'s own
             docstring) — not a bug to guard against client-side.
         current_phase: The worker's most recently reported coarse phase.
+        url_list_url_count: How many URLs a list-mode job was given, or
+            `None` for an ordinary `--crawl` job.
+        url_list_shortfall: URLs supplied but never crawled, once both
+            numbers are known. `None` means "cannot say" — either this was
+            not a list job, or no page count has arrived — and must not be
+            rendered as zero. A positive value is the first truncation
+            signal this system has ever been able to produce (ADR 0022):
+            before a known list length, "the crawl stopped early" and "the
+            site is that size" were indistinguishable.
+        url_list_shortfall_note: The operator-facing explanation of a
+            non-zero shortfall, naming the free-tier cap when the numbers
+            fit it. Empty when there is no shortfall to explain.
     """
 
     id: str
@@ -240,6 +364,9 @@ class WorkerJobView(StrictModel):
     pages_crawled: int | None = None
     progress_pct: float | None = None
     current_phase: WorkerJobPhase | None = None
+    url_list_url_count: int | None = None
+    url_list_shortfall: int | None = None
+    url_list_shortfall_note: str = ""
 
 
 class WorkerJobListView(StrictModel):

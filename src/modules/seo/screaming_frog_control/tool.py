@@ -48,6 +48,7 @@ from src.modules.seo.screaming_frog_control.schemas import (
     ScreamingFrogJobInput,
     ScreamingFrogJobOutput,
     ScreamingFrogProgressSnapshot,
+    UrlListInvocation,
 )
 from src.modules.seo.screaming_frog_control.template_registry import TemplateRegistry
 
@@ -182,11 +183,38 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
         self._progress_min_report_interval_s = progress_min_report_interval_s
 
     def describe_invocation(self, payload: ScreamingFrogJobInput) -> str:
-        """Operator-facing summary shown at the HITL approval point."""
+        """Operator-facing summary shown at the HITL approval point.
+
+        This string is the approval. A human reads it and decides, so it has
+        to carry everything the decision turns on — which for a `--crawl-list`
+        run is *which URLs*, and a SHA-256 does not answer that (ADR 0022).
+        The list line therefore names the crawl the URLs came from, how many
+        there are, and the first few verbatim, with the digest alongside for
+        anyone who wants to check the binding rather than the content. A bare
+        fingerprint would be approvable only in the sense that a button can be
+        clicked.
+
+        It also says *list mode* in words. An operator who reads "crawl" will
+        expect a site crawl, and this is not one: Screaming Frog fetches the
+        supplied URLs and does not spider outward from them.
+        """
         template = payload.template_name or "Screaming Frog's own defaults"
+        if payload.url_list is None:
+            return (
+                f"Launch Screaming Frog CLI (headless) against {payload.seed_url} "
+                f"using template '{template}'"
+            )
+
+        url_list = payload.url_list
+        sample = ", ".join(url_list.sample) if url_list.sample else "(none recorded)"
+        source = url_list.source or "selected"
+        crawl = url_list.source_label or payload.seed_url
         return (
-            f"Launch Screaming Frog CLI (headless) against {payload.seed_url} "
-            f"using template '{template}'"
+            f"Launch Screaming Frog CLI (headless) in LIST MODE over "
+            f"{url_list.url_count:,} URLs from crawl '{crawl}' ({source}), using "
+            f"template '{template}'. List mode crawls exactly these URLs and does "
+            f"not follow links outward. First {len(url_list.sample)}: {sample}. "
+            f"List fingerprint sha256:{url_list.sha256}"
         )
 
     def execute(self, payload: ScreamingFrogJobInput) -> ScreamingFrogJobOutput:
@@ -216,7 +244,7 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
         bundle_dir = self._output_root / job_id
         bundle_dir.mkdir(parents=True, exist_ok=True)
 
-        argv = self._build_argv(safe_url.url, config_path, bundle_dir)
+        argv = self._build_argv(safe_url.url, config_path, bundle_dir, payload.url_list)
         since_offset = self._trace_log_path.stat().st_size if self._trace_log_path.exists() else 0
 
         started = time.monotonic()
@@ -256,9 +284,28 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
         if timed_out:
             raise ScreamingFrogTimeoutError(self._max_runtime_s)
 
-        licence = read_licence_status(self._trace_log_path, since_offset=since_offset)
+        licence = read_licence_status(
+            self._trace_log_path,
+            since_offset=since_offset,
+            expected_url_count=None if payload.url_list is None else payload.url_list.url_count,
+        )
         if not licence.active or licence.free_tier_capped:
             raise ScreamingFrogLicenceError(licence)
+        if licence.shortfall:
+            # A completed, licensed run that nonetheless fetched fewer pages
+            # than the list held. Not raised: the export is real and worth
+            # keeping, and the operator is the one who decides whether a
+            # partial audit is useful. Logged and carried on the output so the
+            # finished job can say so (ADR 0022).
+            _logger.warning(
+                "sf_list_crawl_shortfall",
+                extra={
+                    "job_id": job_id,
+                    "expected_url_count": licence.expected_url_count,
+                    "pages_crawled": licence.pages_crawled,
+                    "shortfall": licence.shortfall,
+                },
+            )
 
         return ScreamingFrogJobOutput(bundle_dir=bundle_dir, licence=licence, elapsed_s=elapsed_s)
 
@@ -288,8 +335,24 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
         thread.start()
         return thread
 
-    def _build_argv(self, seed_url: str, config_path: Path | None, output_dir: Path) -> list[str]:
+    def _build_argv(
+        self,
+        seed_url: str,
+        config_path: Path | None,
+        output_dir: Path,
+        url_list: UrlListInvocation | None = None,
+    ) -> list[str]:
         """Construct the CLI command line.
+
+        Two mutually exclusive start modes, and exactly one is ever emitted:
+        `--crawl <url>` follows links from a seed, `--crawl-list <file>`
+        fetches the listed URLs and does not spider outward (ADR 0022; the
+        flag is documented by this workstation's own
+        `ScreamingFrogSEOSpiderCli.exe --help` as "Start crawling the
+        specified URLs in list mode"). `seed_url` is still validated on the
+        list path and still names the run everywhere a human sees it — it is
+        simply not passed to the CLI, because passing both would ask Screaming
+        Frog to start twice.
 
         `--headless` is `argv[1]`, always, never a configurable option: a
         non-headless run that hits an argument error pops a blocking GUI
@@ -302,11 +365,13 @@ class ScreamingFrogControlTool(BaseTool[ScreamingFrogJobInput, ScreamingFrogJobO
         answered by `ScreamingFrogTemplate`, not by exposing these flags to
         the operator.
         """
+        start_mode = (
+            ["--crawl", seed_url] if url_list is None else ["--crawl-list", str(url_list.path)]
+        )
         argv = [
             str(self._cli_path),
             "--headless",
-            "--crawl",
-            seed_url,
+            *start_mode,
             "--output-folder",
             str(output_dir),
             "--overwrite",

@@ -13,7 +13,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, cast
 
+from pydantic import Field
+
 from src.core.errors import RankunoError
+from src.core.schemas import StrictModel
 from src.core.worker_dispatch_schemas import (
     DispatchPreviewToken,
     WorkerJob,
@@ -26,6 +29,7 @@ from src.core.worker_dispatch_schemas import (
 __all__ = [
     "DEFAULT_PREVIEW_TTL_S",
     "DispatchStoreUnavailableError",
+    "StoredUrlList",
     "WorkerDispatchStore",
     "WorkerJobNotFoundError",
 ]
@@ -37,7 +41,7 @@ to read a confirmation modal, short enough that a leaked token is narrow."""
 SELECT_COLUMNS = (
     "id, org_id, worker_id, kind, seed_url, template_name, correlation_id, "
     "status, created_at, updated_at, dispatched_at, finished_at, error, bundle_size_bytes, "
-    "pages_crawled, progress_pct, current_phase"
+    "pages_crawled, progress_pct, current_phase, url_list_sha256, url_list_url_count"
 )
 """Column list every `worker_jobs` read uses, in the order `row_to_job` expects."""
 
@@ -68,8 +72,15 @@ class WorkerDispatchStore(Protocol):
         template_name: str | None,
         correlation_id: str,
         ttl_s: float = DEFAULT_PREVIEW_TTL_S,
+        url_list_sha256: str | None = None,
     ) -> DispatchPreviewToken:
-        """Mint gate (a)'s preview token. Nothing is queued yet."""
+        """Mint gate (a)'s preview token. Nothing is queued yet.
+
+        `url_list_sha256` binds an already-generated, already-stored URL
+        list into the token (ADR 0022). It defaults to `None` so every
+        existing caller keeps its exact behaviour for an ordinary `--crawl`
+        dispatch.
+        """
         ...
 
     def confirm_dispatch(
@@ -81,11 +92,17 @@ class WorkerDispatchStore(Protocol):
         seed_url: str,
         template_name: str | None,
         correlation_id: str,
+        url_list_sha256: str | None = None,
+        url_list_url_count: int | None = None,
     ) -> WorkerJob | None:
         """Atomically consume the preview token and queue a job.
 
         Returns `None` — never raises — for any mismatch, expiry, or
-        already-consumed token: the safe failure this module exists for.
+        already-consumed token: the safe failure this module exists for. A
+        `url_list_sha256` that does not match the one the preview was
+        minted with is exactly such a mismatch, and it is the check that
+        stops an operator being shown one list and confirming another
+        (ADR 0022).
         """
         ...
 
@@ -198,6 +215,75 @@ class WorkerDispatchStore(Protocol):
         """
         ...
 
+    def store_url_list(
+        self,
+        *,
+        org_id: str,
+        sha256: str,
+        body: bytes,
+        url_count: int,
+        source_job_id: str,
+        retention_days: int,
+    ) -> None:
+        """Persist a generated `--crawl-list` file, addressed by its digest.
+
+        Called at **preview** time, before any human has approved anything,
+        so that the bytes an operator is shown a fingerprint of are the
+        bytes that exist from then on. Generating at download time instead
+        would let the source crawl be deleted, re-run or extended between
+        approval and fetch, and the worker would crawl something nobody
+        approved.
+
+        Keyed by `(sha256, org_id)`: the digest is already the identity
+        every gate compares, so a second preview producing an identical
+        list reuses the row instead of writing a duplicate, and one org can
+        never address another org's blob even holding the right digest.
+        """
+        ...
+
+    def read_url_list(self, sha256: str, *, org_id: str) -> StoredUrlList | None:
+        """Read one org's stored list, or `None` if absent or past retention."""
+        ...
+
+    def find_active_job(self, *, worker_id: str, org_id: str) -> WorkerJob | None:
+        """The one `QUEUED`/`DISPATCHED` job blocking this worker, if any.
+
+        The `seo.screaming_frog` facet is capped at `max_concurrent = 1`
+        (`src.core.facet_router`), and that cap is load-bearing rather than
+        conservative: Screaming Frog's `trace.txt` is shared across every
+        invocation on a workstation, and the offset-scoped licence read only
+        stays correct while exactly one supervised process is appending to
+        it (`license_check`'s own module docstring). This is how the cloud
+        dispatch path enforces the cap the local path already gets from
+        `ApiState.try_reserve` — by refusing a second dispatch and naming
+        the first, rather than queueing work that would corrupt that read.
+        """
+        ...
+
+
+class StoredUrlList(StrictModel):
+    """One persisted `--crawl-list` file, and the facts a caller checks.
+
+    A `StrictModel` rather than bare `bytes` because two of these fields
+    are compared, not merely displayed: `sha256` is recomputed by the
+    worker after download and refused on mismatch, and `url_count` is the
+    denominator of the finished job's truncation check.
+
+    Attributes:
+        sha256: Digest of `body`, as stored.
+        body: The exact rendered file — CRLF-separated UTF-8 with no BOM
+            (`screaming_frog_control.url_list.LIST_ENCODING`).
+        url_count: How many URLs `body` holds.
+        source_job_id: The Rankuno crawl the URLs came from. Audit only:
+            that crawl may have been deleted since, and deliberately does
+            not invalidate a list already approved against it.
+    """
+
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    body: bytes
+    url_count: int = Field(ge=0)
+    source_job_id: str = Field(default="", max_length=64)
+
 
 def _optional_datetime(value: object) -> datetime | None:
     return None if value is None else cast(datetime, value)
@@ -223,6 +309,8 @@ def row_to_job(row: tuple[object, ...]) -> WorkerJob:
         pages_crawled,
         progress_pct,
         current_phase,
+        url_list_sha256,
+        url_list_url_count,
     ) = row
     return WorkerJob(
         id=str(job_id),
@@ -234,6 +322,7 @@ def row_to_job(row: tuple[object, ...]) -> WorkerJob:
             seed_url=str(seed_url),
             template_name=None if template_name is None else str(template_name),
             correlation_id=str(correlation_id),
+            url_list_sha256=None if url_list_sha256 is None else str(url_list_sha256),
         ),
         status=WorkerJobStatus(str(status)),
         created_at=cast(datetime, created_at),
@@ -245,4 +334,7 @@ def row_to_job(row: tuple[object, ...]) -> WorkerJob:
         pages_crawled=None if pages_crawled is None else int(cast(int, pages_crawled)),
         progress_pct=None if progress_pct is None else float(cast(float, progress_pct)),
         current_phase=None if current_phase is None else WorkerJobPhase(str(current_phase)),
+        url_list_url_count=(
+            None if url_list_url_count is None else int(cast(int, url_list_url_count))
+        ),
     )

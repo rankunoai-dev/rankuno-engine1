@@ -27,11 +27,23 @@ from fastapi import APIRouter, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from src.api.auth import org_scoped_or_404, require_principal
-from src.api.worker_route_helpers import owned_worker, validate_seed_url, worker_store_unavailable
+from src.api.url_list_routes import (
+    build_url_list_router,
+    generate_and_store_url_list,
+    owned_crawl_job,
+)
+from src.api.worker_route_helpers import (
+    owned_worker,
+    screaming_frog_busy,
+    shortfall_note,
+    validate_seed_url,
+    worker_store_unavailable,
+)
 from src.api.worker_schemas import (
     DispatchConfirmRequest,
     DispatchPreviewRequest,
     DispatchPreviewResponse,
+    UrlListView,
     WorkerJobAccepted,
     WorkerJobListView,
     WorkerJobView,
@@ -69,8 +81,20 @@ the plaintext is nonetheless materialised before the first chunk is sent."""
 
 
 def _to_view(job: WorkerJob) -> WorkerJobView:
-    """Map a persisted `WorkerJob` onto its HTTP view."""
-    return WorkerJobView.model_validate(job, from_attributes=True)
+    """Map a persisted `WorkerJob` onto its HTTP view, deriving the shortfall.
+
+    The shortfall is computed here rather than stored, because both of its
+    inputs already live on the job and a stored third number could disagree
+    with them. `None` whenever either input is missing — "cannot say" is a
+    different claim from "nothing missing" (ADR 0022).
+    """
+    view = WorkerJobView.model_validate(job, from_attributes=True)
+    expected, crawled = job.url_list_url_count, job.pages_crawled
+    if expected is None or crawled is None:
+        return view
+    view.url_list_shortfall = max(0, expected - crawled)
+    view.url_list_shortfall_note = shortfall_note(expected=expected, crawled=crawled)
+    return view
 
 
 def _summarise(worker: Worker, *, offline_after_s: float) -> WorkerSummary:
@@ -107,6 +131,7 @@ def _stream_bundle(payload: bytes) -> Iterator[bytes]:
 def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 - route count
     """Build every human-authenticated worker-dispatch route over `state`."""
     router = APIRouter()
+    router.include_router(build_url_list_router(state))
 
     @router.post(
         "/workers", response_model=WorkerRegisterResponse, status_code=status.HTTP_201_CREATED
@@ -180,16 +205,36 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
         payload: DispatchPreviewRequest,
         authorization: str | None = Header(default=None),
     ) -> DispatchPreviewResponse:
-        """Validate a seed URL and mint gate (a)'s confirm token.
+        """Validate a seed URL, generate any URL list, and mint gate (a).
+
+        When `payload.url_list` is present this is also where the list is
+        built and persisted — before approval, deliberately. The token is
+        then minted bound to the resulting SHA-256 as well as to the
+        `(org, worker, seed_url, template)` tuple, so the confirm that
+        answers this preview can only ever be for this exact list (ADR
+        0022).
 
         Raises:
-            HTTPException: `401` unauthenticated; `404` unknown worker;
-                `403` a worker owned by another org; `400` an unsafe URL.
+            HTTPException: `401` unauthenticated; `404` unknown worker, or
+                a source crawl this org does not own; `403` a worker owned
+                by another org; `400` an unsafe URL; `409` the source crawl
+                cannot supply the requested set; `422` the list is empty
+                after filtering or over the ceiling.
         """
         principal = require_principal(authorization, session_secret=state.session_secret)
         worker = owned_worker(state, worker_id, principal.org_id)
         safe_url = validate_seed_url(state, payload.seed_url)
         settings = get_settings()
+
+        manifest = None
+        if payload.url_list is not None:
+            record = owned_crawl_job(state, payload.url_list.source_job_id, principal.org_id)
+            manifest = generate_and_store_url_list(
+                state,
+                org_id=principal.org_id,
+                record=record,
+                source=payload.url_list.source,
+            )
 
         token = state.worker_dispatch_store.mint_dispatch_preview(
             org_id=principal.org_id,
@@ -198,6 +243,7 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
             template_name=payload.template_name,
             correlation_id=payload.correlation_id,
             ttl_s=settings.worker_dispatch_preview_ttl_s,
+            url_list_sha256=None if manifest is None else manifest.sha256,
         )
         return DispatchPreviewResponse(
             token=token.token,
@@ -208,6 +254,20 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
             correlation_id=payload.correlation_id,
             worker_online=worker_is_online(worker, offline_after_s=settings.worker_offline_after_s),
             worker_last_seen_at=worker.last_seen_at,
+            url_list=(
+                None
+                if manifest is None
+                else UrlListView(
+                    source=manifest.source,
+                    source_job_id=manifest.source_job_id,
+                    source_label=manifest.source_label,
+                    registrable_domain=manifest.registrable_domain,
+                    url_count=manifest.url_count,
+                    sha256=manifest.sha256,
+                    sample=list(manifest.sample),
+                    counts=manifest.counts,
+                )
+            ),
         )
 
     @router.post(
@@ -225,10 +285,13 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
         Raises:
             HTTPException: `401` unauthenticated; `404` unknown worker;
                 `403` a worker owned by another org, or the token is
-                invalid/expired/already used; `409` the target worker is
-                offline; `400` an unsafe URL; `503` the dispatch store is
-                unreachable (fail closed — condition 5's "approval silently
-                fails, nothing runs").
+                invalid/expired/already used, or names a different URL
+                list than the preview did; `409` the target worker is
+                offline, or already has a Screaming Frog job in flight;
+                `400` an unsafe URL; `404` a URL list this org cannot
+                read; `503` the dispatch store is unreachable (fail
+                closed — condition 5's "approval silently fails, nothing
+                runs").
         """
         principal = require_principal(authorization, session_secret=state.session_secret)
         worker = owned_worker(state, worker_id, principal.org_id)
@@ -255,7 +318,30 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
             )
         safe_url = validate_seed_url(state, payload.seed_url)
 
+        url_count: int | None = None
         try:
+            # One Screaming Frog crawl at a time, enforced here for the
+            # cloud path exactly as `ApiState.try_reserve` enforces it for
+            # the local one. Checked before the token is consumed, so a
+            # refusal does not burn the operator's approval.
+            active = state.worker_dispatch_store.find_active_job(
+                worker_id=worker.worker_id, org_id=principal.org_id
+            )
+            if active is not None:
+                raise screaming_frog_busy(state, active)
+            if payload.url_list_sha256 is not None:
+                stored = state.worker_dispatch_store.read_url_list(
+                    payload.url_list_sha256, org_id=principal.org_id
+                )
+                if stored is None:
+                    raise HTTPException(
+                        status.HTTP_404_NOT_FOUND,
+                        detail=(
+                            "the approved URL list is no longer available; it expired or "
+                            "was never generated for this organization. Preview again."
+                        ),
+                    )
+                url_count = stored.url_count
             job = state.worker_dispatch_store.confirm_dispatch(
                 payload.token,
                 org_id=principal.org_id,
@@ -263,13 +349,18 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
                 seed_url=safe_url,
                 template_name=payload.template_name,
                 correlation_id=payload.correlation_id,
+                url_list_sha256=payload.url_list_sha256,
+                url_list_url_count=url_count,
             )
         except DispatchStoreUnavailableError as exc:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         if job is None:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
-                detail="dispatch preview token is invalid, expired, or already used",
+                detail=(
+                    "dispatch preview token is invalid, expired, already used, or names "
+                    "a different URL list than the preview it answers"
+                ),
             )
         return WorkerJobAccepted(id=job.id, status=job.status.value)
 

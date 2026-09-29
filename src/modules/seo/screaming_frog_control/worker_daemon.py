@@ -59,7 +59,11 @@ from src.core.process_supervisor import ProcessSupervisorUnavailableError, recon
 from src.core.schemas import ToolMetadata
 from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_consumed_ledger import ConsumedJobLedger
-from src.core.worker_dispatch_schemas import DispatchAssignmentClaims, WorkerJobKind
+from src.core.worker_dispatch_schemas import (
+    DispatchAssignmentClaims,
+    WorkerJobKind,
+    WorkerJobPhase,
+)
 from src.core.worker_dispatch_signing import DispatchAssignmentError, verify_dispatch_assignment
 from src.core.worker_templates import (
     MAX_REPORTED_TEMPLATES,
@@ -71,6 +75,7 @@ from src.modules.seo.screaming_frog_control.progress_parser import make_progress
 from src.modules.seo.screaming_frog_control.schemas import (
     ScreamingFrogJobInput,
     ScreamingFrogJobOutput,
+    UrlListInvocation,
 )
 from src.modules.seo.screaming_frog_control.template_registry import (
     TemplateNotFoundError,
@@ -78,6 +83,11 @@ from src.modules.seo.screaming_frog_control.template_registry import (
 )
 from src.modules.seo.screaming_frog_control.tool import ScreamingFrogControlTool
 from src.modules.seo.screaming_frog_control.upload_manifest import ALLOWED_BUNDLE_FILENAMES
+from src.modules.seo.screaming_frog_control.worker_url_list import (
+    EmptyApprovedListError,
+    UrlListIntegrityError,
+    prepare_url_list,
+)
 
 __all__ = ["make_approval_callback", "run_worker_daemon"]
 
@@ -360,6 +370,29 @@ def _run_screaming_frog_job(  # noqa: PLR0913 - every argument is load-bearing, 
             _report_and_consume(client, ledger, claims.job_id, str(exc))
             return
 
+    output_root = settings.deliverables_output_dir / "screaming_frog"
+    url_list: UrlListInvocation | None = None
+    if claims.url_list_sha256 is not None:
+        try:
+            url_list = prepare_url_list(
+                client, claims, output_root=output_root, seed_url=safe_url.url
+            )
+        except (UrlListIntegrityError, EmptyApprovedListError) as exc:
+            _report_and_consume(client, ledger, claims.job_id, str(exc))
+            return
+        except (IntegrationError, OSError) as exc:
+            # Consumed, like every other pre-execution rejection: the fetch
+            # already went through `BaseAPIClient.call`'s retries, so what is
+            # left is not a blip, and a fresh attempt needs a fresh cloud-side
+            # approval in any case (`_report_and_consume`'s own reasoning).
+            _report_and_consume(
+                client,
+                ledger,
+                claims.job_id,
+                f"could not fetch this job's approved URL list: {exc}",
+            )
+            return
+
     approval_callback = make_approval_callback(
         token, claims, worker_id=worker_id, org_id=org_id, settings=settings, ledger=ledger
     )
@@ -368,7 +401,7 @@ def _run_screaming_frog_job(  # noqa: PLR0913 - every argument is load-bearing, 
         guardrails=guardrails,
         cli_path=settings.screaming_frog_cli_path,
         template_registry=templates,
-        output_root=settings.deliverables_output_dir / "screaming_frog",
+        output_root=output_root,
         ledger_path=settings.process_supervisor_ledger_path,
         trace_log_path=settings.screaming_frog_trace_log_path,
         url_policy=url_policy,
@@ -380,7 +413,9 @@ def _run_screaming_frog_job(  # noqa: PLR0913 - every argument is load-bearing, 
     )
 
     result = tool.run(
-        ScreamingFrogJobInput(seed_url=safe_url.url, template_name=claims.template_name)
+        ScreamingFrogJobInput(
+            seed_url=safe_url.url, template_name=claims.template_name, url_list=url_list
+        )
     )
     if not result.ok or result.data is None:
         client.report_failure(claims.job_id, result.error or "the tool returned no data")
@@ -391,7 +426,41 @@ def _run_screaming_frog_job(  # noqa: PLR0913 - every argument is load-bearing, 
         client.report_failure(claims.job_id, f"unexpected output type {type(output).__name__}")
         return
 
+    _report_final_page_count(client, claims.job_id, output)
     _upload_bundle(client, claims.job_id, output, max_bytes=settings.worker_upload_max_bytes)
+
+
+def _report_final_page_count(
+    client: WorkerCloudClient, job_id: str, output: ScreamingFrogJobOutput
+) -> None:
+    """Send the run's own completion count, so the cloud can spot a shortfall.
+
+    The periodic progress thread reports Screaming Frog's *live* estimate
+    while the crawl is open; this sends the authoritative figure from the
+    "Completed the spider of ... crawled N urls" line, once, at the end. The
+    cloud compares it against the approved list length to produce
+    `WorkerJobView.url_list_shortfall` (ADR 0022) — without this call the
+    comparison would be made against whatever the last live sample happened
+    to say, which is not the same number.
+
+    Best-effort, exactly like every other progress report: a lost update is
+    a less informative dashboard, never a failed crawl, so the upload that
+    follows must not be skipped because this did not land.
+    """
+    if output.licence.pages_crawled is None:
+        return
+    try:
+        client.report_progress(
+            job_id,
+            pages_crawled=output.licence.pages_crawled,
+            progress_pct=None,
+            phase=WorkerJobPhase.EXPORTING,
+        )
+    except IntegrationError as exc:  # pragma: no cover - logged, never fatal
+        _logger.warning(
+            "worker_final_progress_report_failed",
+            extra={"job_id": job_id, "error": str(exc)},
+        )
 
 
 def _report_and_consume(

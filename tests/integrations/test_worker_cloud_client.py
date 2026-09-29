@@ -315,3 +315,61 @@ def test_upload_and_report_failure_also_stop_on_a_refused_credential(tmp_path):
         client.report_failure("job-1", "whatever")
     with pytest.raises(WorkerCredentialRejectedError):
         client.heartbeat(WorkerTemplateReport())
+
+
+# --- fetch_url_list: the one inbound-bytes call (ADR 0022) ---------------------
+
+_LIST_PATH = "/api/v1/workers/jobs/job-1/url-list"
+_LIST_BODY = b"https://example.com/a\r\nhttps://example.com/b\r\n"
+
+
+def test_fetch_url_list_returns_the_body_verbatim(tmp_path):
+    """Byte-exact, because the caller hashes exactly what comes back."""
+    settings = _settings(tmp_path)
+    client = WorkerCloudClient(
+        settings,
+        transport=route_map({_LIST_PATH: httpx.Response(200, content=_LIST_BODY)}),
+    )
+    assert client.fetch_url_list("job-1") == _LIST_BODY
+
+
+def test_fetch_url_list_does_not_re_encode_or_strip_a_bom(tmp_path):
+    """A client that normalised the bytes would break the digest it is checked by."""
+    body = b"\xef\xbb\xbfhttps://example.com/a\r\n"
+    settings = _settings(tmp_path)
+    client = WorkerCloudClient(
+        settings, transport=route_map({_LIST_PATH: httpx.Response(200, content=body)})
+    )
+    assert client.fetch_url_list("job-1") == body
+
+
+def test_fetch_url_list_sends_the_worker_bearer(tmp_path):
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, content=_LIST_BODY)
+
+    client = WorkerCloudClient(_settings(tmp_path), transport=httpx.MockTransport(handler))
+    client.fetch_url_list("job-1")
+    assert seen == ["Bearer wkr-alice-desktop:worker-secret-value"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_fetch_url_list_raises_credential_rejected_on_401_and_403(tmp_path, status):
+    client = WorkerCloudClient(
+        _settings(tmp_path),
+        transport=route_map({_LIST_PATH: httpx.Response(status, text="nope")}),
+    )
+    with pytest.raises(WorkerCredentialRejectedError):
+        client.fetch_url_list("job-1")
+
+
+def test_fetch_url_list_raises_integration_error_on_a_missing_list(tmp_path):
+    """A 404 must surface, not be mistaken for an empty list."""
+    client = WorkerCloudClient(
+        _settings(tmp_path),
+        transport=route_map({_LIST_PATH: httpx.Response(404, text="no list")}),
+    )
+    with pytest.raises(IntegrationError):
+        client.fetch_url_list("job-1")

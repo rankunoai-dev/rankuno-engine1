@@ -19,7 +19,13 @@ from typing import NoReturn
 
 import pytest
 from src.core.postgres_worker_dispatch_store import PostgresWorkerDispatchStore
-from src.core.worker_dispatch_schemas import WorkerJobKind, WorkerJobPhase, WorkerJobStatus
+from src.core.worker_dispatch_schemas import (
+    DispatchPreviewToken,
+    WorkerJob,
+    WorkerJobKind,
+    WorkerJobPhase,
+    WorkerJobStatus,
+)
 from src.core.worker_dispatch_store import (
     DispatchStoreUnavailableError,
     WorkerJobNotFoundError,
@@ -43,6 +49,8 @@ _COLUMNS = (
     "pages_crawled",
     "progress_pct",
     "current_phase",
+    "url_list_sha256",
+    "url_list_url_count",
 )
 
 
@@ -92,6 +100,12 @@ class _FakeCursor:
             self._get_job(params)
         elif q.startswith("SELECT") and "ORDER BY created_at DESC" in q:
             self._list_jobs(params)
+        elif q.startswith("INSERT INTO worker_dispatch_url_lists"):
+            self._store_url_list(params)
+        elif q.startswith("SELECT body, url_count, source_job_id"):
+            self._read_url_list(params)
+        elif q.startswith("SELECT") and "status IN (%s, %s)" in q:
+            self._find_active_job(params)
         else:  # pragma: no cover - defensive: an unmodelled query fails the test loudly
             raise AssertionError(f"fake cursor does not understand query: {q!r}")
 
@@ -104,7 +118,16 @@ class _FakeCursor:
     # -- query handlers ----------------------------------------------------
 
     def _insert_preview(self, params: tuple[object, ...]) -> None:
-        token, org_id, worker_id, seed_url, template_name, correlation_id, expires_at = params
+        (
+            token,
+            org_id,
+            worker_id,
+            seed_url,
+            template_name,
+            correlation_id,
+            expires_at,
+            url_list_sha256,
+        ) = params
         self._db["worker_dispatch_previews"][str(token)] = {
             "org_id": org_id,
             "worker_id": worker_id,
@@ -113,11 +136,22 @@ class _FakeCursor:
             "correlation_id": correlation_id,
             "expires_at": expires_at,
             "consumed_at": None,
+            "url_list_sha256": url_list_sha256,
         }
         self._result = None
 
     def _consume_preview(self, params: tuple[object, ...]) -> None:
-        now, token, org_id, worker_id, seed_url, template_name, correlation_id, cutoff = params
+        (
+            now,
+            token,
+            org_id,
+            worker_id,
+            seed_url,
+            template_name,
+            url_list_sha256,
+            correlation_id,
+            cutoff,
+        ) = params
         row = self._db["worker_dispatch_previews"].get(str(token))
         matches = (
             row is not None
@@ -126,6 +160,10 @@ class _FakeCursor:
             and row["worker_id"] == worker_id
             and row["seed_url"] == seed_url
             and row["template_name"] == template_name
+            # `IS NOT DISTINCT FROM` in the real clause: NULL matches
+            # NULL, which plain `=` would not. Modelled with `==` because
+            # Python already has those semantics for `None`.
+            and row["url_list_sha256"] == url_list_sha256
             and row["correlation_id"] == correlation_id
             and row["expires_at"] > cutoff
         )
@@ -147,6 +185,8 @@ class _FakeCursor:
             status,
             created_at,
             updated_at,
+            url_list_sha256,
+            url_list_url_count,
         ) = params
         self._db["worker_jobs"][str(job_id)] = {
             "id": job_id,
@@ -166,6 +206,8 @@ class _FakeCursor:
             "pages_crawled": None,
             "progress_pct": None,
             "current_phase": None,
+            "url_list_sha256": url_list_sha256,
+            "url_list_url_count": url_list_url_count,
         }
         self._result = None
 
@@ -257,6 +299,41 @@ class _FakeCursor:
         self.rowcount = swept
         self._result = None
 
+    def _store_url_list(self, params: tuple[object, ...]) -> None:
+        sha256, org_id, body, url_count, source_job_id, expires_at = params
+        self._db["worker_dispatch_url_lists"][f"{sha256}:{org_id}"] = {
+            "body": body,
+            "url_count": url_count,
+            "source_job_id": source_job_id,
+            "expires_at": expires_at,
+        }
+        self._result = None
+
+    def _read_url_list(self, params: tuple[object, ...]) -> None:
+        sha256, org_id, now = params
+        row = self._db["worker_dispatch_url_lists"].get(f"{sha256}:{org_id}")
+        # The real query filters on org_id *and* expires_at in SQL. The
+        # fake must too, or the cross-org and expiry tests would be proving
+        # the route rather than the store.
+        if row is None or row["expires_at"] <= now:  # type: ignore[operator]
+            self._result = None
+            return
+        self._result = (row["body"], row["url_count"], row["source_job_id"])
+
+    def _find_active_job(self, params: tuple[object, ...]) -> None:
+        worker_id, org_id, queued, dispatched = params
+        candidates = sorted(
+            (
+                row
+                for row in self._db["worker_jobs"].values()
+                if row["worker_id"] == worker_id
+                and row["org_id"] == org_id
+                and row["status"] in {queued, dispatched}
+            ),
+            key=lambda row: row["created_at"],  # type: ignore[arg-type,return-value]
+        )
+        self._result = None if not candidates else tuple(candidates[0][c] for c in _COLUMNS)
+
     def _store_upload(self, params: tuple[object, ...]) -> None:
         job_id, org_id, worker_id, encrypted_bytes, size_bytes, expires_at = params
         self._db["worker_job_uploads"][str(job_id)] = {
@@ -298,7 +375,12 @@ class _FakeConnection:
 
 @pytest.fixture
 def db() -> dict[str, dict[str, dict[str, object]]]:
-    return {"worker_dispatch_previews": {}, "worker_jobs": {}, "worker_job_uploads": {}}
+    return {
+        "worker_dispatch_previews": {},
+        "worker_jobs": {},
+        "worker_job_uploads": {},
+        "worker_dispatch_url_lists": {},
+    }
 
 
 @pytest.fixture
@@ -689,3 +771,190 @@ def test_the_sweep_fails_closed_when_postgres_is_unreachable():
     broken = PostgresWorkerDispatchStore(connection_factory=_broken_factory)
     with pytest.raises(DispatchStoreUnavailableError):
         broken.expire_stale_dispatched(org_id="acme", older_than_s=3600)
+
+
+# --- ADR 0022: the URL-list binding and the concurrency lookup ------------------
+
+_LIST_SHA = "b" * 64
+_OTHER_SHA = "c" * 64
+
+
+def _preview_with_list(store, sha256=_LIST_SHA) -> DispatchPreviewToken:
+    return store.mint_dispatch_preview(
+        org_id="default",
+        worker_id="wkr-1",
+        seed_url="https://e.com/",
+        template_name=None,
+        correlation_id="c1",
+        url_list_sha256=sha256,
+    )
+
+
+def _confirm(store, token, *, sha256=_LIST_SHA, url_count=3) -> WorkerJob | None:
+    return store.confirm_dispatch(
+        token,
+        org_id="default",
+        worker_id="wkr-1",
+        seed_url="https://e.com/",
+        template_name=None,
+        correlation_id="c1",
+        url_list_sha256=sha256,
+        url_list_url_count=url_count,
+    )
+
+
+def test_a_preview_carries_the_list_digest(store):
+    token = _preview_with_list(store)
+    assert token.url_list_sha256 == _LIST_SHA
+
+
+def test_confirm_matching_the_previewed_digest_queues_the_job(store):
+    token = _preview_with_list(store)
+    job = _confirm(store, token.token)
+    assert job is not None
+    assert job.envelope.url_list_sha256 == _LIST_SHA
+    assert job.url_list_url_count == 3
+
+
+def test_confirm_naming_a_different_list_is_refused(store):
+    """Gate (b). Preview one list, confirm another, and nothing is queued.
+
+    This is the check that makes the whole binding worth having: without the
+    digest in the `WHERE` clause an operator could be shown a three-URL
+    preview and confirm a hundred-thousand-URL crawl, and every other field
+    the token compares would still match.
+    """
+    token = _preview_with_list(store)
+    assert _confirm(store, token.token, sha256=_OTHER_SHA) is None
+
+
+def test_a_refused_digest_does_not_burn_the_approval(store):
+    """The consume and the check are one atomic statement, not two steps."""
+    token = _preview_with_list(store)
+    assert _confirm(store, token.token, sha256=_OTHER_SHA) is None
+    assert _confirm(store, token.token) is not None
+
+
+def test_dropping_the_digest_on_confirm_is_refused(store):
+    """Omitting the digest is a different dispatch, not a relaxation of one."""
+    token = _preview_with_list(store)
+    assert _confirm(store, token.token, sha256=None, url_count=None) is None
+
+
+def test_adding_a_digest_to_a_listless_preview_is_refused(store):
+    token = store.mint_dispatch_preview(
+        org_id="default",
+        worker_id="wkr-1",
+        seed_url="https://e.com/",
+        template_name=None,
+        correlation_id="c1",
+    )
+    assert _confirm(store, token.token) is None
+
+
+def test_a_plain_crawl_dispatch_still_round_trips_with_no_digest(store):
+    """Every pre-ADR-0022 caller keeps its exact behaviour."""
+    token = store.mint_dispatch_preview(
+        org_id="default",
+        worker_id="wkr-1",
+        seed_url="https://e.com/",
+        template_name=None,
+        correlation_id="c1",
+    )
+    job = store.confirm_dispatch(
+        token.token,
+        org_id="default",
+        worker_id="wkr-1",
+        seed_url="https://e.com/",
+        template_name=None,
+        correlation_id="c1",
+    )
+    assert job is not None
+    assert job.envelope.url_list_sha256 is None
+    assert job.url_list_url_count is None
+
+
+def test_store_and_read_url_list_round_trips(store):
+    store.store_url_list(
+        org_id="default",
+        sha256=_LIST_SHA,
+        body=b"https://e.com/a\r\n",
+        url_count=1,
+        source_job_id="crawl-1",
+        retention_days=7,
+    )
+    stored = store.read_url_list(_LIST_SHA, org_id="default")
+    assert stored is not None
+    assert stored.body == b"https://e.com/a\r\n"
+    assert stored.url_count == 1
+    assert stored.source_job_id == "crawl-1"
+
+
+def test_read_url_list_is_scoped_to_the_owning_org(store):
+    """Holding the right digest is not authorisation to read another org's list."""
+    store.store_url_list(
+        org_id="default",
+        sha256=_LIST_SHA,
+        body=b"https://e.com/a\r\n",
+        url_count=1,
+        source_job_id="crawl-1",
+        retention_days=7,
+    )
+    assert store.read_url_list(_LIST_SHA, org_id="other-org") is None
+
+
+def test_read_url_list_respects_the_retention_expiry(store, db):
+    store.store_url_list(
+        org_id="default",
+        sha256=_LIST_SHA,
+        body=b"https://e.com/a\r\n",
+        url_count=1,
+        source_job_id="crawl-1",
+        retention_days=7,
+    )
+    row = db["worker_dispatch_url_lists"][f"{_LIST_SHA}:default"]
+    row["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    assert store.read_url_list(_LIST_SHA, org_id="default") is None
+
+
+def test_an_unknown_digest_reads_as_none(store):
+    assert store.read_url_list(_OTHER_SHA, org_id="default") is None
+
+
+def test_find_active_job_returns_a_queued_job(store):
+    token = _preview_with_list(store)
+    job = _confirm(store, token.token)
+    assert job is not None
+    active = store.find_active_job(worker_id="wkr-1", org_id="default")
+    assert active is not None
+    assert active.id == job.id
+
+
+def test_find_active_job_returns_a_dispatched_job(store):
+    """A claimed, running crawl is exactly what must block a second dispatch."""
+    token = _preview_with_list(store)
+    _confirm(store, token.token)
+    claimed = store.claim_next_job(worker_id="wkr-1", org_id="default")
+    assert claimed is not None
+    active = store.find_active_job(worker_id="wkr-1", org_id="default")
+    assert active is not None
+    assert active.id == claimed.id
+
+
+def test_find_active_job_ignores_a_finished_job(store):
+    token = _preview_with_list(store)
+    job = _confirm(store, token.token)
+    assert job is not None
+    store.mark_failed(job.id, "done")
+    assert store.find_active_job(worker_id="wkr-1", org_id="default") is None
+
+
+def test_find_active_job_never_crosses_a_worker_or_org_boundary(store):
+    token = _preview_with_list(store)
+    _confirm(store, token.token)
+    assert store.find_active_job(worker_id="wkr-2", org_id="default") is None
+    assert store.find_active_job(worker_id="wkr-1", org_id="other-org") is None
+
+
+def test_find_active_job_is_none_when_nothing_is_running(store):
+    assert store.find_active_job(worker_id="wkr-1", org_id="default") is None

@@ -25,6 +25,7 @@ __all__ = [
     "ScreamingFrogJobOutput",
     "ScreamingFrogProgressSnapshot",
     "ScreamingFrogTemplate",
+    "UrlListInvocation",
 ]
 
 
@@ -60,6 +61,17 @@ FIELD_MAPPING: tuple[FieldMappingEntry, ...] = (
         "--config <path>, resolved by name via TemplateRegistry — the "
         "substitute mapping this condition is satisfied by (see "
         "ScreamingFrogTemplate below), not a per-field CLI flag.",
+    ),
+    FieldMappingEntry(
+        "url_list_source",
+        FieldMappingStatus.VERIFIED,
+        "--crawl-list <list file>, confirmed against this workstation's real "
+        "ScreamingFrogSEOSpiderCli.exe --help on 2026-09-29, which documents it "
+        "as 'Start crawling the specified URLs in list mode'. LIST MODE IS NOT A "
+        "SITE CRAWL: Screaming Frog fetches exactly the URLs in the file and does "
+        "not spider outward from them, so the export describes a set of pages and "
+        "must never be presented as a crawl of the site. Mutually exclusive with "
+        "--crawl; _build_argv emits one or the other, never both.",
     ),
     FieldMappingEntry(
         "max_pages",
@@ -136,6 +148,41 @@ class ScreamingFrogTemplate(StrictModel):
     disagree about what a description may contain."""
 
 
+class UrlListInvocation(StrictModel):
+    """The one `--crawl-list` file this run will be given, and what it holds.
+
+    Built by the worker daemon *after* it has fetched the approved bytes and
+    re-computed their digest, so an instance of this model is evidence the
+    hash check already passed — never a request to trust one.
+
+    Attributes:
+        path: Where the worker wrote the file, under its own per-job output
+            directory (`output_root / job_id`), which is the only directory
+            a job may write to.
+        url_count: How many URLs the file holds, counted from the bytes on
+            disk rather than carried over from the cloud — it is the
+            denominator of the run's own truncation check, so it must come
+            from what Screaming Frog will actually read.
+        sha256: The verified digest, shown beside the count in the approval
+            summary. A hash on its own is unapprovable; a hash next to a
+            count, a crawl name and three real addresses is checkable.
+        source_label: Human-facing name of the Rankuno crawl the URLs came
+            from, e.g. "Crawl: https://example.com/".
+        source: Which set was chosen, as `UrlListSource`'s own value
+            ("orphans"/"all"). A plain `str` here rather than the enum
+            because this model is `core`-facing wire shape and the enum
+            lives beside the generator; the value is only ever displayed.
+        sample: The first few URLs, verbatim, for the approval summary.
+    """
+
+    path: Path
+    url_count: int = Field(ge=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_label: str = Field(default="", max_length=400)
+    source: str = Field(default="", max_length=32)
+    sample: tuple[str, ...] = ()
+
+
 class LicenceStatus(StrictModel):
     """What Screaming Frog's own log said about this run's licence.
 
@@ -159,13 +206,38 @@ class LicenceStatus(StrictModel):
             500-URL free-tier ceiling — the only observable symptom of the
             silent degrade. A real 500-page site with a valid licence would
             also trip this; the ADR accepts that false positive over silently
-            shipping a truncated bundle as complete.
+            shipping a truncated bundle as complete. A list-mode run narrows
+            it: see `expected_url_count`.
+        expected_url_count: How many URLs this run was *asked* to crawl, for
+            a `--crawl-list` run; `None` for a `--crawl` run, where nothing
+            knows the answer in advance. Two things become possible with it
+            (ADR 0022):
+
+            * The free-tier false positive shrinks. A list of exactly 500
+              URLs that crawled 500 is complete, not capped, and is no
+              longer reported as degraded.
+            * A genuine shortfall becomes visible at all. `shortfall`
+              below is the first check in this codebase that can tell "the
+              crawl stopped early" from "the site is that size".
     """
 
     active: bool
     raw_line: str | None = None
     pages_crawled: int | None = Field(default=None, ge=0)
     free_tier_capped: bool = False
+    expected_url_count: int | None = Field(default=None, ge=0)
+
+    @property
+    def shortfall(self) -> int | None:
+        """URLs supplied but never crawled, or `None` when unknowable.
+
+        `None` unless this was a list-mode run that reached its completion
+        line — absence means "this run cannot say", never zero. Zero means
+        every supplied URL was crawled.
+        """
+        if self.expected_url_count is None or self.pages_crawled is None:
+            return None
+        return max(0, self.expected_url_count - self.pages_crawled)
 
 
 class ScreamingFrogJobInput(StrictModel):
@@ -181,10 +253,17 @@ class ScreamingFrogJobInput(StrictModel):
         template_name: Selects a `.seospiderconfig` by name via
             `TemplateRegistry`. `None` runs Screaming Frog's own persisted
             defaults with no `--config` flag at all.
+        url_list: Present for a `--crawl-list` run, `None` for an ordinary
+            link-following `--crawl`. On the *input* model rather than on
+            the tool instance so that `describe_invocation(payload)` stays a
+            pure function of the thing being approved: what the operator
+            reads and what the tool runs are then the same object, and
+            neither can drift from the other (ADR 0022).
     """
 
     seed_url: str = Field(min_length=1, max_length=2048)
     template_name: str | None = Field(default=None, min_length=1, max_length=128)
+    url_list: UrlListInvocation | None = None
 
 
 class ScreamingFrogJobOutput(StrictModel):

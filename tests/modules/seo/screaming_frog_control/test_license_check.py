@@ -7,6 +7,8 @@ run (2026-09-15), not an invented format.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.modules.seo.screaming_frog_control.license_check import (
     FREE_TIER_URL_CEILING,
     read_licence_status,
@@ -110,3 +112,61 @@ class TestReadLicenceStatus:
         assert status.active is True
         assert status.pages_crawled is None
         assert status.free_tier_capped is False
+
+
+class TestExpectedUrlCount:
+    """ADR 0022: a known list length narrows the free-tier inference."""
+
+    def test_five_hundred_of_more_than_five_hundred_is_still_capped(self, tmp_path) -> None:
+        trace = _trace(tmp_path, _ACTIVE + _completed(500))
+        status = read_licence_status(trace, since_offset=0, expected_url_count=900)
+        assert status.free_tier_capped is True
+        assert status.shortfall == 400
+
+    def test_five_hundred_of_exactly_five_hundred_is_a_finished_job(self, tmp_path) -> None:
+        """The documented false positive, closed for list-mode runs only."""
+        trace = _trace(tmp_path, _ACTIVE + _completed(500))
+        status = read_licence_status(trace, since_offset=0, expected_url_count=500)
+        assert status.free_tier_capped is False
+        assert status.shortfall == 0
+
+    def test_omitting_the_count_preserves_the_pre_adr_behaviour_exactly(self, tmp_path) -> None:
+        trace = _trace(tmp_path, _ACTIVE + _completed(500))
+        status = read_licence_status(trace, since_offset=0)
+        assert status.free_tier_capped is True
+        assert status.expected_url_count is None
+        assert status.shortfall is None
+
+    def test_a_shortfall_short_of_the_ceiling_is_not_a_licence_verdict(self, tmp_path) -> None:
+        trace = _trace(tmp_path, _ACTIVE + _completed(40))
+        status = read_licence_status(trace, since_offset=0, expected_url_count=100)
+        assert status.free_tier_capped is False
+        assert status.shortfall == 60
+
+    def test_shortfall_is_never_negative(self, tmp_path) -> None:
+        """Screaming Frog can report more rows than URLs supplied; that is not a gain."""
+        trace = _trace(tmp_path, _ACTIVE + _completed(12))
+        status = read_licence_status(trace, since_offset=0, expected_url_count=10)
+        assert status.shortfall == 0
+
+    def test_a_run_that_never_completed_cannot_say(self, tmp_path) -> None:
+        trace = _trace(tmp_path, _ACTIVE)
+        status = read_licence_status(trace, since_offset=0, expected_url_count=10)
+        assert status.pages_crawled is None
+        assert status.shortfall is None
+
+
+_ACTIVE = "INFO  - Licence Status: Active, expires on 26 Jan 2027 GMT. (Username: x)\n"
+
+
+def _completed(urls: int) -> str:
+    return (
+        f"INFO  - Completed the spider of https://e.com/ in 0 hrs 0 mins 1 secs (1), "
+        f"null, crawled {urls} urls\n"
+    )
+
+
+def _trace(tmp_path, content: str) -> Path:
+    path = tmp_path / "trace.txt"
+    path.write_text(content, encoding="utf-8")
+    return path

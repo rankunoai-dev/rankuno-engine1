@@ -56,7 +56,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 
 from src.api.auth import require_worker_principal
 from src.api.worker_dashboard_routes import build_worker_dashboard_router
@@ -199,10 +199,69 @@ def build_worker_router(state: ApiState) -> APIRouter:
             seed_url=job.envelope.seed_url,
             template_name=job.envelope.template_name,
             correlation_id=job.envelope.correlation_id,
+            url_list_sha256=job.envelope.url_list_sha256,
             secret=state.dispatch_signing_secret,
             ttl_s=settings.worker_dispatch_assignment_ttl_s,
         )
         return PollResponse(assignment=assignment)
+
+    @router.get("/workers/jobs/{job_id}/url-list")
+    def download_url_list(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Response:
+        """Hand a claimed job its approved `--crawl-list` file (ADR 0022).
+
+        The only channel by which bytes travel cloud -> worker. Everything
+        else in ADR 0015 goes the other way, so this route is a genuine change
+        in posture and is scoped accordingly: `owned_job` requires the caller
+        to be *the* worker this job was pinned to, not merely a worker in the
+        right org (condition 2's IDOR rule, condition 6's pinning), and
+        `read_url_list` then filters on `org_id` in SQL a second time — the
+        same belt-and-braces `download_bundle` already applies to the reverse
+        direction.
+
+        The digest is deliberately **not** sent in a header. The worker
+        already holds it inside its own signed assignment claims, which is the
+        only copy it may trust; a second copy travelling beside the bytes
+        would be a copy an attacker who could alter the bytes could also
+        alter.
+
+        Raises:
+            HTTPException: `401` unauthenticated; `404` unknown job, a job
+                with no URL list, or a list that has expired; `403` a job
+                belonging to a different worker or org; `503` the dispatch
+                store is unreachable.
+        """
+        principal = require_worker_principal(authorization, worker_store=state.worker_store)
+        job = owned_job(state, job_id, principal.worker_id, principal.org_id)
+        digest = job.envelope.url_list_sha256
+        if digest is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=f"job {job_id} is not a list crawl and has no URL list",
+            )
+        try:
+            stored = state.worker_dispatch_store.read_url_list(digest, org_id=principal.org_id)
+        except DispatchStoreUnavailableError as exc:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        if stored is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"the URL list for job {job_id} is no longer stored; it passed its "
+                    f"retention window. Preview and dispatch the crawl again."
+                ),
+            )
+        _logger.info(
+            "worker_url_list_downloaded",
+            extra={
+                "job_id": job.id,
+                "worker_id": principal.worker_id,
+                "urls": stored.url_count,
+                "bytes": len(stored.body),
+            },
+        )
+        return Response(content=stored.body, media_type="text/plain; charset=utf-8")
 
     @router.post("/workers/jobs/{job_id}/upload", response_model=WorkerJobAccepted)
     async def upload_bundle(

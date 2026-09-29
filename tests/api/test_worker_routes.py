@@ -51,6 +51,7 @@ from src.core.worker_dispatch_signing import verify_dispatch_assignment
 from src.core.worker_dispatch_store import (
     DEFAULT_PREVIEW_TTL_S,
     DispatchStoreUnavailableError,
+    StoredUrlList,
 )
 from src.core.worker_templates import MAX_TEMPLATE_DESCRIPTION_CHARS
 
@@ -70,6 +71,8 @@ class _FakeWorkerDispatchStore:
         self._jobs: dict[str, WorkerJob] = {}
         self._uploads: dict[str, bytes] = {}
         self._expired_uploads: set[str] = set()
+        self._url_lists: dict[tuple[str, str], StoredUrlList] = {}
+        self._expired_url_lists: set[str] = set()
 
     def mint_dispatch_preview(
         self,
@@ -80,6 +83,7 @@ class _FakeWorkerDispatchStore:
         template_name,
         correlation_id,
         ttl_s=DEFAULT_PREVIEW_TTL_S,
+        url_list_sha256=None,
     ) -> DispatchPreviewToken:
         token = DispatchPreviewToken(
             token=uuid.uuid4().hex,
@@ -89,12 +93,22 @@ class _FakeWorkerDispatchStore:
             template_name=template_name,
             correlation_id=correlation_id,
             expires_at=datetime.now(UTC) + timedelta(seconds=ttl_s),
+            url_list_sha256=url_list_sha256,
         )
         self._previews[token.token] = token
         return token
 
     def confirm_dispatch(
-        self, token, *, org_id, worker_id, seed_url, template_name, correlation_id
+        self,
+        token,
+        *,
+        org_id,
+        worker_id,
+        seed_url,
+        template_name,
+        correlation_id,
+        url_list_sha256=None,
+        url_list_url_count=None,
     ) -> WorkerJob | None:
         record = self._previews.get(token)
         if (
@@ -105,6 +119,10 @@ class _FakeWorkerDispatchStore:
             or record.seed_url != seed_url
             or record.template_name != template_name
             or record.correlation_id != correlation_id
+            # The real store compares this inside the same atomic UPDATE
+            # that consumes the token. The fake must compare it too, or the
+            # tamper test would be proving the route rather than the gate.
+            or record.url_list_sha256 != url_list_sha256
             or record.expires_at < datetime.now(UTC)
         ):
             return None
@@ -121,10 +139,12 @@ class _FakeWorkerDispatchStore:
                 seed_url=seed_url,
                 template_name=template_name,
                 correlation_id=correlation_id,
+                url_list_sha256=url_list_sha256,
             ),
             status=WorkerJobStatus.QUEUED,
             created_at=now,
             updated_at=now,
+            url_list_url_count=url_list_url_count,
         )
         self._jobs[job_id] = job
         return job
@@ -214,6 +234,34 @@ class _FakeWorkerDispatchStore:
             # store's own filter being dropped.
             return None
         return self._uploads.get(job_id)
+
+    def store_url_list(
+        self, *, org_id, sha256, body, url_count, source_job_id, retention_days
+    ) -> None:
+        self._url_lists[(sha256, org_id)] = StoredUrlList(
+            sha256=sha256, body=body, url_count=url_count, source_job_id=source_job_id
+        )
+
+    def read_url_list(self, sha256, *, org_id) -> StoredUrlList | None:
+        # The Postgres implementation filters on org_id and expires_at in
+        # SQL. The fake must too, or the cross-org and expiry tests would be
+        # passing on the route's check alone.
+        if sha256 in self._expired_url_lists:
+            return None
+        return self._url_lists.get((sha256, org_id))
+
+    def find_active_job(self, *, worker_id, org_id) -> WorkerJob | None:
+        candidates = sorted(
+            (
+                j
+                for j in self._jobs.values()
+                if j.worker_id == worker_id
+                and j.org_id == org_id
+                and j.status in {WorkerJobStatus.QUEUED, WorkerJobStatus.DISPATCHED}
+            ),
+            key=lambda j: j.created_at,
+        )
+        return candidates[0] if candidates else None
 
     def expire_stale_dispatched(self, *, org_id, older_than_s) -> int:
         cutoff = datetime.now(UTC) - timedelta(seconds=older_than_s)
@@ -397,7 +445,16 @@ def test_confirm_without_a_prior_preview_is_rejected(client):
     assert response.status_code == 403
 
 
-def test_confirm_token_is_single_use(client):
+def test_confirm_token_is_single_use(client, dispatch_store):
+    """A consumed token is refused even once the worker is free again.
+
+    The first job is driven to a terminal state before the replay, so the
+    403 here can only be the single-use check. Replaying while the first
+    job is still in flight would be refused by ADR 0022's concurrency gate
+    instead (see `test_a_second_dispatch_is_refused_while_one_is_running`),
+    which would pass for the wrong reason and hide a regression in this
+    one.
+    """
     worker = _register_worker(client)
     preview = client.post(
         f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
@@ -410,12 +467,14 @@ def test_confirm_token_is_single_use(client):
         json={"token": preview["token"], "seed_url": "https://e.com/", "correlation_id": "c1"},
         headers=auth_headers(),
     )
+    assert first.status_code == 202
+    dispatch_store.mark_failed(first.json()["id"], "finished for the purposes of this test")
+
     second = client.post(
         f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch",
         json={"token": preview["token"], "seed_url": "https://e.com/", "correlation_id": "c1"},
         headers=auth_headers(),
     )
-    assert first.status_code == 202
     assert second.status_code == 403
 
 
@@ -1272,7 +1331,14 @@ def test_two_daemons_sharing_one_worker_id_never_claim_the_same_job(client):
 
 
 def test_a_double_clicked_confirm_queues_exactly_one_job(client):
-    """The dispatch token is single-use; the second click must not queue a twin."""
+    """The second click must not queue a twin, whichever gate catches it.
+
+    Since ADR 0022 the second click is refused by the concurrency gate
+    (409) before the single-use gate (403) ever sees it, because the first
+    click has already queued a job for this worker and Screaming Frog runs
+    one at a time. The property this test exists for is unchanged and is
+    asserted directly: exactly one job.
+    """
     worker = _register_worker(client)
     preview = client.post(
         f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
@@ -1287,7 +1353,7 @@ def test_a_double_clicked_confirm_queues_exactly_one_job(client):
         f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch", json=body, headers=auth_headers()
     )
     assert first.status_code == 202
-    assert second.status_code == 403
+    assert second.status_code in {403, 409}
 
     listed = client.get(f"{API_PREFIX}/workers/jobs", headers=auth_headers()).json()
     assert len(listed["jobs"]) == 1

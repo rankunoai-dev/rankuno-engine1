@@ -54,6 +54,7 @@ from src.core.worker_dispatch_store import (
     DEFAULT_PREVIEW_TTL_S,
     SELECT_COLUMNS,
     DispatchStoreUnavailableError,
+    StoredUrlList,
     WorkerJobNotFoundError,
     row_to_job,
 )
@@ -109,6 +110,7 @@ class PostgresWorkerDispatchStore:
         template_name: str | None,
         correlation_id: str,
         ttl_s: float = DEFAULT_PREVIEW_TTL_S,
+        url_list_sha256: str | None = None,
     ) -> DispatchPreviewToken:
         """Mint gate (a)'s preview token. Nothing is queued yet."""
         token = secrets.token_urlsafe(32)
@@ -124,8 +126,18 @@ class PostgresWorkerDispatchStore:
                 cur.execute(
                     "INSERT INTO worker_dispatch_previews "
                     "(token, org_id, worker_id, seed_url, template_name, correlation_id, "
-                    "expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (token, org_id, worker_id, seed_url, template_name, correlation_id, expires_at),
+                    "expires_at, url_list_sha256) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        token,
+                        org_id,
+                        worker_id,
+                        seed_url,
+                        template_name,
+                        correlation_id,
+                        expires_at,
+                        url_list_sha256,
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001 - fail closed, never silently approve
             raise DispatchStoreUnavailableError(f"cannot mint dispatch preview: {exc}") from exc
@@ -139,6 +151,7 @@ class PostgresWorkerDispatchStore:
             template_name=template_name,
             correlation_id=correlation_id,
             expires_at=expires_at,
+            url_list_sha256=url_list_sha256,
         )
 
     def confirm_dispatch(
@@ -150,6 +163,8 @@ class PostgresWorkerDispatchStore:
         seed_url: str,
         template_name: str | None,
         correlation_id: str,
+        url_list_sha256: str | None = None,
+        url_list_url_count: int | None = None,
     ) -> WorkerJob | None:
         """Atomically consume the preview token and queue a job.
 
@@ -157,6 +172,14 @@ class PostgresWorkerDispatchStore:
         the `INSERT` of the job row either both land or neither does — a
         crash between them must never leave a consumed token with no job to
         show for it.
+
+        `url_list_sha256` joins the `WHERE` clause as a seventh bound
+        value, with the same `IS NOT DISTINCT FROM` treatment
+        `template_name` already gets so that `NULL` matches `NULL` (ADR
+        0022). Adding it to the clause rather than checking it in Python
+        afterwards is the point: the consume and the check are then one
+        atomic statement, so a confirm carrying a different digest cannot
+        burn the token on its way to being rejected.
         """
         job_id = uuid.uuid4().hex
         now = datetime.now(UTC)
@@ -167,6 +190,7 @@ class PostgresWorkerDispatchStore:
                     "UPDATE worker_dispatch_previews SET consumed_at = %s "
                     "WHERE token = %s AND org_id = %s AND worker_id = %s AND seed_url = %s "
                     "AND template_name IS NOT DISTINCT FROM %s "
+                    "AND url_list_sha256 IS NOT DISTINCT FROM %s "
                     "AND correlation_id = %s AND consumed_at IS NULL AND expires_at > %s "
                     "RETURNING token",
                     (
@@ -176,6 +200,7 @@ class PostgresWorkerDispatchStore:
                         worker_id,
                         seed_url,
                         template_name,
+                        url_list_sha256,
                         correlation_id,
                         now,
                     ),
@@ -190,8 +215,8 @@ class PostgresWorkerDispatchStore:
                 cur.execute(
                     "INSERT INTO worker_jobs "
                     "(id, org_id, worker_id, kind, seed_url, template_name, correlation_id, "
-                    "status, created_at, updated_at) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    "status, created_at, updated_at, url_list_sha256, url_list_url_count) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         job_id,
                         org_id,
@@ -203,6 +228,8 @@ class PostgresWorkerDispatchStore:
                         WorkerJobStatus.QUEUED.value,
                         now,
                         now,
+                        url_list_sha256,
+                        url_list_url_count,
                     ),
                 )
         except Exception as exc:  # noqa: BLE001 - fail closed, never silently approve
@@ -221,10 +248,12 @@ class PostgresWorkerDispatchStore:
                 seed_url=seed_url,
                 template_name=template_name,
                 correlation_id=correlation_id,
+                url_list_sha256=url_list_sha256,
             ),
             status=WorkerJobStatus.QUEUED,
             created_at=now,
             updated_at=now,
+            url_list_url_count=url_list_url_count,
         )
 
     def claim_next_job(self, *, worker_id: str, org_id: str) -> WorkerJob | None:
@@ -532,3 +561,86 @@ class PostgresWorkerDispatchStore:
         if row is None:
             return None
         return bytes(cast(bytes, row[0]))
+
+    def store_url_list(
+        self,
+        *,
+        org_id: str,
+        sha256: str,
+        body: bytes,
+        url_count: int,
+        source_job_id: str,
+        retention_days: int,
+    ) -> None:
+        """Persist a generated `--crawl-list` file, addressed by its digest.
+
+        `ON CONFLICT ... DO UPDATE` on `(sha256, org_id)` only refreshes the
+        expiry. The body cannot differ from the one already stored — the key
+        *is* its digest — so a re-preview of an identical list extends the
+        row's life rather than writing a second copy of the same bytes.
+        """
+        expires_at = datetime.now(UTC) + timedelta(days=retention_days)
+        conn = self._connect()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO worker_dispatch_url_lists "
+                    "(sha256, org_id, body, url_count, source_job_id, expires_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (sha256, org_id) DO UPDATE SET "
+                    "expires_at = EXCLUDED.expires_at",
+                    (sha256, org_id, body, url_count, source_job_id, expires_at),
+                )
+        except Exception as exc:  # noqa: BLE001 - fail closed, never silently approve
+            raise DispatchStoreUnavailableError(f"cannot store url list: {exc}") from exc
+        finally:
+            conn.close()
+
+    def read_url_list(self, sha256: str, *, org_id: str) -> StoredUrlList | None:
+        """Read one org's stored list, or `None` if absent or past retention."""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT body, url_count, source_job_id FROM worker_dispatch_url_lists "
+                    "WHERE sha256 = %s AND org_id = %s AND expires_at > %s",
+                    (sha256, org_id, datetime.now(UTC)),
+                )
+                row = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001
+            raise DispatchStoreUnavailableError(f"cannot read url list: {exc}") from exc
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return StoredUrlList(
+            sha256=sha256,
+            body=bytes(cast(bytes, row[0])),
+            url_count=int(cast(int, row[1])),
+            source_job_id="" if row[2] is None else str(row[2]),
+        )
+
+    def find_active_job(self, *, worker_id: str, org_id: str) -> WorkerJob | None:
+        """The one `QUEUED`/`DISPATCHED` job blocking this worker, if any."""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    # `SELECT_COLUMNS` is a fixed module constant, never
+                    # caller input; every value is bound via a `%s`.
+                    f"SELECT {SELECT_COLUMNS} FROM worker_jobs "  # noqa: S608
+                    "WHERE worker_id = %s AND org_id = %s AND status IN (%s, %s) "
+                    "ORDER BY created_at ASC LIMIT 1",
+                    (
+                        worker_id,
+                        org_id,
+                        WorkerJobStatus.QUEUED.value,
+                        WorkerJobStatus.DISPATCHED.value,
+                    ),
+                )
+                row = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001
+            raise DispatchStoreUnavailableError(f"cannot read active job: {exc}") from exc
+        finally:
+            conn.close()
+        return None if row is None else row_to_job(row)

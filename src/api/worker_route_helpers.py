@@ -28,6 +28,7 @@ from src.core.logger import get_logger
 from src.core.worker_auth import Worker, WorkerNotFoundError, WorkerStoreUnavailableError
 from src.core.worker_dispatch_schemas import WorkerJob
 from src.core.worker_dispatch_store import WorkerJobNotFoundError
+from src.modules.seo.screaming_frog_control.license_check import FREE_TIER_URL_CEILING
 
 if TYPE_CHECKING:
     from src.api.server import ApiState
@@ -37,6 +38,8 @@ __all__ = [
     "owned_worker",
     "read_capped_body",
     "rebuild_zip",
+    "screaming_frog_busy",
+    "shortfall_note",
     "validate_seed_url",
     "worker_store_unavailable",
 ]
@@ -105,6 +108,73 @@ def owned_job(state: ApiState, job_id: str, worker_id: str, org_id: str) -> Work
         )
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
     return job
+
+
+def screaming_frog_busy(state: ApiState, active: WorkerJob) -> HTTPException:
+    """Refuse a second dispatch while one is in flight, and say what is running.
+
+    The `seo.screaming_frog` facet is capped at `max_concurrent = 1`, and the
+    cap is not conservatism: Screaming Frog appends to a `trace.txt` shared by
+    every invocation on the workstation, and the offset-scoped licence read
+    this engine depends on is only correct while exactly one supervised
+    process is writing to it (`license_check`'s module docstring). Two
+    concurrent crawls would not merely queue badly — they would make the
+    licence verdict wrong for both.
+
+    A bare `429` would say none of that. This names the cap, the reason, and
+    the specific job the operator is waiting on, because the only useful next
+    action is "wait for that one, or cancel it".
+    """
+    facet = state.facet_router.get_facet_config("seo.screaming_frog")
+    started = "not started yet" if active.dispatched_at is None else "already running"
+    _logger.warning(
+        "worker_dispatch_refused_busy",
+        extra={"worker_id": active.worker_id, "active_job_id": active.id},
+    )
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail=(
+            f"Screaming Frog runs {facet.max_concurrent} crawl at a time on a worker, "
+            f"because its licence log is shared across every invocation on that machine. "
+            f"Job {active.id} ({active.envelope.seed_url}) is {started} and is "
+            f"'{active.status.value}'. Wait for it to finish, then dispatch again."
+        ),
+    )
+
+
+def shortfall_note(*, expected: int, crawled: int) -> str:
+    """Explain a list-mode run that crawled fewer pages than it was given.
+
+    Two different findings share one symptom, and an operator has to act on
+    them differently, so they must not collapse into one sentence:
+
+    * `crawled` landing exactly on Screaming Frog's 500-URL free-tier ceiling
+      while more than 500 were supplied is the licence, not the site. It is
+      the first time this system can say so — before a known list length,
+      "exactly 500" was indistinguishable from a real 500-page job
+      (`license_check.FREE_TIER_URL_CEILING`).
+    * Any other shortfall is pages that were supplied and not fetched:
+      redirects collapsed, hosts that stopped answering, a run that was cut
+      short. Worth investigating, but not a licence problem.
+
+    Returns an empty string when nothing is missing, so a caller can render
+    the field's presence as "there is something to say here".
+    """
+    missing = expected - crawled
+    if missing <= 0:
+        return ""
+    if crawled == FREE_TIER_URL_CEILING:
+        return (
+            f"This run was given {expected:,} URLs and crawled {crawled:,} — exactly "
+            f"Screaming Frog's free-tier ceiling. That is the licence expiring, not the "
+            f"site: the crawl keeps running and is silently capped. Check the licence on "
+            f"the worker machine and run this again."
+        )
+    return (
+        f"This run was given {expected:,} URLs and crawled {crawled:,}; {missing:,} were "
+        f"not fetched. The export is real but incomplete — the missing URLs may have "
+        f"redirected, stopped responding, or the run may have been cut short."
+    )
 
 
 def validate_seed_url(state: ApiState, seed_url: str) -> str:

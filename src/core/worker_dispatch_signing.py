@@ -116,6 +116,7 @@ def issue_dispatch_assignment(
     correlation_id: str,
     secret: SecretStr,
     ttl_s: float,
+    url_list_sha256: str | None = None,
 ) -> SignedDispatchAssignment:
     """Mint a signed, self-contained assignment for one claimed job.
 
@@ -135,6 +136,12 @@ def issue_dispatch_assignment(
             4) — not a second, separately-signed object.
         template_name: As above.
         correlation_id: As above.
+        url_list_sha256: Digest of the approved `--crawl-list` file, or
+            `None` for an ordinary `--crawl` job (ADR 0022). Carried inside
+            the same claims for the same reason as `seed_url`: swapping it in
+            transit for a digest naming a different stored list invalidates
+            this one signature, so no separate signing step — and no change
+            to the HMAC construction above — was needed to cover it.
         secret: The shared HMAC key both the cloud API and this worker's
             daemon hold via `get_settings()` (ADR 0016 condition 10's
             `SecretStr`/no-`os.environ` posture, extended to this secret).
@@ -156,6 +163,7 @@ def issue_dispatch_assignment(
         seed_url=seed_url,
         template_name=template_name,
         correlation_id=correlation_id,
+        url_list_sha256=url_list_sha256,
         jti=secrets.token_urlsafe(16),
         issued_at=datetime.fromtimestamp(issued_at, tz=UTC),
         expires_at=datetime.fromtimestamp(expires_at, tz=UTC),

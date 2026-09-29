@@ -40,7 +40,7 @@ import os
 import tempfile
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic import Field
 
+from src.core.json_stream import iter_array_object_field
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 
@@ -274,6 +275,10 @@ class JobStore(Protocol):
 
     def read_result(self, job_id: str) -> Mapping[str, object]:
         """Read a job's result blob."""
+        ...
+
+    def iter_result_page_urls(self, job_id: str) -> Iterator[str]:
+        """Stream every discovered URL out of a result without loading it."""
         ...
 
     def write_checkpoint(self, job_id: str, payload: Mapping[str, object]) -> None:
@@ -572,6 +577,39 @@ class DiskJobStore:
                 raise JobNotFoundError(msg)
             loaded: Mapping[str, object] = json.loads(path.read_text(encoding="utf-8"))
         return loaded
+
+    def iter_result_page_urls(self, job_id: str) -> Iterator[str]:
+        """Stream `pages[*].url` out of a result file without materialising it.
+
+        A 100,687-page result is 93 MB on disk and 292 MB of Python objects
+        once `read_result` has parsed it — measured on this workstation. The
+        URL column alone is 6.9 MB of text. Every caller that wants the column
+        and not the document uses this instead (`src.core.json_stream` records
+        both numbers and why a regex is not an acceptable substitute).
+
+        The job's existence and its result's are checked eagerly, under the
+        lock, so a missing job raises here rather than at the consumer's first
+        `next()`. The file itself is opened lazily and stays open for the life
+        of the iterator, so a caller that abandons it part-way should close it
+        by exhausting or discarding the generator promptly.
+
+        Args:
+            job_id: The finished crawl to read.
+
+        Returns:
+            An iterator over every discovered URL, in result order, with
+            whatever duplicates the result itself holds.
+
+        Raises:
+            JobNotFoundError: If the job or its result does not exist.
+        """
+        path = self._result_path(job_id)
+        with self._lock:
+            self._read(job_id)
+            if not path.exists():
+                msg = f"job {job_id!r} has no result"
+                raise JobNotFoundError(msg)
+        return iter_array_object_field(path, array_key="pages", field="url")
 
     def write_checkpoint(self, job_id: str, payload: Mapping[str, object]) -> None:
         """Save partial work for a job that may not finish.

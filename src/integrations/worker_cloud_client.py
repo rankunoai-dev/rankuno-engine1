@@ -136,6 +136,43 @@ class WorkerCloudClient(BaseAPIClient):
 
         return self.call("poll", _do)
 
+    def fetch_url_list(self, job_id: str) -> bytes:
+        """Download this job's approved `--crawl-list` file (ADR 0022).
+
+        The first call in this client that brings bytes *into* the worker
+        rather than sending them out, so it is worth being explicit about what
+        is and is not trusted here: nothing. This method returns the response
+        body and makes no claim about it. The caller
+        (`screaming_frog_control.worker_daemon`) re-computes the SHA-256 and
+        compares it against the digest inside its own signed assignment
+        claims, which is the only copy of that digest it may trust, and
+        refuses the job on a mismatch with a distinct error.
+
+        Args:
+            job_id: The claimed job whose list to fetch.
+
+        Returns:
+            The raw file bytes — CRLF-separated UTF-8 with no BOM, as the
+            cloud rendered and stored them.
+
+        Raises:
+            WorkerCredentialRejectedError: The credential was refused.
+            IntegrationError: Any other transport or status failure, wrapped
+                by `BaseAPIClient.call()` and retried like every other call
+                here. A missing list is a `404` and therefore terminal, not a
+                transient the daemon should sit in a loop over.
+        """
+
+        def _do() -> bytes:
+            response = self._client.get(
+                f"/api/v1/workers/jobs/{job_id}/url-list", headers=self._auth_headers()
+            )
+            _raise_for_credential(response, "fetch_url_list")
+            response.raise_for_status()
+            return response.content
+
+        return self.call("fetch_url_list", _do)
+
     def upload_bundle(self, job_id: str, archive_bytes: bytes) -> None:
         """Upload a completed job's validated bundle archive.
 

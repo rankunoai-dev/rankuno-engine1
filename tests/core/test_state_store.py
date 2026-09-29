@@ -311,3 +311,51 @@ class TestFacetTracking:
         assert len(jobs) == 2
         facets = {job.facet_id for job in jobs}
         assert facets == {"seo.page_classifier", "seo.health_engine"}
+
+
+class TestIterResultPageUrls:
+    """ADR 0022: read the URL column without materialising the document.
+
+    `read_result` on a real 100,687-page crawl costs 292 MB of Python objects
+    for a column that is 6.9 MB of text. These tests pin the contract, not the
+    performance; `tests/core/test_json_stream.py` covers the reader itself.
+    """
+
+    def _finished(self, store, urls) -> str:
+        record = store.create("seo.page_classifier", {"base_url": "https://e.com/"})
+        store.finish(
+            record.id,
+            {
+                "base_url": "https://e.com/",
+                "pages": [{"url": u, "canonical_url": u} for u in urls],
+                "navigation": {"url": "https://e.com/nav"},
+            },
+        )
+        return record.id
+
+    def test_streams_every_page_url_in_order(self, tmp_path):
+        store = DiskJobStore(tmp_path)
+        job_id = self._finished(store, ["https://e.com/a", "https://e.com/b"])
+        assert list(store.iter_result_page_urls(job_id)) == ["https://e.com/a", "https://e.com/b"]
+
+    def test_ignores_url_keys_outside_the_pages_array(self, tmp_path):
+        """The `navigation` node has a `url` of its own and is not a page."""
+        store = DiskJobStore(tmp_path)
+        job_id = self._finished(store, ["https://e.com/a"])
+        assert list(store.iter_result_page_urls(job_id)) == ["https://e.com/a"]
+
+    def test_an_unknown_job_raises_eagerly_not_at_first_next(self, tmp_path):
+        store = DiskJobStore(tmp_path)
+        with pytest.raises(JobNotFoundError):
+            store.iter_result_page_urls("nope")
+
+    def test_a_job_with_no_result_raises_eagerly(self, tmp_path):
+        store = DiskJobStore(tmp_path)
+        record = store.create("seo.page_classifier", {"base_url": "https://e.com/"})
+        with pytest.raises(JobNotFoundError):
+            store.iter_result_page_urls(record.id)
+
+    def test_a_result_with_no_pages_yields_nothing(self, tmp_path):
+        store = DiskJobStore(tmp_path)
+        job_id = self._finished(store, [])
+        assert list(store.iter_result_page_urls(job_id)) == []

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -525,6 +525,39 @@ class PostgresJobStore(JobStore):
         if row[1] is None:
             raise JobNotFoundError(f"job {job_id!r} has no result")
         return cast(Mapping[str, object], row[1])
+
+    def iter_result_page_urls(self, job_id: str) -> Iterator[str]:
+        """Every discovered URL for one job (ADR 0022).
+
+        **This backend does not get the bounded-memory property, and saying so
+        is the point of this docstring.** `DiskJobStore.iter_result_page_urls`
+        streams the `pages` array off disk behind a 1 MiB window — 5.3 MB peak
+        against 292 MB for the naive read, measured on a real 100,687-page
+        result. Here the result arrives from Postgres as an already-parsed
+        `json` column, so it is whole in this process before any of it can be
+        iterated. A projection in SQL (`jsonb_path_query_array`) would fix
+        that and is deliberately **not** attempted in this cycle: the `result`
+        column is `json`, not `jsonb`, the cast is not free on a 90 MB
+        document, and untested SQL that first meets a real database at deploy
+        is the risk this repository's migration review exists to avoid.
+
+        Acceptable today for one narrow reason, not in general: ADR 0004
+        deploys the local workstation, which uses `DiskJobStore`. A hosted
+        deployment generating a list from a very large crawl will spend the
+        memory. Recorded as a handoff rather than buried here.
+
+        Raises:
+            JobNotFoundError: If the job or its result does not exist.
+        """
+        result = self.read_result(job_id)
+        pages = result.get("pages")
+        if not isinstance(pages, list):
+            return iter(())
+        return (
+            page["url"]
+            for page in pages
+            if isinstance(page, dict) and isinstance(page.get("url"), str)
+        )
 
     def write_checkpoint(self, job_id: str, payload: Mapping[str, object]) -> None:
         """Save partial work. Falls back to disk store once the circuit opens.
