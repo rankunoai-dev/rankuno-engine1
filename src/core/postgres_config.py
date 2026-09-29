@@ -65,6 +65,30 @@ class PostgresSettings(BaseSettings):
         description="Full PostgreSQL database connection URL (e.g. from Railway/Heroku/Neon).",
     )
 
+    def is_configured(self) -> bool:
+        """Whether real Postgres credentials are present, not just the all-default shape.
+
+        `get_connection_string()` always returns *something* — the
+        all-default fields build a syntactically valid
+        `postgresql://rankuno:@localhost:5432/rankuno` URL even when nobody
+        set up Postgres at all. Used at `create_app()` startup to decide
+        whether the default job store should even attempt a Postgres
+        connection: without this check, a workstation with no Postgres
+        installed would have `PostgresJobStore.create()` raise on every call
+        until its circuit breaker's `failure_threshold` is reached, rather
+        than going straight to disk the way local development (ADR 0004)
+        expects.
+        """
+        import os
+
+        return bool(
+            self.database_url
+            or os.getenv("DATABASE_URL")
+            or os.getenv("POSTGRES_URL")
+            or os.getenv("DATABASE_PRIVATE_URL")
+            or self.postgres_password
+        )
+
     def get_connection_string(self) -> str:
         """Return the PostgreSQL connection string.
 

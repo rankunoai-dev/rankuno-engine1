@@ -80,6 +80,8 @@ from src.core.errors import UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.logger import get_logger
+from src.core.postgres_config import get_postgres_settings
+from src.core.postgres_store import PostgresJobStore
 from src.core.postgres_worker_dispatch_store import PostgresWorkerDispatchStore
 from src.core.process_supervisor import ProcessSupervisorUnavailableError, reconcile_orphans
 from src.core.rate_limiter import RateLimiterRegistry
@@ -1259,6 +1261,25 @@ def _seed_bootstrap_operator(operator_store: OperatorStore, settings: Settings) 
     )
 
 
+def _default_job_store(jobs_root: Path | str | None) -> JobStore:
+    """Pick the default job store `create_app()` uses when none is injected.
+
+    `PostgresJobStore` only when Postgres looks configured at all
+    (`PostgresSettings.is_configured`) — otherwise a workstation with no
+    Postgres running would have `PostgresJobStore.create()` raise on every
+    call until its own circuit breaker opens (`CircuitBreaker.
+    failure_threshold`), rather than going straight to disk the way local
+    development (ADR 0004) and this test suite's default both expect. Once
+    Postgres *is* configured, `PostgresJobStore`'s own circuit breaker still
+    covers the "briefly unreachable" case by falling back to the same disk
+    store this function would have returned outright.
+    """
+    disk_store = DiskJobStore(jobs_root or Path(".jobs"))
+    if not get_postgres_settings().is_configured():
+        return disk_store
+    return PostgresJobStore(fallback_store=disk_store)
+
+
 def create_app(
     store: JobStore | None = None,
     url_policy: UrlSafetyPolicy | None = None,
@@ -1288,7 +1309,10 @@ def create_app(
     during test collection.
 
     Args:
-        store: Job persistence. Defaults to a `DiskJobStore` under `jobs_root`.
+        store: Job persistence. Defaults to a `PostgresJobStore` (falling back
+            to a `DiskJobStore` under `jobs_root` on any Postgres error, and
+            used outright as a `DiskJobStore` when Postgres is not configured
+            at all — see `PostgresSettings.is_configured`).
         url_policy: SSRF policy applied at admission and inherited by the crawl.
         org_config_store: Organization config persistence. Defaults to the one
             `get_settings()` exposes, which is what crawl-time credential
@@ -1340,9 +1364,7 @@ def create_app(
     Returns:
         The configured application.
     """
-    resolved_store: JobStore = (
-        store if store is not None else DiskJobStore(jobs_root or Path(".jobs"))
-    )
+    resolved_store: JobStore = store if store is not None else _default_job_store(jobs_root)
     resolved_deliverable_store = DiskJobStore(deliverable_jobs_root or Path(".deliverable_jobs"))
     resolved_rulebook_store = RulebookStore(rulebooks_root or Path(".deliverable_rulebooks"))
     # `get_settings().org_config_store`, not a second store over a hard-coded
