@@ -398,7 +398,7 @@ the column reads `Unknown` rather than substitute the URL
 ([build-log 0123](docs/build-log/0123-a-status-cell-that-was-a-url-cell.md)).
 Until cycle 0130 neither item actually downloaded: the UI called the adapter's
 download methods detached from the adapter, so they threw before sending a
-request ([build-log 0130](docs/build-log/0130-a-method-called-without-its-object.md)).
+request ([build-log 0131](docs/build-log/0131-a-method-called-without-its-object.md)).
 
 ### Search Console accounts (optional)
 
