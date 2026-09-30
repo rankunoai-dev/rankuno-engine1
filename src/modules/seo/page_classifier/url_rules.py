@@ -412,7 +412,10 @@ def decode_percent_escapes(path: str) -> str:
 
     Returns:
         The path with non-structural escapes decoded. Structural ones
-        (`STRUCTURAL_ESCAPES`) are preserved exactly.
+        (`STRUCTURAL_ESCAPES`) and undecodable ones are kept, with their hex
+        digits upper-cased per RFC 3986 §6.2.2.1. That used to be unnecessary
+        because the whole path was lowercased; now that path case is kept,
+        `%2f` and `%2F` would otherwise be two keys for one address.
     """
 
     def decode_run(match: re.Match[str]) -> str:
@@ -422,7 +425,7 @@ def decode_percent_escapes(path: str) -> str:
             if escape.upper() in STRUCTURAL_ESCAPES:
                 out.append(_decode(pending))
                 pending = []
-                out.append(escape)
+                out.append(escape.upper())
             else:
                 pending.append(escape)
         out.append(_decode(pending))
@@ -439,13 +442,22 @@ def _decode(escapes: list[str]) -> str:
     try:
         return unquote(joined, encoding="utf-8", errors="strict")
     except (UnicodeDecodeError, ValueError):
-        return joined
+        return joined.upper()
 
 
 def normalize_path(path: str) -> str:
     """Canonicalise a path to its dedup form.
 
-    Decoded, lowercased, one trailing slash, no empty segments.
+    Decoded, one trailing slash, no empty segments. **Case is preserved.**
+
+    RFC 3986 §6.2.2.1 makes only the scheme and host case-insensitive; the path
+    is not. `/A` and `/a` are different resources on a case-sensitive server,
+    Google indexes them as two URLs, and Screaming Frog crawls them as two.
+    Lowercasing here merged two real pages onto one graph node — one page's
+    HTML and classification shown for both — so it was removed by user decision
+    (ADR 0026), reversing the build-log 0079 fixture ruling. Consumers that
+    genuinely want a case-blind match, such as Search Console resolution, must
+    fold case themselves as an explicit, named fallback.
 
     Decoding runs first and is the reason the split on `/` is safe to do
     afterwards: `decode_percent_escapes` preserves `%2F`, so nothing it returns
@@ -460,7 +472,7 @@ def normalize_path(path: str) -> str:
     kept = [s for s in segments if s]
     if not kept:
         return "/"
-    return "/" + "/".join(s.lower() for s in kept) + "/"
+    return "/" + "/".join(kept) + "/"
 
 
 _logger = get_logger("modules.seo.url_rules")

@@ -380,3 +380,38 @@ class TestMetricContracts:
         assert dumped["match_rate_pct"] == 0.0
         assert dumped["is_reliable"] is False
         assert "by_failure" in dumped
+
+
+class TestPathCaseFallback:
+    """Path case is significant to the crawl (ADR 0026) but not to this join.
+
+    Folding is an explicit fallback with its own tier, tried only after an
+    exact spelling misses, so it can never override a case-exact page.
+    """
+
+    def test_a_case_variant_resolves_under_its_own_tier(self):
+        idx = index(profile("https://e.com/pricing/"))
+        match = idx.resolve("https://e.com/PRICING")
+        assert isinstance(match, UrlMatch)
+        assert match.page_url == "https://e.com/pricing/"
+        assert match.via is MatchTier.CASE_FOLDED
+
+    def test_an_exact_spelling_wins_over_the_fold(self):
+        idx = index(profile("https://e.com/pricing/"), profile("https://e.com/Pricing/"))
+        assert idx.resolve_url("https://e.com/Pricing/") == "https://e.com/Pricing/"
+        assert idx.resolve_url("https://e.com/pricing") == "https://e.com/pricing/"
+        assert idx.resolve_url("/Pricing/") == "https://e.com/Pricing/"
+
+    def test_pages_differing_only_by_case_refuse_a_third_spelling(self):
+        """Handing `/PRICING` to either page would be a guess."""
+        idx = index(profile("https://e.com/pricing/"), profile("https://e.com/Pricing/"))
+        for spelling in ("https://e.com/PRICING", "/PRICING"):
+            failure = idx.resolve(spelling)
+            assert not isinstance(failure, UrlMatch)
+            assert failure.reason is MatchFailure.AMBIGUOUS, spelling
+
+    def test_ga4_path_folds_too(self):
+        idx = index(profile("https://e.com/blog/post/"))
+        match = idx.resolve("/Blog/Post/?utm_source=nl")
+        assert isinstance(match, UrlMatch)
+        assert match.via is MatchTier.CASE_FOLDED
