@@ -2,7 +2,7 @@ import { Alert, Button, Radio, Select } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import type {
   CrawlJobSummary,
-  UrlListSource,
+  CrawlUrlListSource,
   UrlListSourceOption,
   UrlListSourcesView,
   WorkerDispatchAdapter,
@@ -20,7 +20,7 @@ export interface UrlListChoice {
    * `404`. The only place this value comes from is `CrawlJobSummary.id`.
    */
   source_job_id: string;
-  source: UrlListSource;
+  source: CrawlUrlListSource;
   /**
    * The source crawl's own root, as the server reports it.
    *
@@ -99,7 +99,7 @@ export function UrlListSourcePicker({
   const [sourcesLoading, setSourcesLoading] = useState(false);
   const [sourcesError, setSourcesError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  const [chosen, setChosen] = useState<UrlListSource | null>(null);
+  const [chosen, setChosen] = useState<CrawlUrlListSource | null>(null);
 
   // Keyed on the adapter object, not on a `bind` of one of its methods: `bind`
   // returns a new function every render, and the effect below would fetch in a
@@ -183,7 +183,7 @@ export function UrlListSourcePicker({
     onChange(null);
   }
 
-  function chooseSource(value: UrlListSource): void {
+  function chooseSource(value: CrawlUrlListSource): void {
     const option = sources?.sources.find((entry) => entry.source === value);
     if (!sources || !option?.available) return;
     setChosen(value);
@@ -260,7 +260,7 @@ export function UrlListSourcePicker({
             <>
               <Radio.Group
                 value={chosen}
-                onChange={(event) => chooseSource(event.target.value as UrlListSource)}
+                onChange={(event) => chooseSource(event.target.value as CrawlUrlListSource)}
               >
                 {sources.sources.map((option) => (
                   <Radio

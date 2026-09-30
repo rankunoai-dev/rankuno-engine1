@@ -29,9 +29,11 @@ from fastapi.responses import StreamingResponse
 from src.api.auth import org_scoped_or_404, require_principal
 from src.api.url_list_routes import (
     build_url_list_router,
+    generate_and_store_pasted_url_list,
     generate_and_store_url_list,
     owned_crawl_job,
 )
+from src.api.url_list_schemas import UrlListRequest, UrlListView
 from src.api.worker_route_helpers import (
     owned_worker,
     screaming_frog_busy,
@@ -43,7 +45,6 @@ from src.api.worker_schemas import (
     DispatchConfirmRequest,
     DispatchPreviewRequest,
     DispatchPreviewResponse,
-    UrlListView,
     WorkerJobAccepted,
     WorkerJobListView,
     WorkerJobView,
@@ -65,6 +66,8 @@ from src.core.worker_auth import (
 from src.core.worker_bundle_crypto import BundleDecryptionError, decrypt_bytes
 from src.core.worker_dispatch_schemas import WorkerJob
 from src.core.worker_dispatch_store import DispatchStoreUnavailableError, WorkerJobNotFoundError
+from src.modules.seo.screaming_frog_control.pasted_url_list import PasteCounts
+from src.modules.seo.screaming_frog_control.url_list import UrlListManifest, UrlListSource
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -78,6 +81,56 @@ _logger = get_logger("api.worker_dashboard_routes")
 _BUNDLE_CHUNK_BYTES = 64 * 1024
 """Response chunk size for a bundle download. See `_stream_bundle` for why
 the plaintext is nonetheless materialised before the first chunk is sent."""
+
+
+def _url_list_for(
+    state: ApiState,
+    *,
+    org_id: str,
+    request: UrlListRequest | None,
+    seed_url: str,
+) -> tuple[UrlListManifest | None, PasteCounts | None]:
+    """Generate and freeze the list a preview asked for, if it asked for one.
+
+    Both origins land here so that the *order* of operations is identical for
+    each: the seed URL is validated first and only then does anything get
+    built, because its registrable domain is the rule the list is filtered
+    against. `UrlListRequest` has already rejected a request whose `source`
+    and payload disagree, so this is a two-way branch and not a default.
+
+    Returns:
+        The manifest and, for a pasted list only, how its text was read.
+        `(None, None)` for an ordinary `--crawl` preview.
+    """
+    if request is None:
+        return None, None
+    if request.source is UrlListSource.PASTED:
+        # `urls` is non-`None` here by `UrlListRequest`'s own validator; the
+        # `or ""` is what tells mypy so without a cast that would outlive the
+        # guarantee it stands in for.
+        return generate_and_store_pasted_url_list(
+            state, org_id=org_id, text=request.urls or "", seed_url=seed_url
+        )
+    record = owned_crawl_job(state, request.source_job_id or "", org_id)
+    manifest = generate_and_store_url_list(
+        state, org_id=org_id, record=record, source=request.source
+    )
+    return manifest, None
+
+
+def _list_view(manifest: UrlListManifest, paste: PasteCounts | None) -> UrlListView:
+    """Map a generated list onto what a confirmation dialog renders."""
+    return UrlListView(
+        source=manifest.source,
+        source_job_id=manifest.source_job_id,
+        source_label=manifest.source_label,
+        registrable_domain=manifest.registrable_domain,
+        url_count=manifest.url_count,
+        sha256=manifest.sha256,
+        sample=list(manifest.sample),
+        counts=manifest.counts,
+        paste=paste,
+    )
 
 
 def _to_view(job: WorkerJob) -> WorkerJobView:
@@ -226,15 +279,9 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
         safe_url = validate_seed_url(state, payload.seed_url)
         settings = get_settings()
 
-        manifest = None
-        if payload.url_list is not None:
-            record = owned_crawl_job(state, payload.url_list.source_job_id, principal.org_id)
-            manifest = generate_and_store_url_list(
-                state,
-                org_id=principal.org_id,
-                record=record,
-                source=payload.url_list.source,
-            )
+        manifest, paste = _url_list_for(
+            state, org_id=principal.org_id, request=payload.url_list, seed_url=safe_url
+        )
 
         token = state.worker_dispatch_store.mint_dispatch_preview(
             org_id=principal.org_id,
@@ -254,20 +301,7 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
             correlation_id=payload.correlation_id,
             worker_online=worker_is_online(worker, offline_after_s=settings.worker_offline_after_s),
             worker_last_seen_at=worker.last_seen_at,
-            url_list=(
-                None
-                if manifest is None
-                else UrlListView(
-                    source=manifest.source,
-                    source_job_id=manifest.source_job_id,
-                    source_label=manifest.source_label,
-                    registrable_domain=manifest.registrable_domain,
-                    url_count=manifest.url_count,
-                    sha256=manifest.sha256,
-                    sample=list(manifest.sample),
-                    counts=manifest.counts,
-                )
-            ),
+            url_list=None if manifest is None else _list_view(manifest, paste),
         )
 
     @router.post(

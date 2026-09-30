@@ -227,7 +227,16 @@ export function DispatchConfirmModal({
  *   Said in the dialog, not in a tooltip, because an operator who reads this
  *   as a crawl of the site will read the export as a site audit.
  * * **The source.** "Orphans Only" and "All Discovered URLs" differ by orders
- *   of magnitude, and the label is the server's own wording.
+ *   of magnitude, and the label is the server's own wording. A pasted list
+ *   names itself.
+ * * **What the paste lost.** Lines that could not be read, and addresses given
+ *   an assumed `https://`, are both stated here rather than only on the form
+ *   the operator has already scrolled past. Each is a difference between what
+ *   was pasted and what will be crawled, and this is the last screen before it
+ *   becomes true.
+ * * **Duplicates.** Removed, and said so. The count above is post-dedupe and is
+ *   what gets crawled; without this line an operator who pasted 400 lines and
+ *   is shown 380 has no way to tell a silent loss from a deliberate one.
  * * **The exclusions.** `counts.off_domain_dropped` is the number behind
  *   "Excluded N external URLs", shown with the domain that produced it — a
  *   count with no rule beside it cannot be checked.
@@ -254,6 +263,40 @@ function UrlListSummary({ list }: { list: UrlListView }): JSX.Element {
           {list.url_count.toLocaleString()}{" "}
           <span className="sfc-none">({labelFor(list.source)})</span>
         </dd>
+        {list.paste != null && list.paste.malformed_dropped > 0 && (
+          <>
+            <dt>Not read</dt>
+            <dd>
+              {list.paste.malformed_dropped.toLocaleString()} line
+              {list.paste.malformed_dropped === 1 ? "" : "s"}{" "}
+              <span className="sfc-none">
+                — could not be read as a web address, and are not in this list
+              </span>
+            </dd>
+          </>
+        )}
+        {list.paste != null && list.paste.scheme_added > 0 && (
+          <>
+            <dt>Assumed https</dt>
+            <dd>
+              {list.paste.scheme_added.toLocaleString()} address
+              {list.paste.scheme_added === 1 ? "" : "es"}{" "}
+              <span className="sfc-none">— pasted with no scheme</span>
+            </dd>
+          </>
+        )}
+        {list.counts.duplicates_dropped > 0 && (
+          <>
+            <dt>Duplicates</dt>
+            <dd>
+              {list.counts.duplicates_dropped.toLocaleString()} removed{" "}
+              <span className="sfc-none">
+                — the same page twice is one fetch, and would spend two of the
+                licence's URLs on it
+              </span>
+            </dd>
+          </>
+        )}
         {excluded > 0 && (
           <>
             <dt>Excluded</dt>
@@ -293,7 +336,9 @@ function UrlListSummary({ list }: { list: UrlListView }): JSX.Element {
  * here in full would read as two different facts.
  */
 function labelFor(source: UrlListView["source"]): string {
-  return source === "orphans" ? "orphans only" : "all discovered URLs";
+  if (source === "orphans") return "orphans only";
+  if (source === "pasted") return "exactly the list you pasted";
+  return "all discovered URLs";
 }
 
 /**

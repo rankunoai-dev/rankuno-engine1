@@ -266,6 +266,27 @@ describe("DispatchConfirmModal", () => {
     expect(await screen.findByText(/no longer registered/i)).toBeInTheDocument();
   });
 
+  it("names a pasted list as itself, never as a subset of a crawl", () => {
+    // "orphans only" and "all discovered URLs" both describe a crawl this
+    // engine ran. A pasted list is neither, and borrowing either phrase would
+    // put a claim about a crawl into an approval that has none behind it.
+    renderModal({
+      typedUrl: undefined,
+      preview: dispatchPreview({
+        url_list: urlListView({
+          source: "pasted",
+          source_job_id: "",
+          source_label: "a list you pasted",
+          url_count: 12,
+        }),
+      }),
+    });
+
+    expect(screen.getByText(/12 URLs from a list you pasted/)).toBeInTheDocument();
+    expect(screen.getByText(/exactly the list you pasted/)).toBeInTheDocument();
+    expect(screen.queryByText(/all discovered URLs/)).not.toBeInTheDocument();
+  });
+
   it("says nothing about a normalization when nobody typed an address", () => {
     renderModal({
       typedUrl: undefined,

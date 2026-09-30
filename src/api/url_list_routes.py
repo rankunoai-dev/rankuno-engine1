@@ -29,11 +29,27 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Header, HTTPException, status
 
 from src.api.auth import org_scoped_or_404, require_principal
-from src.api.worker_schemas import UrlListSourceOption, UrlListSourcesView
+from src.api.url_list_schemas import (
+    PastedUrlPlanRequest,
+    PastedUrlPlanView,
+    UrlListSourcesView,
+)
+from src.api.url_list_sources import (
+    NO_RECONCILIATION,
+    NO_RESULT,
+    base_url_of,
+    orphan_urls,
+    sources_view,
+)
 from src.core.config import get_settings
-from src.core.errors import RankunoError
 from src.core.logger import get_logger
 from src.core.state_store import JobNotFoundError, JobRecord
+from src.modules.seo.screaming_frog_control.pasted_url_list import (
+    PasteCounts,
+    PastedUrlPlan,
+    parse_pasted_urls,
+    plan_pasted_urls,
+)
 from src.modules.seo.screaming_frog_control.url_list import (
     EmptyUrlListError,
     UrlListManifest,
@@ -43,11 +59,16 @@ from src.modules.seo.screaming_frog_control.url_list import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
     from src.api.server import ApiState
 
-__all__ = ["build_url_list_router", "generate_and_store_url_list", "owned_crawl_job"]
+__all__ = [
+    "build_url_list_router",
+    "generate_and_store_pasted_url_list",
+    "generate_and_store_url_list",
+    "owned_crawl_job",
+]
 
 _logger = get_logger("api.url_list_routes")
 
@@ -58,26 +79,11 @@ that way: Starlette renamed the constant (`UNPROCESSABLE_ENTITY` ->
 this module to one Starlette version. The number has not changed since RFC
 4918."""
 
-_NO_RECONCILIATION = (
-    "No Screaming Frog cross-check has been run against this crawl yet, and an "
-    "orphan is defined by that comparison — a URL this engine found that a "
-    "link-following crawl did not. Upload a Screaming Frog export for this crawl "
-    "first, then this option becomes available."
-)
-_NO_ORPHANS = (
-    "The cross-check for this crawl found no orphans: every URL this engine "
-    "discovered was also reachable by following links. There is nothing for a "
-    "list crawl to add."
-)
-_NO_RESULT = "This crawl has not finished, so it has no URLs to send."
-_ALL_DESCRIPTION = (
-    "Every URL this crawl discovered. Mostly pages Screaming Frog would reach "
-    "by itself; large, and it spends the licence's throughput on them."
-)
-_ORPHANS_DESCRIPTION = (
-    "Only the pages no internal link reaches. This is what a link-following "
-    "crawl can never audit, and the reason list mode exists."
-)
+_PASTED_LABEL = "a list you pasted"
+"""What the approval summary calls a pasted list where it would otherwise name
+the source crawl. Server-owned wording, like every `UrlListSourceOption.label`,
+so the phrase an operator approves under has one definition and not one per
+client."""
 
 
 def owned_crawl_job(state: ApiState, job_id: str, org_id: str) -> JobRecord:
@@ -101,32 +107,59 @@ def owned_crawl_job(state: ApiState, job_id: str, org_id: str) -> JobRecord:
     return record
 
 
-def _orphan_urls(state: ApiState, job_id: str) -> tuple[str, ...] | None:
-    """The saved cross-check's orphan list, or `None` if no cross-check exists."""
-    saved = state.store.read_reconciliation(job_id)
-    if saved is None:
-        return None
-    raw = saved.get("orphans")
-    if not isinstance(raw, list):
-        return ()
-    return tuple(str(url) for url in raw)
+def _build_and_store(
+    state: ApiState,
+    *,
+    org_id: str,
+    urls: Iterable[str],
+    source: UrlListSource,
+    source_job_id: str,
+    source_label: str,
+    base_url: str,
+) -> UrlListManifest:
+    """Filter, freeze and persist one list, whatever produced the URLs.
 
+    The single place a `--crawl-list` file comes into existence. Both origins
+    — a finished crawl and a block of pasted text — land here, so the ceiling,
+    the off-domain filter, the per-host SSRF check and the digest are applied
+    by one body of code and cannot drift apart. Persisting at preview time
+    rather than at download time is the whole design: the bytes an operator
+    approves a fingerprint of must already exist, so that deleting, re-running
+    or extending a source afterwards cannot change what the worker fetches.
 
-def _count_to_ceiling(urls: Iterator[str], *, ceiling: int) -> tuple[int, bool]:
-    """Count, but stop one past the ceiling.
-
-    A 100,687-page crawl takes ~3 s to stream in full; stopping at
-    `ceiling + 1` turns that into ~0.4 s while still answering the only two
-    questions this endpoint has — how many, and is it too many. The count is
-    exact whenever it matters (a list that can actually be dispatched) and
-    deliberately approximate when it does not.
+    Raises:
+        HTTPException: `422` filtering left nothing, or the list is over the
+            ceiling. Both carry the full explanation, because both are
+            decisions an operator has to make differently, not transient
+            failures to retry.
     """
-    count = 0
-    for _ in urls:
-        count += 1
-        if count > ceiling:
-            return count, True
-    return count, False
+    settings = get_settings()
+    try:
+        manifest, body = build_url_list(
+            urls,
+            source=source,
+            source_job_id=source_job_id,
+            source_label=source_label,
+            base_url=base_url,
+            max_urls=settings.screaming_frog_url_list_max_urls,
+            policy=state.url_policy,
+        )
+    except (EmptyUrlListError, UrlListTooLargeError) as exc:
+        _logger.warning(
+            "sf_url_list_refused",
+            extra={"job_id": source_job_id, "source": source.value, "reason": str(exc)},
+        )
+        raise HTTPException(_HTTP_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    state.worker_dispatch_store.store_url_list(
+        org_id=org_id,
+        sha256=manifest.sha256,
+        body=body,
+        url_count=manifest.url_count,
+        source_job_id=source_job_id,
+        retention_days=settings.worker_url_list_retention_days,
+    )
+    return manifest
 
 
 def generate_and_store_url_list(
@@ -136,76 +169,87 @@ def generate_and_store_url_list(
     record: JobRecord,
     source: UrlListSource,
 ) -> UrlListManifest:
-    """Build the list, persist its bytes, and return what names them.
-
-    Called at preview time. Persisting here rather than at download time is
-    the whole design: the bytes an operator approves a fingerprint of must
-    already exist, so that deleting, re-running or extending the source crawl
-    afterwards cannot change what the worker fetches.
+    """Build a list from one of this org's finished crawls, and persist it.
 
     Raises:
         HTTPException: `409` the crawl has no result, or "Orphans Only" was
-            asked for on a crawl with no cross-check; `422` filtering left
-            nothing, or the list is over the ceiling — both carry the full
-            explanation, because both are decisions an operator has to make
-            differently, not transient failures to retry.
+            asked for on a crawl with no cross-check; `422` from
+            `_build_and_store`.
     """
-    settings = get_settings()
-    urls = _source_urls(state, record=record, source=source)
-    try:
-        manifest, body = build_url_list(
-            urls,
-            source=source,
-            source_job_id=record.id,
-            source_label=record.label or record.id,
-            base_url=_base_url_of(record),
-            max_urls=settings.screaming_frog_url_list_max_urls,
-            policy=state.url_policy,
-        )
-    except (EmptyUrlListError, UrlListTooLargeError) as exc:
-        _logger.warning(
-            "sf_url_list_refused",
-            extra={"job_id": record.id, "source": source.value, "reason": str(exc)},
-        )
-        raise HTTPException(_HTTP_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-
-    state.worker_dispatch_store.store_url_list(
+    return _build_and_store(
+        state,
         org_id=org_id,
-        sha256=manifest.sha256,
-        body=body,
-        url_count=manifest.url_count,
+        urls=_source_urls(state, record=record, source=source),
+        source=source,
         source_job_id=record.id,
-        retention_days=settings.worker_url_list_retention_days,
+        source_label=record.label or record.id,
+        base_url=base_url_of(record),
     )
-    return manifest
 
 
-def _base_url_of(record: JobRecord) -> str:
-    """The crawl's own root, from the request it was created with.
+def generate_and_store_pasted_url_list(
+    state: ApiState,
+    *,
+    org_id: str,
+    text: str,
+    seed_url: str,
+) -> tuple[UrlListManifest, PasteCounts]:
+    """Read pasted text into a list, persist it, and return the parse account.
 
-    Read from `JobRecord.request` rather than from the result: the result is
-    the 93 MB file this feature exists to avoid opening, and the seed URL a
-    crawl was started with is already on the record. An absent or non-string
-    value yields `""`, which `build_url_list` treats as "no domain filter" —
-    visible in the returned counts rather than silently emptying the list.
+    The text is parsed **here**, server-side, and never accepted as an array a
+    client already split. The counts an operator approves and the bytes a
+    worker fetches then come from one execution of one parser, so "400 URLs"
+    in the dialog is arithmetic over the file that exists rather than a
+    browser's opinion of the same text.
+
+    `seed_url` is the already-validated dispatch seed, and its registrable
+    domain is the in-scope rule — the same rule a crawl-sourced list takes
+    from the crawl's own root. A paste covering two sites therefore keeps one
+    and reports the rest as `counts.off_domain_dropped`, rather than being
+    refused outright: which site was meant is a question `PastedUrlPlanView`
+    already put to the operator before they got here.
+
+    Args:
+        state: API state, for the SSRF policy and the dispatch store.
+        org_id: The authenticated principal's org. Scopes the stored bytes.
+        text: Exactly what the operator pasted.
+        seed_url: The validated seed URL, whose domain scopes the list.
+
+    Returns:
+        The manifest and the parse account, which the preview reports beside
+        the filtering counts so an operator sees both halves of what their
+        text turned into.
+
+    Raises:
+        HTTPException: `422` from `_build_and_store` — nothing readable
+            survived, or the list is over the ceiling.
     """
-    seed = record.request.get("base_url") or record.request.get("seed_url")
-    return seed if isinstance(seed, str) else ""
+    parsed = parse_pasted_urls(text)
+    manifest = _build_and_store(
+        state,
+        org_id=org_id,
+        urls=parsed.urls,
+        source=UrlListSource.PASTED,
+        source_job_id="",
+        source_label=_PASTED_LABEL,
+        base_url=seed_url,
+    )
+    return manifest, parsed.counts
 
 
 def _source_urls(state: ApiState, *, record: JobRecord, source: UrlListSource) -> Iterator[str]:
     """The raw URLs for one source, streamed where streaming is possible."""
     if source is UrlListSource.ORPHANS:
-        orphans = _orphan_urls(state, record.id)
+        orphans = orphan_urls(state, record.id)
         if orphans is None:
-            raise HTTPException(status.HTTP_409_CONFLICT, detail=_NO_RECONCILIATION)
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=NO_RECONCILIATION)
         return iter(orphans)
     if not record.has_result:
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=_NO_RESULT)
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=NO_RESULT)
     try:
         return state.store.iter_result_page_urls(record.id)
     except JobNotFoundError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, detail=_NO_RESULT) from exc
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=NO_RESULT) from exc
 
 
 def build_url_list_router(state: ApiState) -> APIRouter:
@@ -220,13 +264,8 @@ def build_url_list_router(state: ApiState) -> APIRouter:
 
         Served rather than inferred so a dispatch form never offers a choice
         that would fail: "Orphans Only" exists only for a crawl that has been
-        cross-checked, and a UI cannot know that without asking.
-
-        Counts here are **candidates, before filtering** — the preview call is
-        what reports the truthful post-filter numbers a modal shows ("excluded
-        18 external URLs"). Counting stops one past the ceiling, so an
-        oversized crawl answers in a fraction of a second instead of streaming
-        a 93 MB file to the end.
+        cross-checked, and a UI cannot know that without asking. The verdicts
+        and the wording are `url_list_sources`'.
 
         Raises:
             HTTPException: `401` unauthenticated; `404` unknown crawl;
@@ -234,95 +273,47 @@ def build_url_list_router(state: ApiState) -> APIRouter:
         """
         principal = require_principal(authorization, session_secret=state.session_secret)
         record = owned_crawl_job(state, job_id, principal.org_id)
-        ceiling = get_settings().screaming_frog_url_list_max_urls
-        return UrlListSourcesView(
-            job_id=record.id,
-            label=record.label,
-            base_url=_base_url_of(record),
-            max_urls=ceiling,
-            sources=[
-                _orphans_option(state, record, ceiling),
-                _all_option(state, record, ceiling),
-            ],
+        return sources_view(state, record, get_settings().screaming_frog_url_list_max_urls)
+
+    @router.post("/url-list/paste/plan", response_model=PastedUrlPlanView)
+    def plan_pasted_url_list(
+        payload: PastedUrlPlanRequest, authorization: str | None = Header(default=None)
+    ) -> PastedUrlPlanView:
+        """Read pasted text and report what it would crawl. Nothing is stored.
+
+        The paste-mode counterpart of `.../url-list/sources`, and it exists
+        for the same reason: a dispatch form must not offer a choice that
+        would fail, and it cannot work out on its own which site a block of
+        text is about. A pasted list still needs a `seed_url` — its
+        registrable domain is what the list is filtered against — and with no
+        source crawl there is nothing to take one from, so this call proposes
+        one and names every other domain the text covers.
+
+        Parsing happens here rather than in the browser so that the rule has
+        one owner: the counts shown before approval and the bytes generated at
+        preview come from the same parser on the same text.
+
+        No list is generated, no digest minted and nothing persisted. This is
+        a reading of text the caller already holds, so it grants no access to
+        anything, and the bytes are still frozen at preview time (ADR 0023).
+
+        Raises:
+            HTTPException: `401` unauthenticated.
+        """
+        require_principal(authorization, session_secret=state.session_secret)
+        return _plan_view(
+            plan_pasted_urls(payload.urls, max_urls=get_settings().screaming_frog_url_list_max_urls)
         )
 
     return router
 
 
-def _orphans_option(state: ApiState, record: JobRecord, ceiling: int) -> UrlListSourceOption:
-    """Availability of the recommended source, with the reason when it is not."""
-    orphans = _orphan_urls(state, record.id)
-    if orphans is None:
-        return UrlListSourceOption(
-            source=UrlListSource.ORPHANS,
-            label="Orphans Only (Recommended)",
-            description=_ORPHANS_DESCRIPTION,
-            available=False,
-            unavailable_reason=_NO_RECONCILIATION,
-        )
-    if not orphans:
-        return UrlListSourceOption(
-            source=UrlListSource.ORPHANS,
-            label="Orphans Only (Recommended)",
-            description=_ORPHANS_DESCRIPTION,
-            available=False,
-            unavailable_reason=_NO_ORPHANS,
-            candidate_url_count=0,
-        )
-    count, exceeds = _count_to_ceiling(iter(orphans), ceiling=ceiling)
-    return UrlListSourceOption(
-        source=UrlListSource.ORPHANS,
-        label="Orphans Only (Recommended)",
-        description=_ORPHANS_DESCRIPTION,
-        available=not exceeds,
-        unavailable_reason=_over_ceiling_reason(ceiling) if exceeds else "",
-        candidate_url_count=count,
-        exceeds_ceiling=exceeds,
-    )
-
-
-def _all_option(state: ApiState, record: JobRecord, ceiling: int) -> UrlListSourceOption:
-    """Availability of the whole discovered set."""
-    if not record.has_result:
-        return UrlListSourceOption(
-            source=UrlListSource.ALL,
-            label="All Discovered URLs",
-            description=_ALL_DESCRIPTION,
-            available=False,
-            unavailable_reason=_NO_RESULT,
-        )
-    try:
-        count, exceeds = _count_to_ceiling(
-            state.store.iter_result_page_urls(record.id), ceiling=ceiling
-        )
-    except (JobNotFoundError, RankunoError, OSError) as exc:
-        _logger.warning(
-            "sf_url_list_source_unreadable", extra={"job_id": record.id, "error": str(exc)}
-        )
-        return UrlListSourceOption(
-            source=UrlListSource.ALL,
-            label="All Discovered URLs",
-            description=_ALL_DESCRIPTION,
-            available=False,
-            unavailable_reason=_NO_RESULT,
-        )
-    return UrlListSourceOption(
-        source=UrlListSource.ALL,
-        label="All Discovered URLs",
-        description=_ALL_DESCRIPTION,
-        available=not exceeds,
-        unavailable_reason=_over_ceiling_reason(ceiling) if exceeds else "",
-        candidate_url_count=count,
-        exceeds_ceiling=exceeds,
-    )
-
-
-def _over_ceiling_reason(ceiling: int) -> str:
-    """Why an oversized source is offered as unavailable rather than trimmed."""
-    return (
-        f"This crawl holds more than {ceiling:,} URLs, the ceiling for one list "
-        f"(SCREAMING_FROG_URL_LIST_MAX_URLS). The list is not trimmed to fit, "
-        f"because a trimmed list audits fewer pages than the approval says it "
-        f"does. Use 'Orphans Only', which is smaller and is the recommended "
-        f"source."
+def _plan_view(plan: PastedUrlPlan) -> PastedUrlPlanView:
+    """Map the module's plan onto its wire shape, which is a `list` not a tuple."""
+    return PastedUrlPlanView(
+        counts=plan.counts,
+        domains=list(plan.domains),
+        suggested_seed_url=plan.suggested_seed_url,
+        max_urls=plan.max_urls,
+        exceeds_ceiling=plan.exceeds_ceiling,
     )

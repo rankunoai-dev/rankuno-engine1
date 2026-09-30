@@ -391,7 +391,18 @@ export interface WorkerTemplatesView {
  * would still render — label, description and availability all come from the
  * response — so the union costs nothing at runtime.
  */
-export type UrlListSource = "orphans" | "all";
+export type UrlListSource = "orphans" | "all" | "pasted";
+
+/**
+ * The subset of `UrlListSource` that names a set of a **finished crawl's** URLs.
+ *
+ * `GET /jobs/{id}/url-list/sources` only ever offers these two: it is asked
+ * about one crawl, and "pasted" has no crawl behind it. Narrower than
+ * `UrlListSource` on purpose — it is what keeps a source picked from a crawl
+ * from being sent as a paste, which the server would reject for carrying no
+ * text.
+ */
+export type CrawlUrlListSource = Exclude<UrlListSource, "pasted">;
 
 /**
  * One offered — or refused — list source. Mirrors `UrlListSourceOption`.
@@ -408,7 +419,7 @@ export type UrlListSource = "orphans" | "all";
  * number.
  */
 export interface UrlListSourceOption {
-  source: UrlListSource;
+  source: CrawlUrlListSource;
   label: string;
   description: string;
   available: boolean;
@@ -456,6 +467,7 @@ export interface UrlListCounts {
  */
 export interface UrlListView {
   source: UrlListSource;
+  /** `""` for a pasted list, which has no source crawl to name. */
   source_job_id: string;
   source_label: string;
   /** The domain every kept URL sits inside — the rule behind the exclusions. */
@@ -464,13 +476,78 @@ export interface UrlListView {
   sha256: string;
   sample: string[];
   counts: UrlListCounts;
+  /** How the text was read, for a pasted list. Absent or `null` otherwise. */
+  paste?: PasteCounts | null;
 }
 
-/** Which crawl's URLs, and which subset. Mirrors `UrlListRequest`. */
-export interface UrlListRequest {
-  source_job_id: string;
-  /** No default on the wire: "which URLs" is the decision being approved. */
-  source: UrlListSource;
+/**
+ * Where a list-mode dispatch's URLs come from. Mirrors `UrlListRequest`.
+ *
+ * A discriminated union, not one object with two optional halves, because the
+ * server rejects a request carrying both: which set was approved has to have
+ * one answer. `source` is never defaulted — "which URLs" is the decision being
+ * approved.
+ *
+ * The pasted variant sends the operator's **raw text**, unsplit. Counting the
+ * lines here and sending an array would make the browser the owner of a rule
+ * that decides what gets crawled, and the number in the approval dialog would
+ * then be one this code produced rather than one the generated file has.
+ */
+export type UrlListRequest =
+  | { source: "orphans" | "all"; source_job_id: string }
+  | { source: "pasted"; urls: string };
+
+/**
+ * How a block of pasted text was read. Mirrors `PasteCounts`.
+ *
+ * Parsing only. Deduplication and the off-domain filter are `UrlListCounts`'.
+ * The fields reconcile exactly: `lines` minus `blank_dropped`,
+ * `header_dropped` and `malformed_dropped` equals `accepted`.
+ * `spreadsheet_rows` and `scheme_added` annotate accepted lines and are
+ * outside that sum.
+ *
+ * `malformed_examples` is operator-supplied text quoted back. Render it as
+ * text nodes; it has been nowhere near a sanitiser.
+ */
+export interface PasteCounts {
+  lines: number;
+  blank_dropped: number;
+  header_dropped: number;
+  malformed_dropped: number;
+  accepted: number;
+  spreadsheet_rows: number;
+  scheme_added: number;
+  malformed_examples: string[];
+}
+
+/** One domain a paste covers. Mirrors `PastedDomain`. */
+export interface PastedDomain {
+  registrable_domain: string;
+  /** Candidates *before* filtering, like `UrlListSourceOption.candidate_url_count`. */
+  url_count: number;
+  /** An address to seed the dispatch with, if this domain is the chosen one. */
+  suggested_seed_url: string;
+}
+
+/**
+ * What a paste would crawl, before anything is generated. Mirrors
+ * `PastedUrlPlanView` — `POST /url-list/paste/plan`.
+ *
+ * Nothing is stored by the call that returns this and no digest is minted.
+ * It exists to answer the one question a pasted list cannot answer for
+ * itself: which site it is about. `domains` holding more than one entry is
+ * the case only the operator can settle, because one crawl has one in-scope
+ * domain and the rest will be excluded and counted.
+ */
+export interface PastedUrlPlan {
+  counts: PasteCounts;
+  domains: PastedDomain[];
+  /** The largest group's root, or `""` when nothing could be read. */
+  suggested_seed_url: string;
+  /** The server's ceiling for one list. Never hardcode it in the UI. */
+  max_urls: number;
+  /** The largest group alone is already over the ceiling, so a preview would refuse. */
+  exceeds_ceiling: boolean;
 }
 
 /** What `POST /workers/{id}/dispatch/preview` accepts. */
@@ -767,6 +844,20 @@ export interface CrawlDataAdapter {
    */
   listUrlListSources?(jobId: string): Promise<UrlListSourcesView>;
 
+  /**
+   * What a pasted block of text would crawl, read by the server.
+   *
+   * Asked rather than worked out locally for the same reason as
+   * `listUrlListSources`, and one more: this call proposes the `seed_url` a
+   * pasted list has no source crawl to take one from, and the seed's
+   * registrable domain is what the whole list is filtered against. A browser
+   * that derived it would own a rule that decides what gets crawled.
+   *
+   * Nothing is stored and no digest is minted. Optional like its sibling:
+   * absent means the paste control is not offered at all.
+   */
+  planPastedUrlList?(urls: string): Promise<PastedUrlPlan>;
+
   /** Every Screaming Frog dispatch for the caller's org. Not `/jobs`. */
   listWorkerJobs?(): Promise<WorkerJobView[]>;
 
@@ -818,6 +909,7 @@ export type WorkerDispatchAdapter = Pick<
   | "previewDispatch"
   | "confirmDispatch"
   | "listUrlListSources"
+  | "planPastedUrlList"
   | "listWorkerJobs"
   | "downloadWorkerBundle"
   | "listAvailableMasterfiles"

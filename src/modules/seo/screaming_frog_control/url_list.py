@@ -28,10 +28,12 @@ The pipeline, in this order, every stage counted:
    different resource and collapsing it would silently drop real pages.
 2. **Scheme** — `http`/`https` only. A crawl graph can hold `mailto:` and
    `tel:` links; Screaming Frog would report each as an error row.
-3. **Registrable domain** — anything outside the source crawl's own domain is
+3. **Registrable domain** — anything outside the list's own domain is
    removed and *counted*, never a reason to refuse the whole list. A crawl of
    one site routinely holds a handful of outbound links, and refusing a
-   10,000-URL list over 18 of them would be useless.
+   10,000-URL list over 18 of them would be useless. The domain comes from the
+   source crawl's root, or — for a pasted list, which has no source crawl —
+   from the seed URL the operator confirmed on the form (`pasted_url_list`).
 4. **Host safety** — `UrlSafetyPolicy`, once per unique host. A same-site list
    has one to five hosts; validating per URL would mean 50,000 `getaddrinfo`
    calls for a list that resolves two names (`UrlSafetyPolicy.validate` has no
@@ -118,6 +120,19 @@ class UrlListSource(StrEnum):
     discovered set is a legitimate, occasional request, not because it is the
     normal one."""
 
+    PASTED = "pasted"
+    """URLs an operator pasted, with no source crawl behind them at all.
+
+    The plain case the other two members cannot serve: 400 addresses in a
+    spreadsheet that this engine has never crawled. Reading the text is
+    `pasted_url_list.parse_pasted_urls`; everything after it — dedupe, scheme,
+    domain, host safety, ceiling, render, digest — is this module's, unchanged,
+    because the guarantees an approval rests on must not depend on where the
+    URLs came from.
+
+    `source_job_id` is empty for this member, and that is the one field it
+    changes: there is no crawl to name."""
+
 
 class UrlListCounts(StrictModel):
     """What each filtering stage removed, so a UI can say so truthfully.
@@ -147,7 +162,11 @@ class UrlListManifest(StrictModel):
 
     Attributes:
         source: Which set was asked for.
-        source_job_id: The Rankuno crawl the URLs came from.
+        source_job_id: The Rankuno crawl the URLs came from, or `""` for a
+            pasted list, which has none. Empty rather than `None` because the
+            store column is `NOT NULL DEFAULT ''` and an audit field that is
+            sometimes absent and sometimes blank has two ways to say one
+            thing.
         source_label: That crawl's human-facing label, so the approval
             summary can name it rather than showing a bare job id.
         registrable_domain: The domain every kept URL is inside. Recorded
@@ -161,13 +180,28 @@ class UrlListManifest(StrictModel):
     """
 
     source: UrlListSource
-    source_job_id: str = Field(min_length=1, max_length=64)
+    source_job_id: str = Field(default="", max_length=64)
     source_label: str = Field(default="", max_length=400)
     registrable_domain: str = Field(default="", max_length=253)
     url_count: int = Field(ge=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     sample: tuple[str, ...] = ()
     counts: UrlListCounts
+
+
+_OVER_CEILING_ALTERNATIVE = {
+    UrlListSource.ALL: " Choose 'Orphans Only', which is smaller and is the recommended source.",
+    UrlListSource.PASTED: (
+        " Send fewer URLs, or split the list and dispatch it as more than one run."
+    ),
+}
+"""What an operator can actually do instead, per source, when a list is refused.
+
+`ORPHANS` is absent and that is deliberate: it is already the smallest source,
+so there is nothing smaller to recommend and a sentence saying so would be
+padding. `PASTED` cannot be told to choose a different source either — the
+operator chose the URLs — so it is told the only two things that work.
+Refusing with no route forward is the failure this table exists to prevent."""
 
 
 class UrlListTooLargeError(RankunoError):
@@ -195,11 +229,7 @@ class UrlListTooLargeError(RankunoError):
         self.url_count = url_count
         self.ceiling = ceiling
         self.source = source
-        alternative = (
-            ""
-            if source is UrlListSource.ORPHANS
-            else " Choose 'Orphans Only', which is smaller and is the recommended source."
-        )
+        alternative = _OVER_CEILING_ALTERNATIVE.get(source, "")
         super().__init__(
             f"this crawl's '{source.value}' URL list holds {url_count:,} URLs, over the "
             f"{ceiling:,} ceiling (SCREAMING_FROG_URL_LIST_MAX_URLS), so nothing was "
@@ -349,9 +379,12 @@ def build_url_list(
             more than the kept set (`src.core.json_stream`).
         source: Which set was asked for. Carried through to the manifest and
             into the refusal messages.
-        source_job_id: The crawl these came from.
-        source_label: That crawl's human-facing label, for the approval text.
-        base_url: The crawl's own root. Its registrable domain is the
+        source_job_id: The crawl these came from, or `""` for a pasted list.
+        source_label: What the approval text should call the source — a
+            crawl's own label, or a phrase naming the paste.
+        base_url: The site the list is scoped to. For a crawl-sourced list
+            that is the crawl's own root; for a pasted one it is the seed URL
+            the operator confirmed on the form. Its registrable domain is the
             in-scope rule; an unparseable `base_url` disables the domain
             filter rather than silently emptying the list.
         max_urls: The ceiling. Exceeding it refuses.
