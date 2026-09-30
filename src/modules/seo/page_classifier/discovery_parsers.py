@@ -242,15 +242,23 @@ def parse_sitemap(xml_text: str, source_name: str = "") -> SitemapDocument:
 
 
 class _AnchorCollector(HTMLParser):
-    """Collect every `<a href>` in a document, navigation or otherwise."""
+    """Collect every `<a href>` in a document, and the first `<base href>`."""
 
     def __init__(self) -> None:
         """Start with no links collected."""
         super().__init__(convert_charrefs=True)
         self.hrefs: list[str] = []
+        self.base_href: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        """Record anchor targets."""
+        """Record anchor targets and the document's base URL."""
+        if tag == "base" and self.base_href is None:
+            # Only the first `<base>` carrying an href counts, as in a browser.
+            for name, value in attrs:
+                if name.lower() == "href" and value:
+                    self.base_href = value.strip()
+                    return
+            return
         if tag != "a":
             return
         for name, value in attrs:
@@ -259,7 +267,35 @@ class _AnchorCollector(HTMLParser):
                 return
 
 
-def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True) -> tuple[str, ...]:
+def _resolution_base(base_href: str | None, landed_url: str, site: str) -> str:
+    """The URL a page's relative links resolve against.
+
+    The `<base href>` if the document declares a usable one, itself resolved
+    against where the fetch landed; otherwise the landed URL. A `<base>` naming
+    another site, or a non-http(s) scheme, is ignored rather than obeyed: the
+    markup is third-party input and must not be able to aim the crawl anywhere
+    the same-site filter would not already allow.
+    """
+    if not base_href:
+        return landed_url
+    try:
+        resolved = urljoin(landed_url, base_href)
+    except ValueError:
+        return landed_url
+    parts = safe_split(resolved)
+    if parts is None or parts.scheme not in {"http", "https"} or site_host(parts.netloc) != site:
+        _logger.debug("base_href_ignored", extra={"url": landed_url, "base_href": base_href})
+        return landed_url
+    return resolved
+
+
+def extract_page_links(
+    html: str,
+    base_url: str,
+    *,
+    same_host_only: bool = True,
+    document_url: str = "",
+) -> tuple[str, ...]:
     """Extract outbound page links from a document.
 
     This is Path B's primitive: the DOM link graph is what finds the pages a
@@ -269,11 +305,17 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
 
     Args:
         html: Raw page HTML.
-        base_url: Absolute URL of the page, used to resolve relative links.
+        base_url: Absolute URL the page was requested at. Anchors the
+            same-site filter, and resolves relative links when `document_url`
+            is not given.
         same_host_only: Drop links leaving the site. External links are not part
             of the site graph and following them would be an unbounded crawl.
             `www.example.com` and `example.com` count as one site; any other
             subdomain does not.
+        document_url: Where the fetch landed after redirects. Relative links
+            resolve against this (or the page's `<base href>`), as a browser
+            would; resolving against `base_url` after a cross-directory
+            redirect fabricated URLs that exist nowhere on the site.
 
     Returns:
         Absolute URLs, de-duplicated and order-preserved.
@@ -292,13 +334,14 @@ def extract_page_links(html: str, base_url: str, *, same_host_only: bool = True)
 
     base_split = safe_split(base_url)
     base_host = site_host(base_split.netloc) if base_split else ""
+    resolve_against = _resolution_base(collector.base_href, document_url or base_url, base_host)
     found: dict[str, None] = {}
 
     for href in collector.hrefs:
         if href.startswith(_SKIP_LINK_PREFIXES):
             continue
         try:
-            absolute = urljoin(base_url, href)
+            absolute = urljoin(resolve_against, href)
         except ValueError as exc:
             # A malformed href makes `urljoin` raise, so one bad link used to
             # abort extraction for the whole page — every other link on it was

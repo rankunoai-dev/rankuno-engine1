@@ -999,3 +999,103 @@ class TestCooperativeCancellation:
         # Path A still ran: the sitemap URLs are real, unaffected data.
         assert report.from_sitemap > 0
         assert graph.html_for("https://e.com/") is None, "the homepage was never fetched"
+
+
+def _redirect_site(page_html: str, *, redirect: bool = True) -> dict[str, httpx.Response]:
+    """A home page linking to `/old/`, which may 301 to `/new/sub/`.
+
+    The body under test is served at `/new/sub/` when `redirect` is set and at
+    `/old/` directly otherwise, so the same markup is exercised with and without
+    the hop.
+    """
+    routes = {
+        "/robots.txt": httpx.Response(200, text=ROBOTS),
+        "/": html('<html><body><a href="/old/">Old</a></body></html>'),
+    }
+    if redirect:
+        routes["/old/"] = httpx.Response(301, headers={"location": "https://e.com/new/sub/"})
+        routes["/new/sub/"] = html(page_html)
+    else:
+        routes["/old/"] = html(page_html)
+    return routes
+
+
+def _crawl(settings, routes: dict[str, httpx.Response], path: str) -> set[str]:
+    """Run one crawl path over `routes` and return every node URL it recorded.
+
+    The handler returns the table's own `Response`, headers intact, because the
+    `Location` header is the fixture; `build_fetcher` keeps only content-type.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        template = routes.get(request.url.path)
+        if template is None:
+            return httpx.Response(404, text="not found")
+        return httpx.Response(
+            template.status_code, content=template.content, headers=template.headers
+        )
+
+    def fetcher() -> HttpFetcher:
+        return HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+            async_transport=httpx.MockTransport(handler),
+        )
+
+    if path == "serial":
+        graph, _ = discover_site(fetcher(), "https://e.com")
+    else:
+
+        async def scenario() -> SiteGraph:
+            async with fetcher() as client:
+                result, _ = await adiscover_site(client, "https://e.com")
+                return result
+
+        graph = asyncio.run(scenario())
+    return {node.url for node in graph.nodes}
+
+
+@pytest.mark.parametrize("path", ["serial", "async"])
+class TestLinksResolveAgainstTheDocumentUrl:
+    """Relative links resolve the way a browser resolves them.
+
+    Against the page's `<base href>` if it has a usable one, otherwise against
+    where the fetch *landed* — not the URL that was requested. Resolving
+    against the requested URL after a cross-directory redirect fabricates
+    addresses that exist nowhere on the site, fetches them for 404s, and tags
+    them `dom_link` as if the site linked to them.
+    """
+
+    def test_a_relative_link_after_a_redirect_resolves_against_the_final_url(self, settings, path):
+        urls = _crawl(settings, _redirect_site('<a href="child">c</a>'), path)
+        assert "https://e.com/new/sub/child" in urls
+        assert "https://e.com/old/child" not in urls, "fabricated from the requested URL"
+
+    def test_base_href_is_honoured(self, settings, path):
+        page = '<head><base href="/other/dir/"></head><a href="child">c</a>'
+        urls = _crawl(settings, _redirect_site(page, redirect=False), path)
+        assert "https://e.com/other/dir/child" in urls
+        assert "https://e.com/old/child" not in urls
+
+    def test_base_href_after_a_redirect_is_honoured(self, settings, path):
+        """The original probe: a redirect and a `<base>` naming the destination."""
+        page = '<head><base href="/new/sub/"></head><a href="child">c</a>'
+        urls = _crawl(settings, _redirect_site(page), path)
+        assert "https://e.com/new/sub/child" in urls
+        assert "https://e.com/old/child" not in urls
+
+    def test_absolute_path_and_full_url_links_are_unaffected_by_a_redirect(self, settings, path):
+        page = '<a href="/x/">x</a><a href="https://e.com/full/">f</a>'
+        urls = _crawl(settings, _redirect_site(page), path)
+        assert {"https://e.com/x/", "https://e.com/full/"} <= urls
+
+    def test_without_a_redirect_relative_links_resolve_against_the_page(self, settings, path):
+        urls = _crawl(settings, _redirect_site('<a href="child">c</a>', redirect=False), path)
+        assert "https://e.com/old/child" in urls
+
+    def test_an_off_site_base_href_cannot_move_the_crawl(self, settings, path):
+        page = '<head><base href="https://evil.example/"></head><a href="child">c</a>'
+        urls = _crawl(settings, _redirect_site(page), path)
+        assert "https://e.com/new/sub/child" in urls, "falls back to the final URL"
+        assert not any("evil.example" in url for url in urls)
