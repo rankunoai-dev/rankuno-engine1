@@ -3,7 +3,9 @@
 - **Status**: Accepted
 - **Date**: 2026-09-30
 - **Deciders**: User (Gaurav Doshi), Lead AI Systems Engineer
-- **Note**: Number chosen as next free on branch `fix-path-case`; may be renumbered at merge.
+- **Note**: Written as 0026 on branch `fix-path-case`; renumbered to 0027 at integration
+  (commit 5c0d149) because the provenance ADR claimed 0026 in parallel. Commit 383d01f's
+  message still cites "ADR 0026" for this decision.
 
 ---
 
@@ -53,7 +55,8 @@ The user chose to keep path case.
   change are not comparable for such sites.
 - Stored crawls are not migrated. Search Console resolution and `dedupe_profiles` recompute the
   key from the raw stored URL, so old results re-key under the new rule when read. Checkpoints
-  hold URLs only and are never resumed, so nothing there has to match.
+  hold URLs and per-URL source codes (ADR 0026) and are never resumed, so nothing there has to
+  match.
 - A site that serves one page under several casings without redirecting will now show them as
   separate pages. That matches what Screaming Frog and Google report, and it is a real
   duplicate-content finding.

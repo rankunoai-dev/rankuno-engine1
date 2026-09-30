@@ -339,7 +339,18 @@ src/
     │       ├── schemas.py            # FullPageIntelligenceProfile + taxonomy
     │       ├── weights.py            # Weight profiles + site-profile seam
     │       ├── site_profile.py       # Runtime platform detection (probe pass)
-    │       ├── discovery.py          # 3-path merged discovery -> PageEvidence
+    │       ├── discovery.py          # 3-path merged discovery -> PageEvidence.
+    │       │                         # Per-URL DiscoverySource flags (sitemap/
+    │       │                         # dom_link/cms_api, OR-merged). Fetch
+    │       │                         # ledger outcome robots_disallowed via one
+    │       │                         # _refusal_outcome_for in all six fetch
+    │       │                         # handlers (was transport_error; cycle 0127,
+    │       │                         # ADR 0026). all_url_sources() feeds the
+    │       │                         # checkpoint's "sources" list, index-aligned
+    │       │                         # with "urls"; a missing or malformed list
+    │       │                         # recovers as "unknown", never all-False.
+    │       │                         # landed_url(): where a fetch ended up after
+    │       │                         # redirects (cycle 0128)
     │       ├── async_discovery.py    # Concurrent crawl path (level-synchronous BFS).
     │       │                         # Cooperative cancellation (cycle 0126, ADR 0025):
     │       │                         # an optional threading.Event, checked in
@@ -349,7 +360,28 @@ src/
     │       │                         # Path A (sitemap)/Path C (CMS) are not gated and
     │       │                         # run to completion. Never aborts an in-flight
     │       │                         # fetch; that is REQUEST_DEADLINE_S's bound (200s)
-    │       ├── discovery_parsers.py  # Sitemap XML, DOM links, CMS payloads
+    │       ├── discovery_parsers.py  # Sitemap XML, DOM links, CMS payloads.
+    │       │                         # extract_page_links resolves relative
+    │       │                         # links against the landed URL and the
+    │       │                         # first same-site http(s) <base href>; an
+    │       │                         # off-site base is ignored (cycle 0128).
+    │       │                         # Breadcrumbs/canonical still resolve
+    │       │                         # against the requested URL
+    │       ├── navigation_context.py # Discovery Method + reachability tier per
+    │       │                         # page (urls.xlsx/pdf, GSC table).
+    │       │                         # SITEMAP_ONLY requires the sitemap flag;
+    │       │                         # unlinked without it, incl. CMS-only, is
+    │       │                         # ORPHANED (unreachable before cycle 0127)
+    │       ├── screaming_frog_reconciler.py
+    │       │                         # Engine vs Screaming Frog set comparison.
+    │       │                         # Engine-only reason from the crawl's own
+    │       │                         # flags (ADR 0026): LINKED_NOT_IN_EXPORT,
+    │       │                         # SITEMAP_ONLY_NO_LINK, CMS_API_ONLY,
+    │       │                         # PROVENANCE_UNKNOWN; SITEMAP_ORPHAN is
+    │       │                         # legacy, read but never produced.
+    │       │                         # orphans = reason in ORPHAN_REASONS, the
+    │       │                         # same set as before, so "Orphans Only"
+    │       │                         # list mode sends the same URLs
     │       ├── content_signals.py    # Native title/H1/meta-description
     │       │                         # extraction (html.parser, no new dep).
     │       │                         # Hooked into discovery.SiteGraph
@@ -374,7 +406,10 @@ src/
     │       │                         # Search Console profile, or None (ADR 0012)
     │       ├── nav_tree_parser.py    # Header menu -> tree (footer excluded)
     │       ├── logical_hierarchy.py  # Maps URLs to menu sections; OTHERS bucket
-    │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules
+    │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules.
+    │       │                         # Path case preserved (ADR 0027, cycle
+    │       │                         # 0129): only scheme/host lowercased; kept
+    │       │                         # percent-escapes upper-cased
     │       ├── signal_parsers.py     # The 5 structural consensus signals
     │       ├── cascading_pipeline.py # Layer 0-3 cascade + weighted consensus
     │       └── audit_export.py       # Profiles -> AuditDataset(source=ENGINE).
@@ -589,7 +624,12 @@ src/
     │       │                    # integrations/, persistence in the job store.
     │       ├── schemas.py             # GSC/GA4 metrics + resolution outcome
     │       ├── url_identity.py        # Google URL -> crawled page, with the
-    │       │                          # match rate and why each miss missed
+    │       │                          # match rate and why each miss missed.
+    │       │                          # Exact (case-preserving) lookup first;
+    │       │                          # path-case folding only as the explicit
+    │       │                          # MatchTier.CASE_FOLDED fallback, AMBIGUOUS
+    │       │                          # when two pages differ only by case
+    │       │                          # (ADR 0027). 442 lines, over target
     │       ├── aggregator.py          # Section rollups keyed by whole trail.
     │       │                          # Rates recomputed, never averaged;
     │       │                          # unresolved rows held, never dropped
@@ -745,6 +785,8 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0021](adr/0021-no-binary-config-upload-to-a-worker.md) | **A browser may not upload a `.seospiderconfig` to a worker**; a description may travel the other way. A `.seospiderconfig` is a Java `ObjectInputStream` blob this codebase cannot parse, so [ADR 0015](adr/0015-cloud-local-desktop-worker-architecture.md) condition 8's worker-side re-validation is structurally impossible for it, and `Principal` has no role field so "only an admin may upload" is inexpressible. No upload endpoint, no engine→worker byte channel, and the dispatch envelope chain carries a template **name** and never template **content** — unchanged, so gate (b)'s HMAC covers exactly what it covered before. Populating the template directory stays a one-time operator action in the Screaming Frog GUI. What ships instead is rung 1 of a three-rung ladder: a sidecar `<name>.md` description carried worker→cloud→browser, documentation only, never configuration, and treated as hostile at every boundary. Rung 2 (hash-pinned allow-list) and rung 3 (upload to quarantine, gated on `Principal` gaining a role field) are not built. Status: APPROVED. Implemented as `core/worker_templates.py`, `screaming_frog_control/template_registry.py` `scan()`, `alembic/versions/0005_worker_template_descriptions.py` [build-log 0117](build-log/0117-a-sentence-beside-a-binary.md) |
 | [0023](adr/0023-a-url-list-travels-as-a-digest.md) | **The signed dispatch envelope gains a field, and a URL list travels as a digest.** `url_list_sha256` is the first field added to `WorkerJobEnvelope` since [ADR 0015](adr/0015-cloud-local-desktop-worker-architecture.md), so this is a documented **reversal** of the envelope's own "deliberately carries nothing else" stance and it narrows condition 8 — for this field the worker's re-validation is a digest comparison, not a semantic re-check. Only the 64-char SHA-256 is signed: the bytes live in a content-addressed `worker_dispatch_url_lists` table (migration 0007) and are fetched over the worker's own authenticated, org-scoped channel, because a 10,000-entry list inside an assignment token would make the token enormous, while signing a digest inherits condition 4's property that tampering with either half invalidates the same HMAC — no second signature and no change to the signing construction. The digest is deliberately **not** sent in a response header: a copy beside the bytes is a copy anyone who can alter the bytes can also alter. Over `SCREAMING_FROG_URL_LIST_MAX_URLS` (10,000) the list is **refused, never trimmed** — a silently truncated list audits fewer pages than the approval text says and would destroy the free-tier truncation check; off-domain URLs are the opposite case, dropped and *counted*. SSRF is validated at admission **once per unique host**, because `UrlSafetyPolicy.validate()` calls an uncached `socket.getaddrinfo` and a per-URL check would be 50,000 blocking lookups in a request handler. **The worker does not re-apply `UrlSafetyPolicy` to the entries it downloads** — it verifies the digest only — so list-mode SSRF is cloud-side admission alone, on the far side of the hop ADR 0015 calls untrusted; recorded as an obligation, not as done. Status: APPROVED. Implemented as `modules/seo/screaming_frog_control/url_list.py`/`worker_url_list.py`, `core/json_stream.py`, `api/url_list_routes.py` and the `core/worker_dispatch_*` chain [build-log 0119](build-log/0119-a-list-that-travels-as-a-hash.md) |
 | [0025](adr/0025-cooperative-cancellation-is-python-crawler-only.md) | **Cooperative cancellation stops new fetches on the Python crawler only.** `POST /jobs/{id}/cancel` previously released only the concurrency slot; a per-job `threading.Event` on `ApiState`, set before `release()` (order load-bearing — reversed, the registry entry the lookup depends on is already gone), is now checked by `async_discovery.py` before a queued fetch claims a slot and before a new BFS level begins, so no *new* Path B (DOM) fetch starts once cancelled — an in-flight fetch still runs to `REQUEST_DEADLINE_S` (200s). Path A (sitemap) and Path C (CMS) are not gated. **Screaming Frog cancellation is deliberately out of scope**: `ScreamingFrogTool.execute()`'s poll loop cannot currently distinguish a normal process exit from an externally-triggered `terminate()` (confirmed by reading the loop directly), so wiring a cancel-triggered `terminate()` into it without first fixing that would risk reporting a killed crawl as `SUCCEEDED` — the same failure shape build-log 0113 already found once. Closes DEF-02 from the RAE defect comparison. Status: APPROVED. Implemented in `src/api/server.py` (`ApiState._cancel_flags`, `cancel_job`), `modules/seo/page_classifier/async_discovery.py`, `modules/seo/page_classifier/tool.py` [build-log 0126](build-log/0126-a-flag-checked-before-the-fetch-starts.md). Found, not fixed: `DiskJobStore`/`PostgresJobStore`'s `_transition` has no terminal-state guard, so a cancelled job's now-fast exit usually overwrites `cancel_job`'s `FAILED` with `PARTIAL` moments later |
+| [0026](adr/0026-url-provenance-reports-evidence-or-says-unknown.md) | **A URL's provenance is reported from evidence, or reported as unknown** — never a plausible default. The Screaming Frog engine-only reason is decided from the page's `DiscoverySource` flags (`LINKED_NOT_IN_EXPORT`, `SITEMAP_ONLY_NO_LINK`, `CMS_API_ONLY`, `PROVENANCE_UNKNOWN`) instead of an unconditional `SITEMAP_ORPHAN`; `orphans` membership is unchanged by construction (user decision: "same URLs, honest labels"), because list mode defines an orphan as a URL Screaming Frog's link-following crawl did not reach. Navigation `SITEMAP_ONLY` requires the sitemap flag; robots refusals get their own `robots_disallowed` outcome; checkpoints carry per-URL source letters and an old one says it does not know. Status: Accepted. Phase 1 only [build-log 0127](build-log/0127-a-reason-the-crawl-never-recorded.md) |
+| [0027](adr/0027-url-path-case-is-significant.md) | **URL path case is significant in the page identity.** `normalize_path` stops lowercasing (RFC 3986 makes only scheme and host case-insensitive); kept percent-escapes are upper-cased; Search Console/GA4 matching folds case only as an explicit `MatchTier.CASE_FOLDED` fallback, `AMBIGUOUS` when two crawled pages differ only by case. Reverses the build-log 0079 §4.1 fixture ruling. No migration; `gsc_property_validator.py` still lowercases the whole property URL. Status: Accepted (user decision). Renumbered from 0026 at integration [build-log 0129](build-log/0129-two-pages-that-differed-only-by-case.md) |
 
 ---
 
