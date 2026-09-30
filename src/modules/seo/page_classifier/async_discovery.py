@@ -828,7 +828,7 @@ async def _acrawl(
             url, html = item
             graph.store_html(url, html)
 
-            links = extract_page_links(html, url)
+            links = extract_page_links(html, url, document_url=graph.landed_url(url))
             for target in graph.record_links(url, links, depth):
                 key = normalize_url(target)
                 if key not in seen:

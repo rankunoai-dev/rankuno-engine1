@@ -783,6 +783,17 @@ class SiteGraph:
         """
         return self._html.get(normalize_url(url))
 
+    def landed_url(self, url: str) -> str:
+        """Where a fetch of `url` actually landed, or `url` if nothing is known.
+
+        The page's relative links are relative to *this* address, not the one
+        requested: after `/old/` redirects to `/new/sub/`, `href="child"` is
+        `/new/sub/child`. The node keeps its discovery key (`record_fetch`);
+        only link resolution needs the destination.
+        """
+        node = self._nodes.get(normalize_url(url))
+        return (node.final_url if node is not None else "") or url
+
     def to_page_evidence(self, total_pages: int | None = None) -> tuple[PageEvidence, ...]:
         """Project the graph into the contract the signal parsers consume.
 
@@ -1275,7 +1286,7 @@ def _crawl_dom(
         _notify(on_progress, graph, fetched, recent)
         _checkpoint(on_checkpoint, graph)
 
-        links = extract_page_links(result, url)
+        links = extract_page_links(result, url, document_url=graph.landed_url(url))
         for target in graph.record_links(url, links, depth):
             key = normalize_url(target)
             if key not in seen:

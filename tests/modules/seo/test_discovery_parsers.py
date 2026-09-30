@@ -231,6 +231,60 @@ class TestLinkExtraction:
         assert extract_page_links('<a href="ftp://e.com/f">x</a>', "https://e.com/") == ()
 
 
+class TestLinkResolutionBase:
+    """Relative links resolve against `<base href>`, else the landed URL."""
+
+    def test_resolves_against_the_document_url_after_a_redirect(self):
+        links = extract_page_links(
+            '<a href="child">c</a>', "https://e.com/old/", document_url="https://e.com/new/sub/"
+        )
+        assert links == ("https://e.com/new/sub/child",)
+
+    def test_base_href_is_resolved_against_the_document_url(self):
+        html = '<base href="../dir/"><a href="child">c</a>'
+        links = extract_page_links(
+            html, "https://e.com/old/", document_url="https://e.com/new/sub/"
+        )
+        assert links == ("https://e.com/new/dir/child",)
+
+    def test_only_the_first_base_href_counts(self):
+        html = '<base target="_blank"><base href="/one/"><base href="/two/"><a href="c">c</a>'
+        assert extract_page_links(html, "https://e.com/p/") == ("https://e.com/one/c",)
+
+    def test_www_variant_base_is_same_site(self):
+        html = '<base href="https://www.e.com/b/"><a href="c">c</a>'
+        assert extract_page_links(html, "https://e.com/p/") == ("https://www.e.com/b/c",)
+
+    @pytest.mark.parametrize(
+        "base",
+        ["https://evil.example/", "//evil.example/x/", "javascript:alert(1)", "data:text/html,x"],
+    )
+    def test_unusable_base_href_falls_back_to_the_document_url(self, base):
+        html = f'<base href="{base}"><a href="c">c</a>'
+        assert extract_page_links(html, "https://e.com/p/") == ("https://e.com/p/c",)
+
+    def test_off_site_base_is_refused_even_when_external_links_are_kept(self):
+        html = '<base href="https://evil.example/"><a href="c">c</a>'
+        links = extract_page_links(html, "https://e.com/p/", same_host_only=False)
+        assert links == ("https://e.com/p/c",)
+
+    def test_same_site_filter_stays_anchored_to_the_requested_url(self):
+        """An off-site redirect does not make the destination site crawlable."""
+        links = extract_page_links(
+            '<a href="c">c</a><a href="https://e.com/in/">i</a>',
+            "https://e.com/old/",
+            document_url="https://other.example/landed/",
+        )
+        assert links == ("https://e.com/in/",)
+
+    def test_absolute_links_ignore_the_base(self):
+        html = '<base href="/b/"><a href="/x/">x</a><a href="https://e.com/y/">y</a>'
+        assert extract_page_links(html, "https://e.com/p/") == (
+            "https://e.com/x/",
+            "https://e.com/y/",
+        )
+
+
 class TestSitemapLinkExtraction:
     """`<link rel="sitemap">` — the homepage-declared seed source."""
 
