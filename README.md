@@ -396,6 +396,9 @@ attachment rather than a spreadsheet ([ADR 0024](docs/adr/0024-pdf-url-export-us
 no per-page HTTP status reaches either report anywhere in the pipeline, so
 the column reads `Unknown` rather than substitute the URL
 ([build-log 0123](docs/build-log/0123-a-status-cell-that-was-a-url-cell.md)).
+Until cycle 0130 neither item actually downloaded: the UI called the adapter's
+download methods detached from the adapter, so they threw before sending a
+request ([build-log 0130](docs/build-log/0130-a-method-called-without-its-object.md)).
 
 ### Search Console accounts (optional)
 

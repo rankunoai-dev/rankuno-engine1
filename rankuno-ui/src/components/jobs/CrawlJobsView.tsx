@@ -86,13 +86,18 @@ export function CrawlJobsView(): JSX.Element {
   const canIngestGsc = useCrawlStore(
     (state) => state.adapter?.uploadGscExport !== undefined,
   );
-  // Same reasoning again: fixtures have no server behind them to build the
-  // workbook, so the menu item is absent rather than present and failing.
-  const downloadUrlList = useCrawlStore((state) => state.adapter?.downloadUrlList);
-  // Own flag, not reused from `downloadUrlList` — an adapter could in
+  // The adapter itself, not its methods: `HttpAdapter`'s download methods read
+  // `this.baseUrl`, so a method selected off the instance and called bare
+  // throws before any request is sent.
+  const adapter = useCrawlStore((state) => state.adapter);
+  // Same reasoning as `canReconcile`: fixtures have no server behind them to
+  // build the workbook, so the menu item is absent rather than present and
+  // failing.
+  const canDownloadUrls = adapter?.downloadUrlList !== undefined;
+  // Own flag, not reused from `canDownloadUrls` — an adapter could in
   // principle build one export and not the other, and each menu item's
   // visibility should answer only for the method it calls.
-  const downloadUrlListPdf = useCrawlStore((state) => state.adapter?.downloadUrlListPdf);
+  const canDownloadUrlsPdf = adapter?.downloadUrlListPdf !== undefined;
   const [reconciling, setReconciling] = useState<JobRow | null>(null);
   const [performing, setPerforming] = useState<JobRow | null>(null);
 
@@ -106,10 +111,10 @@ export function CrawlJobsView(): JSX.Element {
    * download, for the same reason.
    */
   async function downloadUrls(row: JobRow): Promise<void> {
-    if (!downloadUrlList) return;
+    if (!adapter?.downloadUrlList) return;
     try {
       const stamp = row.crawledAt ? row.crawledAt.slice(0, 10) : "undated";
-      saveBlob(`urls-${row.id.slice(0, 8)}-${stamp}.xlsx`, await downloadUrlList(row.id));
+      saveBlob(`urls-${row.id.slice(0, 8)}-${stamp}.xlsx`, await adapter.downloadUrlList(row.id));
     } catch (cause) {
       message.error(
         cause instanceof Error ? cause.message : "The URL list could not be downloaded.",
@@ -119,10 +124,13 @@ export function CrawlJobsView(): JSX.Element {
 
   /** Same shape as `downloadUrls`, for the PDF sibling. */
   async function downloadUrlsPdf(row: JobRow): Promise<void> {
-    if (!downloadUrlListPdf) return;
+    if (!adapter?.downloadUrlListPdf) return;
     try {
       const stamp = row.crawledAt ? row.crawledAt.slice(0, 10) : "undated";
-      saveBlob(`urls-${row.id.slice(0, 8)}-${stamp}.pdf`, await downloadUrlListPdf(row.id));
+      saveBlob(
+        `urls-${row.id.slice(0, 8)}-${stamp}.pdf`,
+        await adapter.downloadUrlListPdf(row.id),
+      );
     } catch (cause) {
       message.error(
         cause instanceof Error ? cause.message : "The URL list could not be downloaded.",
@@ -201,8 +209,8 @@ export function CrawlJobsView(): JSX.Element {
           canRelaunch={canRelaunch}
           canReconcile={canReconcile}
           canIngestGsc={canIngestGsc}
-          canDownloadUrls={downloadUrlList !== undefined}
-          canDownloadUrlsPdf={downloadUrlListPdf !== undefined}
+          canDownloadUrls={canDownloadUrls}
+          canDownloadUrlsPdf={canDownloadUrlsPdf}
         />
       ),
     },
