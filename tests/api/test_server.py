@@ -1897,7 +1897,7 @@ class TestReconciliationDownload:
         record = self._saved(store)
         with TestClient(app, headers=auth_headers()) as client:
             body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
-        assert "no internal link reaches it" in body
+        assert "found it is unknown" in body
 
     def test_the_workbook_splits_the_lists_into_sheets(self, store):
         """One sheet per question, and the actionable lists come first.
@@ -1925,9 +1925,9 @@ class TestReconciliationDownload:
         # One sheet per reason, the two findings first. Both sides land in the
         # same list because `FrogGapReason` and `EngineGapReason` share no
         # member, so a reason already names its side.
-        assert book.sheetnames == ["Summary", "Missed pages", "Orphans"]
+        assert book.sheetnames == ["Summary", "Missed pages", "Orphans – pre-provenance"]
         assert [cell.value for cell in book["Missed pages"][2]] == ["https://e.com/x"]
-        assert [cell.value for cell in book["Orphans"][2]] == ["https://e.com/y"]
+        assert [cell.value for cell in book["Orphans – pre-provenance"][2]] == ["https://e.com/y"]
 
     def test_a_reason_sheet_carries_urls_and_nothing_else(self, store):
         """The reason is the sheet; repeating it down the rows is noise.
@@ -1945,8 +1945,8 @@ class TestReconciliationDownload:
         with TestClient(app, headers=auth_headers()) as client:
             response = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx")
         book = load_workbook(io.BytesIO(response.content))
-        assert [cell.value for cell in book["Orphans"][1]] == ["url"]
-        assert book["Orphans"].max_column == 1
+        assert [cell.value for cell in book["Orphans – pre-provenance"][1]] == ["url"]
+        assert book["Orphans – pre-provenance"].max_column == 1
 
     def test_one_side_of_the_gap_downloads_on_its_own(self, store):
         """Each gap table is owned by a different person.
@@ -1969,7 +1969,7 @@ class TestReconciliationDownload:
         frog_book = load_workbook(io.BytesIO(frog.content))
         engine_book = load_workbook(io.BytesIO(engine.content))
         assert frog_book.sheetnames == ["Summary", "Missed pages"]
-        assert engine_book.sheetnames == ["Summary", "Orphans"]
+        assert engine_book.sheetnames == ["Summary", "Orphans – pre-provenance"]
 
     def test_a_one_sided_workbook_is_named_for_the_half_it_holds(self, store):
         """Two downloads from one cross-check must not collide in Downloads."""
@@ -2065,7 +2065,7 @@ class TestReconciliationDownload:
         book = load_workbook(io.BytesIO(response.content))
         assert all(sheet.freeze_panes == "A2" for sheet in book.worksheets)
         # And a URL column wide enough to read a URL in.
-        assert book["Orphans"].column_dimensions["A"].width == 60
+        assert book["Orphans – pre-provenance"].column_dimensions["A"].width == 60
 
     def test_file_sheets_follow_orphans_in_a_fixed_order(self, store):
         """Documents sit together, right after the two findings.
@@ -2095,7 +2095,7 @@ class TestReconciliationDownload:
                     {"url": "https://e.com/book.xlsx", "reason": "SPREADSHEET_FILE"},
                     {"url": "https://e.com/deck.pptx", "reason": "PRESENTATION_FILE"},
                     {"url": "https://e.com/report.pdf", "reason": "PDF_FILE"},
-                    {"url": "https://e.com/orphan", "reason": "SITEMAP_ORPHAN"},
+                    {"url": "https://e.com/orphan", "reason": "SITEMAP_ONLY_NO_LINK"},
                 ],
             },
         )
@@ -2104,16 +2104,62 @@ class TestReconciliationDownload:
         book = load_workbook(io.BytesIO(response.content))
         assert book.sheetnames == [
             "Summary",
-            "Orphans",
+            "Orphans – sitemap, no link",
             "PDF files",
             "Presentations",
             "Spreadsheets",
             "Other files",
             "Query variants",
         ]
+        orphans = book["Orphans – sitemap, no link"]
         assert [cell.value for cell in book["PDF files"][2]] == ["https://e.com/report.pdf"]
-        assert [cell.value for cell in book["Orphans"][2]] == ["https://e.com/orphan"]
-        assert book["Orphans"].max_row == 2
+        assert [cell.value for cell in orphans[2]] == ["https://e.com/orphan"]
+        assert orphans.max_row == 2
+
+    def test_every_orphan_reason_is_labelled_by_what_the_crawl_saw(self, store):
+        """New reasons get their own tab and gloss; a legacy row says it is unknown.
+
+        A saved `SITEMAP_ORPHAN` row was never evidence of a missing link — it
+        was the fallback for every such URL — so the download no longer
+        repeats that claim for it (ADR 0026). The stored file is not rewritten.
+        """
+        app = create_app(
+            store=store,
+            url_policy=UrlSafetyPolicy(resolver=lambda h: [PUBLIC_IP]),
+            session_secret=TEST_SESSION_SECRET,
+        )
+        rows = {
+            "SITEMAP_ONLY_NO_LINK": "Orphans – sitemap, no link",
+            "CMS_API_ONLY": "Orphans – CMS API only",
+            "LINKED_NOT_IN_EXPORT": "Orphans – linked",
+            "PROVENANCE_UNKNOWN": "Orphans – source unknown",
+            "SITEMAP_ORPHAN": "Orphans – pre-provenance",
+        }
+        record = store.create(server_module.TOOL_NAME, {"base_url": "https://e.com/"})
+        store.write_reconciliation(
+            record.id,
+            {
+                "summary": {"base_url": "https://e.com/"},
+                "created_at": "2026-09-30T09:00:00+00:00",
+                "frog_only": [],
+                "engine_only": [
+                    {"url": f"https://e.com/{reason.lower()}", "reason": reason} for reason in rows
+                ],
+            },
+        )
+        with TestClient(app, headers=auth_headers()) as client:
+            book_bytes = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.xlsx").content
+            csv_body = client.get(f"{API_PREFIX}/jobs/{record.id}/reconciliation.csv").text
+
+        book = load_workbook(io.BytesIO(book_bytes))
+        assert set(book.sheetnames) == {"Summary", *rows.values()}
+        for reason, title in rows.items():
+            assert [cell.value for cell in book[title][2]] == [f"https://e.com/{reason.lower()}"]
+            line = f"https://e.com/{reason.lower()},rankuno_only,{reason},"
+            assert line in csv_body
+            assert GAP_MEANINGS[reason].split(".")[0] in csv_body
+        assert "no internal link reaches it" not in csv_body
+        assert "is unknown" in GAP_MEANINGS["SITEMAP_ORPHAN"]
 
     def test_every_gap_reason_has_a_sheet_title_and_a_meaning(self):
         """The maps live here and the enums live in the reconciler.

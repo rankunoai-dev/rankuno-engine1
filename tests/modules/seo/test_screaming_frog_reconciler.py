@@ -151,7 +151,7 @@ class TestEngineSurplus:
             f"https://www.e.com/s{index}/product/overview" for index in range(MIN_TAIL_REPEATS - 1)
         )
         report = reconcile(BASE, few, ())
-        assert set(report.engine_reasons) == {EngineGapReason.SITEMAP_ORPHAN}
+        assert set(report.engine_reasons) == {EngineGapReason.PROVENANCE_UNKNOWN}
 
     def test_broken_markup_is_named_before_anything_else(self):
         """A broken address can also carry a query or a repeating tail.
@@ -543,7 +543,9 @@ class TestEngineFiles:
     @pytest.mark.parametrize("suffix", [".html", ".htm", ".aspx"])
     def test_html_like_extensions_stay_pages(self, suffix: str):
         """infosys.com publishes 550 `.html` pages that are real orphans."""
-        assert self._reason(f"https://www.e.com/about{suffix}") == EngineGapReason.SITEMAP_ORPHAN
+        assert (
+            self._reason(f"https://www.e.com/about{suffix}") == EngineGapReason.PROVENANCE_UNKNOWN
+        )
 
     def test_a_dotted_segment_that_is_not_a_file_stays_a_page(self):
         """An e-mail address resolved as a path is broken, not a `.com` document.
@@ -552,7 +554,7 @@ class TestEngineFiles:
         dotted final segment would have invented a file type for it.
         """
         url = "https://www.e.com/techcompass/name@e.com"
-        assert self._reason(url) == EngineGapReason.SITEMAP_ORPHAN
+        assert self._reason(url) == EngineGapReason.PROVENANCE_UNKNOWN
 
     def test_a_repeating_tail_beats_a_file_extension(self):
         """A fabricated address is not a file whatever it ends in."""
@@ -583,7 +585,7 @@ class TestEngineFiles:
             "PRESENTATION_FILE": 1,
             "SPREADSHEET_FILE": 1,
             "OTHER_FILE": 1,
-            "SITEMAP_ORPHAN": 1,
+            "PROVENANCE_UNKNOWN": 1,
             "QUERY_VARIANT": 1,
         }
         assert sum(report.engine_reasons.values()) == len(report.engine_only)

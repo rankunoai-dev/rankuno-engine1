@@ -98,7 +98,7 @@ describe("per-figure downloads", () => {
     stubSaved(saved());
     open();
 
-    // Pages we missed (2), Sitemap orphans (1), Found by both (1), and one per
+    // Pages we missed (2), Orphans (1), Found by both (1), and one per
     // gap table. Each is labelled with its own count, so a reader can tell
     // which figure a button belongs to without reading the tile above it.
     expect(await screen.findByRole("button", { name: "Download 2" })).toBeInTheDocument();
@@ -258,7 +258,35 @@ describe("ReconcilePanel", () => {
     expect(screen.getByText(/We found, Screaming Frog did not/)).toBeInTheDocument();
     // The counts an analyst reads first.
     expect(screen.getAllByText("340").length).toBeGreaterThan(0);
-    expect(screen.getByText("Sitemap orphans")).toBeInTheDocument();
+    expect(screen.getByText("Orphans")).toBeInTheDocument();
+  });
+
+  it("labels every provenance reason by what the crawl saw", async () => {
+    /*
+     * ADR 0026 split the old single orphan reason by evidence. A reason with
+     * no entry here would render an empty "What it means" cell; a legacy
+     * SITEMAP_ORPHAN row must say its source is unknown, not that nothing
+     * links to it.
+     */
+    stubReconcile({
+      ...SUMMARY,
+      engine_reasons: {
+        SITEMAP_ONLY_NO_LINK: 5,
+        CMS_API_ONLY: 4,
+        LINKED_NOT_IN_EXPORT: 3,
+        PROVENANCE_UNKNOWN: 2,
+        SITEMAP_ORPHAN: 1,
+      },
+    });
+    const { baseElement } = open();
+    dropFile(baseElement as HTMLElement, csvFile(1024));
+
+    expect(await screen.findByText(/this crawl followed no internal link to them/)).toBeInTheDocument();
+    expect(screen.getByText(/Found only through the CMS API/)).toBeInTheDocument();
+    expect(screen.getByText(/reached them by an internal link/)).toBeInTheDocument();
+    expect(screen.getByText(/no record of how it found them/)).toBeInTheDocument();
+    expect(screen.getByText(/before sources were tracked/)).toBeInTheDocument();
+    expect(screen.queryByText(/no internal link reaches them/)).not.toBeInTheDocument();
   });
 
   it("translates the reason codes rather than printing the enum alone", async () => {
@@ -273,7 +301,7 @@ describe("ReconcilePanel", () => {
 
     expect(await screen.findByText(/merged into the tree/)).toBeInTheDocument();
     expect(screen.getByText(/not pages; their destinations are already held/)).toBeInTheDocument();
-    expect(screen.getByText(/no internal link reaches them/)).toBeInTheDocument();
+    expect(screen.getByText(/how they were found is unknown/)).toBeInTheDocument();
   });
 
   it("offers a bare URL list as an input and states its limitation", () => {

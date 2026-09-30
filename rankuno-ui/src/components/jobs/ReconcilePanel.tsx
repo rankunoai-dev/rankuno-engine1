@@ -48,8 +48,17 @@ function isBareList(summary: ReconciliationSummary): boolean {
   return summary.source_format === "BARE_URL_LIST" || "UNKNOWN" in summary.frog_reasons;
 }
 
+/**
+ * The first five are the orphan reasons — together, what "Orphans Only" sends
+ * (ADR 0026). Each says only what this crawl saw; `SITEMAP_ORPHAN` comes from a
+ * cross-check saved before that was recorded, so it claims nothing.
+ */
 const ENGINE_REASONS: Record<string, string> = {
-  SITEMAP_ORPHAN: "Published, and no internal link reaches them — the finding",
+  SITEMAP_ONLY_NO_LINK: "In a sitemap; this crawl followed no internal link to them — the finding",
+  CMS_API_ONLY: "Found only through the CMS API; in no sitemap, and no internal link followed",
+  LINKED_NOT_IN_EXPORT: "This crawl reached them by an internal link; not in the export",
+  PROVENANCE_UNKNOWN: "This crawl has no record of how it found them",
+  SITEMAP_ORPHAN: "Cross-checked before sources were tracked — how they were found is unknown",
   QUERY_VARIANT: "Same path with a query string Screaming Frog collapsed",
   PDF_FILE: "PDFs. Screaming Frog lists documents on its own tab, not under HTML",
   PRESENTATION_FILE: "Slide decks (.ppt, .pptx). Listed separately by Screaming Frog",
@@ -58,6 +67,15 @@ const ENGINE_REASONS: Record<string, string> = {
   REPEATED_SUFFIX_TRAP: "Fabricated by a relative-href loop — our defect",
   MALFORMED_MARKUP: "Built from broken HTML on the site — not URLs at all",
 };
+
+/** Mirrors the engine's `ORPHAN_REASONS`: the rows highlighted as the finding. */
+const ORPHAN_REASONS = new Set([
+  "SITEMAP_ONLY_NO_LINK",
+  "CMS_API_ONLY",
+  "LINKED_NOT_IN_EXPORT",
+  "PROVENANCE_UNKNOWN",
+  "SITEMAP_ORPHAN",
+]);
 
 interface Props {
   jobId: string;
@@ -378,11 +396,11 @@ function GapReport({
           filename={name("pages-we-missed")}
         />
         <Stat
-          label="Sitemap orphans"
+          label="Orphans"
           value={summary.orphans}
           tone="warn"
           urls={lists?.orphans}
-          filename={name("sitemap-orphans")}
+          filename={name("orphans")}
         />
       </div>
 
@@ -459,7 +477,7 @@ function GapReport({
             title: "Reason",
             dataIndex: "reason",
             render: (value: string) => (
-              <Tag color={value === "SITEMAP_ORPHAN" ? "warning" : "default"}>{value}</Tag>
+              <Tag color={ORPHAN_REASONS.has(value) ? "warning" : "default"}>{value}</Tag>
             ),
           },
           { title: "What it means", dataIndex: "meaning" },
@@ -467,14 +485,15 @@ function GapReport({
         ]}
       />
 
-      {/* Said under the engine-only table, beside the button that acts on it:
-          a link-following crawl can never reach an orphan, because nothing
-          links to one. That is why running these URLs through Screaming Frog
-          needs list mode, and why the result is a report on exactly this set
-          of pages rather than a crawl of the site. */}
+      {/* Said under the engine-only table, beside the button that acts on it.
+          An orphan is a URL Screaming Frog's crawl did not reach; the reasons
+          above say how this crawl found each one, and some were linked (ADR
+          0026). List mode is how Screaming Frog gets them, and the result is a
+          report on exactly this set of pages rather than a crawl of the site. */}
       <p className="jb-dim jb-gap-note">
-        Screaming Frog cannot reach these by following links — that is what
-        makes them orphans. Sending them to it runs Screaming Frog in{" "}
+        Screaming Frog's crawl did not reach these — that is what makes them
+        orphans here; the reasons above say how this crawl found each one.
+        Sending them to it runs Screaming Frog in{" "}
         <b>list mode</b>: it audits exactly the URLs it is given and does not
         spider outward from them.
       </p>

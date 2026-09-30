@@ -116,6 +116,7 @@ from src.modules.seo.page_classifier.screaming_frog_merge import (
     merge_reconciled_urls,
 )
 from src.modules.seo.page_classifier.screaming_frog_reconciler import (
+    ORPHAN_REASONS,
     revalidate_defaulters,
 )
 from src.modules.seo.page_classifier.tool import (
@@ -450,8 +451,26 @@ GAP_MEANINGS: Mapping[str, str] = MappingProxyType(
         "SPIDER_TRAP": "Refused by this engine's trap rules.",
         "NON_INDEXABLE": "Live but canonicalised elsewhere or noindex.",
         "MISSED_PAGE": "Live, indexable, in scope - and this engine did not reach it.",
+        # Legacy: written before the cross-check saw how the crawl found a URL,
+        # so it is labelled as unknown rather than as the claim it once made.
         "SITEMAP_ORPHAN": (
-            "Published but no internal link reaches it. A link crawler cannot see these."
+            "Cross-checked before discovery sources were tracked. How this crawl "
+            "found it is unknown; re-run the cross-check to find out."
+        ),
+        "SITEMAP_ONLY_NO_LINK": (
+            "Listed in a sitemap. This crawl followed no internal link to it."
+        ),
+        "CMS_API_ONLY": (
+            "Found only through the site's CMS API. In no sitemap this crawl read, "
+            "and this crawl followed no internal link to it."
+        ),
+        "LINKED_NOT_IN_EXPORT": (
+            "This crawl reached it by following an internal link. The Screaming "
+            "Frog export does not contain it."
+        ),
+        "PROVENANCE_UNKNOWN": (
+            "This crawl holds no record of how it was found: an older crawl, a page "
+            "merged in from Screaming Frog, or one recovered from a checkpoint."
         ),
         "REPEATED_SUFFIX_TRAP": "One page at many fabricated addresses, from a relative href.",
         "MALFORMED_MARKUP": "Built from broken HTML on the site. Never a URL.",
@@ -712,7 +731,13 @@ SHEET_TITLES: Mapping[str, str] = MappingProxyType(
     {
         # The two findings.
         "MISSED_PAGE": "Missed pages",
-        "SITEMAP_ORPHAN": "Orphans",
+        # Every orphan reason keeps the "Orphans" prefix: together they are the
+        # list "Orphans Only" sends; the suffix is how the crawl found them.
+        "SITEMAP_ONLY_NO_LINK": "Orphans – sitemap, no link",
+        "CMS_API_ONLY": "Orphans – CMS API only",
+        "LINKED_NOT_IN_EXPORT": "Orphans – linked",
+        "PROVENANCE_UNKNOWN": "Orphans – source unknown",
+        "SITEMAP_ORPHAN": "Orphans – pre-provenance",
         # Files this engine crawls and Screaming Frog's HTML tab does not list.
         "PDF_FILE": "PDF files",
         "PRESENTATION_FILE": "Presentations",
@@ -774,8 +799,9 @@ class ReconciliationSummary(StrictModel):
     """Live, indexable, in-scope pages the engine never reached. Merged."""
 
     orphans: int = 0
-    """Published pages no internal link reaches. Found only by the engine, and
-    left where they are — their absence from the export *is* the finding."""
+    """Pages only the engine found (`ORPHAN_REASONS`), left where they are —
+    their absence from the export *is* the finding. `engine_reasons` says how
+    the crawl found them; not all are unlinked."""
 
     merged: int = 0
     """Pages added to the tree. Zero is a normal outcome."""
@@ -3324,8 +3350,8 @@ def create_app(
         # One bucket per reason, across both sides. The two vocabularies are
         # disjoint — `FrogGapReason` and `EngineGapReason` share no member — so a
         # reason names its side without needing a prefix, and the dedicated
-        # `missed_pages` and `orphans` lists are exactly the `MISSED_PAGE` and
-        # `SITEMAP_ORPHAN` buckets rather than anything extra.
+        # `missed_pages` and `orphans` lists are exactly the `MISSED_PAGE` bucket
+        # and the `ORPHAN_REASONS` buckets rather than anything extra.
         buckets: dict[str, list[str]] = {}
         sides: dict[str, str] = {}
         for key, owner in sides_wanted:
@@ -3348,7 +3374,9 @@ def create_app(
         def rank(reason: str) -> tuple[int, int]:
             lead = {
                 "MISSED_PAGE": 0,
-                "SITEMAP_ORPHAN": 1,
+                # All orphan reasons share one rank, so they sit together and
+                # order among themselves by size.
+                **dict.fromkeys(ORPHAN_REASONS, 1),
                 "PDF_FILE": 2,
                 "PRESENTATION_FILE": 3,
                 "SPREADSHEET_FILE": 4,

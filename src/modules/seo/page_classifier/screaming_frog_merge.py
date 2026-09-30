@@ -171,6 +171,9 @@ def merge_reconciled_urls(output: PageClassificationOutput, export: bytes | str)
         tuple(page.url for page in output.pages),
         rows,
         source_format=loaded.source_format,
+        # How the crawl found each page, so an engine-only URL's reason is its
+        # evidence rather than a guess from its spelling (ADR 0026).
+        engine_sources={page.url: page.discovery_sources for page in output.pages},
     )
 
     if loaded.source_format is ExportFormat.BARE_URL_LIST:

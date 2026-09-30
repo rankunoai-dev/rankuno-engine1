@@ -91,7 +91,7 @@ export interface ReconciliationSummary {
   in_both: number;
   /** Live, in-scope pages the engine never reached. These were merged. */
   missed_pages: number;
-  /** Published pages no internal link reaches. Left where they are. */
+  /** Pages only this crawl found; `engine_reasons` says how. Left where they are. */
   orphans: number;
   merged: number;
   frog_reasons: Record<string, number>;

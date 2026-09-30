@@ -130,9 +130,21 @@ export interface TreeOverlay {
 
 /** Reasons Screaming Frog's default configuration filters out by itself. */
 export const REASON_MEANINGS: Record<string, string> = {
+  SITEMAP_ONLY_NO_LINK:
+    "Listed in a sitemap, and this crawl followed no internal link to it. Screaming Frog's " +
+    "export does not contain it.",
+  CMS_API_ONLY:
+    "Found only through the site's CMS API: in no sitemap this crawl read, and no internal " +
+    "link to it was followed. Screaming Frog's export does not contain it.",
+  LINKED_NOT_IN_EXPORT:
+    "This crawl reached it by following an internal link, but Screaming Frog's export does " +
+    "not contain it. Why is not visible from here: its depth, limits and rules are its own.",
+  PROVENANCE_UNKNOWN:
+    "This crawl holds no record of how it found this page — an older crawl, a page merged " +
+    "from Screaming Frog, or one recovered from a checkpoint.",
   SITEMAP_ORPHAN:
-    "Listed in the sitemap but reached by no internal link. Screaming Frog only follows " +
-    "links, so it never saw these — the clearest case of a page it missed.",
+    "Cross-checked before discovery sources were tracked, so how this page was found is " +
+    "unknown. Re-run the cross-check to see.",
   QUERY_VARIANT:
     "A `?page=N`-style variant of a page both crawlers found. Screaming Frog drops these " +
     "by default; whether they matter depends on whether Google indexes them separately.",

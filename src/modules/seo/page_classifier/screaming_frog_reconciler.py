@@ -65,6 +65,7 @@ from pydantic import Field
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.modules.seo.page_classifier.bare_url_list import bare_url_list
+from src.modules.seo.page_classifier.schemas import DiscoverySource
 from src.modules.seo.page_classifier.url_rules import (
     NON_PAGE_SUFFIXES,
     is_spider_trap,
@@ -73,6 +74,7 @@ from src.modules.seo.page_classifier.url_rules import (
 
 __all__ = [
     "MIN_TAIL_REPEATS",
+    "ORPHAN_REASONS",
     "CrossCheckInput",
     "DefaulterCategory",
     "DefaulterValidation",
@@ -222,8 +224,27 @@ class EngineGapReason(StrEnum):
     """The same path carrying a query string Screaming Frog collapsed."""
 
     SITEMAP_ORPHAN = "SITEMAP_ORPHAN"
-    """A real published page with no internal link pointing at it. A
-    link-following crawler cannot see these; this is the finding."""
+    """**Legacy; no longer produced.** What every engine-only page was called
+    before the reconciler saw how the crawl found it, so a saved row with this
+    reason carries no evidence either way. Kept so saved reconciliations still
+    load and still count as orphans (ADR 0026)."""
+
+    SITEMAP_ONLY_NO_LINK = "SITEMAP_ONLY_NO_LINK"
+    """Listed in a sitemap, and this crawl followed no internal link to it."""
+
+    CMS_API_ONLY = "CMS_API_ONLY"
+    """Found only through the site's CMS API: in no sitemap this crawl read,
+    and no internal link to it was followed."""
+
+    LINKED_NOT_IN_EXPORT = "LINKED_NOT_IN_EXPORT"
+    """This crawl reached it by following an internal link, and the Screaming
+    Frog export does not contain it. Says nothing about why: the other
+    crawler's depth, limits and rules are not visible from here."""
+
+    PROVENANCE_UNKNOWN = "PROVENANCE_UNKNOWN"
+    """The crawl holds no record of how it found this URL: a result that
+    predates the flags, a page merged in from Screaming Frog, or one recovered
+    from a checkpoint that did not record them. Stated rather than guessed."""
 
     PDF_FILE = "PDF_FILE"
     """A PDF. Screaming Frog lists documents under its own tab, so a set
@@ -237,6 +258,26 @@ class EngineGapReason(StrEnum):
 
     OTHER_FILE = "OTHER_FILE"
     """Any other non-HTML file: Word documents, archives, media."""
+
+
+ORPHAN_REASONS: frozenset[str] = frozenset(
+    {
+        EngineGapReason.SITEMAP_ORPHAN,
+        EngineGapReason.SITEMAP_ONLY_NO_LINK,
+        EngineGapReason.CMS_API_ONLY,
+        EngineGapReason.LINKED_NOT_IN_EXPORT,
+        EngineGapReason.PROVENANCE_UNKNOWN,
+    }
+)
+"""The reasons that make an engine-only URL an orphan, in list mode's sense.
+
+An orphan here is a URL this engine found that Screaming Frog's crawl did not,
+and that no earlier rule explains away as a file, trap, malformed address or
+query variant. That is exactly the set the single `SITEMAP_ORPHAN` fallback
+used to cover; it is now split by evidence, but its membership is unchanged,
+because it is what "Orphans Only" hands to Screaming Frog (ADR 0026). Not every
+member is unlinked — `LINKED_NOT_IN_EXPORT` is in scope because Screaming Frog's
+crawl did not reach it either."""
 
 
 class DefaulterCategory(StrEnum):
@@ -388,10 +429,12 @@ class ReconciliationReport(StrictModel):
 
     @property
     def orphans(self) -> tuple[str, ...]:
-        """Published pages no internal link reaches, which only this engine sees."""
-        return tuple(
-            gap.url for gap in self.engine_only if gap.reason == EngineGapReason.SITEMAP_ORPHAN
-        )
+        """Pages only this engine found, whatever led it to them.
+
+        See `ORPHAN_REASONS`: each member's reason says how it was found, and
+        a saved report's legacy `SITEMAP_ORPHAN` rows still count.
+        """
+        return tuple(gap.url for gap in self.engine_only if gap.reason in ORPHAN_REASONS)
 
 
 def normalise(url: str) -> str:
@@ -797,7 +840,23 @@ def _repeated_tails(urls: list[str]) -> set[str]:
     return {tail for tail, count in tails.items() if count >= MIN_TAIL_REPEATS}
 
 
-def _engine_reason(url: str, loops: set[str]) -> EngineGapReason:
+def _provenance_reason(sources: DiscoverySource | None) -> EngineGapReason:
+    """Say how the crawl found a page, from its flags and nothing else.
+
+    A link beats a sitemap entry: a page this crawl reached by a link is not
+    unlinked, whatever else listed it. No flags means no evidence, and the
+    answer is `PROVENANCE_UNKNOWN` rather than the most plausible guess.
+    """
+    if sources is None or sources.count == 0:
+        return EngineGapReason.PROVENANCE_UNKNOWN
+    if sources.dom_link:
+        return EngineGapReason.LINKED_NOT_IN_EXPORT
+    if sources.sitemap:
+        return EngineGapReason.SITEMAP_ONLY_NO_LINK
+    return EngineGapReason.CMS_API_ONLY
+
+
+def _engine_reason(url: str, loops: set[str], sources: DiscoverySource | None) -> EngineGapReason:
     """Explain one engine URL Screaming Frog lacks.
 
     Malformed markup is tested first: a broken address can also carry a query
@@ -808,7 +867,8 @@ def _engine_reason(url: str, loops: set[str]) -> EngineGapReason:
     happens to carry a parameter, not an HTML page whose pagination Screaming
     Frog collapsed; the file type is the fact an analyst acts on. Only the
     path is judged, lowercased, so `REPORT.PDF` and `deck.pptx#slide=3` land
-    where their lowercase, fragment-free spellings do.
+    where their lowercase, fragment-free spellings do. Only a URL none of those
+    rules explains is judged on how it was found (`_provenance_reason`).
     """
     if any(marker in url for marker in _MALFORMED_MARKERS):
         return EngineGapReason.MALFORMED_MARKUP
@@ -827,7 +887,27 @@ def _engine_reason(url: str, loops: set[str]) -> EngineGapReason:
         return EngineGapReason.OTHER_FILE
     if parts.query:
         return EngineGapReason.QUERY_VARIANT
-    return EngineGapReason.SITEMAP_ORPHAN
+    return _provenance_reason(sources)
+
+
+def _sources_by_key(
+    engine_sources: Mapping[str, DiscoverySource] | None,
+) -> dict[str, DiscoverySource]:
+    """Pool the flags of every spelling that folds to one comparison key.
+
+    Two spellings of one page become one gap, so their evidence is pooled: a
+    link to either spelling is a link to the page.
+    """
+    pooled: dict[str, DiscoverySource] = {}
+    for url, sources in (engine_sources or {}).items():
+        key = normalise(url)
+        held = pooled.get(key, DiscoverySource())
+        pooled[key] = DiscoverySource(
+            sitemap=held.sitemap or sources.sitemap,
+            dom_link=held.dom_link or sources.dom_link,
+            cms_api=held.cms_api or sources.cms_api,
+        )
+    return pooled
 
 
 def reconcile(
@@ -835,6 +915,7 @@ def reconcile(
     engine_urls: tuple[str, ...],
     frog_rows: tuple[ScreamingFrogRow, ...],
     source_format: ExportFormat = ExportFormat.INTERNAL_HTML,
+    engine_sources: Mapping[str, DiscoverySource] | None = None,
 ) -> ReconciliationReport:
     """Compare a crawl result against a Screaming Frog export or a URL list.
 
@@ -846,6 +927,9 @@ def reconcile(
             crawl lacks is `UNKNOWN`: the file has no status to judge it on,
             and a rule that still called it a missed page would be inventing
             evidence.
+        engine_sources: How the crawl found each engine URL, keyed by the
+            URL as given in `engine_urls`. A URL absent from it, or all of it
+            absent, is reported `PROVENANCE_UNKNOWN`, never guessed.
 
     Returns:
         The full reconciliation, every disagreement carrying exactly one reason
@@ -872,8 +956,12 @@ def reconcile(
     )
 
     loops = _repeated_tails([engine_by_key[key] for key in engine_only_keys])
+    sources_by_key = _sources_by_key(engine_sources)
     engine_only = tuple(
-        UrlGap(url=engine_by_key[key], reason=_engine_reason(engine_by_key[key], loops).value)
+        UrlGap(
+            url=engine_by_key[key],
+            reason=_engine_reason(engine_by_key[key], loops, sources_by_key.get(key)).value,
+        )
         for key in sorted(engine_only_keys)
     )
 

@@ -1,6 +1,6 @@
 # ADR 0026: A URL's provenance is reported from evidence, or reported as unknown
 
-- **Status**: Accepted for items 2–4; **Proposed, awaiting a human decision** for item 1
+- **Status**: Accepted (item 1 decided by the user: "same URLs, honest labels")
 - **Date**: 2026-09-30
 - **Deciders**: AI Lead, Lead AI Systems Engineer
 
@@ -69,30 +69,48 @@ The placeholder still carries a `SITEMAP_INDEX`-sourced `SignalScore` at confide
 `signals_evaluated` requires at least one entry and no `SignalSource` member means "none"; no
 consumer reads that signal as discovery evidence. Left as is.
 
-### Item 1 — Screaming Frog gap reason (NOT implemented; decision required)
+### Item 1 — Screaming Frog gap reason (implemented: same URLs, honest labels)
 
-Proposed derivation, keeping the existing members and their precedence (malformed, trap, file
-types, query variant) ahead of it:
+`merge_reconciled_urls` now passes each page's `DiscoverySource` to `reconcile(...,
+engine_sources=)`. The existing rules keep their precedence (malformed markup, repeated-suffix
+trap, the four file types, query variant). Only a URL none of them explains is judged on
+provenance, where it used to fall through to `SITEMAP_ORPHAN` unconditionally:
 
-| Flags on the engine-only URL | Proposed reason |
+| Flags on the engine-only URL | Reason |
 | :--- | :--- |
-| `sitemap` and not `dom_link` | `SITEMAP_ORPHAN` — listed in a sitemap, no internal link found |
-| `cms_api` only | new: found only via the CMS API |
-| `dom_link` | new: reached by an internal link Screaming Frog's crawl did not include |
-| all False, or URL absent from the result | new: `UNKNOWN` — never guessed |
+| `dom_link` (with or without others) | `LINKED_NOT_IN_EXPORT` — this crawl reached it by an internal link; the export does not contain it |
+| `sitemap`, no `dom_link` | `SITEMAP_ONLY_NO_LINK` — listed in a sitemap; this crawl followed no internal link to it |
+| `cms_api` only | `CMS_API_ONLY` — found only through the CMS API |
+| all False, or not supplied | `PROVENANCE_UNKNOWN` — never guessed |
 
-Reason text would describe only what **this engine** observed. The reconciler cannot know
-Screaming Frog's configuration (whether it read sitemaps, its depth or URL limits, its
-include/exclude rules), so no reason may claim a cause on the Screaming Frog side. New members
-would be additive; saved `ReconciliationSummary` JSON with `SITEMAP_ORPHAN` loads unchanged,
-because `UrlGap.reason` and `engine_reasons` are plain strings.
+Spellings that `normalise()` folds into one gap pool their flags: a link to either spelling counts
+as a link to the page.
 
-**Why it is not implemented.** `ReconciliationReport.orphans` is *defined* as
-`reason == SITEMAP_ORPHAN`. That list is saved beside each reconciliation and is exactly what
-Screaming Frog list mode's "Orphans Only" source sends (`url_list_sources.orphan_urls` reads the
-saved `orphans` list). Correcting the label therefore changes which URLs are sent. Measured across
-the 20 saved reconciliations in the local `.jobs/` store (21,910 orphan-list entries), binned by the
-source crawl's own flags:
+**What the reconciler still cannot know.** Screaming Frog's configuration: whether it read
+sitemaps, its depth or URL limits, its include/exclude rules. So no reason and no gloss claims a
+cause on the Screaming Frog side. `LINKED_NOT_IN_EXPORT` says the export lacks the URL, not why.
+
+**Membership of `orphans` is unchanged, by decision.** List mode defines an orphan as "a URL this
+engine found that Screaming Frog's own link-following crawl did not" (`url_list_sources.py`
+module docstring, "Why 'Orphans Only' is conditional"). Its purpose is to give Screaming Frog, in
+list mode, the URLs its crawl did not reach, and linked-but-missed pages are in scope. So
+`ReconciliationReport.orphans` is now `reason in ORPHAN_REASONS`. That set holds the four
+provenance reasons plus legacy `SITEMAP_ORPHAN`, which is exactly the set the old fallback
+covered. `tests/modules/seo/test_screaming_frog_provenance.py` pins membership as identical with
+and without provenance on a mixed fixture, and the membership test passes unchanged on the
+pre-provenance reconciler.
+
+**Legacy rows.** `SITEMAP_ORPHAN` stays a readable member and is no longer produced. Saved
+reconciliations (`.jobs/*.reconciliation.json`, and Postgres job payloads) are not rewritten. They
+load unchanged because `UrlGap.reason` is a string, and they keep serving "Orphans Only" unchanged
+because that reads the saved `orphans` list. A legacy row was never evidence of a missing link;
+it was the fallback for every such URL. So it is now displayed as "cross-checked before discovery
+sources were tracked — how it was found is unknown", in the .xlsx/.csv gloss, its workbook tab
+("Orphans – pre-provenance"), the reconcile panel, and the tree overlay.
+
+**Measured split.** Across the 20 saved reconciliations in the local `.jobs/` store (21,910
+orphan-list entries), binned by the source crawl's own flags. This is what a re-run would now
+report:
 
 | Real flags | Entries | Share |
 | :--- | ---: | ---: |
@@ -101,8 +119,9 @@ source crawl's own flags:
 | `sitemap`, no `dom_link` (a true sitemap orphan) | 3,852 | 17.6% |
 | `cms_api` only | 2,928 | 13.4% |
 
-Only 17.6% of today's "orphans" are what the label says. Changing membership is a product
-decision with a visible effect on list-mode dispatches, so it waits for a human.
+Only 17.6% of the saved "orphans" were what the old label said. Narrowing membership to them was
+considered and rejected: it would have silently removed about 82% of what "Orphans Only" sends,
+including the 47.6% that Screaming Frog's crawl missed even though a link reaches them.
 
 ## Consequences
 
@@ -111,9 +130,15 @@ decision with a visible effect on list-mode dispatches, so it waits for a human.
 - `fetch_outcomes` may contain `robots_disallowed`; `transport_error` shrinks by the same count.
   The UI types `fetch_outcomes` as `Record<string, number>`, so no contract change.
 - New checkpoints are slightly larger. Old checkpoints load, and admit what they do not know.
-- Item 1 remains wrong until decided: every non-file engine-only URL is still `SITEMAP_ORPHAN`.
+- A re-run cross-check reports the four provenance reasons. Workbook tabs are now
+  "Orphans – sitemap, no link / CMS API only / linked / source unknown / pre-provenance" instead of
+  one "Orphans" tab. The panel's tile reads "Orphans", no longer "Sitemap orphans".
+- The orphan count and list are unchanged for the same inputs.
 
 ## Not done
 
-- Item 1 (above). Phase 2 (referrer URL, full sitemap path, link depth, CMS record on the profile,
-  refusal ledger) and Phase 3 (export columns, UI) were out of scope.
+- Docstrings in the list-mode files owned by another session (`url_list.py`,
+  `url_list_sources.py`, `url_list_routes.py`) still say `EngineGapReason.SITEMAP_ORPHAN` and
+  "pages no internal link reaches". Their behaviour is correct; the wording needs a follow-up.
+- Phase 2 (referrer URL, full sitemap path, link depth, CMS record on the profile, refusal ledger)
+  and Phase 3 (export columns, UI) were out of scope.
