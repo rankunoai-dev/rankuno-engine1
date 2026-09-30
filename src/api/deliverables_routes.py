@@ -53,6 +53,10 @@ from src.core.worker_dispatch_schemas import WorkerJob
 from src.core.worker_dispatch_store import DispatchStoreUnavailableError
 from src.modules.seo.contracts.audit import AuditDataset
 from src.modules.seo.deliverables.build_runner import run_build
+from src.modules.seo.deliverables.masterfile_availability import (
+    ServiceAvailability,
+    masterfile_availability,
+)
 from src.modules.seo.deliverables.masterfile_source import (
     MasterfileSource,
     source_for_bundle_bytes,
@@ -76,6 +80,8 @@ __all__ = ["build_deliverables_router"]
 _logger = get_logger("api.deliverables")
 
 _XLSX_MEDIA_TYPE: Final[str] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_ZIP_MEDIA_TYPE: Final[str] = "application/zip"
+_MEDIA_TYPE_BY_EXT: Final[dict[str, str]] = {".xlsx": _XLSX_MEDIA_TYPE, ".zip": _ZIP_MEDIA_TYPE}
 DELIVERABLE_TOOL_NAME: Final[str] = "seo.deliverables.workbook"
 DELIVERABLE_FACET_ID: Final[str] = "seo.deliverables"
 
@@ -94,6 +100,17 @@ class DeliverableAccepted(StrictModel):
     id: str
     status: str
     label: str = ""
+
+
+class AvailableMasterfiles(StrictModel):
+    """The masterfile menu: every service, and whether each can report at all.
+
+    A list of records rather than the bare list of slugs this used to return,
+    because a slug alone cannot carry the one thing the menu was getting wrong
+    - four of the services offered could never produce a row.
+    """
+
+    services: list[ServiceAvailability]
 
 
 class DeliverableBuildRequest(StrictModel):
@@ -485,9 +502,10 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
                 status.HTTP_404_NOT_FOUND, detail=f"deliverable {deliverable_id} has no stored file"
             )
 
+        media_type = _MEDIA_TYPE_BY_EXT.get(candidate.suffix, "application/octet-stream")
         return Response(
             content=candidate.read_bytes(),
-            media_type=_XLSX_MEDIA_TYPE,
+            media_type=media_type,
             headers={"Content-Disposition": f'attachment; filename="{candidate.name}"'},
         )
 
@@ -729,17 +747,127 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             label=f"{job.envelope.seed_url} — {service_slug}",
         )
 
+    async def _dispatch_masterfile_batch(
+        state: ApiState,
+        deliverable_id: str,
+        job_id: str,
+        slugs: tuple[str, ...],
+        source_factory: Callable[[], MasterfileSource],
+    ) -> None:
+        """Run a batch masterfile build on a worker thread, then release."""
+        from src.modules.seo.deliverables.build_runner import run_masterfile_batch
+
+        try:
+            await asyncio.to_thread(
+                run_masterfile_batch,
+                state.deliverable_store,
+                deliverable_id,
+                job_id,
+                slugs,
+                source_factory,
+                None,
+            )
+        finally:
+            state.release_deliverable(deliverable_id)
+
+    @router.post(
+        "/jobs/{job_id}/masterfiles/all",
+        response_model=DeliverableAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def build_all_masterfiles(
+        job_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> DeliverableAccepted:
+        """Build every measurable masterfile and return them as one ZIP.
+
+        Same resolution, auth, and error contract as `build_masterfile`.
+        The ZIP contains one `<slug>.xlsx` per service that succeeded;
+        services that fail are skipped, not fatal, so the operator gets
+        the seventeen that worked rather than nothing.
+
+        Raises:
+            HTTPException: same as `build_masterfile`, minus the 404 for an
+                unknown slug.
+        """
+        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
+
+        try:
+            crawl_record: JobRecord | None = state.store.get(job_id)
+        except JobNotFoundError:
+            crawl_record = None
+        if crawl_record is not None:
+            org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="job")
+            _reject_engine_job(job_id)
+
+        job = human_owned_job(state, job_id, org_id)
+        payload = await _screaming_frog_bundle_bytes(state, job, org_id)
+
+        measurable = tuple(entry.slug for entry in masterfile_availability() if entry.measurable)
+
+        pending = f"pending:{uuid4().hex}"
+        if not state.try_reserve_deliverable(pending):
+            _logger.warning("masterfile_batch_rejected_saturation", extra={"org": org_id})
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"deliverable builds are at capacity "
+                    f"({state.max_concurrent_deliverables} concurrent); please retry in a moment"
+                ),
+            )
+        try:
+            record = state.deliverable_store.create(
+                DELIVERABLE_TOOL_NAME,
+                {
+                    "source": "masterfile_batch",
+                    "source_job_id": job_id,
+                    "services": list(measurable),
+                },
+                label=f"{job.envelope.seed_url} — all masterfiles",
+                facet_id=DELIVERABLE_FACET_ID,
+                org_id=org_id,
+            )
+        except Exception:
+            state.release_deliverable(pending)
+            raise
+        state.rekey_deliverable(pending, record.id)
+        state.track(
+            asyncio.create_task(
+                _dispatch_masterfile_batch(
+                    state,
+                    record.id,
+                    job_id,
+                    measurable,
+                    lambda: source_for_bundle_bytes(payload, job_id),
+                )
+            )
+        )
+        return DeliverableAccepted(id=record.id, status=record.status.value, label=record.label)
+
     @router.get(
         "/masterfiles/available",
+        response_model=AvailableMasterfiles,
     )
-    def list_available_masterfiles() -> dict[str, list[str]]:
-        """List available masterfile service slugs.
+    def list_available_masterfiles() -> AvailableMasterfiles:
+        """Every masterfile service, each saying whether it can measure anything.
+
+        Four of the twenty-one read an export this engine's manifest never
+        requests, so they can only ever return an empty workbook
+        (`masterfile_availability.py` derives which; nothing here lists them).
+        They are still returned: an operator looking for Custom Extraction has
+        to find it and read why it is unavailable, and a filtered list would
+        teach them the feature does not exist. The caller renders those
+        entries disabled with `reason` beside them.
+
+        This is a disclosure, not a gate. `POST /jobs/{id}/masterfile/{slug}`
+        still accepts every slug - a loose export directory can hold files an
+        uploaded bundle may not, and refusing here would break that path to
+        fix a display problem.
 
         Returns:
-            {"services": ["response_codes", "page_titles", ...]}
+            Every registered slug, sorted, with `measurable` and, when false,
+            the sentence explaining it.
         """
-        from src.modules.seo.deliverables.masterfile_registry import AVAILABLE_SERVICES
-
-        return {"services": sorted(AVAILABLE_SERVICES)}
+        return AvailableMasterfiles(services=list(masterfile_availability()))
 
     return router

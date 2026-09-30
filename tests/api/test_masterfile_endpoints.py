@@ -275,8 +275,115 @@ class TestNativeCrawlJobs:
         assert build(client, record.id, org_id="org-a").status_code == 403
 
 
+class TestBatchDownload:
+    """Build every measurable masterfile and ZIP them into one download."""
+
+    def test_batch_builds_a_zip_with_all_measurable_services(self, client, dispatch_store) -> None:
+        job_id = dispatch_store.add_job(bundle=bundle_bytes())
+
+        accepted = client.post(
+            f"{API_PREFIX}/jobs/{job_id}/masterfiles/all", headers=auth_headers("org-a")
+        )
+        assert accepted.status_code == 202, accepted.text
+        body = accepted.json()
+        assert "all masterfiles" in body["label"]
+
+        finished = poll_deliverable(client, body["id"])
+        assert finished["status"] == "succeeded", finished.get("error")
+
+        download = client.get(
+            f"{API_PREFIX}/deliverables/{body['id']}/download", headers=auth_headers("org-a")
+        )
+        assert download.status_code == 200
+        assert download.headers["content-type"] == "application/zip"
+
+        with zipfile.ZipFile(io.BytesIO(download.content)) as zf:
+            names = set(zf.namelist())
+            assert "h1.xlsx" in names
+            assert len(names) >= 10
+
+    def test_batch_records_source_and_service_list(self, client, dispatch_store) -> None:
+        job_id = dispatch_store.add_job(bundle=bundle_bytes())
+        body = client.post(
+            f"{API_PREFIX}/jobs/{job_id}/masterfiles/all", headers=auth_headers("org-a")
+        ).json()
+
+        finished = poll_deliverable(client, body["id"])
+        assert finished["status"] == "succeeded"
+        assert finished["has_result"] is True
+
+        record = client.get(
+            f"{API_PREFIX}/deliverables/{body['id']}", headers=auth_headers("org-a")
+        ).json()
+        assert record["request"]["source"] == "masterfile_batch"
+        assert len(record["request"]["services"]) > 0
+
+    def test_batch_rejects_native_crawl_job(self, client, crawl_store) -> None:
+        record = crawl_store.create("seo.page_classifier", {"base_url": SEED_URL}, org_id="org-a")
+        crawl_store.finish(record.id, {"base_url": SEED_URL})
+
+        response = client.post(
+            f"{API_PREFIX}/jobs/{record.id}/masterfiles/all", headers=auth_headers("org-a")
+        )
+        assert response.status_code == 409
+        assert "native engine crawl" in response.json()["detail"]
+
+    def test_batch_requires_authentication(self, client, dispatch_store) -> None:
+        job_id = dispatch_store.add_job(bundle=bundle_bytes())
+        assert client.post(f"{API_PREFIX}/jobs/{job_id}/masterfiles/all").status_code == 401
+
+
 class TestAvailableServices:
-    def test_every_advertised_slug_is_buildable(self, client) -> None:
-        listed = client.get(f"{API_PREFIX}/masterfiles/available").json()["services"]
+    """What the masterfile menu is allowed to claim.
+
+    It used to advertise twenty-one identical buttons, four of which
+    could not put a row in a workbook: their source file is not in
+    `ALLOWED_BUNDLE_FILENAMES`, so no bundle this engine produces can carry
+    it. The endpoint now says which, and says why.
+    """
+
+    def available(self, client) -> list[dict[str, object]]:
+        response = client.get(f"{API_PREFIX}/masterfiles/available")
+        assert response.status_code == 200
+        return response.json()["services"]
+
+    def test_every_advertised_slug_is_listed(self, client) -> None:
+        listed = self.available(client)
         assert len(listed) == 21
-        assert "h1" in listed
+        assert {entry["slug"] for entry in listed} >= {"h1", "custom_extraction"}
+
+    def test_a_service_with_no_reachable_export_is_flagged_with_a_reason(self, client) -> None:
+        """Flagged and kept, never dropped from the list.
+
+        An operator looking for Custom Extraction has to
+        find it and read why it is unavailable; hidden would teach them the
+        feature does not exist.
+        """
+        by_slug = {entry["slug"]: entry for entry in self.available(client)}
+
+        unmeasurable = {slug for slug, entry in by_slug.items() if not entry["measurable"]}
+        assert unmeasurable == {
+            "custom_extraction",
+            "custom_search_ga4_gtm",
+            "custom_search_og_twitter",
+            "functional_internal_links",
+        }
+        for slug in unmeasurable:
+            assert by_slug[slug]["reason"]
+
+    def test_a_working_service_carries_the_flag_and_no_reason(self, client) -> None:
+        by_slug = {entry["slug"]: entry for entry in self.available(client)}
+
+        assert by_slug["h1"] == {"slug": "h1", "measurable": True, "reason": None}
+        assert len([e for e in by_slug.values() if e["measurable"]]) == 17
+
+    def test_the_flag_is_not_an_enforcement_point(self, client, dispatch_store) -> None:
+        """A flagged service is still buildable.
+
+        A loose export directory can
+        hold files an uploaded bundle may not, and refusing here would break
+        that path to fix a display problem.
+        """
+        job_id = dispatch_store.add_job(bundle=bundle_bytes())
+
+        assert build(client, job_id, slug="custom_extraction").status_code == 202

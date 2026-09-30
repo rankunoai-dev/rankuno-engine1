@@ -518,6 +518,31 @@
   text-align: left;
 }
 
+/* "Download All (ZIP)" row sits above the per-service grid. */
+.sfj-mf-batch-row {
+  grid-column: 1 / -1;
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border, #e8e8e8);
+}
+
+/* A service that cannot measure anything: listed, disabled, and explained.
+   Spans the whole grid so its reason reads as a sentence rather than being
+   squeezed into a 150px button column. */
+.sfj-mf-unavailable {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sfj-mf-why {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--dim);
+}
+
 /* ---- Confirmation dialog ---- */
 
 .sfc-rows {

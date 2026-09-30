@@ -31,6 +31,8 @@ promise.
 
 from __future__ import annotations
 
+import io
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -42,7 +44,7 @@ from src.modules.seo.deliverables.masterfile_source import MasterfileSource
 from src.modules.seo.deliverables.pipeline import run_deliverable_pipeline
 from src.modules.seo.deliverables.workbook import WorkbookPageLimitExceededError
 
-__all__ = ["run_build", "run_masterfile"]
+__all__ = ["run_build", "run_masterfile", "run_masterfile_batch"]
 
 _logger = get_logger(__name__)
 
@@ -186,4 +188,90 @@ def run_masterfile(
             # A zip left open pins its file on Windows and its memory
             # everywhere; the plaintext of an encrypted bundle must not
             # outlive the build that needed it.
+            source.close()
+
+
+def run_masterfile_batch(
+    deliverable_store: DiskJobStore,
+    deliverable_id: str,
+    job_id: str,
+    slugs: tuple[str, ...],
+    source_factory: Callable[[], MasterfileSource],
+    rulebook_path: Path | None,
+) -> None:
+    """Build every requested masterfile and ZIP them into a single download.
+
+    Same worker-thread contract as `run_masterfile`: never raises, never runs
+    on the event loop. Each service that fails is logged and skipped rather
+    than aborting the whole batch — the operator gets the seventeen that
+    worked rather than nothing because the eighteenth threw.
+
+    Args:
+        deliverable_store: Where this deliverable's record and ZIP live.
+        deliverable_id: The record to update.
+        job_id: The source job ID.
+        slugs: The services to build, in the order they appear in the ZIP.
+        source_factory: Opens the CSV source (same contract as `run_masterfile`).
+        rulebook_path: Optional rulebook.
+    """
+    from src.modules.seo.deliverables.masterfile_registry import get_masterfile_service
+
+    source: MasterfileSource | None = None
+    try:
+        deliverable_store.mark_running(deliverable_id)
+        source = source_factory()
+
+        buf = io.BytesIO()
+        built = 0
+        skipped: list[str] = []
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for slug in slugs:
+                try:
+                    svc = get_masterfile_service(slug, job_id, source, rulebook_path)
+                    xlsx_bytes = svc.generate()
+                    zf.writestr(f"{slug}.xlsx", xlsx_bytes)
+                    built += 1
+                except Exception:  # noqa: BLE001
+                    _logger.warning(
+                        "masterfile_batch_skip",
+                        extra={"deliverable_id": deliverable_id, "slug": slug, "job_id": job_id},
+                        exc_info=True,
+                    )
+                    skipped.append(slug)
+
+        if built == 0:
+            deliverable_store.mark_failed(deliverable_id, "every service failed to build")
+            return
+
+        output_dir = deliverable_store.root / deliverable_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename = "masterfiles.zip"
+        (output_dir / filename).write_bytes(buf.getvalue())
+
+        deliverable_store.finish(
+            deliverable_id,
+            {
+                "filename": filename,
+                "source": "masterfile_batch",
+                "source_job_id": job_id,
+                "built": built,
+                "skipped": skipped,
+            },
+        )
+        _logger.info(
+            "masterfile_batch_built",
+            extra={
+                "deliverable_id": deliverable_id,
+                "job_id": job_id,
+                "built": built,
+                "skipped": len(skipped),
+            },
+        )
+    except ValueError as exc:
+        deliverable_store.mark_failed(deliverable_id, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _logger.exception("masterfile_batch_crashed", extra={"deliverable_id": deliverable_id})
+        deliverable_store.mark_failed(deliverable_id, f"{type(exc).__name__}: {exc}")
+    finally:
+        if source is not None:
             source.close()

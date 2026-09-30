@@ -38,6 +38,7 @@ from openpyxl import Workbook
 
 from src.core.logger import get_logger
 from src.modules.seo.deliverables.masterfile_base import (
+    NOT_MEASURED,
     MasterfileMetadata,
     MasterfileService,
     gc,
@@ -45,15 +46,40 @@ from src.modules.seo.deliverables.masterfile_base import (
     sanitize_sheet_name,
 )
 
-__all__ = ["CustomExtractionService"]
+__all__ = ["NOT_REQUESTED", "CustomExtractionService"]
 
 _logger = get_logger(__name__)
 
 _CUSTOM_EXTRACTION_PREFIX: Final[str] = "custom_extraction_"
 
+NOT_REQUESTED: Final[str] = (
+    "This engine never asked for the extraction. Its export manifest does not "
+    "request Screaming Frog's 'Custom Extraction:All' tab, so "
+    "custom_extraction_all.csv is in no bundle it produces - however many "
+    "extractors the crawl's configuration defines. The gap is in this engine, "
+    "not in the Screaming Frog setup."
+)
+"""The reason line beside `NOT_MEASURED` when no extractor export arrived.
+
+The cell used to read "No custom extractors configured", which names the wrong
+cause: it is a claim about the operator's `.seospiderconfig`, a binary file
+this codebase cannot read (ADR 0021), made on evidence that only ever showed
+the export was absent. An operator who had set extraction up correctly read
+that sentence and went looking for a fault in their own template.
+
+`NOT_MEASURED` on the line above keeps the shared vocabulary ADR 0011 §5
+requires; this says the part the generic phrase cannot, because "we never
+asked for this export" is a different fact from "this crawl had none"."""
+
 
 class CustomExtractionService(MasterfileService):
     """Generate custom extraction masterfile (dynamic N sheets)."""
+
+    SOURCE_FILE_PREFIXES = (_CUSTOM_EXTRACTION_PREFIX,)
+    """The one export family discovered rather than named. Declared so
+    `reachable_sources` can see it: this service's `SOURCE_FILES` is empty,
+    and an availability check reading only that would be right today for the
+    wrong reason and wrong the day the tab is requested."""
 
     @property
     def metadata(self) -> MasterfileMetadata:
@@ -110,9 +136,11 @@ class CustomExtractionService(MasterfileService):
         wb.remove(wb.active)  # Remove default sheet
 
         if not extractors:
-            # No custom extractors
+            # Absent, which is not the same as "none configured" - see
+            # `NOT_REQUESTED`.
             ws = wb.create_sheet("Summary")
-            ws.append(["No custom extractors configured"])
+            ws.append([NOT_MEASURED])
+            ws.append([NOT_REQUESTED])
         else:
             # Create sheet for each extractor
             for extractor_name in extractors:

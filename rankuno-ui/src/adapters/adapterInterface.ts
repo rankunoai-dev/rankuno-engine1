@@ -181,11 +181,22 @@ export interface SectionPerformance {
   data_coverage: number;
 }
 
-/** One available masterfile export service. */
+/** One masterfile export service the server offers. */
 export interface MasterfileService {
   slug: string;
   label: string;
   description?: string;
+  /**
+   * Whether this service can report on anything at all.
+   *
+   * `false` means no export it reads can reach a build, so every run would
+   * hand back an empty workbook. The server derives it from what the service
+   * declares against the filenames a bundle may carry; nothing here decides
+   * it, and no list of slugs is kept on this side.
+   */
+  measurable: boolean;
+  /** Why it cannot be built, in the server's words. Only when unmeasurable. */
+  reason?: string | null;
 }
 
 /** A deliverable build record (masterfile or workbook). */
@@ -799,6 +810,14 @@ export interface CrawlDataAdapter {
    * reason.
    */
   buildMasterfile?(jobId: string, serviceSlug: string): Promise<string>;
+
+  /**
+   * Build every measurable masterfile for a job and ZIP them.
+   *
+   * Returns a deliverable id to poll. The download is a `.zip` containing
+   * one `<slug>.xlsx` per service that succeeded.
+   */
+  buildAllMasterfiles?(jobId: string): Promise<string>;
 
   /**
    * Get the status of a deliverable (masterfile or other workbook build).

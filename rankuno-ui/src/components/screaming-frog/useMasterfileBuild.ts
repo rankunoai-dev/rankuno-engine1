@@ -4,10 +4,14 @@ import type { CrawlDataAdapter, MasterfileService } from "../../adapters/adapter
 import { ApiError } from "../../adapters/httpAdapter";
 import { saveBlob } from "../../lib/download";
 
-/** The four adapter methods a masterfile build needs, all optional on the adapter. */
+/** The adapter methods a masterfile build needs, all optional on the adapter. */
 export type MasterfileAdapter = Pick<
   CrawlDataAdapter,
-  "listAvailableMasterfiles" | "buildMasterfile" | "getDeliverable" | "downloadDeliverable"
+  | "listAvailableMasterfiles"
+  | "buildMasterfile"
+  | "buildAllMasterfiles"
+  | "getDeliverable"
+  | "downloadDeliverable"
 >;
 
 /** The job a masterfile is built from: a Screaming Frog WORKER job, never a native crawl. */
@@ -22,6 +26,8 @@ export interface MasterfileTarget {
 export const POLL_INTERVAL_MS = 1_000;
 /** Sixty polls, so a build that has not finished after about a minute is reported. */
 export const MAX_POLL_ATTEMPTS = 60;
+/** A batch of all 17+ services takes longer; five minutes is generous. */
+export const BATCH_MAX_POLL_ATTEMPTS = 300;
 
 export interface MasterfileBuild {
   /** Services the server offers; empty until loaded, or if the list failed. */
@@ -32,6 +38,10 @@ export interface MasterfileBuild {
   isBuilding: (jobId: string, slug: string) => boolean;
   /** Build, poll and save. Never rejects: failures surface through `message.error`. */
   build: (target: MasterfileTarget, service: MasterfileService) => Promise<void>;
+  /** Whether a "download all" batch is in flight for this job. */
+  isBuildingAll: (jobId: string) => boolean;
+  /** Build every measurable masterfile, poll and save as ZIP. */
+  buildAll: (target: MasterfileTarget) => Promise<void>;
 }
 
 /**
@@ -154,8 +164,60 @@ export function useMasterfileBuild(api: MasterfileAdapter | null): MasterfileBui
     [api, setBusy, sleep],
   );
 
+  const buildAll = useCallback(
+    async (target: MasterfileTarget): Promise<void> => {
+      const buildFn = api?.buildAllMasterfiles;
+      const getFn = api?.getDeliverable;
+      const downloadFn = api?.downloadDeliverable;
+      if (!api || !buildFn || !getFn || !downloadFn) return;
+
+      const key = batchKey(target.id);
+      if (inFlightRef.current.has(key)) return;
+      setBusy(key, true);
+
+      let stage: "build" | "poll" = "build";
+      try {
+        const deliverableId = await buildFn.call(api, target.id);
+        stage = "poll";
+
+        for (let attempt = 0; attempt < BATCH_MAX_POLL_ATTEMPTS; attempt += 1) {
+          if (!mounted.current) return;
+          const record = await getFn.call(api, deliverableId);
+
+          if (record.has_result) {
+            const blob = await downloadFn.call(api, deliverableId);
+            if (!mounted.current) return;
+            saveBlob(batchFilename(target), blob);
+            message.success("All masterfiles downloaded.");
+            return;
+          }
+          if (record.status === "failed") {
+            message.error(record.error || "The batch masterfile build failed.");
+            return;
+          }
+          await sleep(POLL_INTERVAL_MS);
+        }
+        if (mounted.current) {
+          message.error("The batch masterfile build timed out. Please try again.");
+        }
+      } catch (cause) {
+        if (mounted.current) {
+          message.error(describeMasterfileError(cause, "all masterfiles", stage));
+        }
+      } finally {
+        setBusy(key, false);
+      }
+    },
+    [api, setBusy, sleep],
+  );
+
   const isBuilding = useCallback(
     (jobId: string, slug: string): boolean => inFlight.has(flightKey(jobId, slug)),
+    [inFlight],
+  );
+
+  const isBuildingAll = useCallback(
+    (jobId: string): boolean => inFlight.has(batchKey(jobId)),
     [inFlight],
   );
 
@@ -164,17 +226,26 @@ export function useMasterfileBuild(api: MasterfileAdapter | null): MasterfileBui
     api.getDeliverable !== undefined &&
     api.downloadDeliverable !== undefined;
 
-  return { services, supported, isBuilding, build };
+  return { services, supported, isBuilding, build, isBuildingAll, buildAll };
 }
 
 function flightKey(jobId: string, slug: string): string {
   return `${jobId}\u0000${slug}`;
 }
 
+function batchKey(jobId: string): string {
+  return `${jobId}\u0000__all__`;
+}
+
 /** `<service>-<first 8 of id>-<date>.xlsx`, the shape the old menu saved. */
 export function masterfileFilename(slug: string, target: MasterfileTarget): string {
   const stamp = target.when ? target.when.slice(0, 10) : "undated";
   return `${slug}-${target.id.slice(0, 8)}-${stamp}.xlsx`;
+}
+
+export function batchFilename(target: MasterfileTarget): string {
+  const stamp = target.when ? target.when.slice(0, 10) : "undated";
+  return `masterfiles-${target.id.slice(0, 8)}-${stamp}.zip`;
 }
 
 /**

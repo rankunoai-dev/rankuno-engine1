@@ -16,9 +16,18 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import openpyxl
-from src.modules.seo.deliverables.masterfile_custom_extraction import CustomExtractionService
+from src.modules.seo.deliverables.masterfile_base import NOT_MEASURED
+from src.modules.seo.deliverables.masterfile_custom_extraction import (
+    NOT_REQUESTED,
+    CustomExtractionService,
+)
 from src.modules.seo.deliverables.masterfile_source import source_for_bundle_bytes
-from tests.modules.seo.deliverables.conftest import detail_table, first_cell, urls_in
+from tests.modules.seo.deliverables.conftest import (
+    detail_table,
+    first_cell,
+    sheet_rows,
+    urls_in,
+)
 from tests.modules.seo.deliverables.sf_export import HOME, csv_bytes, write_export
 
 EXTRACTOR_HEADER = ("Address", "Status Code", "Status", "Phone 1")
@@ -59,11 +68,35 @@ def generate_from(members: Mapping[str, bytes]) -> bytes:
         source.close()
 
 
-def test_no_extractors_configured(empty_export: Path) -> None:
+def test_an_absent_extraction_export_is_not_measured_not_misconfigured(
+    empty_export: Path,
+) -> None:
+    """The placeholder must name our gap, not the operator's configuration.
+
+    The cell used to read "No custom extractors configured", which is a
+    claim about the operator's `.seospiderconfig` - a binary this codebase
+    cannot read - made on evidence that only showed the export was missing.
+    It must say what its siblings say, then the part they cannot.
+    """
     payload = CustomExtractionService("test-job", empty_export).generate()
 
     assert sheet_names(payload) == ["Summary"]
-    assert first_cell(payload) == "No custom extractors configured"
+    assert first_cell(payload) == NOT_MEASURED
+    rows = sheet_rows(payload)
+    assert rows[1][0] == NOT_REQUESTED
+    assert "configured" not in str(rows[0][0])
+
+
+def test_the_reason_names_the_unrequested_tab_not_the_crawl_settings() -> None:
+    """The reason names the tab and the file, not a vague absence.
+
+    Precision is the point: "we never asked for this export" is a different
+    fact from "this crawl had none", and only one of them is the operator's to
+    fix.
+    """
+    assert "Custom Extraction:All" in NOT_REQUESTED
+    assert "custom_extraction_all.csv" in NOT_REQUESTED
+    assert "gap is in this engine" in NOT_REQUESTED
 
 
 def test_metadata(empty_export: Path) -> None:

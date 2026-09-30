@@ -208,6 +208,13 @@ class MasterfileService(ABC):
     discovers its files dynamically; the two Custom Search services and
     Functional Internal Links have no catalogue source at all)."""
 
+    SOURCE_FILE_PREFIXES: ClassVar[tuple[str, ...]] = ()
+    """Filename *prefixes* this service discovers at build time, for the one
+    export whose names cannot be known in advance (`custom_extraction_*`).
+    Declared here rather than left implicit inside `generate()` so that
+    `reachable_sources` can answer "could this service ever read anything?"
+    without running a build."""
+
     INDEXABLE_ONLY: ClassVar[bool] = True
     """Whether the detail table is restricted to `Indexability ==
     "Indexable"`, per build-log 0104's original spec. `False` where the issue
@@ -240,6 +247,29 @@ class MasterfileService(ABC):
         self.rulebook_path = rulebook_path
         self._logger = get_logger(self.__class__.__module__)
         self._enrichment_cache: dict[str, pd.DataFrame | None] = {}
+
+    @classmethod
+    def reachable_sources(cls, allowed: frozenset[str]) -> frozenset[str]:
+        """Every file in `allowed` this service could ever read.
+
+        An empty result is a statement about the service, not about a crawl:
+        no run, and no Screaming Frog configuration, can put a row in its
+        workbook, because nothing it reads is admissible in the first place.
+        Callers pass `ALLOWED_BUNDLE_FILENAMES` to ask the question of an
+        uploaded bundle, which is the only input the API build path has.
+
+        Args:
+            allowed: The filenames a source is permitted to contain.
+
+        Returns:
+            The subset of `allowed` named by `SOURCE_FILES` or matched by
+            `SOURCE_FILE_PREFIXES`.
+        """
+        return frozenset(
+            name
+            for name in allowed
+            if name in cls.SOURCE_FILES or name.startswith(cls.SOURCE_FILE_PREFIXES)
+        )
 
     def _read_csv(self, filename: str) -> pd.DataFrame | None:
         """One export CSV, or `None` when this source does not hold it.

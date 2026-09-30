@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, authorizedFetch, downloadFile, setAuthToken, setSessionExpiredHandler } from "./httpAdapter";
+import {
+  ApiError,
+  HttpAdapter,
+  authorizedFetch,
+  downloadFile,
+  setAuthToken,
+  setSessionExpiredHandler,
+} from "./httpAdapter";
 
 /**
  * The ADR 0016 plumbing `authorizedFetch` adds underneath every adapter call:
@@ -165,5 +172,68 @@ describe("downloadFile", () => {
     await expect(
       downloadFile("http://engine/api/v1/jobs/missing/matched.csv", "f.csv"),
     ).rejects.toThrow("job not found");
+  });
+});
+
+/**
+ * `listAvailableMasterfiles` is the one adapter method that *decides*
+ * something rather than passing a field through: whether a service is
+ * offered. The server derives `measurable`; this must not invent it, and must
+ * not withhold a service the server merely declined to describe.
+ */
+describe("HttpAdapter.listAvailableMasterfiles", () => {
+  function respond(services: unknown): void {
+    (fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify({ services }), { status: 200 }),
+    );
+  }
+
+  it("carries the server's flag and reason through, and labels the slug", async () => {
+    respond([
+      { slug: "h1", measurable: true, reason: null },
+      { slug: "custom_extraction", measurable: false, reason: "never requested" },
+    ]);
+
+    const services = await new HttpAdapter("http://engine/api/v1").listAvailableMasterfiles();
+
+    expect(services).toEqual([
+      { slug: "h1", label: "H1 Tags", description: "H1 tags and uniqueness", measurable: true, reason: null },
+      {
+        slug: "custom_extraction",
+        label: "Custom Extraction",
+        description: "Custom data extraction",
+        measurable: false,
+        reason: "never requested",
+      },
+    ]);
+  });
+
+  it("treats a server that never sends the flag as offering everything", async () => {
+    // A server predating the field listed every service and meant it. Reading
+    // its silence as "unavailable" would disable all twenty-one buttons.
+    respond([{ slug: "h1" }]);
+
+    const services = await new HttpAdapter("http://engine/api/v1").listAvailableMasterfiles();
+
+    expect(services[0]?.measurable).toBe(true);
+    expect(services[0]?.reason).toBeNull();
+  });
+});
+
+describe("HttpAdapter.buildAllMasterfiles", () => {
+  it("posts to the batch endpoint and returns the deliverable id", async () => {
+    (fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "dl-batch", status: "dispatched", label: "all" }), {
+        status: 202,
+      }),
+    );
+
+    const id = await new HttpAdapter("http://engine/api/v1").buildAllMasterfiles("wj-1");
+
+    expect(id).toBe("dl-batch");
+    expect(fetch).toHaveBeenCalledWith(
+      "http://engine/api/v1/jobs/wj-1/masterfiles/all",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

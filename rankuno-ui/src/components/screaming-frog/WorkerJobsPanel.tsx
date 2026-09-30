@@ -2,6 +2,7 @@ import { Alert, Button, Empty, Popover, Progress, Table, Tag, message } from "an
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useState } from "react";
 import type {
+  MasterfileService,
   WorkerDispatchAdapter,
   WorkerJobView,
 } from "../../adapters/adapterInterface";
@@ -388,9 +389,26 @@ function MasterfileMenu({
   job: WorkerJobView;
   masterfiles: MasterfileBuild;
 }): JSX.Element {
+  const batchBusy = masterfiles.isBuildingAll(job.id);
+  const target = { id: job.id, when: job.finished_at ?? job.created_at };
+
   const content = (
     <div className="sfj-mf-grid" role="group" aria-label="Masterfile services">
+      <div className="sfj-mf-batch-row">
+        <Button
+          type="primary"
+          size="small"
+          loading={batchBusy}
+          disabled={batchBusy}
+          onClick={() => void masterfiles.buildAll(target)}
+        >
+          Download All (ZIP)
+        </Button>
+      </div>
       {masterfiles.services.map((service) => {
+        if (!service.measurable) {
+          return <UnbuildableService key={service.slug} service={service} />;
+        }
         const busy = masterfiles.isBuilding(job.id, service.slug);
         return (
           <Button
@@ -399,12 +417,7 @@ function MasterfileMenu({
             loading={busy}
             disabled={busy}
             title={service.description}
-            onClick={() =>
-              void masterfiles.build(
-                { id: job.id, when: job.finished_at ?? job.created_at },
-                service,
-              )
-            }
+            onClick={() => void masterfiles.build(target, service)}
           >
             {service.label}
           </Button>
@@ -425,6 +438,42 @@ function MasterfileMenu({
         Masterfiles
       </Button>
     </Popover>
+  );
+}
+
+/**
+ * A service the server reports as unable to measure anything: shown, not offered.
+ *
+ * Hiding it would be the worse lie. An operator who used Custom Extraction in
+ * RAE and cannot find it here concludes the feature was dropped; what they
+ * need is to find it and read why it is off. An enabled button is what shipped
+ * the original defect - the build succeeded, downloaded, and handed back a
+ * workbook reading "no custom extractors configured", blaming a Screaming Frog
+ * configuration this engine never asks the right tab of.
+ *
+ * The reason is the server's sentence, rendered as visible text rather than a
+ * `title` tooltip: a disabled button does not reliably fire hover on any
+ * platform, and the explanation is the entire point of still listing the row.
+ * `aria-describedby` ties the two together for a screen reader, so the state
+ * and its cause arrive at the same time.
+ */
+function UnbuildableService({ service }: { service: MasterfileService }): JSX.Element {
+  const reasonId = `sfj-mf-why-${service.slug}`;
+  return (
+    <div className="sfj-mf-unavailable">
+      <Button
+        size="small"
+        disabled
+        aria-describedby={service.reason ? reasonId : undefined}
+      >
+        {service.label}
+      </Button>
+      {service.reason ? (
+        <p className="sfj-mf-why" id={reasonId}>
+          {service.reason}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

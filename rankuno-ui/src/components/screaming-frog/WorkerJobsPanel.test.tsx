@@ -242,9 +242,22 @@ describe("WorkerJobsPanel", () => {
  */
 describe("WorkerJobsPanel masterfiles", () => {
   const SERVICES = [
-    { slug: "response_codes", label: "Response Codes", description: "HTTP status codes" },
-    { slug: "page_titles", label: "Page Titles" },
+    {
+      slug: "response_codes",
+      label: "Response Codes",
+      description: "HTTP status codes",
+      measurable: true,
+    },
+    { slug: "page_titles", label: "Page Titles", measurable: true },
   ];
+  const UNMEASURABLE = {
+    slug: "custom_extraction",
+    label: "Custom Extraction",
+    measurable: false,
+    reason:
+      "Not measured by this crawl: this engine's export manifest never asks " +
+      "Screaming Frog for an export this report reads.",
+  };
   const DONE = {
     status: "succeeded" as const,
     finished_at: "2026-09-21T11:00:00Z",
@@ -261,6 +274,7 @@ describe("WorkerJobsPanel masterfiles", () => {
       listWorkerJobs: vi.fn().mockResolvedValue([workerJob(DONE)]),
       listAvailableMasterfiles: vi.fn().mockResolvedValue(SERVICES),
       buildMasterfile: vi.fn().mockResolvedValue("dl-1"),
+      buildAllMasterfiles: vi.fn().mockResolvedValue("dl-batch"),
       getDeliverable: vi
         .fn()
         .mockResolvedValue({ id: "dl-1", status: "succeeded", has_result: true }),
@@ -279,7 +293,7 @@ describe("WorkerJobsPanel masterfiles", () => {
     const api = masterfileApi({
       listAvailableMasterfiles: vi
         .fn()
-        .mockResolvedValue([{ slug: "only_one", label: "The Only Service" }]),
+        .mockResolvedValue([{ slug: "only_one", label: "The Only Service", measurable: true }]),
     });
     renderPanel(api);
 
@@ -289,6 +303,49 @@ describe("WorkerJobsPanel masterfiles", () => {
     // Not a constant: the two services in SERVICES are absent.
     expect(screen.queryByRole("button", { name: "Response Codes" })).not.toBeInTheDocument();
     expect(api.listAvailableMasterfiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists a service it cannot build as disabled, with the server's reason beside it", async () => {
+    // Never hidden: an operator looking for Custom Extraction has to find it
+    // and read why it is off, not conclude the feature does not exist. And
+    // never enabled: an enabled button here downloaded an empty workbook that
+    // blamed their Screaming Frog configuration for our export manifest's gap.
+    const api = masterfileApi({
+      listAvailableMasterfiles: vi.fn().mockResolvedValue([SERVICES[0], UNMEASURABLE]),
+    });
+    renderPanel(api);
+
+    await openMenu();
+
+    const offered = screen.getByRole("button", { name: "Response Codes" });
+    const refused = screen.getByRole("button", { name: "Custom Extraction" });
+    expect(offered).toBeEnabled();
+    expect(refused).toBeDisabled();
+
+    const reason = screen.getByText(new RegExp(UNMEASURABLE.reason.slice(0, 40), "i"));
+    expect(reason).toBeInTheDocument();
+    expect(refused).toHaveAttribute("aria-describedby", reason.id);
+
+    fireEvent.click(refused);
+    expect(api.buildMasterfile).not.toHaveBeenCalled();
+  });
+
+  it("shows a Download All button that triggers the batch endpoint", async () => {
+    const save = vi.spyOn(download, "saveBlob").mockImplementation(() => undefined);
+    vi.spyOn(message, "success").mockImplementation(() => ({}) as never);
+    const getDeliverable = vi
+      .fn()
+      .mockResolvedValue({ id: "dl-batch", status: "succeeded", has_result: true });
+    const api = masterfileApi({ getDeliverable });
+    renderPanel(api);
+    await openMenu();
+
+    const button = screen.getByRole("button", { name: /download all/i });
+    expect(button).toBeEnabled();
+
+    fireEvent.click(button);
+    await waitFor(() => expect(api.buildAllMasterfiles).toHaveBeenCalledWith("wj-1"));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.stringMatching(/\.zip$/), expect.any(Blob)));
   });
 
   it("hides the control for a row with no bundle", async () => {

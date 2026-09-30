@@ -48,6 +48,19 @@ interface WorkerJobListView {
   jobs: WorkerJobView[];
 }
 
+/**
+ * Mirrors `ServiceAvailability` in
+ * `src/modules/seo/deliverables/masterfile_availability.py`.
+ *
+ * `measurable` is optional here and nowhere else: this is the wire, and a
+ * server that predates the field sends a record without it.
+ */
+interface MasterfileAvailability {
+  slug: string;
+  measurable?: boolean;
+  reason?: string | null;
+}
+
 export const DEFAULT_API_BASE = "http://127.0.0.1:8000/api/v1";
 
 /**
@@ -673,14 +686,29 @@ export class HttpAdapter implements CrawlDataAdapter {
   }
 
   /**
-   * Available masterfile export services, sorted by slug.
+   * Every masterfile export service, sorted by slug, measurable or not.
+   *
+   * The server returns records rather than bare slugs: four of the
+   * twenty-one read an export this engine never asks Screaming Frog for, and
+   * a build of one of those succeeds and downloads an empty workbook. They
+   * are still listed - the caller shows them disabled with `reason` beside
+   * them, because an operator looking for Custom Extraction has to find it
+   * and learn why it is off.
+   *
+   * `measurable` is taken as true only when the server has not said
+   * otherwise: a server predating the flag offered everything, and treating
+   * its silence as "unavailable" would disable all twenty-one.
    */
   async listAvailableMasterfiles(): Promise<MasterfileService[]> {
-    const response = await this.request<{ services: string[] }>("/masterfiles/available");
-    return response.services.map((slug) => ({
-      slug,
-      label: this.masterfileLabel(slug),
-      description: this.masterfileDescription(slug),
+    const response = await this.request<{ services: MasterfileAvailability[] }>(
+      "/masterfiles/available",
+    );
+    return response.services.map((entry) => ({
+      slug: entry.slug,
+      label: this.masterfileLabel(entry.slug),
+      description: this.masterfileDescription(entry.slug),
+      measurable: entry.measurable !== false,
+      reason: entry.reason ?? null,
     }));
   }
 
@@ -692,6 +720,14 @@ export class HttpAdapter implements CrawlDataAdapter {
   async buildMasterfile(jobId: string, serviceSlug: string): Promise<string> {
     const accepted = await this.request<{ id: string }>(
       `/jobs/${encodeURIComponent(jobId)}/masterfile/${encodeURIComponent(serviceSlug)}`,
+      { method: "POST" },
+    );
+    return accepted.id;
+  }
+
+  async buildAllMasterfiles(jobId: string): Promise<string> {
+    const accepted = await this.request<{ id: string }>(
+      `/jobs/${encodeURIComponent(jobId)}/masterfiles/all`,
       { method: "POST" },
     );
     return accepted.id;

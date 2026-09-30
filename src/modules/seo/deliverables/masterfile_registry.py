@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "get_masterfile_service",
+    "service_class",
     "AVAILABLE_SERVICES",
 ]
 
@@ -91,6 +92,30 @@ def get_masterfile_service(
     Raises:
         ValueError: Unknown service slug
     """
+    return service_class(slug)(job_id, source, rulebook_path)
+
+
+def service_class(slug: str) -> type[MasterfileService]:
+    """The class registered for `slug`, imported but not instantiated.
+
+    Split out of `get_masterfile_service` for the availability derivation
+    (`masterfile_availability.py`), which reads class-level `SOURCE_FILES`
+    and `SOURCE_FILE_PREFIXES` to decide whether a service can measure
+    anything at all. It has no source and no job to build for, so it must be
+    able to ask the question without constructing a service.
+
+    Args:
+        slug: Service slug (e.g., "response_codes")
+
+    Returns:
+        The service class.
+
+    Raises:
+        ValueError: Unknown slug, or a registered target that cannot be
+            imported - a typo in `_SERVICES` is a wiring bug, and surfacing
+            it as the same `ValueError` the caller already handles keeps a
+            broken entry loud rather than silently unavailable.
+    """
     if slug not in _SERVICES:
         msg = f"Unknown masterfile service: {slug}"
         raise ValueError(msg)
@@ -101,8 +126,7 @@ def get_masterfile_service(
     try:
         # Lazy import to avoid circular dependencies
         module = __import__(module_path, fromlist=[attr.split(":")[0]])
-        service_class = getattr(module, class_name)
-        return service_class(job_id, source, rulebook_path)  # type: ignore[no-any-return]
+        return getattr(module, class_name)  # type: ignore[no-any-return]
     except (ImportError, AttributeError) as exc:
         msg = f"Failed to instantiate masterfile service {slug}: {exc}"
         raise ValueError(msg) from exc
