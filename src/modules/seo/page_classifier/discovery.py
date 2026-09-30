@@ -404,6 +404,80 @@ class DiscoveryReport(StrictModel):
     dom_reserve: int = Field(default=0, ge=0)
     dom_reserve_used: int = Field(default=0, ge=0)
 
+    # The Discovered-to-Fetched gap, named piece by piece. Every field below
+    # counts URLs that *are* in `total_urls` and were *not* fetched, so that
+    # `unaccounted` can be derived from named fields alone. On a 26k-URL
+    # infosys.com crawl the gap was ~20,000 and the report explained none of
+    # it; the operator's question was "why were 60% not captured", and the
+    # honest answer was that nothing had counted them.
+    pages_not_retrieved: int = Field(default=0, ge=0)
+    """DOM-crawl page fetches that were made and produced no page: an
+    exception, a non-2xx status, or a 2xx that was not HTML.
+
+    A counter of its own rather than a value derived from `fetch_outcomes`,
+    because that ledger is shared with sitemap and CMS-endpoint fetches and
+    nothing records how many of *those* were made. Subtracting
+    `sitemap_fetch_attempts` from the ledger total balances on a site with no
+    CMS path and silently does not on a WordPress site. The per-outcome
+    breakdown of this number is `fetch_outcomes` minus its sitemap and CMS
+    share, which is why the UI shows both."""
+    cms_only_unlinked: int = Field(default=0, ge=0)
+    """Present in the CMS API but in no sitemap and linked from nowhere.
+
+    Sibling of `sitemap_only`: together they are every node the DOM frontier
+    never held, and therefore never tried to fetch."""
+    faceted_skipped: int = Field(default=0, ge=0)
+    """Frontier URLs deliberately not fetched because `is_faceted_filter`
+    classified them from the URL alone. They stay in the graph as link
+    targets; fetching them is the combinatorial trap the Amazon-scale rules
+    exist to avoid."""
+    resume_excluded: int = Field(default=0, ge=0)
+    """Frontier URLs skipped because the run this one resumes had already
+    fetched them (`exclude_urls`). Non-zero only on a resumed crawl."""
+    depth_capped: int = Field(default=0, ge=0)
+    """Frontier URLs discovered beyond `max_depth` and therefore never
+    fetched. Zero when the crawl ran without a depth ceiling."""
+    abandoned_in_flight: int = Field(default=0, ge=0)
+    """Frontier URLs still queued or in flight when the crawl was abandoned —
+    by the stall detector or by an operator's cancel. `stopped_reason` says
+    which. Always zero on the serial path, which has neither."""
+    ceiling_refused: int = Field(default=0, ge=0)
+    """Link occurrences the graph refused because the page ceiling was full.
+
+    **Occurrences, not unique URLs**: `SiteGraph.add` is called once per link
+    target on every page, so a URL linked from fifty pages after the ceiling
+    was hit counts fifty times. Deduplicating would need a set that grows
+    without bound on exactly the crawls where the ceiling matters. Unlike the
+    other counters here, these URLs are *outside* `total_urls` — this explains
+    how much bigger the site is than the graph, not the fetch gap."""
+
+    @property
+    def unaccounted(self) -> int:
+        """URLs in the Discovered-to-Fetched gap that no named field explains.
+
+        `total_urls - pages_fetched` minus every counter that names a reason.
+        Zero is the claim; a positive remainder is a cause the report does not
+        yet count, and a negative one is double counting. Either is a bug in
+        the accounting, not in the crawl, which is why the test suite asserts
+        zero on synthetic crawls of both paths.
+
+        Known to go negative by design in one case: the relative-loop watcher
+        evicts nodes it admitted before it had the evidence to refuse them, and
+        an evicted node that had already been fetched still counts in
+        `pages_fetched` while no longer counting in `total_urls`.
+        """
+        return (
+            self.total_urls
+            - self.pages_fetched
+            - self.pages_not_retrieved
+            - self.sitemap_only
+            - self.cms_only_unlinked
+            - self.faceted_skipped
+            - self.resume_excluded
+            - self.depth_capped
+            - self.abandoned_in_flight
+        )
+
     @property
     def retrieved_nothing(self) -> bool:
         """Whether the crawl obtained no data from the network at all.
@@ -517,6 +591,19 @@ class SiteGraph:
         never fetched. See `DiscoveryReport.sitemap_offhost_skipped`."""
         self.filter_skipped = 0
         """URLs rejected by include/exclude pattern filters."""
+        # The gap counters. Kept as plain attributes like the rest, incremented
+        # by whichever crawl path made the decision, and projected into
+        # `DiscoveryReport` by `report()`. See the field docstrings there.
+        self.pages_fetched = 0
+        """DOM-crawl pages actually retrieved."""
+        self.sitemaps_fetched = 0
+        """Sitemap files successfully parsed."""
+        self.pages_not_retrieved = 0
+        self.faceted_skipped = 0
+        self.resume_excluded = 0
+        self.depth_capped = 0
+        self.abandoned_in_flight = 0
+        self.ceiling_refused = 0
 
     def __len__(self) -> int:
         """Node count."""
@@ -618,6 +705,8 @@ class SiteGraph:
             limit = self.max_pages if dom_link else self.pre_crawl_budget
             if len(self._nodes) >= limit:
                 self.truncated = True
+                # Per call, so per link occurrence — see the report field.
+                self.ceiling_refused += 1
                 return None
             existing = DiscoveredNode(url=url, normalized=key)
             self._nodes[key] = existing
@@ -870,8 +959,17 @@ class SiteGraph:
             from_dom=sum(1 for n in nodes if n.sources.dom_link),
             from_cms=sum(1 for n in nodes if n.sources.cms_api),
             sitemap_only=sum(1 for n in nodes if n.sources.sitemap and not n.sources.dom_link),
+            # Disjoint from `sitemap_only` by construction, so the two sum to
+            # "every node the DOM frontier never held".
+            cms_only_unlinked=sum(
+                1
+                for n in nodes
+                if n.sources.cms_api and not n.sources.sitemap and not n.sources.dom_link
+            ),
             dom_only=sum(1 for n in nodes if n.sources.dom_link and not n.sources.sitemap),
             orphans=sum(1 for n in nodes if n.is_orphan),
+            pages_fetched=self.pages_fetched,
+            sitemaps_fetched=self.sitemaps_fetched,
             fetch_failures=self.fetch_failures,
             fetch_outcomes=dict(self.fetch_outcomes),
             media_skipped=self.media_skipped,
@@ -887,6 +985,12 @@ class SiteGraph:
             sitemap_offhost_skipped=self.sitemap_offhost_skipped,
             truncated=self.truncated,
             stopped_reason=self.stopped_reason,
+            pages_not_retrieved=self.pages_not_retrieved,
+            faceted_skipped=self.faceted_skipped,
+            resume_excluded=self.resume_excluded,
+            depth_capped=self.depth_capped,
+            abandoned_in_flight=self.abandoned_in_flight,
+            ceiling_refused=self.ceiling_refused,
         )
 
 
@@ -944,7 +1048,7 @@ def discover_site(
         url_filter=url_filter,
     )
 
-    sitemaps_fetched = _discover_from_sitemaps(fetcher, base_url, graph)
+    graph.sitemaps_fetched = _discover_from_sitemaps(fetcher, base_url, graph)
     _discover_from_cms(fetcher, base_url, graph, site_profile)
     # Reported once before the DOM crawl: sitemap and CMS discovery establish the
     # denominator, so without this the first progress reading is 0 of 0.
@@ -954,10 +1058,9 @@ def discover_site(
     # something worth rendering.
     _checkpoint(on_checkpoint, graph)
 
-    pages_fetched = 0
     if crawl_dom:
         try:
-            pages_fetched = _crawl_dom(
+            graph.pages_fetched = _crawl_dom(
                 fetcher,
                 base_url,
                 graph,
@@ -971,9 +1074,7 @@ def discover_site(
             _logger.exception("dom_crawl_aborted", extra={"url": base_url})
             graph.stopped_reason = f"{type(exc).__name__}: {exc}"
 
-    report = graph.report().model_copy(
-        update={"sitemaps_fetched": sitemaps_fetched, "pages_fetched": pages_fetched}
-    )
+    report = graph.report()
     _logger.info("discovery_complete", extra=report.model_dump())
     return graph, report
 
@@ -1178,9 +1279,7 @@ def _paginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> Iterator
         try:
             result = fetcher.fetch(url)
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
-            _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
-            graph.fetch_failures += 1
-            graph.record_outcome(_refusal_outcome_for(exc) or OUTCOME_TRANSPORT)
+            record_fetch_exception(graph, url, exc, classify_transport=False)
             return
         if not result.ok:
             graph.record_outcome(outcome_for(result.status_code))
@@ -1267,12 +1366,19 @@ def _crawl_dom(
         # refuses *new* nodes when full, so the frontier stops growing on its
         # own. Skipping here instead meant that whenever the sitemap alone
         # filled the budget, the DOM crawl fetched nothing at all.
+        #
+        # Each skip below is counted, in this order, and the async path checks
+        # the same conditions in the same order — a URL that is both faceted
+        # and excluded must land in the same bucket on both paths or the two
+        # reports disagree on a resumed crawl.
         if max_depth is not None and depth > max_depth:
+            graph.depth_capped += 1
             continue
 
         # Filter permutations are classified from the URL alone; fetching them
         # is the combinatorial trap the Amazon-scale rules exist to avoid.
         if is_faceted_filter(url):
+            graph.faceted_skipped += 1
             continue
 
         # Already fetched by the run this one resumes. Skipped at the fetch and
@@ -1281,6 +1387,7 @@ def _crawl_dom(
         # `base_url` on a resume, which is what stops the traversal restarting
         # from the homepage.
         if normalize_url(url) in excluded:
+            graph.resume_excluded += 1
             continue
 
         result = _safe_fetch_html(fetcher, url, graph)
@@ -1340,11 +1447,41 @@ OUTCOME_MEANINGS: Mapping[str, str] = {
         "completing (the tarpit shape) or otherwise ran past the whole-request budget."
     ),
     OUTCOME_ROBOTS_DISALLOWED: (
-        "The site's robots.txt disallows this path, so it was never requested — "
-        "a choice this crawler made, not a network failure."
+        "The site's robots.txt disallows this path for our user-agent, so the request "
+        "was never sent — a rule the site set, not a network failure."
     ),
 }
-"""Plain-language gloss per outcome, for a report handed to somebody else."""
+"""Plain-language gloss per outcome, for a report handed to somebody else.
+
+Exported to the UI verbatim by `scripts/export_ui_contract.py`, so the report
+never carries a second, hand-typed copy of these sentences that can drift."""
+
+GAP_COUNTER_MEANINGS: Mapping[str, str] = {
+    "pages_not_retrieved": (
+        "Requested, but no page came back — a 404, a refusal, a timeout, a robots.txt "
+        "block, or a 200 that was a file rather than HTML. See the fetch outcomes."
+    ),
+    "sitemap_only": (
+        "Listed in a sitemap but linked from nowhere, so the link crawl never reached it."
+    ),
+    "cms_only_unlinked": (
+        "Known to the CMS API but in no sitemap and linked from nowhere — never reached."
+    ),
+    "faceted_skipped": (
+        "A faceted-filter URL, classified from its address alone and deliberately not fetched."
+    ),
+    "resume_excluded": "Already fetched by the run this crawl resumed.",
+    "depth_capped": "Found beyond the crawl's depth ceiling.",
+    "abandoned_in_flight": (
+        "Queued or in flight when the crawl was abandoned — the stop reason says why."
+    ),
+}
+"""Plain-language gloss per `DiscoveryReport` gap counter, keyed by field name.
+
+Same purpose and same export path as `OUTCOME_MEANINGS`. Every key here is a
+field whose URLs sit *inside* `total_urls`; `ceiling_refused` is deliberately
+absent because its URLs never entered the graph and it does not belong in a
+table that explains the Discovered-to-Fetched gap."""
 
 
 def outcome_for(status_code: int) -> str:
@@ -1393,24 +1530,43 @@ def _transport_outcome_for(exc: BaseException) -> str:
     return OUTCOME_TRANSPORT
 
 
-def _refusal_outcome_for(exc: BaseException) -> str | None:
-    """Name the outcome of a fetch this crawler refused to make, if it was one.
+def record_fetch_exception(
+    graph: SiteGraph, url: str, exc: BaseException, *, classify_transport: bool
+) -> None:
+    """Book one failed fetch attempt on the graph, whatever raised it.
 
-    `UnsafeUrlError` and `RobotsDisallowedError` are siblings under
-    `GuardrailViolationError`, not parent and child, so a handler that tested
-    only the first filed every robots refusal as `transport_error` — "no
-    answer at all" about a URL that was never requested. Testing both here
-    means every fetch handler asks one question instead of repeating it.
+    The single place an exception is turned into an outcome, for the same
+    reason `record_outcome` is the single place an outcome is counted: six
+    `except Exception` sites across two crawl paths each carried their own
+    `isinstance` ladder, and a `RobotsDisallowedError` fell through every one of
+    them into `transport_error`. On infosys.com a whole robots-disallowed
+    subfolder was therefore reported as a network failure, at debug level.
 
-    Returns:
-        The refusal outcome, or `None` when the exception is a genuine
-        transport failure the caller should classify its own way.
+    Args:
+        graph: Receives the failure count and the outcome.
+        url: The URL that was being fetched, for the log line.
+        exc: Whatever the fetcher raised.
+        classify_transport: `True` on the async path, which can tell a timeout
+            from a refused connection from its own deadline; `False` on the
+            serial path, which keeps the single `transport_error` bucket it
+            has always had.
     """
-    if isinstance(exc, UnsafeUrlError):
-        return OUTCOME_GUARDRAIL_REFUSED
+    graph.fetch_failures += 1
     if isinstance(exc, RobotsDisallowedError):
-        return OUTCOME_ROBOTS_DISALLOWED
-    return None
+        # Info, not debug, and one line per URL: a disallowed path is a rule
+        # the site owner wrote, and the operator asking "why was this folder
+        # not captured" should find the answer in the log without correlating
+        # anything.
+        _logger.info("fetch_robots_disallowed", extra={"url": url, "user_agent": exc.user_agent})
+        graph.record_outcome(OUTCOME_ROBOTS_DISALLOWED)
+        return
+    _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
+    if isinstance(exc, UnsafeUrlError):
+        graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
+    elif classify_transport:
+        graph.record_outcome(_transport_outcome_for(exc))
+    else:
+        graph.record_outcome(OUTCOME_TRANSPORT)
 
 
 def is_refusal(status_code: int) -> bool:
@@ -1444,9 +1600,7 @@ def _safe_body(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> tuple[str | 
     try:
         result = fetcher.fetch(url)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
-        _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
-        graph.fetch_failures += 1
-        graph.record_outcome(_refusal_outcome_for(exc) or OUTCOME_TRANSPORT)
+        record_fetch_exception(graph, url, exc, classify_transport=False)
         return None, False
     if not result.ok:
         graph.record_outcome(outcome_for(result.status_code))
@@ -1469,9 +1623,8 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
     try:
         result = fetcher.fetch(url)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
-        _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
-        graph.fetch_failures += 1
-        graph.record_outcome(_refusal_outcome_for(exc) or OUTCOME_TRANSPORT)
+        record_fetch_exception(graph, url, exc, classify_transport=False)
+        graph.pages_not_retrieved += 1
         return None
     # Recorded before any bail, because this is where the fetcher's own answer
     # is still in scope. One line further on it is a bare string and the
@@ -1483,9 +1636,11 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
         graph.record_outcome(outcome_for(result.status_code))
         if is_refusal(result.status_code):
             graph.fetch_failures += 1
+        graph.pages_not_retrieved += 1
         return None
     if not result.is_html:
         graph.record_outcome(OUTCOME_NOT_HTML)
+        graph.pages_not_retrieved += 1
         return None
     graph.record_outcome(OUTCOME_OK)
     return result.body

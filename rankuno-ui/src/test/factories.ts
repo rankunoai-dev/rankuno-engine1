@@ -106,6 +106,13 @@ export function discovery(overrides: Partial<DiscoveryReport> = {}): DiscoveryRe
     stopped_reason: null,
     dom_reserve: 0,
     dom_reserve_used: 0,
+    pages_not_retrieved: 0,
+    cms_only_unlinked: 0,
+    faceted_skipped: 0,
+    resume_excluded: 0,
+    depth_capped: 0,
+    abandoned_in_flight: 0,
+    ceiling_refused: 0,
     ...overrides,
   };
 }
