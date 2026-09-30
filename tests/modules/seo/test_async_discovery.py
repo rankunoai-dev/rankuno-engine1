@@ -201,6 +201,40 @@ class TestEquivalenceWithSerialPath:
         assert concurrent.sitemap_fetch_attempts == serial.sitemap_fetch_attempts
         assert concurrent.sitemaps_blocked == serial.sitemaps_blocked
 
+    def test_the_gap_reconciles_to_zero(self, settings):
+        """Both paths must produce zero unaccounted gap remainder."""
+        _, serial = discover_site(build_fetcher(settings), "https://e.com")
+        _, concurrent = run_async(settings)
+        assert serial.unaccounted == 0
+        assert concurrent.unaccounted == 0
+
+    def test_the_graphs_own_report_reconciles_on_both_paths(self, settings):
+        """`graph.report()` must reconcile, not just the report `discover_site` returns.
+
+        The async path used to carry `pages_fetched` and `sitemaps_fetched` as
+        locals and patch them onto the returned report with `model_copy`. The
+        graph's own counters stayed at zero, so every consumer that re-derives a
+        report from the graph — checkpoints, progress notifications, the tree
+        visualiser — saw `pages_fetched=0` and a gap equal to the whole crawl.
+        Asserting only on the returned report hid that for the entire feature.
+        """
+        serial_graph, serial = discover_site(build_fetcher(settings), "https://e.com")
+        concurrent_graph, concurrent = run_async(settings)
+        for label, graph, returned in (
+            ("serial", serial_graph, serial),
+            ("concurrent", concurrent_graph, concurrent),
+        ):
+            from_graph = graph.report()
+            assert from_graph.pages_fetched == returned.pages_fetched, label
+            assert from_graph.sitemaps_fetched == returned.sitemaps_fetched, label
+            assert from_graph.unaccounted == 0, (
+                f"{label}: graph.report() does not reconcile: "
+                f"total_urls={from_graph.total_urls}, "
+                f"pages_fetched={from_graph.pages_fetched}, "
+                f"sitemap_only={from_graph.sitemap_only}, "
+                f"unaccounted={from_graph.unaccounted}"
+            )
+
 
 class TestConcurrentBehaviour:
     def test_finds_pages_the_sitemap_omits(self, settings):

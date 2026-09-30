@@ -256,6 +256,13 @@ export interface DiscoveryReport {
   stopped_reason: string | null;
   dom_reserve: number;
   dom_reserve_used: number;
+  pages_not_retrieved: number;
+  cms_only_unlinked: number;
+  faceted_skipped: number;
+  resume_excluded: number;
+  depth_capped: number;
+  abandoned_in_flight: number;
+  ceiling_refused: number;
 }
 
 /** What one probe pass discovered about a site. */

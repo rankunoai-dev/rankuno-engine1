@@ -179,8 +179,18 @@ export function DashboardShell(): JSX.Element {
           )}
           {/* Everything below describes the *loaded result*, so it belongs to
               the visualizer. The error banner above stays on both, because a
-              rejected submission has no job row to be reported against. */}
-          {view === "jobs" && <CrawlJobsView />}
+              rejected submission has no job row to be reported against.
+
+              Boundaried like every other view here, and it was the one
+              exception until a bug report: a null-safe field renamed on the
+              server, or any other render-time throw in this table or the
+              reconcile/performance dialogs it opens, unmounted the entire
+              dashboard with nothing on screen to say why (build-log 0122). */}
+          {view === "jobs" && (
+            <ErrorBoundary label="Crawl jobs">
+              <CrawlJobsView />
+            </ErrorBoundary>
+          )}
           {/* Boundaried for the reason stated on the boundary itself: a view
               that reads a field an older stored result does not carry throws
               during render, and an unboundaried throw blanks the whole

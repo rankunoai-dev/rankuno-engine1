@@ -227,6 +227,44 @@ export function CrawlReport({ model, result, generatedAt }: Props): JSX.Element 
         </tbody>
       </table>
 
+      {/* Why the Discovered-to-Fetched gap exists: a breakdown by skip reason.
+          When total_urls > pages_fetched, every discovered URL that was never
+          fetched lands in one of these buckets. */}
+      {discovery.total_urls > discovery.pages_fetched && (
+        <div className="rep-gap-breakdown">
+          <h3>Why the gap</h3>
+          <p className="rep-note">
+            {discovery.total_urls - discovery.pages_fetched} of {discovery.total_urls} discovered URLs were not fetched.
+          </p>
+          <table className="rep-kpi">
+            <tbody>
+              <tr>
+                <th>Not retrieved</th>
+                <td>{count(discovery.pages_not_retrieved)}</td>
+                <th>Sitemap only</th>
+                <td>{count(discovery.sitemap_only)}</td>
+              </tr>
+              <tr>
+                <th>CMS only</th>
+                <td>{count(discovery.cms_only_unlinked)}</td>
+                <th>Faceted filter</th>
+                <td>{count(discovery.faceted_skipped)}</td>
+              </tr>
+              <tr>
+                <th>Already fetched</th>
+                <td>{count(discovery.resume_excluded)}</td>
+                <th>Depth ceiling</th>
+                <td>{count(discovery.depth_capped)}</td>
+              </tr>
+              <tr>
+                <th>Abandoned in flight</th>
+                <td>{count(discovery.abandoned_in_flight)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
       <GscPerformanceSection
         pages={
           model.nodes

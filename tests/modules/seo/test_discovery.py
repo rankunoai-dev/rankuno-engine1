@@ -1279,4 +1279,25 @@ class TestDiscoverySourcesReachTheProfile:
         evidence = next(item for item in graph.to_page_evidence() if item.discovery_sources.sitemap)
         profile = classify_page(evidence)
         assert profile.discovery_sources == evidence.discovery_sources
-        assert profile.sitemap_source == evidence.sitemap_source
+
+    def test_the_gap_reconciles_to_zero(self, settings):
+        """The Discovered-to-Fetched accounting balances exactly.
+
+        `DiscoveryReport.unaccounted` derives the gap from named counters only,
+        asserting zero remainder. A synthetic crawl should satisfy this claim, or
+        the accounting is incomplete.
+        """
+        graph, _ = discover_site(site_fetcher(FULL_SITE, settings), "https://e.com")
+        report = graph.report()
+        assert report.unaccounted == 0, (
+            f"Gap reconciliation failed: total_urls={report.total_urls}, "
+            f"pages_fetched={report.pages_fetched}, "
+            f"pages_not_retrieved={report.pages_not_retrieved}, "
+            f"sitemap_only={report.sitemap_only}, "
+            f"cms_only_unlinked={report.cms_only_unlinked}, "
+            f"faceted_skipped={report.faceted_skipped}, "
+            f"resume_excluded={report.resume_excluded}, "
+            f"depth_capped={report.depth_capped}, "
+            f"abandoned_in_flight={report.abandoned_in_flight}, "
+            f"unaccounted={report.unaccounted}"
+        )

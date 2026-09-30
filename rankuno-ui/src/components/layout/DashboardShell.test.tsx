@@ -8,6 +8,18 @@ import { crawl, crawlJob, discovery } from "../../test/factories";
 import { DashboardShell } from "./DashboardShell";
 
 /**
+ * Stands in for a render-time throw anywhere in the jobs table or the
+ * reconcile/performance dialogs it opens (build-log 0122). No other test in
+ * this file renders the "jobs" view, so replacing the whole module is safe
+ * for the rest of the suite.
+ */
+vi.mock("../jobs/CrawlJobsView", () => ({
+  CrawlJobsView: () => {
+    throw new Error("boom from the jobs table");
+  },
+}));
+
+/**
  * The route from the Launch chooser into the engine.
  *
  * `LaunchView` and `NavigationRail` are tested on their own; this file exists
@@ -266,5 +278,59 @@ describe("DashboardShell — dismissing the safety banners", () => {
 
     expect(screen.getByText("The crawl failed after 1,204 pages.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Dismiss/i })).toBeNull();
+  });
+});
+
+/**
+ * A crash in the jobs table stays on the jobs table.
+ *
+ * Every other view `DashboardShell` renders — Launch, the Screaming Frog
+ * launcher, the audit, GSC Accounts — is wrapped in an `ErrorBoundary`. The
+ * jobs view was the one exception, discovered from a production report of an
+ * on-page error whose actual React stack trace this session could not
+ * capture (no live browser available); nothing in the shipped code reads an
+ * unguarded property in the reconcile/performance fetch paths, so the gap
+ * that *is* independently verifiable — and that turns "the whole dashboard
+ * goes blank with no explanation" into a contained, readable message — is
+ * this one (build-log 0122).
+ */
+describe("DashboardShell — the jobs view is boundaried like its siblings", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUiStore.setState({ view: "jobs", lastEngineView: "visualizer" });
+    useCrawlStore.setState({
+      adapter: null,
+      result: null,
+      jobs: [],
+      activeJobId: null,
+      liveJobs: {},
+      status: "idle",
+      error: null,
+    });
+    useAuthStore.setState({
+      token: null,
+      orgId: null,
+      expiresAt: null,
+      loggingIn: false,
+      loginError: null,
+    });
+  });
+
+  it("contains a render throw in the jobs table instead of blanking the dashboard", () => {
+    // React logs the caught error to the console on its own; expected here,
+    // not a signal that the test itself is broken.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    render(<DashboardShell />);
+
+    // The header and the rail survive — exactly what an unboundaried throw
+    // in this same tree would have taken down with it.
+    expect(document.querySelector(".rk-app")).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Primary" })).toBeInTheDocument();
+    expect(
+      screen.getByText(/Crawl jobs could not be rendered — boom from the jobs table/),
+    ).toBeInTheDocument();
+
+    consoleError.mockRestore();
   });
 });

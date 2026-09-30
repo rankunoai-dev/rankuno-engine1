@@ -67,11 +67,10 @@ from src.modules.seo.page_classifier.discovery import (
     _checkpoint,
     _filter_same_host_sitemaps,
     _notify,
-    _refusal_outcome_for,
     _registrable_host,
-    _transport_outcome_for,
     is_refusal,
     outcome_for,
+    record_fetch_exception,
 )
 from src.modules.seo.page_classifier.discovery_parsers import (
     extract_page_links,
@@ -358,9 +357,7 @@ async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str 
     try:
         result = await asyncio.wait_for(fetcher.afetch(url), timeout=REQUEST_DEADLINE_S)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
-        _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
-        graph.fetch_failures += 1
-        graph.record_outcome(_refusal_outcome_for(exc) or _transport_outcome_for(exc))
+        record_fetch_exception(graph, url, exc, classify_transport=True)
         return None, False
     if not result.ok:
         graph.record_outcome(outcome_for(result.status_code))
@@ -384,9 +381,8 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
         # worker never returns.
         result = await asyncio.wait_for(fetcher.afetch(url), timeout=REQUEST_DEADLINE_S)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
-        _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
-        graph.fetch_failures += 1
-        graph.record_outcome(_refusal_outcome_for(exc) or _transport_outcome_for(exc))
+        record_fetch_exception(graph, url, exc, classify_transport=True)
+        graph.pages_not_retrieved += 1
         return None
     # Both crawl paths must record the same facts. Behavioural equivalence
     # between them is this module's central claim, and a redirect chain present
@@ -399,11 +395,13 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
         graph.record_outcome(outcome_for(result.status_code))
         if is_refusal(result.status_code):
             graph.fetch_failures += 1
+        graph.pages_not_retrieved += 1
         return None
     if not result.is_html:
         # A 200 that is not a page. Not a failure — the server answered — but
         # not a fetched page either, and it was previously recorded as neither.
         graph.record_outcome(OUTCOME_NOT_HTML)
+        graph.pages_not_retrieved += 1
         return None
     graph.record_outcome(OUTCOME_OK)
     return url, result.body
@@ -478,7 +476,7 @@ async def adiscover_site(
         url_filter=url_filter,
     )
 
-    sitemaps_fetched = await _asitemaps(fetcher, base_url, graph, bounded, on_progress)
+    graph.sitemaps_fetched = await _asitemaps(fetcher, base_url, graph, bounded, on_progress)
     await _acms(fetcher, base_url, graph, site_profile)
     # Reported once before the DOM crawl: sitemap and CMS discovery establish the
     # denominator, so without this the first progress reading is 0 of 0.
@@ -488,10 +486,9 @@ async def adiscover_site(
     # something worth rendering.
     _checkpoint(on_checkpoint, graph)
 
-    pages_fetched = 0
     if crawl_dom:
         try:
-            pages_fetched = await _acrawl(
+            graph.pages_fetched = await _acrawl(
                 fetcher,
                 base_url,
                 graph,
@@ -510,9 +507,7 @@ async def adiscover_site(
             _logger.exception("dom_crawl_aborted", extra={"url": base_url})
             graph.stopped_reason = f"{type(exc).__name__}: {exc}"
 
-    report = graph.report().model_copy(
-        update={"sitemaps_fetched": sitemaps_fetched, "pages_fetched": pages_fetched}
-    )
+    report = graph.report()
     _logger.info("async_discovery_complete", extra={**report.model_dump(), "concurrency": bounded})
     return graph, report
 
@@ -672,9 +667,7 @@ async def _apaginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> A
         try:
             result = await asyncio.wait_for(fetcher.afetch(url), timeout=REQUEST_DEADLINE_S)
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
-            _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
-            graph.fetch_failures += 1
-            graph.record_outcome(_refusal_outcome_for(exc) or _transport_outcome_for(exc))
+            record_fetch_exception(graph, url, exc, classify_transport=True)
             return
         if not result.ok:
             graph.record_outcome(outcome_for(result.status_code))
@@ -772,11 +765,15 @@ async def _acrawl(
             graph.stopped_reason = "cancelled by operator"
             break
 
-        crawlable = [
-            url
-            for url in level
-            if not is_faceted_filter(url) and normalize_url(url) not in excluded
-        ]
+        crawlable = []
+        for url in level:
+            if is_faceted_filter(url):
+                graph.faceted_skipped += 1
+                continue
+            if normalize_url(url) not in excluded:
+                crawlable.append(url)
+            else:
+                graph.resume_excluded += 1
 
         def note(url: str) -> None:
             """Report one completed page, from inside the level.
@@ -809,6 +806,7 @@ async def _acrawl(
             # the partial view is never mistaken for a complete one.
             _logger.warning("crawl_stalled", extra={"url": base_url, "error": str(exc)})
             graph.stopped_reason = str(exc)
+            graph.abandoned_in_flight = exc.in_flight
             break
 
         next_level: list[str] = []
@@ -831,6 +829,12 @@ async def _acrawl(
         )
         level = next_level
         depth += 1
+
+    # Count URLs that would have been crawled at depth > max_depth.
+    # The loop exited because the condition became false; `level` holds the
+    # queued-but-unprocessed next level.
+    if max_depth is not None and depth > max_depth and level:
+        graph.depth_capped += len(level)
 
     return fetched
 
