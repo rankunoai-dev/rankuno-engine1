@@ -21,6 +21,7 @@ import type {
   JobStatus,
   WorkerJobAccepted,
   WorkerJobView,
+  PastedUrlPlan,
   UrlListSourcesView,
   WorkerListView,
   WorkerTemplatesView,
@@ -458,6 +459,27 @@ export class HttpAdapter implements CrawlDataAdapter {
     return this.request<UrlListSourcesView>(
       `/jobs/${encodeURIComponent(jobId)}/url-list/sources`,
     );
+  }
+
+  /**
+   * Read a pasted block of text server-side and report what it would crawl.
+   *
+   * A POST because the payload is a body, not because anything changes: this
+   * route stores nothing, mints no digest and grants no access — it reads
+   * text the caller already holds. The bytes are still frozen at preview
+   * time, which is the guarantee an approval rests on (ADR 0023).
+   *
+   * The raw text goes over the wire unsplit, deliberately. Splitting it here
+   * would make this file the owner of a rule that decides what gets crawled,
+   * and the count in the approval dialog would be this code's opinion rather
+   * than a fact about the generated file.
+   */
+  async planPastedUrlList(urls: string): Promise<PastedUrlPlan> {
+    return this.request<PastedUrlPlan>("/url-list/paste/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urls }),
+    });
   }
 
   /**

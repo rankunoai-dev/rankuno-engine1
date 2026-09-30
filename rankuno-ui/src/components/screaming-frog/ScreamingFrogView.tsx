@@ -2,6 +2,7 @@ import { Alert, Button, Input, Radio, Select, Spin, Tag, message } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import type {
   DispatchPreview,
+  DispatchPreviewRequest,
   WorkerDispatchAdapter,
   WorkerJobView,
   WorkerSummary,
@@ -14,6 +15,8 @@ import { useUiStore } from "../../store/useUiStore";
 import { DispatchConfirmModal } from "./DispatchConfirmModal";
 import { WorkerJobsPanel } from "./WorkerJobsPanel";
 import { newCorrelationId } from "./correlationId";
+import type { PastedListChoice } from "./UrlListPastePanel";
+import { UrlListPastePanel } from "./UrlListPastePanel";
 import type { UrlListChoice } from "./UrlListSourcePicker";
 import { UrlListSourcePicker } from "./UrlListSourcePicker";
 import { UnavailableSettings } from "./UnavailableSettings";
@@ -30,14 +33,19 @@ const NO_TEMPLATE = "";
 /**
  * What Screaming Frog is pointed at.
  *
- * `spider` is `--crawl <url>`: follow links from a seed. `list` is
- * `--crawl-list <file>`: fetch exactly the supplied URLs and nothing else.
- * There is no default beyond `spider` and the choice is never implied by
- * another field, because the two produce different artefacts — a list run
+ * `spider` is `--crawl <url>`: follow links from a seed. `list` and `paste`
+ * are both `--crawl-list <file>`: fetch exactly the supplied URLs and nothing
+ * else. There is no default beyond `spider` and the choice is never implied by
+ * another field, because the two kinds produce different artefacts — a list run
  * describes a set of pages and must never be read as a crawl of the site
  * (ADR 0023).
+ *
+ * `list` and `paste` differ only in where the URLs come from — a crawl this
+ * engine already ran, or a block of text an operator pasted. Everything after
+ * that is one server-side path: the same dedupe, the same domain filter, the
+ * same per-host SSRF check, the same ceiling, the same digest.
  */
-type CrawlMode = "spider" | "list";
+type CrawlMode = "spider" | "list" | "paste";
 
 /**
  * Launch a Screaming Frog crawl on a machine the operator owns.
@@ -88,6 +96,7 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
 
   const [mode, setMode] = useState<CrawlMode>("spider");
   const [listChoice, setListChoice] = useState<UrlListChoice | null>(null);
+  const [pasteChoice, setPasteChoice] = useState<PastedListChoice | null>(null);
   const [listSourceJobId, setListSourceJobId] = useState<string | null>(null);
 
   const [preview, setPreview] = useState<DispatchPreview | null>(null);
@@ -221,6 +230,7 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
     // source would build no list and queue an ordinary site crawl under a
     // heading that says otherwise.
     if (mode === "list" && listChoice === null) return;
+    if (mode === "paste" && pasteChoice === null) return;
 
     setPreviewing(true);
     setPreviewError(null);
@@ -233,14 +243,7 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
           // This call is what builds and stores the list, so the count and the
           // digest in the response describe bytes that already exist. Nothing
           // shown for approval is ever carried over from the picker above.
-          ...(mode === "list" && listChoice
-            ? {
-                url_list: {
-                  source_job_id: listChoice.source_job_id,
-                  source: listChoice.source,
-                },
-              }
-            : {}),
+          ...listRequest(mode, listChoice, pasteChoice),
         }),
       );
     } catch (cause) {
@@ -267,9 +270,25 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
     }
   }, []);
 
+  // Stable across renders for the same reason `chooseList` is: the panel holds
+  // it as a prop. The seed URL is filled from the chosen domain — a pasted list
+  // has no source crawl to take one from, and its registrable domain is what
+  // the whole list is filtered against, so any other address would name a site
+  // the URLs are not from.
+  const choosePaste = useCallback((choice: PastedListChoice | null): void => {
+    setPasteChoice(choice);
+    setPreview(null);
+    setPreviewError(null);
+    if (choice) {
+      setSeedUrl(choice.seedUrl);
+      setUrlError(null);
+    }
+  }, []);
+
   function changeMode(next: CrawlMode): void {
     setMode(next);
     setListChoice(null);
+    setPasteChoice(null);
     setListSourceJobId(null);
     setPreview(null);
     setPreviewError(null);
@@ -295,13 +314,14 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
   const confirmDispatch = api?.confirmDispatch?.bind(api);
   const canDispatch = api?.previewDispatch !== undefined;
   const canListCrawl = api?.listUrlListSources !== undefined && api?.listJobs !== undefined;
+  const canPasteList = api?.planPastedUrlList !== undefined;
   const blockedReason = whyBlocked({
     canDispatch,
     selected,
     seedUrl: seedUrl.trim(),
     offlineAfterS,
     mode,
-    hasList: listChoice !== null,
+    hasList: mode === "paste" ? pasteChoice !== null : listChoice !== null,
   });
 
   return (
@@ -419,6 +439,22 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
                   )}
                 </span>
               </Radio>
+              <Radio value="paste" className="sfd-source" disabled={!canPasteList}>
+                <span className="sfd-source-body">
+                  <span className="sfd-source-name">A list of URLs I paste</span>
+                  <span className="sfd-hint">
+                    The same list mode, for URLs this engine has never crawled —
+                    a column out of a spreadsheet. You see how many were read,
+                    and what could not be, before you approve anything.
+                  </span>
+                  {!canPasteList && (
+                    <span className="sfd-source-why">
+                      This mode cannot check a pasted list, so there is nothing
+                      to send.
+                    </span>
+                  )}
+                </span>
+              </Radio>
             </Radio.Group>
           </fieldset>
 
@@ -430,8 +466,10 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
             />
           )}
 
+          {mode === "paste" && <UrlListPastePanel api={api} onChange={choosePaste} />}
+
           <div className="sfd-field">
-            <label htmlFor="sfd-seed">{mode === "list" ? "Site" : "Seed URL"}</label>
+            <label htmlFor="sfd-seed">{mode === "spider" ? "Seed URL" : "Site"}</label>
             <Input
               id="sfd-seed"
               value={seedUrl}
@@ -451,9 +489,7 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
               </span>
             ) : (
               <span className="sfd-hint" id="sfd-seed-hint">
-                {mode === "list"
-                  ? "Filled in from the source crawl. A list run still needs an address: it names the site in the job record, and its domain is what the list was filtered against. It is not spidered."
-                  : "Where the crawl starts. The server normalizes it and shows you the result before anything runs."}
+                {seedHint(mode)}
               </span>
             )}
           </div>
@@ -533,7 +569,7 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
         <DispatchConfirmModal
           preview={preview}
           workerName={selected?.display_name ?? preview.worker_id}
-          /* Only in spider mode. In list mode the address was filled in from
+          /* Only in spider mode. In the two list modes the address was filled in from
              the source crawl, so a note about "what you typed" would be about
              text the operator never entered. */
           typedUrl={mode === "spider" ? seedUrl.trim() : undefined}
@@ -687,6 +723,42 @@ function describePreviewFailure(cause: unknown): PreviewFailure {
   }
 }
 
+/**
+ * The `url_list` half of a preview request, or nothing at all.
+ *
+ * A function rather than an inline ternary because there are now three modes
+ * and the spread had to stay a single expression. `spider` contributes
+ * nothing, which is what makes a plain `--crawl` preview identical to every
+ * request predating ADR 0023.
+ */
+function listRequest(
+  mode: CrawlMode,
+  list: UrlListChoice | null,
+  paste: PastedListChoice | null,
+): { url_list?: DispatchPreviewRequest["url_list"] } {
+  if (mode === "list" && list) {
+    return { url_list: { source_job_id: list.source_job_id, source: list.source } };
+  }
+  if (mode === "paste" && paste) {
+    // The raw text, unsplit. The server parses it with the same parser that
+    // produced the counts the operator just read, so the number approved and
+    // the number crawled come from one implementation.
+    return { url_list: { source: "pasted", urls: paste.urls } };
+  }
+  return {};
+}
+
+/** What the address field is for, which is not the same thing in all three modes. */
+function seedHint(mode: CrawlMode): string {
+  if (mode === "spider") {
+    return "Where the crawl starts. The server normalizes it and shows you the result before anything runs.";
+  }
+  if (mode === "paste") {
+    return "Filled in from the site you chose above. A list run still needs an address: it names the site in the job record, and its domain is what the list is filtered against. It is not spidered.";
+  }
+  return "Filled in from the source crawl. A list run still needs an address: it names the site in the job record, and its domain is what the list was filtered against. It is not spidered.";
+}
+
 /** Why the launch button is disabled, or `null` when it is not. */
 function whyBlocked({
   canDispatch,
@@ -717,6 +789,9 @@ function whyBlocked({
   // to do something the operator cannot do yet.
   if (mode === "list" && !hasList) {
     return "Choose the crawl to take URLs from, and which of its URLs to send.";
+  }
+  if (mode === "paste" && !hasList) {
+    return "Paste the URLs to crawl, then press Check this list.";
   }
   if (!seedUrl) return "Enter the URL the crawl should start from.";
   return null;

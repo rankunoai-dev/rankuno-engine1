@@ -4,6 +4,8 @@ import type { WorkerDispatchAdapter } from "../../adapters/adapterInterface";
 import {
   crawlJob,
   dispatchPreview,
+  pasteCounts,
+  pastedUrlPlan,
   urlListSources,
   urlListView,
   worker,
@@ -54,6 +56,17 @@ async function chooseOrphanList(): Promise<void> {
   fireEvent.click(await screen.findByTitle("example.com — https://www.example.com/"));
   fireEvent.click(await screen.findByRole("radio", { name: /Orphans Only/ }));
   // Settle anything the choice started inside act; see the picker's own suite.
+  await act(async () => {});
+}
+
+/** Switch to paste mode, paste `text`, and check it against the default plan. */
+async function pasteList(text: string): Promise<void> {
+  fireEvent.click(await screen.findByRole("radio", { name: /A list of URLs I paste/ }));
+  fireEvent.change(await screen.findByLabelText("URLs to crawl"), {
+    target: { value: text },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Check this list" }));
+  await screen.findByRole("radio", { name: /example\.com/ });
   await act(async () => {});
 }
 
@@ -462,6 +475,161 @@ describe("ScreamingFrogView", () => {
         url_list_sha256: "c".repeat(64),
       });
     });
+  });
+
+
+  it("sends a pasted list as raw text, and approves the count the server built", async () => {
+    // The two numbers differ on purpose, exactly as they do for a crawl-sourced
+    // list. 400 lines were read; 382 survived deduping and the domain filter,
+    // and 382 is the only number the approval may show.
+    const preview = dispatchPreview({
+      seed_url: "https://www.example.com/",
+      url_list: urlListView({
+        source: "pasted",
+        source_job_id: "",
+        source_label: "a list you pasted",
+        url_count: 382,
+        sha256: "d".repeat(64),
+        paste: pasteCounts({ lines: 400, accepted: 400 }),
+      }),
+    });
+    const confirmDispatch = vi.fn().mockResolvedValue({ id: "wj-11", status: "queued" });
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      planPastedUrlList: vi
+        .fn()
+        .mockResolvedValue(pastedUrlPlan({ counts: pasteCounts({ lines: 400, accepted: 400 }) })),
+      previewDispatch: vi.fn().mockResolvedValue(preview),
+      confirmDispatch,
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    await pasteList("https://www.example.com/a");
+
+    // The seed came from the site chosen on the panel, not from a keyboard.
+    expect(screen.getByLabelText("Site")).toHaveValue("https://www.example.com/");
+    fireEvent.click(screen.getByRole("button", { name: /review and launch/i }));
+
+    await waitFor(() => {
+      expect(api.previewDispatch).toHaveBeenCalledWith("wkr-aaaa", {
+        seed_url: "https://www.example.com/",
+        template_name: null,
+        correlation_id: expect.stringMatching(/^ui-/),
+        // The raw text, unsplit: the server parses it with the same parser
+        // that produced the counts the operator just read.
+        url_list: { source: "pasted", urls: "https://www.example.com/a" },
+      });
+    });
+
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText(/382 URLs from a list you pasted/)).toBeInTheDocument();
+    expect(dialog.queryByText(/400/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /launch on studio desktop/i }));
+    await waitFor(() => {
+      expect(confirmDispatch).toHaveBeenCalledWith("wkr-aaaa", {
+        token: "tok-1",
+        seed_url: "https://www.example.com/",
+        template_name: null,
+        correlation_id: "ui-test-1",
+        url_list_sha256: "d".repeat(64),
+      });
+    });
+  });
+
+  it("will not preview a pasted dispatch before the list has been checked", async () => {
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      planPastedUrlList: vi.fn().mockResolvedValue(pastedUrlPlan()),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    fireEvent.click(await screen.findByRole("radio", { name: /A list of URLs I paste/ }));
+    fireEvent.click(screen.getByRole("button", { name: /review and launch/i }));
+
+    expect(api.previewDispatch).not.toHaveBeenCalled();
+    expect(screen.getByText(/Paste the URLs to crawl, then press Check this list/)).toBeVisible();
+  });
+
+  it("drops a pasted list when the operator switches back to a spider crawl", async () => {
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      planPastedUrlList: vi.fn().mockResolvedValue(pastedUrlPlan()),
+      previewDispatch: vi.fn().mockResolvedValue(dispatchPreview()),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    await pasteList("https://www.example.com/a");
+    fireEvent.click(screen.getByRole("radio", { name: /Spider from a seed URL/ }));
+    fireEvent.click(screen.getByRole("button", { name: /review and launch/i }));
+
+    // No `url_list` at all. Carrying one over would queue a list run under a
+    // heading that says otherwise.
+    await waitFor(() => {
+      expect(api.previewDispatch).toHaveBeenCalledWith("wkr-aaaa", {
+        seed_url: "https://www.example.com/",
+        template_name: null,
+        correlation_id: expect.stringMatching(/^ui-/),
+      });
+    });
+  });
+
+  it("disables paste mode, with the reason, when the engine cannot check a list", async () => {
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      previewDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+
+    expect(await screen.findByRole("radio", { name: /A list of URLs I paste/ })).toBeDisabled();
+    expect(screen.getByText(/cannot check a pasted list/i)).toBeInTheDocument();
+  });
+
+  it("tells the operator what the paste lost, in the approval itself", async () => {
+    const preview = dispatchPreview({
+      seed_url: "https://www.example.com/",
+      url_list: urlListView({
+        source: "pasted",
+        source_job_id: "",
+        source_label: "a list you pasted",
+        url_count: 3,
+        paste: pasteCounts({
+          lines: 8,
+          accepted: 6,
+          malformed_dropped: 2,
+          scheme_added: 1,
+        }),
+        counts: {
+          source_rows: 6,
+          duplicates_dropped: 2,
+          non_http_dropped: 0,
+          off_domain_dropped: 1,
+          unsafe_host_dropped: 0,
+          kept: 3,
+        },
+      }),
+    });
+    const api = makeApi({
+      listWorkers: vi.fn().mockResolvedValue(onlineWorker()),
+      planPastedUrlList: vi.fn().mockResolvedValue(pastedUrlPlan()),
+      previewDispatch: vi.fn().mockResolvedValue(preview),
+      confirmDispatch: vi.fn(),
+    });
+
+    render(<ScreamingFrogView adapter={api} />);
+    await pasteList("https://www.example.com/a");
+    fireEvent.click(screen.getByRole("button", { name: /review and launch/i }));
+
+    // Every difference between what was pasted and what will be crawled, on
+    // the last screen before it becomes true.
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText(/2 lines/)).toBeInTheDocument();
+    expect(dialog.getByText(/could not be read as a web address/)).toBeInTheDocument();
+    expect(dialog.getByText(/2 removed/)).toBeInTheDocument();
+    expect(dialog.getByText(/1 external URL/)).toBeInTheDocument();
+    expect(dialog.getByText(/1 address/)).toBeInTheDocument();
   });
 
   it("will not preview a list dispatch with no list chosen", async () => {

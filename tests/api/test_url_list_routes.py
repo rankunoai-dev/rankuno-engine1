@@ -28,13 +28,19 @@ import json
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from src.api import url_list_routes
 from src.api.server import API_PREFIX, create_app
 from src.core.state_store import DiskJobStore, JobRecord
 from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_auth import DiskWorkerStore
 from src.core.worker_dispatch_schemas import DispatchAssignmentClaims
 from src.core.worker_dispatch_signing import verify_dispatch_assignment
-from src.modules.seo.screaming_frog_control.url_list import fingerprint, render_url_list
+from src.modules.seo.screaming_frog_control.pasted_url_list import MAX_PASTE_CHARS
+from src.modules.seo.screaming_frog_control.url_list import (
+    fingerprint,
+    read_url_list_file,
+    render_url_list,
+)
 
 from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
 from tests.api.test_worker_routes import (
@@ -137,6 +143,309 @@ def _confirm(client, worker, preview_body, *, sha256=..., org_id="default") -> h
         json=body,
         headers=auth_headers(org_id=org_id),
     )
+
+
+def _plan(client, text: str, *, org_id: str = "default") -> httpx.Response:
+    return client.post(
+        f"{API_PREFIX}/url-list/paste/plan",
+        json={"urls": text},
+        headers=auth_headers(org_id=org_id),
+    )
+
+
+def _paste_preview(client, worker, text: str, *, seed_url: str = BASE) -> httpx.Response:
+    return client.post(
+        f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
+        json={
+            "seed_url": seed_url,
+            "correlation_id": "c1",
+            "url_list": {"source": "pasted", "urls": text},
+        },
+        headers=auth_headers(),
+    )
+
+
+# --- pasted lists -------------------------------------------------------------
+
+
+class TestPastePlan:
+    """The call that answers "which site is this text about", before anything runs."""
+
+    def test_requires_authentication(self, client):
+        response = client.post(f"{API_PREFIX}/url-list/paste/plan", json={"urls": ""})
+        assert response.status_code == 401
+
+    def test_a_clean_paste_proposes_a_seed_url_and_one_domain(self, client):
+        body = _plan(client, "https://example.com/a\nhttps://example.com/b").json()
+        assert body["suggested_seed_url"] == BASE
+        assert [(d["registrable_domain"], d["url_count"]) for d in body["domains"]] == [
+            ("example.com", 2)
+        ]
+        assert body["counts"]["accepted"] == 2
+
+    def test_two_domains_are_both_offered_largest_first(self, client):
+        """Neither refused nor silently majority-filtered: the operator chooses."""
+        body = _plan(
+            client, "https://example.com/a\nhttps://example.com/b\nhttps://other.test/x"
+        ).json()
+        assert [d["registrable_domain"] for d in body["domains"]] == ["example.com", "other.test"]
+        assert body["suggested_seed_url"] == BASE
+
+    def test_the_operator_is_told_what_could_not_be_read_and_where(self, client):
+        body = _plan(client, "URL\nhttps://example.com/a\n\nPage Title\nmailto:a@b.test").json()
+        counts = body["counts"]
+        assert counts["accepted"] == 1
+        assert counts["header_dropped"] == 1
+        assert counts["blank_dropped"] == 1
+        assert counts["malformed_dropped"] == 2
+        assert counts["malformed_examples"] == ["line 4: Page Title", "line 5: mailto:a@b.test"]
+
+    def test_an_empty_paste_is_answered_not_refused(self, client):
+        """Nothing has been asked for yet, so there is nothing to refuse."""
+        body = _plan(client, "").json()
+        assert body["domains"] == []
+        assert body["suggested_seed_url"] == ""
+        assert body["counts"]["accepted"] == 0
+
+    def test_the_ceiling_is_served_never_hardcoded_by_a_form(self, client):
+        assert _plan(client, "https://example.com/a").json()["max_urls"] == 10_000
+
+    def test_an_over_ceiling_paste_is_flagged_before_the_operator_commits(
+        self, client, monkeypatch
+    ):
+        _shrink_ceiling(monkeypatch, url_list_routes, 3)
+        text = "\n".join(f"https://example.com/{n}" for n in range(5))
+        body = _plan(client, text).json()
+        assert body["exceeds_ceiling"] is True
+        assert body["max_urls"] == 3
+
+    def test_a_paste_over_the_transport_guard_is_refused(self, client):
+        """`MAX_PASTE_CHARS`, the guard that must precede parsing, not follow it."""
+        response = _plan(client, "x" * (MAX_PASTE_CHARS + 1))
+        assert response.status_code == 422
+
+
+class TestPastePreview:
+    """Where a paste becomes bytes with a digest. Same gates as a crawl-sourced list."""
+
+    def test_a_clean_paste_is_generated_stored_and_fingerprinted(self, client, dispatch_store):
+        worker = _register_worker(client)
+        body = _paste_preview(client, worker, "https://example.com/a\nhttps://example.com/b").json()
+        listing = body["url_list"]
+
+        assert listing["source"] == "pasted"
+        assert listing["source_job_id"] == ""
+        assert listing["url_count"] == 2
+        assert listing["registrable_domain"] == "example.com"
+        stored = dispatch_store.read_url_list(listing["sha256"], org_id="default")
+        assert read_url_list_file(stored.body) == ("https://example.com/a", "https://example.com/b")
+        assert fingerprint(stored.body) == listing["sha256"]
+
+    def test_the_count_shown_for_approval_is_the_count_that_gets_crawled(
+        self, client, dispatch_store
+    ):
+        """The one identity this whole feature rests on."""
+        worker = _register_worker(client)
+        text = "\n".join(
+            [
+                "Address",
+                "  https://example.com/a  ",
+                "",
+                "https://example.com/a#pricing",
+                "example.com/b",
+                "https://other.test/x",
+                "Page Title",
+            ]
+        )
+        preview = _paste_preview(client, worker, text).json()
+        listing = preview["url_list"]
+        job = _confirm(client, worker, preview).json()
+
+        stored = dispatch_store.read_url_list(listing["sha256"], org_id="default")
+        assert listing["url_count"] == len(read_url_list_file(stored.body))
+        view = client.get(f"{API_PREFIX}/workers/jobs/{job['id']}", headers=auth_headers()).json()
+        assert view["url_list_url_count"] == listing["url_count"]
+
+    def test_blank_lines_and_whitespace_do_not_reach_the_file(self, client, dispatch_store):
+        worker = _register_worker(client)
+        text = "\n\n  https://example.com/a  \n\t\nhttps://example.com/b\n\n"
+        listing = _paste_preview(client, worker, text).json()["url_list"]
+
+        assert listing["url_count"] == 2
+        assert listing["paste"]["blank_dropped"] == 4
+        stored = dispatch_store.read_url_list(listing["sha256"], org_id="default")
+        assert read_url_list_file(stored.body) == ("https://example.com/a", "https://example.com/b")
+
+    def test_a_second_domain_is_excluded_against_the_seed_url_and_counted(self, client):
+        worker = _register_worker(client)
+        text = "https://example.com/a\nhttps://other.test/x\nhttps://other.test/y"
+        listing = _paste_preview(client, worker, text).json()["url_list"]
+
+        assert listing["url_count"] == 1
+        assert listing["registrable_domain"] == "example.com"
+        assert listing["counts"]["off_domain_dropped"] == 2
+
+    def test_the_seed_url_the_operator_confirmed_is_what_scopes_the_list(self, client):
+        """Pick the other domain on the plan and the other domain is what runs."""
+        worker = _register_worker(client)
+        text = "https://example.com/a\nhttps://other.test/x\nhttps://other.test/y"
+        listing = _paste_preview(client, worker, text, seed_url="https://other.test/").json()[
+            "url_list"
+        ]
+
+        assert listing["registrable_domain"] == "other.test"
+        assert listing["url_count"] == 2
+        assert listing["counts"]["off_domain_dropped"] == 1
+
+    def test_duplicates_are_removed_and_the_removal_is_reported(self, client):
+        worker = _register_worker(client)
+        text = "\n".join(
+            [
+                "https://example.com/a",
+                "https://example.com/a",
+                "https://example.com/a#pricing",
+                "https://example.com/b",
+            ]
+        )
+        listing = _paste_preview(client, worker, text).json()["url_list"]
+
+        assert listing["url_count"] == 2
+        assert listing["counts"]["duplicates_dropped"] == 2
+
+    def test_a_malformed_entry_is_dropped_and_named_not_fatal(self, client):
+        worker = _register_worker(client)
+        text = "https://example.com/a\nPage Title\nhttps://example.com/b"
+        listing = _paste_preview(client, worker, text).json()["url_list"]
+
+        assert listing["url_count"] == 2
+        assert listing["paste"]["malformed_dropped"] == 1
+        assert listing["paste"]["malformed_examples"] == ["line 2: Page Title"]
+
+    def test_an_empty_paste_is_refused_with_the_reason(self, client):
+        worker = _register_worker(client)
+        response = _paste_preview(client, worker, "   \n\n")
+
+        assert response.status_code == 422
+        assert "empty after filtering" in response.json()["detail"]
+
+    def test_a_paste_that_is_entirely_off_domain_is_refused_naming_the_rule(self, client):
+        worker = _register_worker(client)
+        response = _paste_preview(client, worker, "https://other.test/x\nhttps://other.test/y")
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "2 outside the crawl's own domain" in detail
+        assert "Nothing was dispatched" in detail
+
+    def test_an_over_ceiling_paste_is_refused_and_the_ceiling_is_stated(
+        self, client, monkeypatch, dispatch_store
+    ):
+        """Refused, never trimmed: a trimmed list audits fewer pages than the approval."""
+        _shrink_ceiling(monkeypatch, url_list_routes, 3)
+        worker = _register_worker(client)
+        text = "\n".join(f"https://example.com/{n}" for n in range(5))
+        response = _paste_preview(client, worker, text)
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "5 URLs, over the 3 ceiling" in detail
+        assert "SCREAMING_FROG_URL_LIST_MAX_URLS" in detail
+        assert "split the list" in detail
+        assert dispatch_store._url_lists == {}
+
+    def test_a_same_domain_host_that_fails_the_ssrf_check_is_dropped(self, tmp_path, job_store):
+        """`UrlSafetyPolicy` is applied to a pasted host exactly as to a crawled one.
+
+        The URL under test shares the seed's registrable domain, so it clears
+        the off-domain filter and the SSRF check is the only thing left that
+        can stop it. A paste is the one origin where an operator can put an
+        internal address in front of this guard by hand.
+        """
+        app = create_app(
+            store=job_store,
+            url_policy=UrlSafetyPolicy(
+                resolver=lambda host: ["127.0.0.1"] if host.startswith("internal.") else [PUBLIC_IP]
+            ),
+            session_secret=TEST_SESSION_SECRET,
+            worker_store=DiskWorkerStore(tmp_path / "workers2"),
+            worker_dispatch_store=_FakeWorkerDispatchStore(),
+            dispatch_signing_secret=DISPATCH_SECRET,
+            bundle_encryption_secret=BUNDLE_SECRET,
+        )
+        with TestClient(app) as local:
+            worker = _register_worker(local)
+            listing = local.post(
+                f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
+                json={
+                    "seed_url": BASE,
+                    "correlation_id": "c1",
+                    "url_list": {
+                        "source": "pasted",
+                        "urls": "https://example.com/a\nhttps://internal.example.com/secret",
+                    },
+                },
+                headers=auth_headers(),
+            ).json()["url_list"]
+
+        assert listing["url_count"] == 1
+        assert listing["counts"]["unsafe_host_dropped"] == 1
+        assert listing["sample"] == ["https://example.com/a"]
+
+    def test_a_request_naming_both_a_crawl_and_a_paste_is_refused(self, client, job_store):
+        """The two origins are mutually exclusive: which set was approved must be answerable."""
+        worker = _register_worker(client)
+        crawl = _finished_crawl(job_store)
+        response = client.post(
+            f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
+            json={
+                "seed_url": BASE,
+                "correlation_id": "c1",
+                "url_list": {
+                    "source": "pasted",
+                    "urls": "https://example.com/a",
+                    "source_job_id": crawl.id,
+                },
+            },
+            headers=auth_headers(),
+        )
+        assert response.status_code == 422
+
+    def test_a_crawl_source_carrying_pasted_text_is_refused(self, client, job_store):
+        worker = _register_worker(client)
+        crawl = _finished_crawl(job_store)
+        response = client.post(
+            f"{API_PREFIX}/workers/{worker['worker_id']}/dispatch/preview",
+            json={
+                "seed_url": BASE,
+                "correlation_id": "c1",
+                "url_list": {
+                    "source": "all",
+                    "source_job_id": crawl.id,
+                    "urls": "https://example.com/a",
+                },
+            },
+            headers=auth_headers(),
+        )
+        assert response.status_code == 422
+
+    def test_the_envelope_carries_the_digest_and_never_the_urls(self, client, dispatch_store):
+        """ADR 0023's whole shape: a pasted list changes what fills the table, not the wire."""
+        worker = _register_worker(client)
+        preview = _paste_preview(client, worker, "https://example.com/a").json()
+        job_id = _confirm(client, worker, preview).json()["id"]
+        job = dispatch_store.get_job(job_id)
+
+        assert job.envelope.url_list_sha256 == preview["url_list"]["sha256"]
+        assert "example.com/a" not in job.envelope.model_dump_json()
+
+    def test_the_approval_is_bound_to_the_pasted_bytes(self, client, dispatch_store):
+        """Confirming a different digest than the preview minted must fail."""
+        worker = _register_worker(client)
+        preview = _paste_preview(client, worker, "https://example.com/a").json()
+        other = _paste_preview(client, worker, "https://example.com/b").json()
+        response = _confirm(client, worker, preview, sha256=other["url_list"]["sha256"])
+
+        assert response.status_code == 403
 
 
 # --- source discovery ---------------------------------------------------------

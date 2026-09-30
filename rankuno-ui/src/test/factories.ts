@@ -11,6 +11,8 @@
 import type {
   CrawlJobSummary,
   DispatchPreview,
+  PasteCounts,
+  PastedUrlPlan,
   UrlListSourcesView,
   UrlListView,
   WorkerJobView,
@@ -287,6 +289,45 @@ export function urlListSources(
         exceeds_ceiling: false,
       },
     ],
+    ...overrides,
+  };
+}
+
+/**
+ * How a pasted block of text was read, as the server reports it.
+ *
+ * Defaults describe a clean paste: every line an address, nothing dropped.
+ * A test about a messy one overrides the fields it is about, which keeps the
+ * thing under test visible in the test rather than buried in this file.
+ */
+export function pasteCounts(overrides: Partial<PasteCounts> = {}): PasteCounts {
+  return {
+    lines: 3,
+    blank_dropped: 0,
+    header_dropped: 0,
+    malformed_dropped: 0,
+    accepted: 3,
+    spreadsheet_rows: 0,
+    scheme_added: 0,
+    malformed_examples: [],
+    ...overrides,
+  };
+}
+
+/** What a paste would crawl, as `POST /url-list/paste/plan` answers. */
+export function pastedUrlPlan(overrides: Partial<PastedUrlPlan> = {}): PastedUrlPlan {
+  return {
+    counts: pasteCounts(),
+    domains: [
+      {
+        registrable_domain: "example.com",
+        url_count: 3,
+        suggested_seed_url: "https://www.example.com/",
+      },
+    ],
+    suggested_seed_url: "https://www.example.com/",
+    max_urls: 10_000,
+    exceeds_ceiling: false,
     ...overrides,
   };
 }

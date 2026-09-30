@@ -169,9 +169,12 @@ class UrlListInvocation(StrictModel):
         source_label: Human-facing name of the Rankuno crawl the URLs came
             from, e.g. "Crawl: https://example.com/".
         source: Which set was chosen, as `UrlListSource`'s own value
-            ("orphans"/"all"). A plain `str` here rather than the enum
-            because this model is `core`-facing wire shape and the enum
+            ("orphans"/"all"/"pasted"). A plain `str` here rather than the
+            enum because this model is `core`-facing wire shape and the enum
             lives beside the generator; the value is only ever displayed.
+            Empty in practice on the worker side: the dispatch envelope
+            carries a digest and not a provenance, so a daemon cannot know
+            which set it was handed and says nothing rather than guessing.
         sample: The first few URLs, verbatim, for the approval summary.
     """
 
