@@ -526,6 +526,38 @@ class TestGuardrailRefusalOutcome:
         assert outcomes.get("transport_refused", 0) == 1
         assert outcomes.get("transport_error", 0) == 0
 
+    def test_a_robots_refusal_is_its_own_outcome_not_a_transport_error(self, settings):
+        """Async twin of the serial test of the same name.
+
+        Covers `_abody` (the sitemap probe) and `_ahtml` (the linked page).
+        Before the fix both refusals landed in `transport_error`.
+        """
+        routes = {
+            "/robots.txt": httpx.Response(
+                200, text="User-agent: *\nDisallow: /sitemap.xml\nDisallow: /private\n"
+            ),
+            "/": html('<html><a href="/private">private</a></html>'),
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return routes.get(request.url.path, httpx.Response(404, text="nope"))
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+            async_transport=httpx.MockTransport(handler),
+        )
+
+        async def scenario() -> DiscoveryReport:
+            async with fetcher:
+                _, report = await adiscover_site(fetcher, "https://e.com", max_pages=10)
+                return report
+
+        outcomes = asyncio.run(scenario()).fetch_outcomes
+        assert outcomes.get("robots_disallowed", 0) == 2
+        assert not {key for key in outcomes if key.startswith("transport")}
+
 
 class TestProgressReporting:
     """Progress has to arrive per page, not per level.

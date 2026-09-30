@@ -47,7 +47,6 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import TypeVar
 
-from src.core.errors import UnsafeUrlError
 from src.core.logger import get_logger
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.discovery import (
@@ -55,7 +54,6 @@ from src.modules.seo.page_classifier.discovery import (
     DEFAULT_MAX_PAGES,
     MAX_CMS_PAGES,
     MAX_SITEMAP_FETCH_ATTEMPTS,
-    OUTCOME_GUARDRAIL_REFUSED,
     OUTCOME_NOT_HTML,
     OUTCOME_OK,
     OUTCOME_SERVER_ERROR,
@@ -69,6 +67,7 @@ from src.modules.seo.page_classifier.discovery import (
     _checkpoint,
     _filter_same_host_sitemaps,
     _notify,
+    _refusal_outcome_for,
     _registrable_host,
     _transport_outcome_for,
     is_refusal,
@@ -361,10 +360,7 @@ async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str 
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
-        if isinstance(exc, UnsafeUrlError):
-            graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
-        else:
-            graph.record_outcome(_transport_outcome_for(exc))
+        graph.record_outcome(_refusal_outcome_for(exc) or _transport_outcome_for(exc))
         return None, False
     if not result.ok:
         graph.record_outcome(outcome_for(result.status_code))
@@ -390,10 +386,7 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("async_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
-        if isinstance(exc, UnsafeUrlError):
-            graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
-        else:
-            graph.record_outcome(_transport_outcome_for(exc))
+        graph.record_outcome(_refusal_outcome_for(exc) or _transport_outcome_for(exc))
         return None
     # Both crawl paths must record the same facts. Behavioural equivalence
     # between them is this module's central claim, and a redirect chain present
@@ -681,10 +674,7 @@ async def _apaginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> A
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
             _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
             graph.fetch_failures += 1
-            if isinstance(exc, UnsafeUrlError):
-                graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
-            else:
-                graph.record_outcome(_transport_outcome_for(exc))
+            graph.record_outcome(_refusal_outcome_for(exc) or _transport_outcome_for(exc))
             return
         if not result.ok:
             graph.record_outcome(outcome_for(result.status_code))

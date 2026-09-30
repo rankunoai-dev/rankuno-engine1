@@ -104,6 +104,7 @@ from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.reports import MasterURLReport
 from src.modules.seo.page_classifier.schemas import (
     ConsensusMethod,
+    DiscoverySource,
     FullPageIntelligenceProfile,
     HierarchyLevel,
     PrimaryPageType,
@@ -286,7 +287,7 @@ class CrawlCheckpointer:
             self._last_count = count
             # Materialised inside the throttle, never outside it: at 20,000
             # nodes building these tuples is the expensive part of a checkpoint.
-            urls = graph.all_urls()
+            found = graph.all_url_sources()
             unfetched = graph.unfetched_urls()
 
         try:
@@ -294,7 +295,11 @@ class CrawlCheckpointer:
                 self._job_id,
                 {
                     "base_url": self._base_url,
-                    "urls": list(urls),
+                    "urls": [url for url, _ in found],
+                    # How each URL was found, index-aligned with `urls`. Without
+                    # it a recovered page carries all-False flags, which is the
+                    # exact shape of a Screaming Frog import (build-log 0069).
+                    "sources": [_encode_sources(sources) for _, sources in found],
                     # What a resumed crawl would still have to fetch. Recorded
                     # here because it cannot be recovered afterwards: the result
                     # holds a row for every *discovered* URL, fetched or not, so
@@ -305,6 +310,43 @@ class CrawlCheckpointer:
             )
         except JobNotFoundError:
             _logger.debug("checkpoint_job_missing", extra={"job_id": self._job_id})
+
+
+_SOURCE_LETTERS = (("s", "sitemap"), ("d", "dom_link"), ("c", "cms_api"))
+"""One letter per `DiscoverySource` flag, as a checkpoint stores them.
+
+Letters rather than three booleans or a list of names: the checkpoint is
+rewritten every ten seconds, and `"sd"` costs a few bytes per URL where
+`{"sitemap": true, ...}` would cost forty. Still readable in a JSON viewer,
+which a bitmask integer is not."""
+
+
+def _encode_sources(sources: DiscoverySource) -> str:
+    """Spell a URL's discovery flags as the letters of the ones that are set."""
+    return "".join(letter for letter, name in _SOURCE_LETTERS if getattr(sources, name))
+
+
+def _checkpoint_sources(
+    checkpoint: Mapping[str, object], count: int
+) -> list[DiscoverySource] | None:
+    """Read a checkpoint's per-URL flags, or `None` if they cannot be trusted.
+
+    `None` covers every checkpoint written before the flags were recorded, and
+    any whose list does not line up with `urls` or holds an unknown letter.
+    Partial trust is refused on purpose: one misaligned entry means every
+    pairing after it may be wrong, and a wrong flag is worse than an admitted
+    unknown.
+    """
+    raw = checkpoint.get("sources")
+    if not isinstance(raw, list) or len(raw) != count:
+        return None
+    known = dict(_SOURCE_LETTERS)
+    decoded: list[DiscoverySource] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not set(entry) <= known.keys():
+            return None
+        decoded.append(DiscoverySource(**{known[letter]: True for letter in entry}))
+    return decoded
 
 
 class TelemetryRecorder:
@@ -3749,6 +3791,19 @@ def _checkpoint_as_output(checkpoint: Mapping[str, object]) -> PageClassificatio
     base_url = str(checkpoint.get("base_url") or "")
     raw = checkpoint.get("urls")
     urls = [str(item) for item in raw] if isinstance(raw, list) else []
+    sources = _checkpoint_sources(checkpoint, len(urls))
+
+    stopped_reason = (
+        "recovered from a checkpoint — these URLs were discovered before the "
+        "crawl was interrupted, and none of them were classified"
+    )
+    if sources is None:
+        # Said once, where every consumer already looks, because the all-False
+        # flags these pages then carry would otherwise read as a finding.
+        stopped_reason += (
+            "; this checkpoint did not record discovery sources, so how each URL "
+            "was found is unknown"
+        )
 
     return PageClassificationOutput(
         base_url=base_url,
@@ -3757,18 +3812,29 @@ def _checkpoint_as_output(checkpoint: Mapping[str, object]) -> PageClassificatio
         discovery=DiscoveryReport(
             base_url=base_url,
             total_urls=len(urls),
-            stopped_reason=(
-                "recovered from a checkpoint — these URLs were discovered before the "
-                "crawl was interrupted, and none of them were classified"
-            ),
+            stopped_reason=stopped_reason,
         ),
         summary=CrawlSummary(pages_classified=len(urls), unknown_pages=len(urls)),
-        pages=tuple(_placeholder_profile(url) for url in urls),
+        pages=tuple(
+            _placeholder_profile(url, None if sources is None else sources[index])
+            for index, url in enumerate(urls)
+        ),
     )
 
 
-def _placeholder_profile(url: str) -> FullPageIntelligenceProfile:
-    """An unclassified page, carrying only what a checkpoint actually knows."""
+def _placeholder_profile(url: str, sources: DiscoverySource | None) -> FullPageIntelligenceProfile:
+    """An unclassified page, carrying only what a checkpoint actually knows.
+
+    Args:
+        url: The recovered address.
+        sources: How the crawl found it, or `None` when the checkpoint did not
+            record that. `None` leaves the flags all-False and says so in the
+            page's own note, since all-False alone is also what a Screaming
+            Frog import looks like (build-log 0069).
+    """
+    notes = "discovered before the crawl was interrupted; never classified"
+    if sources is None:
+        notes += "; how it was found is unknown"
     return FullPageIntelligenceProfile(
         url=url,
         canonical_url=url,
@@ -3783,11 +3849,12 @@ def _placeholder_profile(url: str) -> FullPageIntelligenceProfile:
                 suggested_level=HierarchyLevel.L3_LEAF_PAGE,
                 suggested_page_type=PrimaryPageType.UNKNOWN,
                 confidence=0.0,
-                notes="discovered before the crawl was interrupted; never classified",
+                notes=notes,
             ),
         ),
         final_confidence_score=0.0,
         consensus_method=ConsensusMethod.LAYER0_FAST_PATH,
+        discovery_sources=sources or DiscoverySource(),
     )
 
 

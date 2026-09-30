@@ -1048,6 +1048,59 @@ class TestCheckpointEndpoint:
         body = client.get(f"{API_PREFIX}/jobs/{job_id}/checkpoint").json()
         assert "interrupted" in body["discovery"]["stopped_reason"]
 
+    def test_recovered_pages_keep_how_they_were_found(self, client, store):
+        """All-False flags are the shape of a Screaming Frog import (build-log 0069).
+
+        A recovered page used to carry exactly that shape, so a URL this
+        engine found in a sitemap was indistinguishable from one it never
+        found at all. The checkpoint now carries the three flags per URL.
+        """
+        graph = SiteGraph(SAFE_URL, max_pages=10)
+        graph.add(f"{SAFE_URL}listed/", sitemap=True)
+        graph.add(f"{SAFE_URL}linked/", dom_link=True)
+        graph.add(f"{SAFE_URL}both/", sitemap=True)
+        graph.add(f"{SAFE_URL}both/", dom_link=True)
+        graph.add(f"{SAFE_URL}cms/", cms_api=True)
+        job_id = store.create("seo.page_classifier", {}).id
+        server_module.CrawlCheckpointer(store, job_id, SAFE_URL)(graph)
+
+        body = client.get(f"{API_PREFIX}/jobs/{job_id}/checkpoint").json()
+        found = {page["url"]: page["discovery_sources"] for page in body["pages"]}
+        assert found == {
+            f"{SAFE_URL}listed/": {"sitemap": True, "dom_link": False, "cms_api": False},
+            f"{SAFE_URL}linked/": {"sitemap": False, "dom_link": True, "cms_api": False},
+            f"{SAFE_URL}both/": {"sitemap": True, "dom_link": True, "cms_api": False},
+            f"{SAFE_URL}cms/": {"sitemap": False, "dom_link": False, "cms_api": True},
+        }
+        assert "unknown" not in body["discovery"]["stopped_reason"]
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            pytest.param({}, id="predates-the-field"),
+            pytest.param({"sources": ["s"]}, id="length-mismatch"),
+            pytest.param({"sources": ["x", "s"]}, id="unreadable-entry"),
+        ],
+    )
+    def test_a_checkpoint_without_usable_flags_says_provenance_is_unknown(
+        self, client, store, extra
+    ):
+        """Every checkpoint already on disk lacks the flags; it must still load.
+
+        It loads, and says plainly that how each URL was found is unknown,
+        rather than leaving all-False flags to be read as a finding.
+        """
+        job_id = store.create("seo.page_classifier", {}).id
+        store.write_checkpoint(
+            job_id, {"base_url": SAFE_URL, "urls": [f"{SAFE_URL}a/", f"{SAFE_URL}b/"], **extra}
+        )
+
+        body = client.get(f"{API_PREFIX}/jobs/{job_id}/checkpoint").json()
+        assert len(body["pages"]) == 2
+        assert "how each URL was found is unknown" in body["discovery"]["stopped_reason"]
+        for page in body["pages"]:
+            assert "how it was found is unknown" in page["signals_evaluated"][0]["notes"]
+
     def test_a_job_with_no_checkpoint_is_404(self, client, store):
         job_id = store.create("seo.page_classifier", {}).id
         assert client.get(f"{API_PREFIX}/jobs/{job_id}/checkpoint").status_code == 404

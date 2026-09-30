@@ -41,7 +41,7 @@ from collections.abc import Callable, Iterator, Mapping
 import httpx
 from pydantic import Field
 
-from src.core.errors import IntegrationError, UnsafeUrlError
+from src.core.errors import IntegrationError, RobotsDisallowedError, UnsafeUrlError
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.integrations.http_fetcher import FetchResult, HttpFetcher
@@ -753,6 +753,15 @@ class SiteGraph:
         """
         return tuple(node.url for node in self._nodes.values())
 
+    def all_url_sources(self) -> tuple[tuple[str, DiscoverySource], ...]:
+        """Every URL with how it was found, in discovery order, in one pass.
+
+        One pass rather than a second method parallel to `all_urls`, so a
+        checkpoint can never pair a URL with a neighbour's flags because a
+        node arrived between two separate walks of the graph.
+        """
+        return tuple((node.url, node.sources) for node in self._nodes.values())
+
     def unfetched_urls(self) -> tuple[str, ...]:
         """URLs in the graph whose body was never retrieved.
 
@@ -1160,10 +1169,7 @@ def _paginate(fetcher: HttpFetcher, endpoint: str, graph: SiteGraph) -> Iterator
         except Exception as exc:  # noqa: BLE001 - one bad page must not stop discovery
             _logger.debug("cms_page_failed", extra={"url": url, "error": str(exc)})
             graph.fetch_failures += 1
-            if isinstance(exc, UnsafeUrlError):
-                graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
-            else:
-                graph.record_outcome(OUTCOME_TRANSPORT)
+            graph.record_outcome(_refusal_outcome_for(exc) or OUTCOME_TRANSPORT)
             return
         if not result.ok:
             graph.record_outcome(outcome_for(result.status_code))
@@ -1296,6 +1302,7 @@ OUTCOME_GUARDRAIL_REFUSED = "guardrail_refused"
 OUTCOME_TRANSPORT_TIMEOUT = "transport_timeout"
 OUTCOME_TRANSPORT_REFUSED = "transport_refused"
 OUTCOME_TRANSPORT_DEADLINE = "transport_deadline"
+OUTCOME_ROBOTS_DISALLOWED = "robots_disallowed"
 
 OUTCOME_MEANINGS: Mapping[str, str] = {
     OUTCOME_OK: "Fetched and read as HTML.",
@@ -1320,6 +1327,10 @@ OUTCOME_MEANINGS: Mapping[str, str] = {
     OUTCOME_TRANSPORT_DEADLINE: (
         "Our own REQUEST_DEADLINE_S fired — the response dribbled data without ever "
         "completing (the tarpit shape) or otherwise ran past the whole-request budget."
+    ),
+    OUTCOME_ROBOTS_DISALLOWED: (
+        "The site's robots.txt disallows this path, so it was never requested — "
+        "a choice this crawler made, not a network failure."
     ),
 }
 """Plain-language gloss per outcome, for a report handed to somebody else."""
@@ -1371,6 +1382,26 @@ def _transport_outcome_for(exc: BaseException) -> str:
     return OUTCOME_TRANSPORT
 
 
+def _refusal_outcome_for(exc: BaseException) -> str | None:
+    """Name the outcome of a fetch this crawler refused to make, if it was one.
+
+    `UnsafeUrlError` and `RobotsDisallowedError` are siblings under
+    `GuardrailViolationError`, not parent and child, so a handler that tested
+    only the first filed every robots refusal as `transport_error` — "no
+    answer at all" about a URL that was never requested. Testing both here
+    means every fetch handler asks one question instead of repeating it.
+
+    Returns:
+        The refusal outcome, or `None` when the exception is a genuine
+        transport failure the caller should classify its own way.
+    """
+    if isinstance(exc, UnsafeUrlError):
+        return OUTCOME_GUARDRAIL_REFUSED
+    if isinstance(exc, RobotsDisallowedError):
+        return OUTCOME_ROBOTS_DISALLOWED
+    return None
+
+
 def is_refusal(status_code: int) -> bool:
     """Whether a status means the server *declined* rather than lacked the page.
 
@@ -1404,10 +1435,7 @@ def _safe_body(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> tuple[str | 
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
-        if isinstance(exc, UnsafeUrlError):
-            graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
-        else:
-            graph.record_outcome(OUTCOME_TRANSPORT)
+        graph.record_outcome(_refusal_outcome_for(exc) or OUTCOME_TRANSPORT)
         return None, False
     if not result.ok:
         graph.record_outcome(outcome_for(result.status_code))
@@ -1432,10 +1460,7 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
         _logger.debug("discovery_fetch_failed", extra={"url": url, "error": str(exc)})
         graph.fetch_failures += 1
-        if isinstance(exc, UnsafeUrlError):
-            graph.record_outcome(OUTCOME_GUARDRAIL_REFUSED)
-        else:
-            graph.record_outcome(OUTCOME_TRANSPORT)
+        graph.record_outcome(_refusal_outcome_for(exc) or OUTCOME_TRANSPORT)
         return None
     # Recorded before any bail, because this is where the fetcher's own answer
     # is still in scope. One line further on it is a bare string and the

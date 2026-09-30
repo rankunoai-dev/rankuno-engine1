@@ -84,18 +84,19 @@ class NavigationContextClassifier:
             # Otherwise more likely body content link
             return NavigationDiscoveryMethod.BODY_LINK
 
-        # Rule 4: In sitemap only (no inbound links)
+        # Rule 4: listed in a sitemap, and nothing links to it. The flag itself
+        # is tested: this rule previously tested enum membership and the
+        # truthiness of a model instance, so it held for every unlinked page.
         if (
             page.trail_source == "none"
             and page.inbound_internal_links_count == 0
-            and NavigationDiscoveryMethod.SITEMAP_ONLY
-            in [d.value for d in NavigationDiscoveryMethod]
-            and page.discovery_sources
+            and page.discovery_sources.sitemap
         ):
-            # If only discovered via sitemap discovery method
             return NavigationDiscoveryMethod.SITEMAP_ONLY
 
-        # Rule 5: Completely orphaned (no links, no sitemap)
+        # Rule 5: no link and no sitemap entry. A CMS-only page lands here on
+        # purpose: the CMS API is how this engine found it, not a route by
+        # which a visitor or a link-following crawler can reach it.
         return NavigationDiscoveryMethod.ORPHANED
 
     def _calculate_reachability_tier(

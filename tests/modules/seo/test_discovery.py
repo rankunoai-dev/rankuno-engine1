@@ -643,6 +643,41 @@ class TestGuardrailRefusalOutcome:
         assert outcomes.get("guardrail_refused", 0) == 1
         assert set(outcomes) <= set(OUTCOME_MEANINGS)
 
+    def test_a_robots_refusal_is_its_own_outcome_not_a_transport_error(self, settings):
+        """`RobotsDisallowedError` is not an `UnsafeUrlError`, so it was misfiled.
+
+        The two are siblings under `GuardrailViolationError`, so the
+        `except UnsafeUrlError` branch missed a robots refusal and it landed in
+        `transport_error`, "no answer at all", about a URL this engine chose
+        not to request. Both fetch helpers are covered: the sitemap probe goes
+        through `_safe_body`, the linked page through `_safe_fetch_html`.
+        """
+        routes = {
+            "/robots.txt": httpx.Response(
+                200, text="User-agent: *\nDisallow: /sitemap.xml\nDisallow: /private\n"
+            ),
+            "/": httpx.Response(
+                200,
+                text='<html><a href="/private">private</a></html>',
+                headers={"content-type": "text/html"},
+            ),
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return routes.get(request.url.path, httpx.Response(404, text="nope"))
+
+        fetcher = HttpFetcher(
+            settings=settings,
+            url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+            transport=httpx.MockTransport(handler),
+        )
+        _, report = discover_site(fetcher, "https://e.com", max_pages=10)
+
+        outcomes = report.fetch_outcomes
+        assert outcomes.get("robots_disallowed", 0) == 2
+        assert outcomes.get("transport_error", 0) == 0
+        assert set(outcomes) <= set(OUTCOME_MEANINGS)
+
 
 # A WordPress index pointing at both a page sitemap and an attachment sitemap.
 # The attachment sitemap is what put every uploaded image into the graph.
