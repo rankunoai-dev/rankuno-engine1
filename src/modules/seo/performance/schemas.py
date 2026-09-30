@@ -71,6 +71,14 @@ class MatchTier(StrEnum):
     one crawled page has that path. GA4 property filters frequently strip
     queries the crawl kept."""
 
+    CASE_FOLDED = "case_folded"
+    """Matched only after folding path case, because no crawled page has the
+    address as spelled. The path is case-sensitive in the engine's identity
+    (ADR 0026); Google reports `/PRICING` for a page linked as `/pricing/` often
+    enough that refusing it would lose real traffic. Never used when an exact
+    spelling matches, and refused as ambiguous when two crawled pages differ
+    only by case."""
+
 
 class MatchFailure(StrEnum):
     """Why a Google URL could not be tied to a crawled page.

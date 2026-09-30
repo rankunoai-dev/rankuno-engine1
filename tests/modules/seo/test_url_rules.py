@@ -55,7 +55,8 @@ class TestNormalizeUrl:
         """The worked example from the Amazon-scale specification."""
         raw = "https://www.amazon.com/dp/B0001234?color=red&size=xl&ref=nav_1&qid=1723456&sr=8-1"
         # `www.` is folded out of the dedup key — see `TestHostVariantFolding`.
-        assert normalize_url(raw) == "https://amazon.com/dp/b0001234/?color=red&size=xl"
+        # The path keeps its case: `B0001234` is the ASIN as served (RFC 3986).
+        assert normalize_url(raw) == "https://amazon.com/dp/B0001234/?color=red&size=xl"
 
     def test_locale_variants_are_distinct_pages(self):
         """`/de/pricing/` is a URL Google indexes and ranks on its own.
@@ -111,7 +112,9 @@ class TestNormalizeUrl:
         )
 
     def test_host_and_scheme_are_lowercased(self):
-        assert normalize_url("HTTPS://E.COM/A/") == "https://e.com/a/"
+        # Scheme and host are case-insensitive (RFC 3986 §6.2.2.1); the path is
+        # not, so `/A/` survives while the host folds.
+        assert normalize_url("HTTPS://E.COM/A/") == "https://e.com/A/"
 
     def test_fragment_is_dropped(self):
         assert normalize_url("https://e.com/a/#section") == "https://e.com/a/"
@@ -167,8 +170,9 @@ class TestLocaleAndPath:
             _, locale = strip_locale_prefix(path)
             assert locale is not None, f"{path} should be recognised"
 
-    def test_normalize_path_lowercases_and_pads(self):
-        assert normalize_path("/A//B") == "/a/b/"
+    def test_normalize_path_preserves_case_and_pads(self):
+        # Case is kept (path case is significant); empty segments still collapse.
+        assert normalize_path("/A//B") == "/A/B/"
 
 
 class TestDepth:
@@ -608,7 +612,8 @@ class TestPercentEscapeDecoding:
         Stripping whitespace anywhere but the segment edges would delete them.
         """
         assert normalize_path("/pdf/Infosys%20ESG%20-%20climate%20change.pdf") == (
-            "/pdf/infosys esg - climate change.pdf/"
+            # Case preserved: the published filename is `Infosys ESG ...`.
+            "/pdf/Infosys ESG - climate change.pdf/"
         )
 
     def test_a_path_with_no_escapes_is_untouched(self):
@@ -684,3 +689,23 @@ class TestRegionalLocaleShape:
         accident someone later "fixes" without knowing it was considered.
         """
         assert is_locale_segment("cs-demo")
+
+
+class TestPathCaseIsSignificant:
+    """The path is case-sensitive; only scheme and host fold (RFC 3986 §6.2.2.1).
+
+    `/A` and `/a` are different resources on a case-sensitive server, and both
+    Google and Screaming Frog treat them as two URLs. Folding them merged two
+    real pages onto one graph node.
+    """
+
+    def test_path_case_is_preserved_while_host_folds(self):
+        assert normalize_url("https://E.com/A/Page") == "https://e.com/A/Page/"
+
+    def test_case_variants_are_distinct_keys(self):
+        assert normalize_url("https://e.com/A/Page") != normalize_url("https://e.com/a/page")
+
+    def test_kept_escape_hex_case_is_folded(self):
+        """With path case preserved, `%2f` and `%2F` must still be one key."""
+        assert normalize_url("https://e.com/a%2fb") == normalize_url("https://e.com/a%2Fb")
+        assert normalize_url("https://e.com/x%ff") == normalize_url("https://e.com/x%FF")

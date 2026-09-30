@@ -108,6 +108,13 @@ class TestSiteGraph:
         graph.add("https://e.com/a/?utm_source=x")
         assert len(graph) == 1
 
+    def test_path_case_variants_are_two_nodes(self):
+        """`/A` and `/a` are two resources; one node would show one page's HTML for both."""
+        graph = SiteGraph("https://e.com")
+        graph.add("https://e.com/A", dom_link=True)
+        graph.add("https://E.COM/a", dom_link=True)
+        assert len(graph) == 2
+
     def test_enforces_the_node_ceiling(self):
         graph = SiteGraph("https://e.com", max_pages=2)
         assert graph.add("https://e.com/1/") is not None

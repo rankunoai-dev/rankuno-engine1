@@ -36,13 +36,22 @@ path alone, because GA4 supplies no host; if a crawl spans two hosts and both
 serve `/pricing/`, that path is claimed twice and is refused rather than
 attributed to whichever host happened to be indexed first.
 
+Path case is a fallback, not an identity
+----------------------------------------
+The engine keys pages case-sensitively (ADR 0026), so `/A/` and `/a/` can be two
+crawled pages. Google still reports `/PRICING` for a page linked as `/pricing/`.
+Every lookup is therefore tried exactly first and only then case-folded, under
+its own `MatchTier.CASE_FOLDED` so the count is visible. The folded index obeys
+the same ambiguity rule: if two crawled pages differ only by case, a row that
+matches neither spelling exactly is refused, not handed to one of them.
+
 Pure domain logic: no I/O, no settings, no clock.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from urllib.parse import SplitResult, parse_qsl, urlencode
+from urllib.parse import SplitResult, parse_qsl, urlencode, urlunsplit
 
 from src.modules.seo.page_classifier.logical_hierarchy import OTHERS_LABEL
 from src.modules.seo.page_classifier.schemas import FullPageIntelligenceProfile
@@ -98,6 +107,19 @@ def _path_key(parts: SplitResult) -> str:
     query = _query_key(parts)
     path = normalize_path(parts.path or "/")
     return f"{path}?{query}" if query else path
+
+
+def _fold_path(key: str) -> str:
+    """Case-fold the path of an absolute or host-free key, and nothing else.
+
+    The host is already lowercase and the query keeps its case, exactly as the
+    identity did before path case became significant — so this fallback matches
+    no more loosely than the old global rule did.
+    """
+    parts = safe_split(key)
+    if parts is None:
+        return key
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.lower(), parts.query, ""))
 
 
 def placement_depth(trail: tuple[str, ...]) -> int:
@@ -240,20 +262,26 @@ class UrlResolutionIndex:
         absolute: list[_Tier] = []
         with_query: list[_Tier] = []
         bare: list[_Tier] = []
+        folded: tuple[list[_Tier], list[_Tier], list[_Tier]] = ([], [], [])
 
         for field, tier in _SOURCES:
             urls: list[tuple[str, str]] = [(getattr(page, field), page.url) for page in pages]
             live = [(alias, owner) for alias, owner in urls if alias]
-            absolute.append(_tier_index(((normalize_url(a), o) for a, o in live), tier))
-
             split = [(safe_split(alias), owner) for alias, owner in live]
             parsed = [(parts, owner) for parts, owner in split if parts is not None]
-            with_query.append(_tier_index(((_path_key(p), o) for p, o in parsed), tier))
-            bare.append(_tier_index(((normalize_path(p.path or "/"), o) for p, o in parsed), tier))
+            keyed = (
+                [(normalize_url(a), o) for a, o in live],
+                [(_path_key(p), o) for p, o in parsed],
+                [(normalize_path(p.path or "/"), o) for p, o in parsed],
+            )
+            for exact, fold, pairs in zip((absolute, with_query, bare), folded, keyed, strict=True):
+                exact.append(_tier_index(pairs, tier))
+                fold.append(_tier_index(((_fold_path(k), o) for k, o in pairs), tier))
 
         self._absolute, self._absolute_clash = _merge(absolute)
         self._path, self._path_clash = _merge(with_query)
         self._bare, self._bare_clash = _merge(bare)
+        self._folded = tuple(_merge(tiers) for tiers in folded)
 
     @staticmethod
     def _host_of(url: str) -> str:
@@ -299,6 +327,9 @@ class UrlResolutionIndex:
             found = self._absolute.get(key)
             if found is not None:
                 return UrlMatch(google_url=google_url, page_url=found[0], via=found[1])
+            folded = self._case_folded(google_url, key, self._folded[0])
+            if folded is not None:
+                return folded
             # Only now is the host worth checking. Doing it first would reject a
             # cross-domain canonical — a page that names another property as its
             # canonical is exactly the case where Google reports the other host,
@@ -326,6 +357,9 @@ class UrlResolutionIndex:
         found = self._path.get(exact)
         if found is not None:
             return UrlMatch(google_url=google_url, page_url=found[0], via=found[1])
+        folded = self._case_folded(google_url, exact, self._folded[1])
+        if folded is not None:
+            return folded
 
         # Last resort: drop the query entirely. GA4 property filters routinely
         # strip parameters the crawl kept, so `/search/` arrives for a page held
@@ -338,8 +372,28 @@ class UrlResolutionIndex:
         owner = self._bare.get(loose)
         if owner is not None:
             return UrlMatch(google_url=google_url, page_url=owner[0], via=MatchTier.BARE_PATH)
+        folded = self._case_folded(google_url, loose, self._folded[2])
+        if folded is not None:
+            return folded
 
         return UrlFailure(google_url=google_url, reason=MatchFailure.NOT_CRAWLED)
+
+    @staticmethod
+    def _case_folded(google_url: str, key: str, folded: _Index) -> UrlMatch | UrlFailure | None:
+        """Retry a missed exact key with its path case folded.
+
+        Called only after the exact lookup at the same level found nothing, so a
+        case-exact match always wins. Returns `None` when the fold finds nothing
+        either, letting the caller continue to its next, looser level.
+        """
+        owners, clashed = folded
+        key = _fold_path(key)
+        if key in clashed:
+            return UrlFailure(google_url=google_url, reason=MatchFailure.AMBIGUOUS)
+        owner = owners.get(key)
+        if owner is None:
+            return None
+        return UrlMatch(google_url=google_url, page_url=owner[0], via=MatchTier.CASE_FOLDED)
 
     def resolve_url(self, google_url: str) -> str | None:
         """Resolve to a crawled page URL, or `None` if it cannot be resolved.
