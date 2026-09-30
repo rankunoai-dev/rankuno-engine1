@@ -38,7 +38,7 @@ attributed to whichever host happened to be indexed first.
 
 Path case is a fallback, not an identity
 ----------------------------------------
-The engine keys pages case-sensitively (ADR 0026), so `/A/` and `/a/` can be two
+The engine keys pages case-sensitively (ADR 0027), so `/A/` and `/a/` can be two
 crawled pages. Google still reports `/PRICING` for a page linked as `/pricing/`.
 Every lookup is therefore tried exactly first and only then case-folded, under
 its own `MatchTier.CASE_FOLDED` so the count is visible. The folded index obeys

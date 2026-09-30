@@ -1,4 +1,4 @@
-# ADR 0026: URL path case is significant in the engine's page identity
+# ADR 0027: URL path case is significant in the engine's page identity
 
 - **Status**: Accepted
 - **Date**: 2026-09-30

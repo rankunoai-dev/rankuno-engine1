@@ -530,7 +530,7 @@ def test_url_rules(issue: IssueId, hit: str, miss: str) -> None:
 def test_url_rules_read_the_raw_url_and_report_the_normalised_key():
     raw = "https://www.example.com/Blog//Post_A?utm_source=x"
     dataset = with_sitemap(profile(raw))
-    # Path case is part of the key now (ADR 0026); `URL_UPPERCASE` is still
+    # Path case is part of the key now (ADR 0027); `URL_UPPERCASE` is still
     # read from the raw URL and filed under the case-preserving key.
     key = "https://example.com/Blog/Post_A/"
     assert any(p.url == key for p in dataset.pages)
@@ -550,7 +550,7 @@ def test_url_rules_read_the_raw_url_and_report_the_normalised_key():
 
 def test_duplicates_collapse_to_one_page_and_issues_union():
     # A genuine same-page duplicate: scheme, `www.`, doubled slash and missing
-    # trailing slash. Case is no longer one of those shapes (ADR 0026), so the
+    # trailing slash. Case is no longer one of those shapes (ADR 0027), so the
     # dirty copy differs by everything *except* path case.
     clean = profile("https://example.com/page/")
     dirty = profile("http://www.example.com//page", indexability=Indexability.NOINDEX)
@@ -564,7 +564,7 @@ def test_duplicates_collapse_to_one_page_and_issues_union():
 def test_path_case_variants_stay_two_pages():
     """`/Page/` and `/page/` are two URLs to Google and to Screaming Frog.
 
-    This reverses the build-log 0079 ruling that they were one page (ADR 0026).
+    This reverses the build-log 0079 ruling that they were one page (ADR 0027).
     `URL_UPPERCASE` is still found, from the raw URL, on the uppercase one only.
     """
     dataset = with_sitemap(

@@ -74,7 +74,7 @@ class MatchTier(StrEnum):
     CASE_FOLDED = "case_folded"
     """Matched only after folding path case, because no crawled page has the
     address as spelled. The path is case-sensitive in the engine's identity
-    (ADR 0026); Google reports `/PRICING` for a page linked as `/pricing/` often
+    (ADR 0027); Google reports `/PRICING` for a page linked as `/pricing/` often
     enough that refusing it would lose real traffic. Never used when an exact
     spelling matches, and refused as ambiguous when two crawled pages differ
     only by case."""

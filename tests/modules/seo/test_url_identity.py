@@ -383,7 +383,7 @@ class TestMetricContracts:
 
 
 class TestPathCaseFallback:
-    """Path case is significant to the crawl (ADR 0026) but not to this join.
+    """Path case is significant to the crawl (ADR 0027) but not to this join.
 
     Folding is an explicit fallback with its own tier, tried only after an
     exact spelling misses, so it can never override a case-exact page.

@@ -455,7 +455,7 @@ def normalize_path(path: str) -> str:
     Google indexes them as two URLs, and Screaming Frog crawls them as two.
     Lowercasing here merged two real pages onto one graph node — one page's
     HTML and classification shown for both — so it was removed by user decision
-    (ADR 0026), reversing the build-log 0079 fixture ruling. Consumers that
+    (ADR 0027), reversing the build-log 0079 fixture ruling. Consumers that
     genuinely want a case-blind match, such as Search Console resolution, must
     fold case themselves as an explicit, named fallback.
 
