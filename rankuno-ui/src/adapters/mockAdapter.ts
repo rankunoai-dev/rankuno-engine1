@@ -130,6 +130,11 @@ export class MockAdapter implements CrawlDataAdapter {
    * that endpoint exists to stop. The gap report that launches a list crawl
    * is unreachable in fixture mode anyway — `reconcileScreamingFrog` is
    * absent too, so no cross-check can be produced to read a gap from.
+   *
+   * `revokeWorker` and `rotateWorkerCredential` are absent for the same reason
+   * as `previewDispatch`: the fleet is empty, so there is nothing to act on,
+   * and a fixture that "rotated" a credential would be fabricating a secret
+   * that no machine could ever use. Absent means the controls are not offered.
    */
   async listWorkers(): Promise<WorkerListView> {
     return { workers: [], offline_after_s: 60 };

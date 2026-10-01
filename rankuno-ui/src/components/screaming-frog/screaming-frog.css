@@ -644,3 +644,19 @@
     margin-bottom: 8px;
   }
 }
+
+/* Registered machines and their credential actions. */
+.sfd-worker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sfd-worker-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}

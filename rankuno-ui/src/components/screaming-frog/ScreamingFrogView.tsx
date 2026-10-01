@@ -13,6 +13,7 @@ import { formatCrawlTime } from "../../lib/time";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
 import { DispatchConfirmModal } from "./DispatchConfirmModal";
+import { WorkerCredentialsPanel } from "./WorkerCredentialsPanel";
 import { WorkerJobsPanel } from "./WorkerJobsPanel";
 import { newCorrelationId } from "./correlationId";
 import type { PastedListChoice } from "./UrlListPastePanel";
@@ -387,7 +388,7 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
                 <Tag color={selected.is_online ? "success" : "default"}>
                   {selected.is_online ? "ONLINE" : "OFFLINE"}
                 </Tag>
-                {!selected.is_active && <Tag color="warning">DEACTIVATED</Tag>}
+                {!selected.is_active && <Tag color="error">REVOKED</Tag>}
                 {describeLastSeen(selected, offlineAfterS)}
               </span>
             )}
@@ -554,6 +555,14 @@ export function ScreamingFrogView({ adapter }: Props): JSX.Element {
             )}
           </div>
         </div>
+      )}
+
+      {!loading && !loadError && workers.length > 0 && (
+        <WorkerCredentialsPanel
+          api={api}
+          workers={workers}
+          onChanged={() => void loadWorkers()}
+        />
       )}
 
       <WorkerJobsPanel

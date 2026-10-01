@@ -357,6 +357,21 @@ export interface WorkerTemplate {
   description: string;
 }
 
+/**
+ * A worker's replacement credential. Mirrors `WorkerCredentialRotateResponse`.
+ *
+ * `worker_secret` exists in exactly one HTTP response and is never readable
+ * again — the server keeps only its hash. Hold it only for as long as the
+ * dialog that shows it is open; never put it in a store, a log, or a toast.
+ */
+export interface WorkerCredentialRotation {
+  /** Unchanged by rotation — the daemon's WORKER_ID stays the same. */
+  worker_id: string;
+  /** The new WORKER_CREDENTIAL. The old one was refused before this arrived. */
+  worker_secret: string;
+  org_id: string;
+}
+
 /** Mirrors `WorkerListView`. */
 export interface WorkerListView {
   workers: WorkerSummary[];
@@ -795,6 +810,23 @@ export interface CrawlDataAdapter {
   getWorkerTemplates?(workerId: string): Promise<WorkerTemplatesView>;
 
   /**
+   * Refuse this worker's credential from now on. Idempotent.
+   *
+   * The machine's next poll is answered `401` and its daemon stops on
+   * purpose. There is no "reactivate": rotating is the only way back, because
+   * re-trusting a revoked secret would undo the revoke in exactly the case it
+   * exists for. Optional like `listWorkers` — fixtures have no fleet.
+   */
+  revokeWorker?(workerId: string): Promise<WorkerSummary>;
+
+  /**
+   * Replace this worker's credential; the old one is refused at once.
+   *
+   * Also re-enables a revoked worker. The returned secret is shown once.
+   */
+  rotateWorkerCredential?(workerId: string): Promise<WorkerCredentialRotation>;
+
+  /**
    * Available masterfile export services (slugs and labels).
    *
    * Optional like `startJob`: fixtures have no server behind them to build
@@ -925,6 +957,8 @@ export type WorkerDispatchAdapter = Pick<
   CrawlDataAdapter,
   | "listWorkers"
   | "getWorkerTemplates"
+  | "revokeWorker"
+  | "rotateWorkerCredential"
   | "previewDispatch"
   | "confirmDispatch"
   | "listUrlListSources"

@@ -34,10 +34,12 @@ from src.api.url_list_routes import (
     owned_crawl_job,
 )
 from src.api.url_list_schemas import UrlListRequest, UrlListView
+from src.api.worker_credential_routes import build_worker_credential_router
 from src.api.worker_route_helpers import (
     owned_worker,
     screaming_frog_busy,
     shortfall_note,
+    summarise_worker,
     validate_seed_url,
     worker_store_unavailable,
 )
@@ -51,7 +53,6 @@ from src.api.worker_schemas import (
     WorkerListView,
     WorkerRegisterRequest,
     WorkerRegisterResponse,
-    WorkerSummary,
     WorkerTemplatesView,
 )
 from src.core.auth import hash_password
@@ -150,21 +151,6 @@ def _to_view(job: WorkerJob) -> WorkerJobView:
     return view
 
 
-def _summarise(worker: Worker, *, offline_after_s: float) -> WorkerSummary:
-    """Map a `Worker` onto its HTTP view, adding the server's liveness verdict."""
-    return WorkerSummary(
-        worker_id=worker.worker_id,
-        org_id=worker.org_id,
-        display_name=worker.display_name,
-        is_active=worker.is_active,
-        created_at=worker.created_at,
-        last_seen_at=worker.last_seen_at,
-        is_online=worker_is_online(worker, offline_after_s=offline_after_s),
-        templates=list(worker.templates),
-        unrecognised_template_count=worker.unrecognised_template_count,
-    )
-
-
 def _stream_bundle(payload: bytes) -> Iterator[bytes]:
     """Yield an already-decrypted bundle in chunks.
 
@@ -185,6 +171,7 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
     """Build every human-authenticated worker-dispatch route over `state`."""
     router = APIRouter()
     router.include_router(build_url_list_router(state))
+    router.include_router(build_worker_credential_router(state))
 
     @router.post(
         "/workers", response_model=WorkerRegisterResponse, status_code=status.HTTP_201_CREATED
@@ -224,7 +211,7 @@ def build_worker_dashboard_router(state: ApiState) -> APIRouter:  # noqa: C901 -
         except WorkerStoreUnavailableError as exc:
             raise worker_store_unavailable(exc) from exc
         return WorkerListView(
-            workers=[_summarise(w, offline_after_s=offline_after_s) for w in workers],
+            workers=[summarise_worker(w, offline_after_s=offline_after_s) for w in workers],
             offline_after_s=offline_after_s,
         )
 

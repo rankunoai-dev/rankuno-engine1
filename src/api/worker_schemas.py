@@ -37,6 +37,7 @@ __all__ = [
     "WorkerFailureReport",
     "WorkerHeartbeatRequest",
     "WorkerHeartbeatResponse",
+    "WorkerCredentialRotateResponse",
     "WorkerJobAccepted",
     "WorkerJobListView",
     "WorkerJobView",
@@ -73,6 +74,28 @@ class WorkerRegisterResponse(StrictModel):
     worker_id: str
     worker_secret: str
     org_id: str
+
+
+class WorkerCredentialRotateResponse(StrictModel):
+    """A worker's replacement credential, returned exactly once.
+
+    The same shape and the same "shown once" posture as
+    `WorkerRegisterResponse`: `worker_secret` is the value the daemon reads
+    as `WORKER_CREDENTIAL`, and after this response the server holds only
+    its PBKDF2 hash. The previous secret stopped verifying before this
+    response was sent.
+    """
+
+    worker_id: str = Field(
+        description="Unchanged by rotation; the daemon's WORKER_ID stays the same."
+    )
+    worker_secret: str = Field(
+        description=(
+            "The new long-lived secret. Never retrievable again; put it in "
+            "WORKER_CREDENTIAL on the worker machine and restart the daemon."
+        )
+    )
+    org_id: str = Field(description="The organization the worker belongs to.")
 
 
 class WorkerSummary(StrictModel):

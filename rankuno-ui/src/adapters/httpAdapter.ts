@@ -23,7 +23,9 @@ import type {
   WorkerJobView,
   PastedUrlPlan,
   UrlListSourcesView,
+  WorkerCredentialRotation,
   WorkerListView,
+  WorkerSummary,
   WorkerTemplatesView,
 } from "./adapterInterface";
 
@@ -419,6 +421,24 @@ export class HttpAdapter implements CrawlDataAdapter {
   async getWorkerTemplates(workerId: string): Promise<WorkerTemplatesView> {
     return this.request<WorkerTemplatesView>(
       `/workers/${encodeURIComponent(workerId)}/templates`,
+    );
+  }
+
+  /** Refuse this worker's credential from now on. Idempotent. */
+  async revokeWorker(workerId: string): Promise<WorkerSummary> {
+    return this.request<WorkerSummary>(`/workers/${encodeURIComponent(workerId)}/revoke`, {
+      method: "POST",
+    });
+  }
+
+  /**
+   * Replace this worker's credential. The response is the only copy of the new
+   * secret that will ever exist outside the worker machine.
+   */
+  async rotateWorkerCredential(workerId: string): Promise<WorkerCredentialRotation> {
+    return this.request<WorkerCredentialRotation>(
+      `/workers/${encodeURIComponent(workerId)}/rotate-credential`,
+      { method: "POST" },
     );
   }
 
