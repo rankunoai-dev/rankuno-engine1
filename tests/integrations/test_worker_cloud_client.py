@@ -55,6 +55,40 @@ def test_missing_base_url_raises_configuration_error(tmp_path):
         WorkerCloudClient(settings)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://cloud.example.com",
+        "http://127.0.0.1.evil.example",
+        "ftp://cloud.example.com",
+        "cloud.example.com",
+        "http://[::1",
+    ],
+)
+def test_a_non_https_base_url_is_refused_at_construction(tmp_path, url):
+    """The worker credential and every assignment must never cross the network in clear.
+
+    Fails on the pre-ADR-0028 client, which accepted any base URL.
+    """
+    settings = _settings(tmp_path, worker_cloud_api_base_url=url)
+    with pytest.raises(ConfigurationError, match="WORKER_CLOUD_API_BASE_URL"):
+        WorkerCloudClient(settings, transport=route_map({}))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://cloud.example.com",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://[::1]:8000",
+    ],
+)
+def test_https_and_loopback_http_base_urls_are_accepted(tmp_path, url):
+    settings = _settings(tmp_path, worker_cloud_api_base_url=url)
+    WorkerCloudClient(settings, transport=route_map({})).close()
+
+
 def test_authenticate_builds_worker_id_colon_secret_bearer(tmp_path):
     settings = _settings(tmp_path)
     client = WorkerCloudClient(settings, transport=route_map({}))

@@ -31,6 +31,10 @@ The whole surface, in the order ADR 0015's binding conditions introduce it:
 * `POST /workers/heartbeat` — worker-authenticated check-in that also
   reports which `.seospiderconfig` templates that machine holds. The cloud
   host has none of its own; the worker is the only place they exist.
+* `GET /workers/dispatch-verify-key` (`worker_verify_key_routes`) —
+  human-authenticated. The cloud's Ed25519 *public* key and its `kid`, which
+  `scripts/register_worker.py` writes to a worker's `WORKER_DISPATCH_VERIFY_KEY`
+  (ADR 0028).
 * `GET /workers/dispatch/poll` — worker-authenticated. Claims the oldest
   queued job pinned to *this* worker and mints gate (b)'s signed assignment
   (condition 3(b)). Never accepts a `worker_id` the request claims — the
@@ -74,6 +78,7 @@ from src.api.worker_schemas import (
     WorkerJobAccepted,
     WorkerProgressReport,
 )
+from src.api.worker_verify_key_routes import build_dispatch_verify_key_router
 from src.core.config import get_settings
 from src.core.logger import get_logger
 from src.core.worker_auth import WorkerStoreUnavailableError
@@ -125,6 +130,9 @@ def build_worker_router(state: ApiState) -> APIRouter:
     surface.
     """
     router = APIRouter()
+    # A literal path, first, so no `/workers/{worker_id}` route added to the
+    # dashboard module later can ever shadow it (ADR 0028).
+    router.include_router(build_dispatch_verify_key_router(state))
     router.include_router(build_worker_dashboard_router(state))
 
     @router.post("/workers/heartbeat", response_model=WorkerHeartbeatResponse)
@@ -201,6 +209,7 @@ def build_worker_router(state: ApiState) -> APIRouter:
             correlation_id=job.envelope.correlation_id,
             url_list_sha256=job.envelope.url_list_sha256,
             secret=state.dispatch_signing_secret,
+            signing_key=state.dispatch_signing_key,
             ttl_s=settings.worker_dispatch_assignment_ttl_s,
         )
         return PollResponse(assignment=assignment)

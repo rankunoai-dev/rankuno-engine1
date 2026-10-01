@@ -172,7 +172,7 @@ the cloud cannot bind — which is the question this allow-list exists to force
 someone to answer rather than to silence.
 """
 
-_NON_CLAIM_PARAMS = frozenset({"secret", "ttl_s"})
+_NON_CLAIM_PARAMS = frozenset({"secret", "signing_key", "ttl_s"})
 """Mint parameters that configure the signing rather than land in the claims."""
 
 _PROBE: dict[str, object] = {

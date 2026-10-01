@@ -27,13 +27,13 @@ from typing import Any
 import httpx
 
 from src.core.config import Settings
-from src.core.errors import WorkerCredentialRejectedError
+from src.core.errors import ConfigurationError, WorkerCredentialRejectedError
 from src.core.logger import get_logger
 from src.core.worker_dispatch_schemas import SignedDispatchAssignment, WorkerJobPhase
 from src.core.worker_templates import WorkerTemplateReport
 from src.integrations.base_client import BaseAPIClient
 
-__all__ = ["WorkerCloudClient"]
+__all__ = ["WorkerCloudClient", "require_secure_base_url"]
 
 _logger = get_logger("integrations.worker_cloud_client")
 
@@ -47,6 +47,47 @@ Raised as a `WorkerCredentialRejectedError` so `BaseAPIClient.call()`
 propagates it unwrapped and `with_retries` does not treat it as transient.
 `503` is deliberately *not* here: that is what the cloud answers when its
 own worker store is unreachable, and retrying it is exactly right."""
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+"""Hosts where plain `http://` is allowed: traffic that never leaves the machine."""
+
+
+def require_secure_base_url(url: str, *, setting_name: str = "WORKER_CLOUD_API_BASE_URL") -> str:
+    """Refuse a cloud API URL that would send the worker credential in clear text.
+
+    Every request on this channel carries the worker's long-lived bearer
+    credential, and every poll response carries a dispatch assignment. Over
+    `http://` both are readable and alterable by anyone on the path, so only
+    `https://` is accepted — except for a loopback host, which keeps a local
+    development cloud usable without a certificate.
+
+    Args:
+        url: The configured base URL.
+        setting_name: Named in the error so the operator knows what to edit.
+
+    Returns:
+        `url`, unchanged, when it is acceptable.
+
+    Raises:
+        ConfigurationError: The scheme is not `https`, and the URL is not
+            `http` to a loopback host.
+    """
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL as exc:
+        msg = f"{setting_name} is not a valid URL."
+        raise ConfigurationError(msg) from exc
+    if parsed.scheme == "https" and parsed.host:
+        return url
+    if parsed.scheme == "http" and parsed.host in _LOOPBACK_HOSTS:
+        return url
+    msg = (
+        f"{setting_name} must be an https:// URL (plain http:// is allowed only for "
+        f"localhost, 127.0.0.1 or ::1); got scheme {parsed.scheme or '(none)'!r} for "
+        f"host {parsed.host or '(none)'!r}."
+    )
+    raise ConfigurationError(msg)
 
 
 def _raise_for_credential(response: httpx.Response, operation: str) -> None:
@@ -84,10 +125,11 @@ class WorkerCloudClient(BaseAPIClient):
                 `HttpFetcher`'s own testability pattern.
 
         Raises:
-            ConfigurationError: `Settings.worker_cloud_api_base_url` is unset.
+            ConfigurationError: `Settings.worker_cloud_api_base_url` is
+                unset, or is not `https://` for a non-loopback host.
         """
         super().__init__(settings=settings)
-        base_url = self._settings.require("worker_cloud_api_base_url")
+        base_url = require_secure_base_url(self._settings.require("worker_cloud_api_base_url"))
         self._client = httpx.Client(
             base_url=base_url, timeout=_REQUEST_TIMEOUT_S, transport=transport
         )

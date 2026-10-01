@@ -40,6 +40,14 @@ dependencies = [
     "sqlalchemy>=2.0.0,<3.0.0",
     "redis>=5.0.0,<6.0.0",
     "celery>=5.3.0,<6.0.0",
+    # Ed25519 signing/verification of worker dispatch assignments (ADR 0028).
+    # Was already installed transitively (google-auth); declared explicitly
+    # because `src/core/worker_dispatch_keys.py` imports it and the worker must
+    # not depend on another package's dependency list. No upper bound on
+    # purpose: cryptography bumps its major version several times a year, the
+    # Ed25519 API used here has been stable since 2.6, and a cap would hold
+    # back security releases of the one library where those matter most.
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

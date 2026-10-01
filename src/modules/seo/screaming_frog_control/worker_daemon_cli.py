@@ -50,16 +50,18 @@ _REQUIRED_SETTINGS: tuple[tuple[str, str], ...] = (
     ("worker_id", "WORKER_ID"),
     ("worker_org_id", "WORKER_ORG_ID"),
     ("worker_credential", "WORKER_CREDENTIAL"),
-    ("worker_dispatch_signing_secret", "WORKER_DISPATCH_SIGNING_SECRET"),
 )
 """Every setting without which this daemon cannot do its job, and the
-environment variable name an operator would actually edit.
+environment variable name an operator would actually edit."""
 
-`WORKER_DISPATCH_SIGNING_SECRET` is in this list even though `Settings`
-generates a random one outside production, because a *generated* key on the
-worker side can never verify an artifact the cloud signed: every dispatch
-would be rejected as a bad signature, with nothing in the message pointing
-at the real cause. Naming it here turns that into one line at startup."""
+_VERIFY_KEY_ENV = "WORKER_DISPATCH_VERIFY_KEY"
+"""Required unless the legacy `WORKER_DISPATCH_SIGNING_SECRET` is set (ADR
+0028). Reported by *this* name when both are missing, because a new install
+needs only the public verify key and must never be told to obtain the shared
+secret. Checked here even though `Settings` generates a random HMAC key
+outside production: a *generated* key can never verify an artifact the cloud
+signed, so every dispatch would be rejected with nothing pointing at the
+cause. Naming it here turns that into one line at startup."""
 
 EXIT_OK = 0
 EXIT_CONFIGURATION = 2
@@ -72,7 +74,13 @@ def missing_settings(settings: Settings) -> list[str]:
     Returns names only. A value is never read into the return type, so no
     caller of this function can accidentally log a secret.
     """
-    return [env_name for attr, env_name in _REQUIRED_SETTINGS if getattr(settings, attr) is None]
+    missing = [env_name for attr, env_name in _REQUIRED_SETTINGS if getattr(settings, attr) is None]
+    if (
+        settings.worker_dispatch_verify_key is None
+        and settings.worker_dispatch_signing_secret is None
+    ):
+        missing.append(_VERIFY_KEY_ENV)
+    return missing
 
 
 def build_parser() -> argparse.ArgumentParser:

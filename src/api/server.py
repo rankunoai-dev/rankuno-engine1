@@ -76,7 +76,7 @@ from src.api.deliverables_routes import build_deliverables_router
 from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password
 from src.core.config import Settings, get_settings
-from src.core.errors import UnsafeUrlError
+from src.core.errors import ConfigurationError, UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.logger import get_logger
@@ -98,6 +98,7 @@ from src.core.state_store import (
 )
 from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_auth import WorkerStore
+from src.core.worker_dispatch_keys import DispatchSigningKey
 from src.core.worker_dispatch_store import WorkerDispatchStore
 from src.modules.seo.deliverables.rulebook_store import RulebookStore
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
@@ -936,6 +937,7 @@ class ApiState:
         worker_dispatch_store: WorkerDispatchStore | None = None,
         dispatch_signing_secret: SecretStr | None = None,
         bundle_encryption_secret: SecretStr | None = None,
+        dispatch_signing_key: DispatchSigningKey | None = None,
     ) -> None:
         """Build the shared state.
 
@@ -974,12 +976,22 @@ class ApiState:
                 queue store (ADR 0015 condition 5). Defaults to a
                 `PostgresWorkerDispatchStore` — never an in-process
                 fallback, per that module's own "never fail open" design.
-            dispatch_signing_secret: HMAC key dispatch assignment artifacts
-                are signed and verified against (ADR 0015 conditions 3(b)
-                and 4). Defaults to `Settings.dispatch_signing_secret`.
+            dispatch_signing_secret: Legacy HMAC key dispatch assignment
+                artifacts are also signed with during the ADR 0028
+                transition (ADR 0015 conditions 3(b) and 4). Defaults to
+                `Settings.dispatch_hmac_issuing_secret`, which is `None` —
+                no HMAC emitted — unless one is configured and enabled.
             bundle_encryption_secret: Symmetric key for at-rest bundle
                 encryption (ADR 0015 condition 11). Defaults to
                 `Settings.bundle_encryption_secret`.
+            dispatch_signing_key: Ed25519 key dispatch assignments are
+                signed with (ADR 0028). Defaults to
+                `Settings.dispatch_ed25519_signing_key`.
+
+        Raises:
+            ConfigurationError: Neither a signing key nor an HMAC secret
+                resolved — the cloud refuses to start rather than run a
+                dispatch surface that cannot sign anything.
         """
         self.store = store
         self.url_policy = url_policy
@@ -1001,8 +1013,17 @@ class ApiState:
             store, self.worker_dispatch_store, exclude_tool_name=SF_TOOL_NAME
         )
         self.dispatch_signing_secret = (
-            dispatch_signing_secret or get_settings().dispatch_signing_secret
+            dispatch_signing_secret or get_settings().dispatch_hmac_issuing_secret
         )
+        self.dispatch_signing_key = (
+            dispatch_signing_key or get_settings().dispatch_ed25519_signing_key
+        )
+        if self.dispatch_signing_secret is None and self.dispatch_signing_key is None:
+            msg = (
+                "No dispatch signing method is configured: set "
+                "WORKER_DISPATCH_SIGNING_PRIVATE_KEY (ADR 0028)."
+            )
+            raise ConfigurationError(msg)
         self.bundle_encryption_secret = (
             bundle_encryption_secret or get_settings().bundle_encryption_secret
         )
@@ -1421,6 +1442,7 @@ def create_app(
     dispatch_signing_secret: SecretStr | None = None,
     bundle_encryption_secret: SecretStr | None = None,
     process_ledger_path: Path | None = None,
+    dispatch_signing_key: DispatchSigningKey | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -1469,9 +1491,9 @@ def create_app(
             `PostgresWorkerDispatchStore`. Tests inject a fake
             psycopg-shaped connection factory rather than overriding this
             directly — see `tests/core/test_postgres_worker_dispatch_store.py`.
-        dispatch_signing_secret: HMAC key for dispatch assignment artifacts
-            (ADR 0015 conditions 3(b)/4). Defaults to
-            `Settings.dispatch_signing_secret`.
+        dispatch_signing_secret: Legacy HMAC key for dispatch assignment
+            artifacts (ADR 0015 conditions 3(b)/4), transition only (ADR
+            0028). Defaults to `Settings.dispatch_hmac_issuing_secret`.
         bundle_encryption_secret: At-rest bundle encryption key (ADR 0015
             condition 11). Defaults to `Settings.bundle_encryption_secret`.
         process_ledger_path: PID ledger that startup orphan reconciliation
@@ -1481,6 +1503,8 @@ def create_app(
             able to name a throwaway ledger rather than the workstation's
             real one, which a live Screaming Frog crawl is enrolled in
             (cycle 0113).
+        dispatch_signing_key: Ed25519 dispatch signing key (ADR 0028).
+            Defaults to `Settings.dispatch_ed25519_signing_key`.
 
     Returns:
         The configured application.
@@ -1520,6 +1544,7 @@ def create_app(
         worker_dispatch_store=worker_dispatch_store,
         dispatch_signing_secret=dispatch_signing_secret,
         bundle_encryption_secret=bundle_encryption_secret,
+        dispatch_signing_key=dispatch_signing_key,
     )
 
     @asynccontextmanager

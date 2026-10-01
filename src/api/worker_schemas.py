@@ -15,6 +15,7 @@ imported back here because `DispatchPreviewResponse` carries one.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
@@ -292,6 +293,19 @@ class PollResponse(StrictModel):
     """
 
     assignment: SignedDispatchAssignment | None = None
+
+
+class DispatchVerifyKeyView(StrictModel):
+    """What `GET /workers/dispatch-verify-key` returns (ADR 0028).
+
+    Public key material only — the value a worker writes into
+    `WORKER_DISPATCH_VERIFY_KEY`. `kid` lets the installer cross-check the
+    key it received against the id it derives locally.
+    """
+
+    algorithm: Literal["Ed25519"] = "Ed25519"
+    kid: str = Field(pattern=r"^[0-9a-f]{16}$")
+    public_key: str = Field(min_length=44, max_length=44)
 
 
 class WorkerFailureReport(StrictModel):

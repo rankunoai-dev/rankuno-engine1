@@ -24,6 +24,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.errors import ConfigurationError
 from src.core.schemas import StrictModel
+from src.core.worker_dispatch_keys import DispatchSigningKey, DispatchVerifyKey
 
 if TYPE_CHECKING:
     from src.core.auth import OperatorStore
@@ -453,12 +454,42 @@ class Settings(BaseSettings):
     worker_dispatch_signing_secret: SecretStr | None = Field(
         default=None,
         description=(
-            "HMAC-SHA256 key shared by the cloud API and every worker "
-            "daemon to sign/verify dispatch assignment artifacts (ADR 0015 "
-            "conditions 3(b) and 4). Required in production. Unset "
-            "elsewhere generates one random per-process key, matching "
-            "`auth_session_secret`'s own posture — a restart invalidates "
-            "any artifact minted before it."
+            "LEGACY, transition only (ADR 0028). HMAC-SHA256 key shared by "
+            "the cloud API and not-yet-upgraded worker daemons to sign/verify "
+            "dispatch assignment artifacts (ADR 0015 conditions 3(b) and 4). "
+            "A shared key lets any worker forge claims, so it is being "
+            "replaced by WORKER_DISPATCH_SIGNING_PRIVATE_KEY / "
+            "WORKER_DISPATCH_VERIFY_KEY; remove and rotate it once every "
+            "worker holds a verify key."
+        ),
+    )
+    worker_dispatch_signing_private_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "CLOUD SIDE ONLY. Standard base64 of the 32 raw bytes of the "
+            "Ed25519 private key that signs dispatch assignments (ADR 0028). "
+            "Generate with scripts/generate_dispatch_keypair.py. Required in "
+            "production unless the legacy HMAC secret is still emitting. "
+            "Unset outside production generates one random per-process key."
+        ),
+    )
+    worker_dispatch_verify_key: str | None = Field(
+        default=None,
+        description=(
+            "WORKER SIDE. Standard base64 of the 32 raw bytes of the cloud's "
+            "Ed25519 PUBLIC key (not a secret). When set, the worker accepts "
+            "only Ed25519-signed assignments under this key's kid and never "
+            "falls back to HMAC (ADR 0028). scripts/register_worker.py "
+            "fetches it from GET /api/v1/workers/dispatch-verify-key."
+        ),
+    )
+    worker_dispatch_legacy_hmac_enabled: bool = Field(
+        default=True,
+        description=(
+            "CLOUD SIDE. While true and WORKER_DISPATCH_SIGNING_SECRET is "
+            "set, assignments also carry the legacy HMAC signature so "
+            "un-upgraded workers keep running (ADR 0028). Set false once "
+            "every worker holds WORKER_DISPATCH_VERIFY_KEY."
         ),
     )
     worker_bundle_encryption_secret: SecretStr | None = Field(
@@ -638,10 +669,12 @@ class Settings(BaseSettings):
                     "where invalidating every session on restart is an acceptable cost."
                 )
                 raise ConfigurationError(msg)
-            if self.worker_dispatch_signing_secret is None:
+            if self.worker_dispatch_signing_private_key is None and not self._hmac_emitting():
                 msg = (
-                    "WORKER_DISPATCH_SIGNING_SECRET must be set in production (ADR "
-                    "0015 condition 4). A process-local random key is permitted only "
+                    "WORKER_DISPATCH_SIGNING_PRIVATE_KEY must be set in production "
+                    "(ADR 0028), unless the legacy WORKER_DISPATCH_SIGNING_SECRET is "
+                    "set with WORKER_DISPATCH_LEGACY_HMAC_ENABLED=true during the "
+                    "transition. A process-local random key is permitted only "
                     "outside production, where invalidating outstanding dispatch "
                     "assignments on restart is an acceptable cost."
                 )
@@ -660,6 +693,18 @@ class Settings(BaseSettings):
         self._session_secret: SecretStr | None = None
         self._dispatch_signing_secret: SecretStr | None = None
         self._bundle_encryption_secret: SecretStr | None = None
+        # Parsed eagerly, in every environment: a malformed key must stop the
+        # process at boot, not surface as "every dispatch rejected" later.
+        self._dispatch_ed25519_key: DispatchSigningKey | None = (
+            DispatchSigningKey.from_secret(self.worker_dispatch_signing_private_key)
+            if self.worker_dispatch_signing_private_key is not None
+            else None
+        )
+        self._dispatch_verify_key: DispatchVerifyKey | None = (
+            DispatchVerifyKey.from_base64(self.worker_dispatch_verify_key)
+            if self.worker_dispatch_verify_key is not None
+            else None
+        )
 
     def gsc_account_names(self) -> tuple[str, ...]:
         """Profile names from `.env.local` only, sorted. Names, never secrets.
@@ -884,6 +929,43 @@ class Settings(BaseSettings):
             raise ConfigurationError(msg)
         self._dispatch_signing_secret = SecretStr(secrets.token_hex(32))
         return self._dispatch_signing_secret
+
+    def _hmac_emitting(self) -> bool:
+        return self.worker_dispatch_signing_secret is not None and (
+            self.worker_dispatch_legacy_hmac_enabled
+        )
+
+    @property
+    def dispatch_hmac_issuing_secret(self) -> SecretStr | None:
+        """The legacy HMAC key the *cloud* should still sign with, or `None`.
+
+        Only a configured secret counts — a per-process random one could
+        never verify on a worker, so there is no point emitting it — and
+        only while `WORKER_DISPATCH_LEGACY_HMAC_ENABLED` is true (ADR 0028).
+        """
+        return self.worker_dispatch_signing_secret if self._hmac_emitting() else None
+
+    @property
+    def dispatch_ed25519_signing_key(self) -> DispatchSigningKey | None:
+        """The cloud's Ed25519 dispatch signing key (ADR 0028).
+
+        The configured key when set. In production with none configured,
+        `None` — `model_post_init` has already refused to boot unless the
+        legacy HMAC secret is emitting instead. Elsewhere, generated once per
+        process and cached, matching `dispatch_signing_secret`'s posture.
+        """
+        if self._dispatch_ed25519_key is None and self.environment is not Environment.PRODUCTION:
+            self._dispatch_ed25519_key = DispatchSigningKey.generate()
+        return self._dispatch_ed25519_key
+
+    @property
+    def dispatch_verify_key(self) -> DispatchVerifyKey | None:
+        """This worker's Ed25519 verify key, or `None` on a legacy HMAC worker.
+
+        Never generated: a random public key could verify nothing the cloud
+        signed. Its presence is what switches a worker to Ed25519-only.
+        """
+        return self._dispatch_verify_key
 
     @property
     def bundle_encryption_secret(self) -> SecretStr:

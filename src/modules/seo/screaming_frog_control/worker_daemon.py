@@ -94,6 +94,24 @@ __all__ = ["make_approval_callback", "run_worker_daemon"]
 _logger = get_logger(__name__)
 
 
+def _verify_assignment(
+    token: str, *, settings: Settings, worker_id: str, org_id: str
+) -> DispatchAssignmentClaims:
+    """Verify gate (b) with whichever key this worker is configured for (ADR 0028).
+
+    A configured verify key means Ed25519 and nothing else — the HMAC secret
+    is not even passed, so no code path can fall back to it.
+    """
+    verify_key = settings.dispatch_verify_key
+    if verify_key is not None:
+        return verify_dispatch_assignment(
+            token, verify_key=verify_key, worker_id=worker_id, org_id=org_id
+        )
+    return verify_dispatch_assignment(
+        token, secret=settings.dispatch_signing_secret, worker_id=worker_id, org_id=org_id
+    )
+
+
 def make_approval_callback(
     token: str,
     claims: DispatchAssignmentClaims,
@@ -121,9 +139,7 @@ def make_approval_callback(
 
     def _approval_callback(metadata: ToolMetadata, _context: str) -> bool:
         try:
-            verify_dispatch_assignment(
-                token, secret=settings.dispatch_signing_secret, worker_id=worker_id, org_id=org_id
-            )
+            _verify_assignment(token, settings=settings, worker_id=worker_id, org_id=org_id)
         except DispatchAssignmentError:
             return False
         approved = ledger.try_consume(claims.job_id)
@@ -185,6 +201,18 @@ def run_worker_daemon(  # noqa: C901, PLR0912 - one loop, every branch a named f
     settings = settings or get_settings()
     worker_id = settings.require("worker_id")
     org_id = settings.require("worker_org_id")
+    if settings.dispatch_verify_key is None:
+        _logger.warning(
+            "worker_dispatch_legacy_hmac_deprecated",
+            extra={
+                "detail": (
+                    "This worker verifies dispatches with the shared "
+                    "WORKER_DISPATCH_SIGNING_SECRET, which lets anyone holding this "
+                    "config forge jobs. Re-run scripts/register_worker.py to obtain "
+                    "WORKER_DISPATCH_VERIFY_KEY (ADR 0028)."
+                )
+            },
+        )
 
     _reconcile_at_startup(settings)
 
@@ -299,9 +327,7 @@ def _handle_assignment(
 ) -> None:
     """Gate (b)'s fast admission check, then dispatch on the closed job-kind enum."""
     try:
-        claims = verify_dispatch_assignment(
-            token, secret=settings.dispatch_signing_secret, worker_id=worker_id, org_id=org_id
-        )
+        claims = _verify_assignment(token, settings=settings, worker_id=worker_id, org_id=org_id)
     except DispatchAssignmentError as exc:
         # No `job_id` survives an artifact that fails to verify — nothing to
         # report failure against, and nothing ran. Logged, not raised: one

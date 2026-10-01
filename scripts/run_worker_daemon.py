@@ -11,8 +11,9 @@ Usage:
     python scripts/run_worker_daemon.py
 
 Configuration comes from `.env.local` (WORKER_CLOUD_API_BASE_URL, WORKER_ID,
-WORKER_ORG_ID, WORKER_CREDENTIAL, WORKER_DISPATCH_SIGNING_SECRET). No secret
-is ever passed as an argument.
+WORKER_ORG_ID, WORKER_CREDENTIAL, WORKER_DISPATCH_VERIFY_KEY — or, on a
+not-yet-upgraded worker, the legacy WORKER_DISPATCH_SIGNING_SECRET; ADR 0028).
+No secret is ever passed as an argument.
 """
 
 from __future__ import annotations

@@ -17,6 +17,7 @@ import pytest
 from pydantic import SecretStr
 from src.core.config import Environment, Settings
 from src.core.errors import ConfigurationError, WorkerCredentialRejectedError
+from src.core.worker_dispatch_keys import DispatchSigningKey
 from src.modules.seo.screaming_frog_control import worker_daemon_cli
 
 
@@ -54,15 +55,38 @@ def test_missing_settings_is_empty_when_fully_configured(tmp_path):
     assert worker_daemon_cli.missing_settings(_settings(tmp_path)) == []
 
 
-def test_a_signing_secret_set_on_only_one_side_is_reported_not_left_mysterious(tmp_path):
+def test_a_missing_verification_key_is_reported_not_left_mysterious(tmp_path):
     """Every dispatch would fail signature verification with no clue why.
 
-    `Settings` generates a random signing key outside production, so this is
+    `Settings` generates a random HMAC key outside production, so this is
     exactly the case that otherwise presents as "the cloud approved it and
-    the worker silently refused it", over and over.
+    the worker silently refused it", over and over. Since ADR 0028 the name
+    reported is the public verify key — a new install must never be sent to
+    fetch the shared HMAC secret.
     """
     settings = _settings(tmp_path, worker_dispatch_signing_secret=None)
-    assert worker_daemon_cli.missing_settings(settings) == ["WORKER_DISPATCH_SIGNING_SECRET"]
+    assert worker_daemon_cli.missing_settings(settings) == ["WORKER_DISPATCH_VERIFY_KEY"]
+
+
+def test_the_daemon_starts_with_only_the_verify_key(tmp_path, monkeypatch):
+    """ADR 0028: a new worker needs the public key and never the HMAC secret.
+
+    Fails on the pre-ADR-0028 code, which listed WORKER_DISPATCH_SIGNING_SECRET
+    as unconditionally required and exited with EXIT_CONFIGURATION here.
+    """
+    verify_key = DispatchSigningKey.generate().public_key_b64
+    settings = _settings(
+        tmp_path, worker_dispatch_signing_secret=None, worker_dispatch_verify_key=verify_key
+    )
+    assert worker_daemon_cli.missing_settings(settings) == []
+
+    started: list[Settings] = []
+    monkeypatch.setattr(worker_daemon_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        worker_daemon_cli, "run_worker_daemon", lambda **kw: started.append(kw["settings"])
+    )
+    assert worker_daemon_cli.main([]) == worker_daemon_cli.EXIT_OK
+    assert started == [settings]
 
 
 def test_main_refuses_to_start_and_names_what_is_missing(tmp_path, monkeypatch, capsys):
