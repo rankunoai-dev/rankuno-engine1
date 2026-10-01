@@ -16,7 +16,7 @@ way psycopg does. Those are asserted by construction and remain unverified
 until this runs against a real database. Said plainly here rather than left
 for a reader to discover.
 
-The fake understands exactly the four queries this store issues; an
+The fake understands exactly the six queries this store issues; an
 unrecognised query is a hard failure, so a change to the SQL that this suite
 does not know about fails loudly rather than silently passing.
 """
@@ -78,6 +78,8 @@ class _FakeCursor:
             self._insert(params)
         elif q.startswith("UPDATE workers SET last_seen_at"):
             self._touch(params)
+        elif q.startswith("UPDATE workers SET") and "WHERE worker_id = %s AND org_id = %s" in q:
+            self._update_owned(q, params)
         elif "FROM workers WHERE worker_id = %s" in q:
             self._get(params)
         elif "FROM workers" in q and "ORDER BY worker_id" in q:
@@ -117,6 +119,25 @@ class _FakeCursor:
         if templates is not None:  # the COALESCE
             record["templates"] = templates
             record["unrecognised_template_count"] = unrecognised
+        self._result = self._row(record)
+
+    def _update_owned(self, q: str, params: tuple[object, ...]) -> None:
+        """The two org-scoped `UPDATE`s `set_active`/`replace_credential` issue."""
+        *values, worker_id, org_id = params
+        record = self._db.get(str(worker_id))
+        if record is None or record["org_id"] != org_id:  # the `AND org_id = %s`
+            self._result = None
+            return
+        if q.startswith("UPDATE workers SET is_active = %s WHERE"):
+            record["is_active"] = values[0]
+        elif q.startswith(
+            "UPDATE workers SET secret_hash = %s, is_active = TRUE, last_seen_at = NULL WHERE"
+        ):
+            record["secret_hash"] = values[0]
+            record["is_active"] = True
+            record["last_seen_at"] = None
+        else:  # pragma: no cover - defensive: an unmodelled query fails loudly
+            raise AssertionError(f"fake cursor does not understand update: {q!r}")
         self._result = self._row(record)
 
     def fetchone(self) -> object:
@@ -294,6 +315,10 @@ def test_every_method_fails_closed_when_postgres_is_unreachable():
         store.list_workers("acme")
     with pytest.raises(WorkerStoreUnavailableError):
         store.touch("wkr-alice", seen_at=datetime.now(UTC))
+    with pytest.raises(WorkerStoreUnavailableError):
+        store.set_active("wkr-alice", "acme", active=False)
+    with pytest.raises(WorkerStoreUnavailableError):
+        store.replace_credential("wkr-alice", "acme", new_credential_hash="pbkdf2_x")
 
 
 def test_an_outage_is_not_reported_as_an_authentication_failure():

@@ -312,6 +312,40 @@ class WorkerStore(Protocol):
         """
         ...
 
+    def set_active(self, worker_id: str, org_id: str, *, active: bool) -> Worker:
+        """Allow or refuse this worker's credential from now on.
+
+        Org-scoped in the store, not only in the route: a worker that exists
+        in another org raises the same `WorkerNotFoundError` as one that does
+        not exist, so no caller can learn another org's worker ids by
+        probing this method. Idempotent — setting the current value again
+        is a successful no-op.
+
+        Raises:
+            WorkerNotFoundError: No such worker in `org_id`.
+            WorkerStoreUnavailableError: If the backing store is unreachable.
+        """
+        ...
+
+    def replace_credential(
+        self, worker_id: str, org_id: str, *, new_credential_hash: str
+    ) -> Worker:
+        """Swap in a new credential hash; the old secret stops verifying at once.
+
+        Also reactivates the worker and clears `last_seen_at`, in the same
+        write. Rotation is the recovery path after a revoke — reactivating
+        with the *old* secret would re-trust a credential that was revoked
+        because it might be stolen — and nothing has yet checked in with the
+        new secret, so reporting the machine as online would be a claim
+        about a daemon that is about to be refused.
+
+        Raises:
+            WorkerNotFoundError: No such worker in `org_id` (same
+                indistinguishability rule as `set_active`).
+            WorkerStoreUnavailableError: If the backing store is unreachable.
+        """
+        ...
+
 
 def _atomic_write(path: Path, payload: str) -> None:
     """Write `payload` to `path` so a crash cannot leave it half-written.
@@ -439,4 +473,41 @@ class DiskWorkerStore:
             worker = Worker.model_validate(worker.model_dump())
             self._workers[worker_id] = json.loads(worker.model_dump_json())
             self._save()
+        return worker
+
+    def set_active(self, worker_id: str, org_id: str, *, active: bool) -> Worker:
+        """Flip `is_active` for one of `org_id`'s workers. See `WorkerStore`."""
+        return self._update_owned(worker_id, org_id, {"is_active": active})
+
+    def replace_credential(
+        self, worker_id: str, org_id: str, *, new_credential_hash: str
+    ) -> Worker:
+        """Swap the hash, reactivate, clear liveness. See `WorkerStore`."""
+        return self._update_owned(
+            worker_id,
+            org_id,
+            {"secret_hash": new_credential_hash, "is_active": True, "last_seen_at": None},
+        )
+
+    def _update_owned(self, worker_id: str, org_id: str, update: dict[str, object]) -> Worker:
+        """Read-modify-write one org-owned worker under the lock, atomically saved.
+
+        Raises:
+            WorkerNotFoundError: Unknown worker, or one owned by another org
+                — deliberately the same error for both.
+        """
+        with self._lock:
+            data = self._workers.get(worker_id)
+            if data is None or data.get("org_id") != org_id:
+                msg = f"Worker '{worker_id}' not found"
+                raise WorkerNotFoundError(msg)
+            worker = Worker.model_validate({**data, **update})
+            self._workers[worker_id] = json.loads(worker.model_dump_json())
+            try:
+                self._save()
+            except BaseException:
+                # Never leave memory saying "revoked" while the file on disk
+                # still says active: a restart would silently un-revoke.
+                self._workers[worker_id] = data
+                raise
         return worker

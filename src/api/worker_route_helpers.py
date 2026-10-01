@@ -23,9 +23,15 @@ from typing import TYPE_CHECKING
 from fastapi import HTTPException, Request, status
 
 from src.api.auth import org_scoped_or_404
+from src.api.worker_schemas import WorkerSummary
 from src.core.errors import UnsafeUrlError
 from src.core.logger import get_logger
-from src.core.worker_auth import Worker, WorkerNotFoundError, WorkerStoreUnavailableError
+from src.core.worker_auth import (
+    Worker,
+    WorkerNotFoundError,
+    WorkerStoreUnavailableError,
+    worker_is_online,
+)
 from src.core.worker_dispatch_schemas import WorkerJob
 from src.core.worker_dispatch_store import WorkerJobNotFoundError
 from src.modules.seo.screaming_frog_control.license_check import FREE_TIER_URL_CEILING
@@ -40,6 +46,7 @@ __all__ = [
     "rebuild_zip",
     "screaming_frog_busy",
     "shortfall_note",
+    "summarise_worker",
     "validate_seed_url",
     "worker_store_unavailable",
 ]
@@ -81,6 +88,25 @@ def owned_worker(state: ApiState, worker_id: str, org_id: str) -> Worker:
         raise worker_store_unavailable(exc) from exc
     org_scoped_or_404(record=worker, record_id=worker_id, org_id=org_id, kind="worker")
     return worker
+
+
+def summarise_worker(worker: Worker, *, offline_after_s: float) -> WorkerSummary:
+    """Map a `Worker` onto its HTTP view, adding the server's liveness verdict.
+
+    Shared by the list route and the revoke route so both describe a worker
+    identically; never includes `secret_hash`.
+    """
+    return WorkerSummary(
+        worker_id=worker.worker_id,
+        org_id=worker.org_id,
+        display_name=worker.display_name,
+        is_active=worker.is_active,
+        created_at=worker.created_at,
+        last_seen_at=worker.last_seen_at,
+        is_online=worker_is_online(worker, offline_after_s=offline_after_s),
+        templates=list(worker.templates),
+        unrecognised_template_count=worker.unrecognised_template_count,
+    )
 
 
 def owned_job(state: ApiState, job_id: str, worker_id: str, org_id: str) -> WorkerJob:

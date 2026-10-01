@@ -283,3 +283,65 @@ class PostgresWorkerStore:
             msg = f"Worker '{worker_id}' not found"
             raise WorkerNotFoundError(msg)
         return _row_to_worker(row)
+
+    def set_active(self, worker_id: str, org_id: str, *, active: bool) -> Worker:
+        """Flip `is_active` in one org-scoped statement. See `WorkerStore`.
+
+        `org_id` is in the `WHERE` clause, so another org's worker matches
+        no row and is reported exactly like an unknown one.
+
+        Raises:
+            WorkerNotFoundError: No such worker in `org_id`.
+            WorkerStoreUnavailableError: If Postgres is unreachable.
+        """
+        return self._update_owned("is_active = %s", (active,), worker_id=worker_id, org_id=org_id)
+
+    def replace_credential(
+        self, worker_id: str, org_id: str, *, new_credential_hash: str
+    ) -> Worker:
+        """Swap the hash, reactivate, clear liveness — one statement. See `WorkerStore`.
+
+        One `UPDATE`, so there is no instant at which the worker is active
+        under the old hash after rotation was requested. The hash is bound
+        as a parameter and never logged or echoed in an error.
+
+        Raises:
+            WorkerNotFoundError: No such worker in `org_id`.
+            WorkerStoreUnavailableError: If Postgres is unreachable.
+        """
+        return self._update_owned(
+            "secret_hash = %s, is_active = TRUE, last_seen_at = NULL",
+            (new_credential_hash,),
+            worker_id=worker_id,
+            org_id=org_id,
+        )
+
+    def _update_owned(
+        self, assignments: str, values: tuple[object, ...], *, worker_id: str, org_id: str
+    ) -> Worker:
+        """Run one org-scoped `UPDATE ... RETURNING` and map the row.
+
+        `assignments` is always one of the two literals above, never caller
+        input; every value is bound via `%s`.
+        """
+        conn = self._connect()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE workers SET {assignments} "  # noqa: S608
+                    f"WHERE worker_id = %s AND org_id = %s RETURNING {_COLUMNS}",
+                    (*values, worker_id, org_id),
+                )
+                row = cur.fetchone()
+        except Exception as exc:  # noqa: BLE001
+            # The message names the operation only; psycopg's own text can
+            # echo bound parameters, and one of them may be a credential hash.
+            raise WorkerStoreUnavailableError(
+                f"cannot update worker {worker_id}: {type(exc).__name__}"
+            ) from exc
+        finally:
+            conn.close()
+        if row is None:
+            msg = f"Worker '{worker_id}' not found"
+            raise WorkerNotFoundError(msg)
+        return _row_to_worker(row)
