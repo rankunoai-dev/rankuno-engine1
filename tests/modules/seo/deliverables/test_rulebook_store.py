@@ -7,10 +7,12 @@ No rulebook-shaped `.xlsx` is committed to the repository, the same stance
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
 import pytest
+from src.modules.seo.deliverables import rulebook_store
 from src.modules.seo.deliverables.rulebook import RULEBOOK_SHEET_NAME, RulebookError
 from src.modules.seo.deliverables.rulebook_store import (
     RulebookNotFoundError,
@@ -75,11 +77,19 @@ class TestGetListDelete:
         with pytest.raises(RulebookNotFoundError):
             store.get("nope")
 
-    def test_list_all_is_unfiltered_and_newest_first(self, tmp_path: Path) -> None:
+    def test_list_all_is_unfiltered_and_newest_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Mirrors `DiskJobStore.list_jobs()` exactly.
 
-        Org filtering is the caller's job - see the module docstring.
+        Org filtering is the caller's job - see the module docstring. The clock
+        is stepped explicitly: two back-to-back `create()` calls can land in the
+        same Windows clock tick, and equal `created_at` values have no defined
+        order, which made this test fail about 1 run in 6.
         """
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        ticks = iter(start + timedelta(seconds=n) for n in range(10))
+        monkeypatch.setattr(rulebook_store, "_now", lambda: next(ticks))
         store = RulebookStore(tmp_path / "store")
         content = write_rulebook_xlsx(tmp_path / "src.xlsx")
         first = store.create("org-a", "first", content)
