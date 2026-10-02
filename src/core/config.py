@@ -12,6 +12,7 @@ Rules enforced here:
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
 from enum import StrEnum
@@ -20,8 +21,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
+from src.core.app_paths import REPO_ROOT, env_files, is_frozen, resolve_user_data_root
 from src.core.errors import ConfigurationError
 from src.core.schemas import StrictModel
 from src.core.worker_dispatch_keys import DispatchSigningKey, DispatchVerifyKey
@@ -37,14 +44,25 @@ __all__ = [
     "GSC_ACCOUNT_NAME_PATTERN",
     "Environment",
     "GscAccountProfile",
+    "ProcessRole",
     "ResolvedGscCredentials",
     "Settings",
+    "WorkerCredentialStore",
     "WorkerStoreBackend",
     "get_settings",
     "reset_settings_cache",
+    "user_data_root",
 ]
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+
+def user_data_root() -> Path:
+    """This process's durable-file root: `REPO_ROOT`, or the packaged worker's profile dir.
+
+    Lives here, not in `app_paths`, because it reads the environment and this
+    is the one module allowed to (CLAUDE.md §1.3). See `app_paths` for the rule.
+    """
+    return resolve_user_data_root(os.environ, frozen=is_frozen())
+
 
 DEFAULT_ORG_ID = "default"
 """The organization a request belongs to when it names none.
@@ -111,6 +129,31 @@ class Environment(StrEnum):
     PRODUCTION = "production"
 
 
+class ProcessRole(StrEnum):
+    """Which side of ADR 0015 this process is: the cloud server or a desktop worker.
+
+    Production's cloud-only secret checks (`AUTH_SESSION_SECRET`, the dispatch
+    signing key, `WORKER_BUNDLE_ENCRYPTION_SECRET`) apply to the server alone:
+    a worker holds none of those secrets and must never be asked for them
+    (ADR 0030). The packaged worker is a worker by construction; a checkout
+    running `rankuno-worker` can declare it with `RANKUNO_PROCESS_ROLE=worker`.
+    """
+
+    SERVER = "server"
+    WORKER = "worker"
+
+
+class WorkerCredentialStore(StrEnum):
+    """Where the worker daemon reads `WORKER_CREDENTIAL` from (ADR 0030).
+
+    The packaged worker always uses `CREDENTIAL_MANAGER`, whatever is
+    configured; a checkout uses `ENV` unless told otherwise.
+    """
+
+    ENV = "env"
+    CREDENTIAL_MANAGER = "credential_manager"
+
+
 class WorkerStoreBackend(StrEnum):
     """Where ADR 0015 worker identity is persisted.
 
@@ -145,7 +188,11 @@ class Settings(BaseSettings):
     environment: Environment = Environment.DEVELOPMENT
     log_level: str = "INFO"
     log_format: str = Field(default="json", pattern="^(json|text)$")
-    audit_log_path: Path = REPO_ROOT / "logs" / "audit.jsonl"
+    audit_log_path: Path = Field(default_factory=lambda: user_data_root() / "logs" / "audit.jsonl")
+    rankuno_process_role: ProcessRole = Field(
+        default_factory=lambda: ProcessRole.WORKER if is_frozen() else ProcessRole.SERVER,
+        description="Server or desktop worker; see `ProcessRole`. Frozen builds are workers.",
+    )
 
     # -- Guardrails --------------------------------------------------------
     guardrails_enabled: bool = Field(
@@ -222,7 +269,7 @@ class Settings(BaseSettings):
 
     # -- Deliverables workbook (Phase 2a/2b, ADR 0011) ----------------------
     deliverables_output_dir: Path = Field(
-        default=REPO_ROOT / "deliverables" / "output",
+        default_factory=lambda: user_data_root() / "deliverables" / "output",
         description=(
             "Where build_workbook() writes client workbooks. A local path; "
             "the upload endpoint that moves a workbook off this workstation "
@@ -277,7 +324,7 @@ class Settings(BaseSettings):
         ),
     )
     screaming_frog_template_dir: Path = Field(
-        default=REPO_ROOT / "templates" / "screaming_frog",
+        default_factory=lambda: user_data_root() / "templates" / "screaming_frog",
         description=(
             "Pre-authored .seospiderconfig files, operator-selected by name "
             "(ADR 0013 condition 5). Nothing in this engine can create one: a "
@@ -294,7 +341,7 @@ class Settings(BaseSettings):
         ),
     )
     process_supervisor_ledger_path: Path = Field(
-        default=REPO_ROOT / ".process_ledger.json",
+        default_factory=lambda: user_data_root() / ".process_ledger.json",
         description=(
             "Independent PID + process-start-time ledger `launch_supervised()` "
             "writes before a Job Object exists (ADR 0013 condition 2). Never "
@@ -544,6 +591,15 @@ class Settings(BaseSettings):
             "cloud API, which stores only a hash."
         ),
     )
+    worker_credential_store: WorkerCredentialStore | None = Field(
+        default=None,
+        description=(
+            "Where the worker daemon reads its credential (ADR 0030). Unset in a "
+            "checkout means WORKER_CREDENTIAL from the environment, as before. "
+            "Ignored by the packaged worker, which always uses Windows "
+            "Credential Manager and never a plaintext file."
+        ),
+    )
     worker_cloud_api_base_url: str | None = Field(
         default=None,
         description="Base URL of the cloud API this worker daemon polls, e.g. https://api.example.com.",
@@ -606,7 +662,7 @@ class Settings(BaseSettings):
         ),
     )
     worker_consumed_jobs_path: Path = Field(
-        default=REPO_ROOT / ".worker_consumed_jobs.json",
+        default_factory=lambda: user_data_root() / ".worker_consumed_jobs.json",
         description=(
             "The worker daemon's own local record of job ids it has already "
             "run, checked before honouring a dispatch assignment a second "
@@ -616,6 +672,33 @@ class Settings(BaseSettings):
             "restart, not merely within one process's lifetime."
         ),
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Point the packaged worker at its profile's `worker.env` (ADR 0030).
+
+        `model_config["env_file"]` is fixed at import, relative to `REPO_ROOT`,
+        which inside a frozen build is the bundle. Swapped here, per
+        construction, and only when the caller did not pass its own
+        `_env_file` — a test that passes `_env_file=None` stays hermetic. A
+        checkout or server is returned its sources untouched.
+        """
+        if (
+            is_frozen()
+            and isinstance(dotenv_settings, DotEnvSettingsSource)
+            and dotenv_settings.env_file == cls.model_config.get("env_file")
+        ):
+            dotenv_settings = DotEnvSettingsSource(
+                settings_cls, env_file=env_files(user_data_root(), frozen=True)
+            )
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
 
     @field_validator("log_level")
     @classmethod
@@ -662,6 +745,11 @@ class Settings(BaseSettings):
                     "Policy overrides cannot loosen FINANCIAL guardrails (CLAUDE.md §7 ruling 10)."
                 )
                 raise ConfigurationError(msg)
+        if (
+            self.environment is Environment.PRODUCTION
+            and self.rankuno_process_role is ProcessRole.SERVER
+        ):
+            # Cloud-only secrets: a desktop worker holds none of them (ADR 0030).
             if self.auth_session_secret is None:
                 msg = (
                     "AUTH_SESSION_SECRET must be set in production (ADR 0016). A "

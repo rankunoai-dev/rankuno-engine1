@@ -35,8 +35,10 @@ import httpx  # noqa: E402
 from src.core.errors import ConfigurationError  # noqa: E402
 from src.core.worker_dispatch_keys import DispatchVerifyKey  # noqa: E402
 from src.integrations.worker_cloud_client import require_secure_base_url  # noqa: E402
-
-VERIFY_KEY_PATH = "/api/v1/workers/dispatch-verify-key"
+from src.integrations.worker_registration_client import (  # noqa: E402
+    DEFAULT_CLOUD_URL,
+    VERIFY_KEY_PATH,
+)
 
 _STATUS_HINTS = {
     401: "the server did not accept the credentials or session.",
@@ -56,8 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cloud-url",
-        default="https://rankuno-engine1-production.up.railway.app",
-        help="Base URL of the Rankuno API server (default: https://rankuno-engine1-production.up.railway.app)",
+        default=DEFAULT_CLOUD_URL,
+        help=f"Base URL of the Rankuno API server (default: {DEFAULT_CLOUD_URL})",
     )
     parser.add_argument(
         "--display-name",

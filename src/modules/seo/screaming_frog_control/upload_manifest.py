@@ -6,8 +6,10 @@ constraint specific to this tool — a hard restriction to exactly the CSV
 filenames a deliverable can consume. Never an arbitrary walk of whatever a
 compromised or buggy worker happened to zip up.
 
-`ALLOWED_BUNDLE_FILENAMES` is derived mechanically from one source of truth:
-`ISSUE_CATALOGUE`'s `sf_sources` filenames, plus the mandatory spine file.
+`ALLOWED_BUNDLE_FILENAMES` is `ISSUE_CATALOGUE`'s `sf_sources` filenames plus
+the mandatory spine file. The catalogue names are held as fixed literals in
+`bundle_filenames.py` rather than imported, so the standalone worker carries no
+engine code (ADR 0030); a test pins them equal to the catalogue.
 That is deliberately *not* `export_manifest.py`'s `--export-tabs` /
 `--bulk-export` argument strings, because for seven files those arguments
 cannot produce the filename Screaming Frog actually writes:
@@ -47,7 +49,7 @@ from typing import Final
 
 from src.core.errors import RankunoError
 from src.core.logger import get_logger
-from src.modules.seo.contracts.catalogue import ISSUE_CATALOGUE
+from src.modules.seo.screaming_frog_control.bundle_filenames import ISSUE_SOURCE_FILENAMES
 from src.modules.seo.screaming_frog_control.export_manifest import SPINE_TAB
 
 __all__ = [
@@ -84,7 +86,7 @@ below, because the upload route must be able to ask "did the spine arrive?" —
 a bundle without it is data, but it is not a deliverable."""
 
 ALLOWED_BUNDLE_FILENAMES: Final[frozenset[str]] = frozenset(
-    {SPINE_FILENAME} | {name for spec in ISSUE_CATALOGUE for name in spec.sf_sources}
+    {SPINE_FILENAME} | ISSUE_SOURCE_FILENAMES
 )
 """Every filename this endpoint will ever accept. Nothing else survives
 `validate_and_extract_bundle`, regardless of what a worker's zip contains."""

@@ -25,9 +25,9 @@ page it resolves is a page that never reaches the paid Layer 3, which per
 from __future__ import annotations
 
 import re
-from urllib.parse import SplitResult, parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlunsplit
 
-from src.core.logger import get_logger
+from src.core.url_hosts import registrable_domain, safe_split, site_host
 from src.modules.seo.page_classifier.schemas import (
     MAX_CRAWL_DEPTH,
     HierarchyLevel,
@@ -475,32 +475,6 @@ def normalize_path(path: str) -> str:
     return "/" + "/".join(kept) + "/"
 
 
-_logger = get_logger("modules.seo.url_rules")
-
-
-def safe_split(url: str) -> SplitResult | None:
-    """Split a URL, or return `None` when the standard library refuses.
-
-    `urlsplit` raises `ValueError` on some inputs — an unbalanced bracket gives
-    "Invalid IPv6 URL", and a bracketed host that is not a valid IP fails
-    `_check_bracketed_host`, both added as 3.11 hardening. Neither is rare in
-    the wild: a page only has to contain one such `<a href>`.
-
-    Left unguarded, that exception propagates out of `normalize_url`, which is
-    called for every URL entering the graph — so a single malformed link on any
-    page failed the entire crawl. Observed live on highradius.com.
-
-    `None` means "not a usable URL", which every caller can act on. Raising is
-    not useful here: the crawl cannot fix the markup, and there is nothing to
-    retry.
-    """
-    try:
-        return urlsplit(url.strip())
-    except ValueError as exc:
-        _logger.debug("url_unsplittable", extra={"url": url[:120], "error": str(exc)})
-        return None
-
-
 def is_crawlable_url(url: str) -> bool:
     """Report whether a URL plausibly addresses an HTML page.
 
@@ -664,74 +638,6 @@ def is_spider_trap(url: str) -> bool:
             if counts[lowered] > 1:
                 return True
     return False
-
-
-def site_host(netloc: str) -> str:
-    """Reduce a netloc to the host that identifies the site.
-
-    Drops the port and a leading `www.`, which is a serving convention rather
-    than a different site. Every other subdomain is kept: `blog.example.com` and
-    `shop.example.com` really are separate properties, and folding them would
-    turn a bounded crawl into an unbounded one.
-
-    Args:
-        netloc: Host, optionally with port and credentials.
-
-    Returns:
-        The comparable host, lower-cased.
-    """
-    host = netloc.lower().rsplit("@", 1)[-1]
-    if host.startswith("["):
-        # A bracketed IPv6 literal is full of colons that are not the port
-        # separator. Only one after the closing bracket is.
-        closing = host.find("]")
-        host = host[: closing + 1] if closing != -1 else host
-    else:
-        host = host.split(":", 1)[0]
-    return host[4:] if host.startswith("www.") else host
-
-
-_SECOND_LEVEL = frozenset({"co", "com", "org", "net", "ac", "gov", "edu", "gob", "or", "ne"})
-"""Second-level labels that behave like a suffix: `co.uk`, `com.au`, `ac.jp`.
-
-A heuristic, and named as one. The correct answer needs the Public Suffix List,
-which is a network-fetched dataset with its own update problem; this covers the
-shapes that actually appear in client work and errs toward treating two hosts as
-*different* domains, which is the safer mistake — it under-reports a
-relationship rather than inventing one.
-"""
-
-
-def registrable_domain(host: str) -> str:
-    """The domain two hosts must share to be the same organisation.
-
-    `smartstaging-auth.gep.com` and `www.gep.com` are both `gep.com`;
-    `gep.com` and `example.com` are not. This exists because "not the site we
-    crawled" and "a subdomain of the site we crawled" are very different
-    findings, and the first real Search Console export made the difference
-    urgent: 558 rows on two gep.com subdomains read as ordinary off-site noise.
-
-    Args:
-        host: A bare host, already stripped of port and credentials.
-
-    Returns:
-        The registrable domain, or the host unchanged when it has too few
-        labels or is an IP literal.
-    """
-    lowered = host.lower().strip(".")
-    if not lowered or lowered.startswith("["):
-        return lowered
-    labels = lowered.split(".")
-    if len(labels) < 3:
-        return lowered
-    if all(label.isdigit() for label in labels):
-        # An IPv4 literal has no registrable domain, and slicing its last two
-        # labels invents one: `1.2.3.4` became `3.4`, which would make every
-        # host on 10.x look like it shared an organisation.
-        return lowered
-    if labels[-2] in _SECOND_LEVEL and len(labels) >= 3:
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
 
 
 def same_site(a: str, b: str) -> bool:

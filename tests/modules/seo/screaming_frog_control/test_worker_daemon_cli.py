@@ -183,3 +183,107 @@ def test_max_iterations_is_forwarded_to_the_loop(configured, monkeypatch):
     )
     worker_daemon_cli.main(["--max-iterations", "3"])
     assert captured["max_iterations"] == 3
+
+
+# --- The packaged worker (ADR 0030) ---------------------------------------------
+
+
+@pytest.fixture
+def frozen_root(tmp_path, monkeypatch):
+    """Simulate `rankuno-worker.exe` with its profile directory under `tmp_path`."""
+    import sys
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv("RANKUNO_WORKER_HOME", str(tmp_path / "home"))
+    return tmp_path / "home"
+
+
+class _Vault:
+    def __init__(self, entries: dict[str, str]) -> None:
+        self.entries = entries
+
+    def read(self, target: str) -> SecretStr | None:
+        value = self.entries.get(target)
+        return SecretStr(value) if value is not None else None
+
+
+def test_setup_is_refused_in_a_checkout(capsys):
+    assert worker_daemon_cli.main(["setup"]) == worker_daemon_cli.EXIT_CONFIGURATION
+    assert "scripts/register_worker.py" in capsys.readouterr().err
+
+
+def test_setup_runs_in_the_packaged_worker(frozen_root, monkeypatch):
+    calls: list[Path] = []
+
+    def _fake_setup(root: Path, **_kwargs: object) -> bool:
+        calls.append(root)
+        return True
+
+    monkeypatch.setattr(worker_daemon_cli, "run_setup", _fake_setup)
+    assert worker_daemon_cli.main(["setup"]) == worker_daemon_cli.EXIT_OK
+    assert calls == [frozen_root]
+    assert frozen_root.is_dir()
+
+
+def test_a_failed_setup_exits_as_configuration(frozen_root, monkeypatch):
+    monkeypatch.setattr(worker_daemon_cli, "run_setup", lambda root, **_k: False)
+    assert worker_daemon_cli.main(["setup"]) == worker_daemon_cli.EXIT_CONFIGURATION
+
+
+def test_first_launch_runs_setup_then_starts(frozen_root, tmp_path, monkeypatch):
+    settings = _settings(tmp_path, worker_credential=None)
+    vault = _Vault({"Rankuno Worker/wkr-alice-desktop": "vault-secret"})
+    setups: list[Path] = []
+    started: list[Settings] = []
+    monkeypatch.setattr(worker_daemon_cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        worker_daemon_cli, "run_setup", lambda root, **_k: setups.append(root) or True
+    )
+    monkeypatch.setattr(worker_daemon_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker_daemon_cli, "default_vault", lambda: vault)
+    monkeypatch.setattr(
+        worker_daemon_cli, "run_worker_daemon", lambda **kw: started.append(kw["settings"])
+    )
+
+    assert worker_daemon_cli.main([]) == worker_daemon_cli.EXIT_OK
+    assert setups == [frozen_root]
+    credential = started[0].worker_credential
+    assert credential is not None and credential.get_secret_value() == "vault-secret"
+
+
+def test_first_launch_without_a_terminal_says_to_run_setup(frozen_root, monkeypatch, capsys):
+    monkeypatch.setattr(worker_daemon_cli.sys.stdin, "isatty", lambda: False)
+    assert worker_daemon_cli.main([]) == worker_daemon_cli.EXIT_CONFIGURATION
+    assert "rankuno-worker setup" in capsys.readouterr().err
+
+
+def test_first_launch_setup_failure_does_not_start(frozen_root, monkeypatch):
+    monkeypatch.setattr(worker_daemon_cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(worker_daemon_cli, "run_setup", lambda root, **_k: False)
+    assert worker_daemon_cli.main([]) == worker_daemon_cli.EXIT_CONFIGURATION
+
+
+def test_the_packaged_worker_ignores_a_plaintext_credential(
+    frozen_root, tmp_path, monkeypatch, capsys
+):
+    """An env-file WORKER_CREDENTIAL with an empty vault is reported missing, never used."""
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "worker.env").write_text("WORKER_ID=wkr-alice-desktop\n", encoding="utf-8")
+    monkeypatch.setattr(worker_daemon_cli, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(worker_daemon_cli, "default_vault", lambda: _Vault({}))
+    assert worker_daemon_cli.main([]) == worker_daemon_cli.EXIT_CONFIGURATION
+    err = capsys.readouterr().err
+    assert "WORKER_CREDENTIAL" in err
+    assert "rankuno-worker setup" in err
+
+
+def test_an_unusable_vault_exits_as_configuration(frozen_root, tmp_path, monkeypatch):
+    frozen_root.mkdir(parents=True)
+    (frozen_root / "worker.env").write_text("WORKER_ID=wkr-alice-desktop\n", encoding="utf-8")
+    monkeypatch.setattr(worker_daemon_cli, "get_settings", lambda: _settings(tmp_path))
+
+    def _unavailable() -> _Vault:
+        raise ConfigurationError("runs on Windows only")
+
+    monkeypatch.setattr(worker_daemon_cli, "default_vault", _unavailable)
+    assert worker_daemon_cli.main(["--check"]) == worker_daemon_cli.EXIT_CONFIGURATION

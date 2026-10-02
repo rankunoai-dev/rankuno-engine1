@@ -52,8 +52,8 @@ from pydantic import Field
 from src.core.errors import RankunoError, UnsafeUrlError
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.core.url_hosts import registrable_domain, safe_split, site_host
 from src.core.url_safety import UrlSafetyPolicy
-from src.modules.seo.page_classifier.url_rules import registrable_domain, safe_split, site_host
 
 __all__ = [
     "LIST_ENCODING",

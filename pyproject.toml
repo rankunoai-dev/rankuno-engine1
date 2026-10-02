@@ -224,9 +224,10 @@ ignore_missing_imports = true
 # `ubuntu-latest` CI runners `mypy src` runs on. Without this, `mypy --strict`
 # would fail to resolve `win32api`/`win32job`/`win32process`/`win32con`/
 # `win32event`/`pywintypes`, imported only inside
-# `src/core/_win32_bindings.py::load_win32()`.
+# `src/core/_win32_bindings.py::load_win32()`, or `win32cred`, imported only
+# inside `src/core/credential_vault.py::WindowsCredentialVault` (ADR 0030).
 [[tool.mypy.overrides]]
-module = ["win32api", "win32con", "win32event", "win32job", "win32process", "pywintypes"]
+module = ["win32api", "win32con", "win32cred", "win32event", "win32job", "win32process", "pywintypes"]
 ignore_missing_imports = true
 
 # `celery` ships no `py.typed` marker and no bundled stubs, so `mypy --strict`

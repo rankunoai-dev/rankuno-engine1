@@ -75,7 +75,7 @@ from src.api.crawl_activity import CrawlActivityCounter, build_crawl_activity_ro
 from src.api.deliverables_routes import build_deliverables_router
 from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password
-from src.core.config import Settings, get_settings
+from src.core.config import ProcessRole, Settings, get_settings
 from src.core.errors import ConfigurationError, UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
@@ -1508,7 +1508,18 @@ def create_app(
 
     Returns:
         The configured application.
+
+    Raises:
+        ConfigurationError: This process declared itself a desktop worker.
+            Production's cloud-secret checks are skipped for a worker (ADR
+            0030), so a server must never run under that role.
     """
+    if get_settings().rankuno_process_role is ProcessRole.WORKER:
+        msg = (
+            "RANKUNO_PROCESS_ROLE=worker cannot serve the cloud API: a worker skips "
+            "the production secret checks the server depends on (ADR 0030)."
+        )
+        raise ConfigurationError(msg)
     resolved_store: JobStore = store if store is not None else _default_job_store(jobs_root)
     resolved_deliverable_store = DiskJobStore(deliverable_jobs_root or Path(".deliverable_jobs"))
     resolved_rulebook_store = RulebookStore(rulebooks_root or Path(".deliverable_rulebooks"))
