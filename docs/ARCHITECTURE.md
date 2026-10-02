@@ -119,7 +119,12 @@ src/
 │   │                            # unrecognised_template_count). The template
 │   │                            # value objects themselves live in
 │   │                            # worker_templates.py -- three layers need them
-│   │                            # that must not import worker identity
+│   │                            # that must not import worker identity.
+│   │                            # set_active / replace_credential (ADR 0029):
+│   │                            # revoke, and rotate (new hash + reactivate +
+│   │                            # clear last_seen_at in one write); both
+│   │                            # org-scoped in the store, another org's
+│   │                            # worker indistinguishable from none
 │   ├── worker_templates.py      # What a worker reports about its own config
 │   │                            # templates: WorkerTemplate (name + the
 │   │                            # human-written description),
@@ -151,10 +156,24 @@ src/
 │   │                            # this model's own "carries nothing else" stance),
 │   │                            # WorkerJob, DispatchAssignmentClaims
 │   ├── worker_dispatch_signing.py   # Gate (b): issue_dispatch_assignment /
-│   │                            # verify_dispatch_assignment -- HMAC-signed,
-│   │                            # self-contained, identity-bound artifact the
-│   │                            # worker independently verifies before its own
-│   │                            # GuardrailEngine.authorize() call runs
+│   │                            # verify_dispatch_assignment -- Ed25519-signed
+│   │                            # (ADR 0028), self-contained, identity-bound
+│   │                            # artifact the worker independently verifies
+│   │                            # before its own GuardrailEngine.authorize()
+│   │                            # call runs. The cloud alone holds the private
+│   │                            # key. The worker picks the algorithm from its
+│   │                            # own config, never the token: with a verify
+│   │                            # key set it never reads the legacy HMAC
+│   │                            # segment. The cloud dual-signs (HMAC too)
+│   │                            # only while the legacy secret is set and
+│   │                            # WORKER_DISPATCH_LEGACY_HMAC_ENABLED is true,
+│   │                            # for un-upgraded workers
+│   ├── worker_dispatch_keys.py  # ADR 0028: parse/validate the Ed25519 signing
+│   │                            # (private, SecretStr, cloud) and verify
+│   │                            # (public, worker) keys -- base64 of 32 raw
+│   │                            # bytes -- and derive kid (16 hex of SHA-256
+│   │                            # of the public key). Errors name the
+│   │                            # setting, never its value
 │   ├── worker_dispatch_store.py     # WorkerDispatchStore Protocol + shared errors
 │   │                            # + row-mapping helper for gate (a) and the job
 │   │                            # queue (ADR 0015 condition 5)
@@ -304,6 +323,19 @@ src/
 │   │                            # comparison against an uploaded Screaming Frog
 │   │                            # export, so the API states the reason a source is
 │   │                            # unavailable rather than letting a UI guess
+│   ├── worker_credential_routes.py  # ADR 0029: POST /workers/{id}/revoke and
+│   │                            # /workers/{id}/rotate-credential (operator
+│   │                            # session, org-scoped; another org's worker is
+│   │                            # 404 like an unknown one, unlike the 403 the
+│   │                            # read routes use). Rotate returns the new
+│   │                            # secret once and stores only its PBKDF2 hash.
+│   │                            # No reactivate route -- rotation is the only
+│   │                            # way back. Included by the dashboard router
+│   ├── worker_verify_key_routes.py  # ADR 0028: GET /workers/dispatch-verify-key
+│   │                            # (operator session) -> {algorithm, kid,
+│   │                            # public_key}; 503 when the deployment has no
+│   │                            # Ed25519 key. Read by scripts/register_worker.py.
+│   │                            # Trust-on-first-use: no pinned fingerprint
 │   └── worker_route_helpers.py  # The ownership, liveness and body-size checks
 │                                # those routes perform before doing any work.
 │                                # read_capped_body refuses an over-cap
@@ -331,7 +363,7 @@ src/
 │                                # fetch_url_list() is the ONE inbound-bytes call
 │                                # in the whole architecture (ADR 0023): its
 │                                # result is checked against the digest in the
-│                                # worker's own HMAC-verified claims, never
+│                                # worker's own signature-verified claims, never
 │                                # against anything the download itself supplied
 └── modules/                     # Domain engines
     ├── seo/
@@ -602,7 +634,7 @@ src/
     │   │   │                         # built from it may be presented as one
     │   │   ├── worker_url_list.py    # The worker's own check on the list it was
     │   │   │                         # handed: the digest compared against is the
-    │   │   │                         # one inside its HMAC-verified claims, so a
+    │   │   │                         # one inside its signature-verified claims, so a
     │   │   │                         # list substituted anywhere between cloud
     │   │   │                         # storage and this process fails it. Does NOT
     │   │   │                         # re-apply UrlSafetyPolicy per entry (ADR
@@ -656,6 +688,10 @@ src/
 | A UI that consumes `rankuno-ui/src/lib/validation.ts` | Retained with **zero importers** except its own test. `validateProxyUrl`, `validateRate`, `validateConcurrency`, `validateCustomHeaders`, `validateGA4PropertyId`, `estimateCrawlSeconds`, `formatCrawlTimeEstimate` and `normalizeDomain` are all unconsumed. This row named `lib/urlParser.ts` alongside it until cycle 0120; that file is **deleted** (`2dceae1`). Both were kept in cycle 0112 §6.1 on the reasoning that a Screaming Frog dispatch form would want them. That form shipped in `52532ba` ([build-log 0120](build-log/0120-an-action-beside-the-download.md)) and used **none** of either: the URLs come from a finished crawl the server already holds, so nothing is uploaded to parse, and a second browser-side domain filter would produce a second count that could disagree with the approved one — which is the exact failure ADR 0023's digest exists to prevent. The retention argument is therefore falsified, not merely overtaken, and `validation.ts` survives only because `normalizeDomain`/`parseDomain` were repaired in cycle 0112 for a real defect and discarding that work should be a deliberate decision |
 | ~~The React UI for `modules/seo/screaming_frog_control/` (ADR 0013)~~ | **Closed.** `ScreamingFrogView.tsx` consumes the preview/confirm/templates surface, and `WorkerJobsPanel.tsx` renders dispatched jobs, their progress and their masterfile builds. Row kept rather than deleted so a reader who remembers it can see it was closed and not merely dropped |
 | ~~A cloud dashboard or worker-management screen for ADR 0015's worker dispatch~~ | **Closed.** `ScreamingFrogView.tsx` (worker picker, liveness, template dropdown with each template's description and a count of skipped files — [build-log 0117](build-log/0117-a-sentence-beside-a-binary.md)) and `WorkerJobsPanel.tsx` (job list, progress bar, bundle and masterfile downloads). Row kept rather than deleted so the closure is visible |
+| Worker dispatch signing moved off the shared HMAC key in production | The code ships Ed25519 (ADR 0028), but no private key is set in Railway, no worker has been re-registered, legacy HMAC is still on and `WORKER_DISPATCH_SIGNING_SECRET` has not been rotated. Until the ADR 0028 runbook is run, every worker desktop still holds a key that can forge dispatches ([build-log 0133 §6](build-log/0133-a-key-every-verifier-could-sign-with.md)) |
+| Overlapping dispatch-key rotation, and a pinned verify-key fingerprint | A worker holds one verify key, so rotation is a cut-over; `kid` exists for side-by-side keys but nothing publishes two. The verify-key endpoint is trust-on-first-use |
+| Cleanup of jobs queued for a revoked worker | `QUEUED` jobs pinned to a revoked, never-rotated worker wait forever (ADR 0029). `DISPATCHED` ones are swept to `FAILED` by the stale-dispatch timeout |
+| A UI to register a worker machine, and a packaged worker | Registration is still `scripts/register_worker.py`, which needs the engine source. The standalone `rankuno-worker.exe` (Phase 2: cut the imports that pull engine modules into the worker, `%LOCALAPPDATA%` paths, Windows Credential Manager, first-run token prompt; Phase 3: PyInstaller build, release workflow, dashboard download with SHA-256) is not started |
 | A purge job for expired uploaded bundles | Still read-time filtering only (`read_upload` checks `expires_at`). Nothing deletes the row, so storage grows without bound — unchanged from build-log 0098 |
 | A migration of existing disk-backed worker registrations into Postgres | Impossible by construction: the `workers.json` it would read lives on a container filesystem that has already been rebuilt. Switching `WORKER_STORE_BACKEND` to `postgres` requires re-registering each desktop once (see `alembic/versions/0003_worker_identity_table.py`) |
 | Any Postgres SQL in `postgres_worker_store.py` or migration 0003 verified against a real database | `psycopg` is not installed in the local venv and no server is reachable from it. Both are covered only by an in-memory fake cursor, which cannot validate SQL syntax or `COALESCE`/`ON CONFLICT` semantics |
@@ -787,6 +823,8 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0025](adr/0025-cooperative-cancellation-is-python-crawler-only.md) | **Cooperative cancellation stops new fetches on the Python crawler only.** `POST /jobs/{id}/cancel` previously released only the concurrency slot; a per-job `threading.Event` on `ApiState`, set before `release()` (order load-bearing — reversed, the registry entry the lookup depends on is already gone), is now checked by `async_discovery.py` before a queued fetch claims a slot and before a new BFS level begins, so no *new* Path B (DOM) fetch starts once cancelled — an in-flight fetch still runs to `REQUEST_DEADLINE_S` (200s). Path A (sitemap) and Path C (CMS) are not gated. **Screaming Frog cancellation is deliberately out of scope**: `ScreamingFrogTool.execute()`'s poll loop cannot currently distinguish a normal process exit from an externally-triggered `terminate()` (confirmed by reading the loop directly), so wiring a cancel-triggered `terminate()` into it without first fixing that would risk reporting a killed crawl as `SUCCEEDED` — the same failure shape build-log 0113 already found once. Closes DEF-02 from the RAE defect comparison. Status: APPROVED. Implemented in `src/api/server.py` (`ApiState._cancel_flags`, `cancel_job`), `modules/seo/page_classifier/async_discovery.py`, `modules/seo/page_classifier/tool.py` [build-log 0126](build-log/0126-a-flag-checked-before-the-fetch-starts.md). Found, not fixed: `DiskJobStore`/`PostgresJobStore`'s `_transition` has no terminal-state guard, so a cancelled job's now-fast exit usually overwrites `cancel_job`'s `FAILED` with `PARTIAL` moments later |
 | [0026](adr/0026-url-provenance-reports-evidence-or-says-unknown.md) | **A URL's provenance is reported from evidence, or reported as unknown** — never a plausible default. The Screaming Frog engine-only reason is decided from the page's `DiscoverySource` flags (`LINKED_NOT_IN_EXPORT`, `SITEMAP_ONLY_NO_LINK`, `CMS_API_ONLY`, `PROVENANCE_UNKNOWN`) instead of an unconditional `SITEMAP_ORPHAN`; `orphans` membership is unchanged by construction (user decision: "same URLs, honest labels"), because list mode defines an orphan as a URL Screaming Frog's link-following crawl did not reach. Navigation `SITEMAP_ONLY` requires the sitemap flag; robots refusals get their own `robots_disallowed` outcome; checkpoints carry per-URL source letters and an old one says it does not know. Status: Accepted. Phase 1 only [build-log 0127](build-log/0127-a-reason-the-crawl-never-recorded.md) |
 | [0027](adr/0027-url-path-case-is-significant.md) | **URL path case is significant in the page identity.** `normalize_path` stops lowercasing (RFC 3986 makes only scheme and host case-insensitive); kept percent-escapes are upper-cased; Search Console/GA4 matching folds case only as an explicit `MatchTier.CASE_FOLDED` fallback, `AMBIGUOUS` when two crawled pages differ only by case. Reverses the build-log 0079 §4.1 fixture ruling. No migration; `gsc_property_validator.py` still lowercases the whole property URL. Status: Accepted (user decision). Renumbered from 0026 at integration [build-log 0129](build-log/0129-two-pages-that-differed-only-by-case.md) |
+| [0028](adr/0028-dispatch-claims-are-signed-asymmetrically.md) | **Dispatch claims are signed asymmetrically (Ed25519).** Amends ADR 0015 condition 4: gate (b) used one shared HMAC key to sign on the cloud and verify on every worker, so any worker's `.env.local` could forge dispatches for any worker or org. The cloud now signs with `WORKER_DISPATCH_SIGNING_PRIVATE_KEY`; a worker verifies with the public `WORKER_DISPATCH_VERIFY_KEY` + `kid` and, with a verify key set, never falls back to HMAC. Wire model unchanged (old workers use `extra="forbid"`); the signature rides in the token header. Dual-signing while `WORKER_DISPATCH_LEGACY_HMAC_ENABLED` is true. `GET /workers/dispatch-verify-key` distributes the key (trust-on-first-use); HTTPS enforced for the worker client and `register_worker.py`. No overlapping key rotation ([build-log 0133](build-log/0133-a-key-every-verifier-could-sign-with.md)) |
+| [0029](adr/0029-a-worker-credential-is-revoked-or-rotated-never-reactivated.md) | **A worker credential is revoked or rotated, never reactivated.** `is_active` was checked but never set, so a worker credential was valid forever. `POST /workers/{id}/revoke` and `/rotate-credential` (operator session, org-scoped; cross-org is `404`, not the reads' `403`). Rotate returns the new secret once, stores only the PBKDF2 hash, reactivates and clears `last_seen_at`; it is the only way back from a revoke. No `GuardrailEngine` — same approval model as registration and the GSC credential routes. A revoked daemon gets `401` and exits code 3; queued jobs for a never-rotated revoked worker are not cleaned up ([build-log 0133](build-log/0133-a-key-every-verifier-could-sign-with.md)) |
 
 ---
 
