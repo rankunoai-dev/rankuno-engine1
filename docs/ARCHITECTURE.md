@@ -39,6 +39,24 @@ src/
 │   ├── retry.py                 # Exponential backoff with jitter (tenacity)
 │   ├── url_safety.py            # SSRF guard: private-range blocker, scheme allowlist
 │   ├── robots.py                # robots.txt & crawl-delay parsing (RFC 9309)
+│   ├── url_hosts.py             # ADR 0030: safe_split/site_host/registrable_domain,
+│   │                            # moved out of page_classifier/url_rules.py (which
+│   │                            # re-exports them) so the worker's url_list.py
+│   │                            # stops importing the classification cascade
+│   ├── app_paths.py             # ADR 0030: where this process keeps its files.
+│   │                            # Not frozen: REPO_ROOT, unchangeable by any env
+│   │                            # var. Frozen (sys.frozen): %LOCALAPPDATA%\Rankuno\
+│   │                            # Worker or RANKUNO_WORKER_HOME (frozen only).
+│   │                            # Takes the environment as an argument;
+│   │                            # config.user_data_root() does the read
+│   ├── credential_vault.py      # ADR 0030: CredentialVault protocol +
+│   │                            # WindowsCredentialVault (the only win32cred
+│   │                            # caller; "Rankuno Worker/<worker_id>", local-
+│   │                            # machine persistence). resolve_worker_credential
+│   │                            # holds the precedence: frozen = vault only, env
+│   │                            # WORKER_CREDENTIAL ignored with a warning, error
+│   │                            # off Windows; checkout = env unless
+│   │                            # WORKER_CREDENTIAL_STORE=credential_manager
 │   ├── auth.py                  # Operator identity + session tokens (ADR 0016).
 │   │                            # Principal/Operator StrictModels, PBKDF2 password
 │   │                            # hashing, self-contained HMAC-SHA256 bearer
@@ -353,6 +371,12 @@ src/
 │   ├── gsc_property_validator.py# Property URL validation before any query
 │   ├── gsc_schemas.py           # GscOAuthToken (SecretStr), metrics rows, errors
 │   ├── llm_client.py            # Provider-agnostic LLM interface + spend metering
+│   ├── worker_registration_client.py  # ADR 0030: the operator calls behind
+│   │                            # `rankuno-worker setup` (login, verify key,
+│   │                            # register) under BaseAPIClient. Verify key
+│   │                            # before registration; nothing retried, so a
+│   │                            # lost POST /workers response cannot mint a
+│   │                            # second worker; failures named by status only
 │   └── worker_cloud_client.py   # ADR 0015: the worker daemon's one outbound
 │                                # connection, to its own cloud API. poll()/
 │                                # upload_bundle()/report_failure() over httpx,
@@ -597,19 +621,38 @@ src/
     │   │   │                         # path. Exports SPINE_FILENAME, which
     │   │   │                         # worker_routes uses to decide a job's
     │   │   │                         # terminal status (ADR 0019).
-    │   │   │                         # ALLOWED_BUNDLE_FILENAMES derived
-    │   │   │                         # from contracts/catalogue.py's sf_sources
-    │   │   │                         # + the spine (ADR 0018) - NOT from
+    │   │   │                         # ALLOWED_BUNDLE_FILENAMES equal to
+    │   │   │                         # contracts/catalogue.py's sf_sources
+    │   │   │                         # + the spine (ADR 0018), held as
+    │   │   │                         # literals in bundle_filenames.py since
+    │   │   │                         # ADR 0030 (no catalogue import) - NOT from
     │   │   │                         # export_manifest.py's naming transform,
     │   │   │                         # which produced 7 filenames no export
     │   │   │                         # contains; zip-slip/size-cap/
     │   │   │                         # encrypted-member defense; an unlisted
     │   │   │                         # member rejects the whole upload
+    │   │   ├── bundle_filenames.py   # ADR 0030: the 95 issue-source CSV names
+    │   │   │                         # as a literal frozenset, so the worker
+    │   │   │                         # imports no catalogue. A test pins it
+    │   │   │                         # equal to the catalogue both ways
+    │   │   ├── worker_setup.py       # ADR 0030: `rankuno-worker setup`, frozen
+    │   │   │                         # builds only. Probes the credential store,
+    │   │   │                         # requires https (loopback exempt) before
+    │   │   │                         # the getpass prompt, fetches the verify
+    │   │   │                         # key, registers, stores the credential in
+    │   │   │                         # Credential Manager, then writes the
+    │   │   │                         # non-secret worker.env atomically
     │   │   ├── worker_daemon_cli.py  # The process an operator actually starts:
     │   │   │                         # the `rankuno-worker` console script and
     │   │   │                         # scripts/run_worker_daemon.py. Reads the
-    │   │   │                         # cloud URL/worker id/secret from Settings
-    │   │   │                         # (never an argument), names missing
+    │   │   │                         # cloud URL/worker id from Settings and the
+    │   │   │                         # credential through credential_vault (a
+    │   │   │                         # frozen build: Credential Manager only)
+    │   │   │                         # (never an argument). `setup` subcommand,
+    │   │   │                         # also run on a frozen build's first
+    │   │   │                         # interactive launch; its import closure is
+    │   │   │                         # engine-free, enforced by
+    │   │   │                         # test_worker_import_boundary.py. Names missing
     │   │   │                         # settings on --check, routes SIGINT/SIGTERM
     │   │   │                         # into a between-jobs stop flag, and exits
     │   │   │                         # 3 (not 0, not a restart loop) when the
@@ -691,7 +734,7 @@ src/
 | Worker dispatch signing moved off the shared HMAC key in production | The code ships Ed25519 (ADR 0028), but no private key is set in Railway, no worker has been re-registered, legacy HMAC is still on and `WORKER_DISPATCH_SIGNING_SECRET` has not been rotated. Until the ADR 0028 runbook is run, every worker desktop still holds a key that can forge dispatches ([build-log 0133 §6](build-log/0133-a-key-every-verifier-could-sign-with.md)) |
 | Overlapping dispatch-key rotation, and a pinned verify-key fingerprint | A worker holds one verify key, so rotation is a cut-over; `kid` exists for side-by-side keys but nothing publishes two. The verify-key endpoint is trust-on-first-use |
 | Cleanup of jobs queued for a revoked worker | `QUEUED` jobs pinned to a revoked, never-rotated worker wait forever (ADR 0029). `DISPATCHED` ones are swept to `FAILED` by the stale-dispatch timeout |
-| A UI to register a worker machine, and a packaged worker | Registration is still `scripts/register_worker.py`, which needs the engine source. The standalone `rankuno-worker.exe` (Phase 2: cut the imports that pull engine modules into the worker, `%LOCALAPPDATA%` paths, Windows Credential Manager, first-run token prompt; Phase 3: PyInstaller build, release workflow, dashboard download with SHA-256) is not started |
+| A UI to register a worker machine, and a packaged worker | **Phase 2 done** ([build-log 0135](build-log/0135-a-worker-that-carried-the-engine.md), ADR 0030): the worker's import closure is engine-free, a frozen build keeps its state in `%LOCALAPPDATA%\Rankuno\Worker` and its credential in Windows Credential Manager, and `rankuno-worker setup` registers the PC by operator sign-in. **Still open**: Phase 3 (PyInstaller onedir build, release-tag workflow, dashboard download with SHA-256; HITL before any CI or release), so no `rankuno-worker.exe` exists; from a checkout registration is still `scripts/register_worker.py`; no register-a-machine UI in the dashboard; no explicit ACL on the data folder, no uninstall / sign-out, no template delivery to a frozen worker, and setup does not revoke the worker it replaces |
 | A purge job for expired uploaded bundles | Still read-time filtering only (`read_upload` checks `expires_at`). Nothing deletes the row, so storage grows without bound — unchanged from build-log 0098 |
 | A migration of existing disk-backed worker registrations into Postgres | Impossible by construction: the `workers.json` it would read lives on a container filesystem that has already been rebuilt. Switching `WORKER_STORE_BACKEND` to `postgres` requires re-registering each desktop once (see `alembic/versions/0003_worker_identity_table.py`) |
 | Any Postgres SQL in `postgres_worker_store.py` or migration 0003 verified against a real database | `psycopg` is not installed in the local venv and no server is reachable from it. Both are covered only by an in-memory fake cursor, which cannot validate SQL syntax or `COALESCE`/`ON CONFLICT` semantics |
@@ -825,6 +868,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0027](adr/0027-url-path-case-is-significant.md) | **URL path case is significant in the page identity.** `normalize_path` stops lowercasing (RFC 3986 makes only scheme and host case-insensitive); kept percent-escapes are upper-cased; Search Console/GA4 matching folds case only as an explicit `MatchTier.CASE_FOLDED` fallback, `AMBIGUOUS` when two crawled pages differ only by case. Reverses the build-log 0079 §4.1 fixture ruling. No migration; `gsc_property_validator.py` still lowercases the whole property URL. Status: Accepted (user decision). Renumbered from 0026 at integration [build-log 0129](build-log/0129-two-pages-that-differed-only-by-case.md) |
 | [0028](adr/0028-dispatch-claims-are-signed-asymmetrically.md) | **Dispatch claims are signed asymmetrically (Ed25519).** Amends ADR 0015 condition 4: gate (b) used one shared HMAC key to sign on the cloud and verify on every worker, so any worker's `.env.local` could forge dispatches for any worker or org. The cloud now signs with `WORKER_DISPATCH_SIGNING_PRIVATE_KEY`; a worker verifies with the public `WORKER_DISPATCH_VERIFY_KEY` + `kid` and, with a verify key set, never falls back to HMAC. Wire model unchanged (old workers use `extra="forbid"`); the signature rides in the token header. Dual-signing while `WORKER_DISPATCH_LEGACY_HMAC_ENABLED` is true. `GET /workers/dispatch-verify-key` distributes the key (trust-on-first-use); HTTPS enforced for the worker client and `register_worker.py`. No overlapping key rotation ([build-log 0133](build-log/0133-a-key-every-verifier-could-sign-with.md)) |
 | [0029](adr/0029-a-worker-credential-is-revoked-or-rotated-never-reactivated.md) | **A worker credential is revoked or rotated, never reactivated.** `is_active` was checked but never set, so a worker credential was valid forever. `POST /workers/{id}/revoke` and `/rotate-credential` (operator session, org-scoped; cross-org is `404`, not the reads' `403`). Rotate returns the new secret once, stores only the PBKDF2 hash, reactivates and clears `last_seen_at`; it is the only way back from a revoke. No `GuardrailEngine` — same approval model as registration and the GSC credential routes. A revoked daemon gets `401` and exits code 3; queued jobs for a never-rotated revoked worker are not cleaned up ([build-log 0133](build-log/0133-a-key-every-verifier-could-sign-with.md)) |
+| [0030](adr/0030-the-worker-ships-as-a-standalone-client.md) | **The worker ships as a standalone client.** Amends ADR 0015 (installation and worker state). The worker CLI's import closure held 11 engine modules through two incidental imports; three URL helpers moved to `core/url_hosts.py` and the upload allow-list became pinned literals (`bundle_filenames.py`), and a fresh-subprocess allowlist test keeps the closure engine-free. `core/app_paths.py`: `REPO_ROOT` when not frozen, `%LOCALAPPDATA%\Rankuno\Worker` when frozen. The credential lives in Windows Credential Manager (`core/credential_vault.py`); a frozen build never falls back to plaintext. `rankuno-worker setup` signs in once through `WorkerRegistrationClient`, verify key before registration, never retried. `RANKUNO_PROCESS_ROLE`: cloud-secret checks apply to `server` only, and `create_app` refuses `worker`. Packaging (Phase 3) is not decided here ([build-log 0135](build-log/0135-a-worker-that-carried-the-engine.md)) |
 
 ---
 
