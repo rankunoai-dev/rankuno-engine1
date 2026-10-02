@@ -19,6 +19,7 @@ by name. `CLAUDE.md` binds every agent; each definition restates only the rules 
 | `test-engineer` | TESTING, Step 7 verification | tests only | yes | no |
 | `reviewer` | final diff review | no | runs it if output missing | verdict only |
 | `docs-scribe` | DOCUMENTATION, Steps 8 and 8b | docs only | drift check | no |
+| `tutor` | Step 8c lesson, `/learn` | no (writes only `docs/learning/`, gitignored) | no | no |
 
 ## Standard cycle
 
@@ -32,6 +33,7 @@ request
   -> test-engineer              when the implementer's gate is red or coverage needs work
   -> reviewer                   read-only verdict on the diff
   -> docs-scribe                build-log entry, README, ARCHITECTURE, ADR, drift check
+  -> tutor (background)         senior-architect lesson in docs/learning/, newest 5 kept
 ```
 
 Not every cycle needs every agent. A one-line bug fix is `bug-fixer` then `docs-scribe`.

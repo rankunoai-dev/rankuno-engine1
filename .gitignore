@@ -123,3 +123,7 @@ project-standards/
 # Both names exist: the copy was renamed, and the old rule stopped matching it.
 RAE - Copy/
 RAE/
+
+# Tutor lessons (.claude/agents/tutor.md): private learning notes, capped at the
+# newest 5 by scripts/prune_lessons.py. Never project history, never committed.
+docs/learning/
