@@ -40,6 +40,12 @@ steps that agents most often skip, and must not:
 - **Step 8b (Build Log)** — **mandatory, not optional**: write a cycle entry to
   `docs/build-log/NNNN-<slug>.md` and add it to that directory's index. See
   `docs/build-log/README.md` for the required structure.
+- **Step 8c (Lesson)**: after the build-log entry, run the `tutor` agent
+  (`.claude/agents/tutor.md`) on that entry, in the background, passing a short factual
+  process narrative (what was investigated, wrong turns, what the user decided). It writes a
+  senior-architect lesson to `docs/learning/` (gitignored, never committed; capped at the
+  newest 5 by `scripts/prune_lessons.py`). The lesson is for the developer's learning, not
+  project history — never cite it from code or docs. `/learn` asks for a lesson on demand.
 
 ### Why the build log is mandatory
 
@@ -247,6 +253,7 @@ defined in full by the `/do` skill (`.claude/skills/do/SKILL.md`), is:
    `investigator`, `test-engineer`). `security-auditor` runs first when network,
    secrets, or spend are involved.
 3. `docs-scribe` closes the cycle with the build-log entry.
+4. `tutor` writes the lesson for that entry (Step 8c), in the background.
 
 Roles and the routing table are in `docs/AGENT_ROSTER.md`; cross-agent discoveries use
 `docs/standards/AGENT_HANDOFF_PROTOCOL.md`. Questions, approvals, and replies to the

@@ -445,7 +445,14 @@ POST /api/v1/jobs                {"base_url": ..., "gsc_property": ..., "gsc_acc
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1   # SDLC Step 7 quality gate
 .\.venv\Scripts\python.exe scripts\drift_check.py               # SDLC Step 8 drift audit
+.\.venv\Scripts\python.exe scripts\prune_lessons.py             # Step 8c: keep the newest 5 tutor lessons
 ```
+
+After the build-log entry (Step 8b), the `tutor` agent (`.claude/agents/tutor.md`, or `/learn`
+on demand) writes a senior-architect lesson about the change to `docs/learning/`. That folder is
+gitignored and capped at the newest 5 lessons; lessons are private learning notes, not project
+history, and are never cited from code or docs
+([build-log 0134](docs/build-log/0134-a-tutor-that-explains-every-decision.md)).
 
 ---
 

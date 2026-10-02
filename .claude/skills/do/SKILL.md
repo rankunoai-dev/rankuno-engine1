@@ -45,6 +45,11 @@ Rules:
 When the target agent reports done with a green gate, launch `docs-scribe` with the agent's final
 report so the build-log entry is written. Skip this only for pure INVESTIGATION briefs.
 
+Then launch `tutor` in the background (CLAUDE.md Step 8c) with the build-log entry path and a short
+factual process narrative: what was investigated, which hypotheses were wrong, what the user decided,
+and which test failed first. It writes a lesson to `docs/learning/` and prunes to the newest 5. For a
+pure INVESTIGATION brief, run it on the investigation report instead.
+
 ## 6. Relay
 
 Report to the user: the brief's TARGET AGENT and TYPE, what was changed, real gate output, handoffs
