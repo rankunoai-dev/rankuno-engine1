@@ -221,6 +221,20 @@ class Settings(BaseSettings):
             "only with the RAM to match."
         ),
     )
+    crawl_memory_budget_mib: int = Field(
+        default=3072,
+        ge=256,
+        le=65536,
+        description=(
+            "Page HTML, in MiB, that all running crawls together may retain before "
+            "the largest crawl over its fair share (budget / max_concurrent_crawls) "
+            "is stopped as partial with 'memory budget reached' (ADR 0031). Sized "
+            "for an 8 GB container with headroom for what it does not count — "
+            "sitemaps, result reads, workbook builds — so it is not an OOM "
+            "guarantee. The 8 GB figure is the operator's statement of the Railway "
+            "plan; the process never reads its own limit."
+        ),
+    )
 
     # -- LLM providers -----------------------------------------------------
     gemini_api_key: SecretStr | None = None

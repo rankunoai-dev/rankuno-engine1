@@ -53,6 +53,9 @@ const STATUS_COLOUR: Record<JobStatus, string> = {
   failed: "error",
 };
 
+/** The server's fixed stop reason for a memory-budget stop (`MEMORY_BUDGET_REASON`). */
+const MEMORY_BUDGET_REASON = "memory budget reached";
+
 /**
  * Every crawl, running and finished, in one table.
  *
@@ -327,10 +330,16 @@ function ProgressCell({ row }: { row: JobRow }): JSX.Element {
  * page ceiling, a planned stop, and a stall or aborted crawl —
  * `stoppedReason` on the summary, sourced from `JobRecord.error`. Read
  * cheaply off the row already on screen; no per-row result fetch.
+ *
+ * A memory-budget stop is named rather than folded into "stalled/aborted":
+ * the site did not stall and nothing failed — the server stopped the crawl to
+ * protect itself (ADR 0031), which is a different thing for an operator to act on.
  */
 function statusDetail(row: JobRow): string | null {
   if (row.status === "partial") {
-    return row.summary?.stoppedReason ? "stalled/aborted" : "hit page ceiling";
+    const reason = row.summary?.stoppedReason;
+    if (reason === MEMORY_BUDGET_REASON) return MEMORY_BUDGET_REASON;
+    return reason ? "stalled/aborted" : "hit page ceiling";
   }
   if (row.status === "succeeded") return "finished";
   return null;

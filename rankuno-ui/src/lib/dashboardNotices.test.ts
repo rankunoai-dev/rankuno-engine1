@@ -62,6 +62,18 @@ describe("dashboardNotices", () => {
     expect(notices[0]?.message).toContain("1,234");
   });
 
+  it("names a memory-budget stop through the same stopped-early notice", () => {
+    // The server's fixed, numberless reason (ADR 0031). No new notice type:
+    // the existing one already says the view is partial and by how much is unknown.
+    const notices = dashboardNotices(
+      withNav({ discovery: discovery({ stopped_reason: "memory budget reached", total_urls: 812 }) }),
+      false,
+    );
+    expect(notices.map((n) => n.id)).toEqual(["stopped-early"]);
+    expect(notices[0]?.message).toContain("Crawl stopped early — memory budget reached.");
+    expect(notices[0]?.message).toContain("812");
+  });
+
   it("counts the refused requests when nothing was fetched", () => {
     const notices = dashboardNotices(
       withNav({ discovery: discovery({ pages_fetched: 0, fetch_failures: 12 }) }),

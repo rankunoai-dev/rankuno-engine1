@@ -104,6 +104,28 @@ def test_max_concurrent_crawls_out_of_range_rejected(value, tmp_path):
         Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl", max_concurrent_crawls=value)
 
 
+# -- Crawl memory budget (ADR 0031) -------------------------------------------
+
+
+def test_crawl_memory_budget_defaults_to_three_gib(tmp_path):
+    """Derived from the measurement in ADR 0031 for an 8 GB container."""
+    settings = Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl")
+    assert settings.crawl_memory_budget_mib == 3072
+
+
+def test_crawl_memory_budget_reads_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRAWL_MEMORY_BUDGET_MIB", "1024")
+    settings = Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl")
+    assert settings.crawl_memory_budget_mib == 1024
+
+
+@pytest.mark.parametrize("value", [0, 255, 65537])
+def test_crawl_memory_budget_out_of_range_rejected(value, tmp_path):
+    """Too small stops every crawl at its homepage; too large guards nothing."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, audit_log_path=tmp_path / "a.jsonl", crawl_memory_budget_mib=value)
+
+
 # -- Named GSC account profiles ------------------------------------------------
 
 

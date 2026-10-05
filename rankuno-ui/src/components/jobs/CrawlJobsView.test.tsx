@@ -57,6 +57,14 @@ describe("CrawlJobsView status detail", () => {
     expect(screen.queryByText("hit page ceiling")).not.toBeInTheDocument();
   });
 
+  it("names a memory-budget stop instead of calling it stalled/aborted", () => {
+    withJob({ status: "partial", truncated: false, stoppedReason: "memory budget reached" });
+    render(<CrawlJobsView />);
+    expect(screen.getByText("memory budget reached")).toBeInTheDocument();
+    expect(screen.queryByText("stalled/aborted")).not.toBeInTheDocument();
+    expect(screen.queryByText("hit page ceiling")).not.toBeInTheDocument();
+  });
+
   it("shows no status detail for a failed job", () => {
     withJob({ status: "failed" });
     render(<CrawlJobsView />);

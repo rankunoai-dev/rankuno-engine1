@@ -43,11 +43,14 @@ pressure, which is the thing that was never bounded.
 from __future__ import annotations
 
 import asyncio
+import functools
+import sys
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import TypeVar
 
 from src.core.logger import get_logger
+from src.core.memory_budget import MEMORY_BUDGET_REASON, MemoryAccount
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.discovery import (
     DEFAULT_DOM_RESERVE_FRACTION,
@@ -260,6 +263,7 @@ async def _gather_bounded(
     stall_timeout_s: float | None = None,
     graph: SiteGraph | None = None,
     cancel_event: threading.Event | None = None,
+    memory_account: MemoryAccount | None = None,
 ) -> list[ResultT | None]:
     """Await every factory with at most `concurrency` in flight.
 
@@ -289,10 +293,16 @@ async def _gather_bounded(
             own bound is `REQUEST_DEADLINE_S`. An already-dispatched
             `await fetcher.afetch(...)` is never interrupted; that is a known,
             disclosed bound, not an oversight (see `adiscover_site`).
+        memory_account: This crawl's share of the process memory budget
+            (ADR 0031). Checked where `cancel_event` is, and again once the
+            task holds a slot, so a stop chosen mid-level reaches fetches
+            already queued on the governor: no fetch not yet dispatched is
+            made. Each skip is counted on the account so the crawl can tell
+            work it lost from work it finished.
 
     Returns:
         Results in input order, `None` for anything that failed, abandoned, or
-        skipped because the job was cancelled before it began.
+        skipped because the job was cancelled or budget-stopped before it began.
 
     Raises:
         CrawlStalledError: If nothing completes within `stall_timeout_s`.
@@ -305,8 +315,19 @@ async def _gather_bounded(
     async def run(factory: Callable[[], Awaitable[ResultT]]) -> ResultT | None:
         if cancel_event is not None and cancel_event.is_set():
             return None
+        if memory_account is not None and memory_account.stop_requested:
+            memory_account.record_skip()
+            return None
         await governor.acquire()
         try:
+            # Checked again once a slot is held. Every task in a level runs the
+            # check above the moment the batch starts — before any fetch has
+            # landed — and then queues here, so a stop chosen mid-level would
+            # otherwise never be seen until the level ended. A level can hold
+            # thousands of pages, which is the memory this exists to protect.
+            if memory_account is not None and memory_account.stop_requested:
+                memory_account.record_skip()
+                return None
             return await factory()
         except asyncio.CancelledError:
             raise
@@ -369,11 +390,22 @@ async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str 
     return result.body, False
 
 
-async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str, str] | None:
+async def _ahtml(
+    graph: SiteGraph,
+    fetcher: HttpFetcher,
+    url: str,
+    *,
+    memory_account: MemoryAccount | None = None,
+) -> tuple[str, str] | None:
     """Fetch a URL, returning `(url, html)` only when the response is HTML.
 
     A non-HTML 200 is not a failure: the server answered, the payload simply is
     not a page.
+
+    A returned body is charged to `memory_account` here, the moment it lands,
+    rather than when `store_html` keeps it: a BFS level holds every body it
+    fetched in its results list before any of them is stored, so counting at
+    storage would miss a whole level's worth of memory (ADR 0031).
     """
     try:
         # Bounded here rather than by httpx: its read timeout measures the gap
@@ -404,6 +436,10 @@ async def _ahtml(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str,
         graph.pages_not_retrieved += 1
         return None
     graph.record_outcome(OUTCOME_OK)
+    if memory_account is not None:
+        # `getsizeof` is O(1) and reports the PEP 393 width: one curly quote
+        # makes a whole page two bytes per character.
+        memory_account.charge(sys.getsizeof(result.body))
     return url, result.body
 
 
@@ -423,6 +459,7 @@ async def adiscover_site(
     exclude_urls: tuple[str, ...] = (),
     url_filter: URLFilter | None = None,
     cancel_event: threading.Event | None = None,
+    memory_account: MemoryAccount | None = None,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths concurrently and merge them.
 
@@ -464,6 +501,12 @@ async def adiscover_site(
             `REQUEST_DEADLINE_S` of cancellation, once whatever was already in
             flight drains — a fetch that has already started is never aborted.
             `None`, the default, means no caller can cancel this run.
+        memory_account: This crawl's share of the process-wide memory budget
+            (ADR 0031). Like `cancel_event` it is honoured on Path B only, at
+            the same two points; a crawl it stops ends with `stopped_reason`
+            `MEMORY_BUDGET_REASON` and `truncated` untouched. Only DOM-crawl
+            HTML is charged: it is the only body discovery retains. `None`
+            means no budget applies.
 
     Returns:
         The merged graph and its report.
@@ -499,6 +542,7 @@ async def adiscover_site(
                 seed_urls,
                 exclude_urls,
                 cancel_event=cancel_event,
+                memory_account=memory_account,
             )
         except Exception as exc:  # noqa: BLE001 - a partial graph beats no graph
             # Everything discovered before the failure is real data an operator
@@ -707,6 +751,7 @@ async def _acrawl(
     seed_urls: tuple[str, ...] = (),
     exclude_urls: tuple[str, ...] = (),
     cancel_event: threading.Event | None = None,
+    memory_account: MemoryAccount | None = None,
 ) -> int:
     """Path B — breadth-first traversal, one level at a time, fetched in parallel.
 
@@ -722,6 +767,10 @@ async def _acrawl(
     without being made. Neither check reaches into a fetch already in flight —
     that is `REQUEST_DEADLINE_S`'s bound, not this one's, and the two are not
     the same guarantee.
+
+    `memory_account` is checked at the same two points, always *after*
+    `cancel_event`, so an operator's cancel keeps its own label whichever stop
+    lands first. Its reason is a separate constant, never the cancel string.
     """
     graph.add(base_url, dom_link=True, depth=0)
     seen: set[str] = {normalize_url(base_url)}
@@ -750,6 +799,7 @@ async def _acrawl(
     fetched = 0
     depth = 0
     recent: list[str] = []
+    fetch_page = functools.partial(_ahtml, memory_account=memory_account)
 
     # Capacity deliberately does NOT stop the crawl. `graph.add` already
     # refuses *new* nodes when full, so the frontier stops growing on its
@@ -763,6 +813,12 @@ async def _acrawl(
             # already returned). Nothing here waits on an in-flight fetch.
             _logger.warning("crawl_cancelled", extra={"url": base_url, "depth": depth})
             graph.stopped_reason = "cancelled by operator"
+            break
+        if memory_account is not None and memory_account.stop_requested:
+            # Same safe point as cancellation: the level that just finished
+            # has been stored, so everything fetched so far gets classified.
+            _logger.warning("crawl_memory_budget_stop", extra={"url": base_url, "depth": depth})
+            graph.stopped_reason = MEMORY_BUDGET_REASON
             break
 
         crawlable = []
@@ -794,11 +850,12 @@ async def _acrawl(
 
         try:
             results = await _gather_bounded(
-                [_factory(_ahtml, graph, fetcher, url, note) for url in crawlable],
+                [_factory(fetch_page, graph, fetcher, url, note) for url in crawlable],
                 concurrency,
                 stall_timeout_s=STALL_TIMEOUT_S,
                 graph=graph,
                 cancel_event=cancel_event,
+                memory_account=memory_account,
             )
         except CrawlStalledError as exc:
             # Ends the crawl, it does not fail it. Everything discovered so far
@@ -835,6 +892,17 @@ async def _acrawl(
     # queued-but-unprocessed next level.
     if max_depth is not None and depth > max_depth and level:
         graph.depth_capped += len(level)
+
+    # The stop can land during the last level, after which there is no next
+    # boundary to report it. Reported only if it actually cost fetches: a crawl
+    # whose final page reached the budget lost nothing and is complete.
+    if (
+        graph.stopped_reason is None
+        and memory_account is not None
+        and memory_account.fetches_skipped > 0
+        and not (cancel_event is not None and cancel_event.is_set())
+    ):
+        graph.stopped_reason = MEMORY_BUDGET_REASON
 
     return fetched
 

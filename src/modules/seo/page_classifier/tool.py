@@ -42,6 +42,7 @@ from pydantic import Field
 from src.core.base_tool import BaseTool
 from src.core.errors import CrawlBlockedError
 from src.core.logger import get_logger
+from src.core.memory_budget import MemoryAccount
 from src.core.rate_limiter import CostLedger
 from src.core.schemas import RiskClass, StrictModel, ToolMetadata
 from src.core.url_safety import UrlSafetyPolicy
@@ -436,6 +437,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         homepage_sink: Callable[[str], None] | None = None,
         org_id: str | None = None,
         cancel_event: threading.Event | None = None,
+        memory_account: MemoryAccount | None = None,
         **kwargs: object,
     ) -> None:
         """Build the tool.
@@ -477,6 +479,12 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 means this run cannot be cancelled, which is every caller that
                 has no concept of cancellation — direct `execute()` calls and
                 most tests.
+            memory_account: This crawl's share of the server's process-wide
+                memory budget (ADR 0031). Constructor-injected for the same
+                reason as `cancel_event`: a live control object owned by the
+                caller, and a request must never be able to name or size its
+                own budget. Honoured by the async path only; `None` means no
+                budget applies.
             **kwargs: Forwarded to `BaseTool`.
         """
         super().__init__(**kwargs)  # type: ignore[arg-type]
@@ -490,6 +498,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         self._homepage_sink = homepage_sink
         self._org_id = org_id
         self._cancel_event = cancel_event
+        self._memory_account = memory_account
 
     def describe_invocation(self, payload: PageClassificationInput) -> str:
         """Operator-facing summary. Names the site, not the object graph."""
@@ -835,6 +844,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                     payload.base_url,
                     concurrency=payload.concurrency,
                     cancel_event=self._cancel_event,
+                    memory_account=self._memory_account,
                     **kwargs,  # type: ignore[arg-type]
                 )
             )

@@ -80,6 +80,7 @@ from src.core.errors import ConfigurationError, UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.logger import get_logger
+from src.core.memory_budget import MIB, MemoryBudget
 from src.core.postgres_config import get_postgres_settings
 from src.core.postgres_store import PostgresJobStore
 from src.core.postgres_worker_dispatch_store import PostgresWorkerDispatchStore
@@ -938,6 +939,7 @@ class ApiState:
         dispatch_signing_secret: SecretStr | None = None,
         bundle_encryption_secret: SecretStr | None = None,
         dispatch_signing_key: DispatchSigningKey | None = None,
+        memory_budget: MemoryBudget | None = None,
     ) -> None:
         """Build the shared state.
 
@@ -987,6 +989,10 @@ class ApiState:
             dispatch_signing_key: Ed25519 key dispatch assignments are
                 signed with (ADR 0028). Defaults to
                 `Settings.dispatch_ed25519_signing_key`.
+            memory_budget: The page-HTML budget every running crawl in this
+                process shares (ADR 0031). Defaults to
+                `Settings.crawl_memory_budget_mib`, split into fair shares by
+                `max_concurrent_jobs`.
 
         Raises:
             ConfigurationError: Neither a signing key nor an HMAC secret
@@ -998,6 +1004,9 @@ class ApiState:
         self.org_config_store = org_config_store
         self.max_concurrent_jobs = max_concurrent_jobs
         self.facet_router = FacetRouter(max_concurrent=max_concurrent_jobs)
+        self.memory_budget = memory_budget or MemoryBudget(
+            get_settings().crawl_memory_budget_mib * MIB, fair_share_slots=max_concurrent_jobs
+        )
         self.sf_templates = sf_template_registry or TemplateRegistry(
             get_settings().screaming_frog_template_dir
         )
@@ -1230,6 +1239,11 @@ def _run_job(
             guarantee this gives.
     """
     store = state.store
+    # Opened here and closed in this function's `finally`, which runs on the
+    # worker thread when the crawl really ends — not when `cancel_job` releases
+    # the slot. A cancelled crawl keeps its HTML until it drains, so it must
+    # stay counted until then (ADR 0031).
+    account = state.memory_budget.open(job_id, in_flight_ceiling=payload.concurrency)
     try:
         running = store.mark_running(job_id)
         result = PageClassificationTool(
@@ -1245,6 +1259,7 @@ def _run_job(
             # this result without re-crawling. One page; the menu is global.
             homepage_sink=lambda html: store.write_homepage(job_id, html),
             cancel_event=cancel_event,
+            memory_account=account,
         ).run(payload)
 
         if not result.ok or result.data is None:
@@ -1258,8 +1273,9 @@ def _run_job(
 
         # `truncated` means the crawl hit its ceiling: a planned stop at a known
         # boundary. `stopped_reason` means it was abandoned instead — a stall
-        # (`CrawlStalledError`) or a generic exception `async_discovery` caught
-        # and recorded rather than raised. Either one leaves the graph a subset
+        # (`CrawlStalledError`), the memory budget (`MEMORY_BUDGET_REASON`,
+        # ADR 0031), or a generic exception `async_discovery` caught and
+        # recorded rather than raised. Either one leaves the graph a subset
         # of the site, so either one must block `SUCCEEDED`; checking `truncated`
         # alone let a stalled or aborted crawl with `truncated=False` report as
         # complete. `retrieved_nothing` never reaches this branch: `execute()`
@@ -1282,6 +1298,8 @@ def _run_job(
     except Exception as exc:  # noqa: BLE001 - a detached worker must not leak
         _logger.exception("job_crashed", extra={"job_id": job_id})
         store.mark_failed(job_id, f"{type(exc).__name__}: {exc}")
+    finally:
+        state.memory_budget.close(account)
 
 
 async def _dispatch(
