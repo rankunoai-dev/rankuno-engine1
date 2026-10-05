@@ -171,7 +171,9 @@ resolutions. **Follow the "Ruling" column, not the source documents.**
 
 ## 8. Known gaps — do not describe these as working
 
-- `src/core/circuit_breaker.py` — does not exist.
+- No circuit breaker in the **governed pipeline** (ruling 2). `src/core/circuit_breaker.py`
+  exists and guards the Postgres store, dispatch signing and the GSC token manager — it
+  is not a pipeline step, and the two must not be conflated.
 - Idempotency keys — not implemented anywhere.
 - Rate limiter and cost ledger are **in-process only**. Multi-worker deployment would
   multiply both the API quota and the spend ceiling by the worker count. Blocking for
@@ -186,10 +188,17 @@ resolutions. **Follow the "Ruling" column, not the source documents.**
   draft rows await review in `tests/fixtures/corpus/drafts/`.
 - Observed LLM escalation rate is ~50x the assumption in ADR 0005, so the cost model
   is **not trustworthy** (build-log 0007).
-- A crawl holds its entire graph, including page HTML, in RAM. The 3-crawl
-  concurrency cap is what bounds memory; nothing bounds a single large crawl.
-- Checkpoints are never deleted and hold URLs only — no navigation footprint, and
-  no resume. A checkpoint is for *viewing* what was found (build-log 0019 §6).
+- A crawl holds its entire graph, including page HTML, in RAM until the job ends
+  (~2 MiB per page on sites with ~1 MB HTML). A process-wide budget
+  (`CRAWL_MEMORY_BUDGET_MIB`, default 3 GiB, fair share = budget / crawl cap of 5)
+  stops the largest over-share crawl as PARTIAL "memory budget reached" instead of an
+  OOM kill (ADR 0031). It counts async DOM-crawl HTML only — sitemaps/CMS, the serial
+  fallback, `/result` reads, deliverables and Screaming Frog jobs are uncounted — so it
+  is **not** an OOM guarantee, and the 8 GB container limit it is sized for is unverified.
+- Checkpoints are never deleted and hold URLs only — no navigation footprint. A
+  checkpoint is for *viewing* what was found (build-log 0019 §6). Manual resume exists
+  (`POST /jobs/{id}/resume`, build-log 0032) but starts a new, unmerged job; there is no
+  automatic resume after a restart.
 - The SSRF guard resolves and validates addresses but cannot close the **DNS rebinding**
   window on its own. Callers must pin connections to `SafeUrl.resolved_ips`.
 

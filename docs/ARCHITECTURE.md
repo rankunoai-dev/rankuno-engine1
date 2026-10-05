@@ -39,6 +39,15 @@ src/
 │   ├── retry.py                 # Exponential backoff with jitter (tenacity)
 │   ├── url_safety.py            # SSRF guard: private-range blocker, scheme allowlist
 │   ├── robots.py                # robots.txt & crawl-delay parsing (RFC 9309)
+│   ├── memory_budget.py         # ADR 0031: process-wide budget on retained crawl
+│   │                            # HTML. MemoryBudget/MemoryAccount, one Lock; fair
+│   │                            # share = budget // max concurrent crawls; victim =
+│   │                            # largest projected over its share, newest on a tie,
+│   │                            # never a crawl with 0 pages. Counts what callers
+│   │                            # charge (sys.getsizeof), never reads RSS. Sets a
+│   │                            # stop flag only; never touches status, slot or
+│   │                            # cancel flag. Covers async DOM-crawl HTML only:
+│   │                            # not a process-wide OOM guarantee
 │   ├── url_hosts.py             # ADR 0030: safe_split/site_host/registrable_domain,
 │   │                            # moved out of page_classifier/url_rules.py (which
 │   │                            # re-exports them) so the worker's url_list.py
@@ -218,7 +227,12 @@ src/
 │   │                            # *what* a crawl may fetch, so this stays an open
 │   │                            # proxy on a routable interface either way.
 │   │                            # Runs at most MAX_CONCURRENT_CRAWLS jobs (default
-│   │                            # 5) — the RAM bound; the rest get 429
+│   │                            # 5); the rest get 429. The cap limits how many
+│   │                            # crawls hold RAM, not how much one holds
+│   │                            # ApiState.memory_budget (ADR 0031): _run_job opens
+│   │                            # the crawl's MemoryAccount before its try and
+│   │                            # closes it in finally, on the worker thread; a
+│   │                            # budget stop ends PARTIAL "memory budget reached"
 │   │                            # GET /api/v1/gsc/accounts lists profile names;
 │   │                            # admission refuses an unknown gsc_account (400)
 │   │                            # GET /jobs/{id}/urls.xlsx (cycle 0102): the
@@ -738,6 +752,7 @@ src/
 | A purge job for expired uploaded bundles | Still read-time filtering only (`read_upload` checks `expires_at`). Nothing deletes the row, so storage grows without bound — unchanged from build-log 0098 |
 | A migration of existing disk-backed worker registrations into Postgres | Impossible by construction: the `workers.json` it would read lives on a container filesystem that has already been rebuilt. Switching `WORKER_STORE_BACKEND` to `postgres` requires re-registering each desktop once (see `alembic/versions/0003_worker_identity_table.py`) |
 | Any Postgres SQL in `postgres_worker_store.py` or migration 0003 verified against a real database | `psycopg` is not installed in the local venv and no server is reachable from it. Both are covered only by an in-memory fake cursor, which cannot validate SQL syntax or `COALESCE`/`ON CONFLICT` semantics |
+| Crawl memory, step 2: not retaining full page HTML until the job ends | Every fetched page's HTML stays in `SiteGraph._html` until the job ends (about 2.2 MiB per page on sites with ~1 MB pages). Step 1 ([ADR 0031](adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md), [build-log 0136](build-log/0136-a-crawl-that-stops-before-the-container-does.md)) only stops the largest over-share crawl when tracked async DOM-crawl HTML reaches `CRAWL_MEMORY_BUDGET_MIB`; a lone crawl of such a site stops at about 1,400 pages. Sitemap/CMS bodies, the serial fallback, `/result` reads, deliverables and Screaming Frog jobs are uncounted, so process memory is not bounded. Compress, spill or extract is undecided and needs its own ADR |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
 | `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
@@ -869,6 +884,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0028](adr/0028-dispatch-claims-are-signed-asymmetrically.md) | **Dispatch claims are signed asymmetrically (Ed25519).** Amends ADR 0015 condition 4: gate (b) used one shared HMAC key to sign on the cloud and verify on every worker, so any worker's `.env.local` could forge dispatches for any worker or org. The cloud now signs with `WORKER_DISPATCH_SIGNING_PRIVATE_KEY`; a worker verifies with the public `WORKER_DISPATCH_VERIFY_KEY` + `kid` and, with a verify key set, never falls back to HMAC. Wire model unchanged (old workers use `extra="forbid"`); the signature rides in the token header. Dual-signing while `WORKER_DISPATCH_LEGACY_HMAC_ENABLED` is true. `GET /workers/dispatch-verify-key` distributes the key (trust-on-first-use); HTTPS enforced for the worker client and `register_worker.py`. No overlapping key rotation ([build-log 0133](build-log/0133-a-key-every-verifier-could-sign-with.md)) |
 | [0029](adr/0029-a-worker-credential-is-revoked-or-rotated-never-reactivated.md) | **A worker credential is revoked or rotated, never reactivated.** `is_active` was checked but never set, so a worker credential was valid forever. `POST /workers/{id}/revoke` and `/rotate-credential` (operator session, org-scoped; cross-org is `404`, not the reads' `403`). Rotate returns the new secret once, stores only the PBKDF2 hash, reactivates and clears `last_seen_at`; it is the only way back from a revoke. No `GuardrailEngine` — same approval model as registration and the GSC credential routes. A revoked daemon gets `401` and exits code 3; queued jobs for a never-rotated revoked worker are not cleaned up ([build-log 0133](build-log/0133-a-key-every-verifier-could-sign-with.md)) |
 | [0030](adr/0030-the-worker-ships-as-a-standalone-client.md) | **The worker ships as a standalone client.** Amends ADR 0015 (installation and worker state). The worker CLI's import closure held 11 engine modules through two incidental imports; three URL helpers moved to `core/url_hosts.py` and the upload allow-list became pinned literals (`bundle_filenames.py`), and a fresh-subprocess allowlist test keeps the closure engine-free. `core/app_paths.py`: `REPO_ROOT` when not frozen, `%LOCALAPPDATA%\Rankuno\Worker` when frozen. The credential lives in Windows Credential Manager (`core/credential_vault.py`); a frozen build never falls back to plaintext. `rankuno-worker setup` signs in once through `WorkerRegistrationClient`, verify key before registration, never retried. `RANKUNO_PROCESS_ROLE`: cloud-secret checks apply to `server` only, and `create_app` refuses `worker`. Packaging (Phase 3) is not decided here ([build-log 0135](build-log/0135-a-worker-that-carried-the-engine.md)) |
+| [0031](adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md) | **A crawl stops at a shared memory budget, fair share first.** Production crawls of sites with ~1.1 MB pages came back `FAILED` "interrupted by a server restart"; an OOM kill is inferred, not confirmed. `Settings.crawl_memory_budget_mib` (default 3072, 256–65536, no request field, no admin route) caps the HTML all running async DOM crawls retain. `_ahtml` charges `sys.getsizeof(body)` as each page lands, because PEP 393 width makes one curly quote double a page (1.10 MiB ASCII, 2.20 MiB with one U+2019, measured). When the projected total reaches the budget, the largest crawl over `budget // MAX_CONCURRENT_CRAWLS` stops at a safe point (checked before and after the governor slot, and at level boundaries after the cancel check) and ends `PARTIAL` with a fixed, numberless reason; a crawl at or under its share is never stopped by another tenant. Default derived as (8 − 0.5 − 1.5) / (1.10 × 1.25) = 4.36 GiB ceiling for an 8 GiB container, set to 3 GiB. Not an OOM guarantee; retaining the HTML at all is left to a later ADR ([build-log 0136](build-log/0136-a-crawl-that-stops-before-the-container-does.md)) |
 
 ---
 

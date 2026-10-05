@@ -137,6 +137,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | Golden corpus coverage | ⚠️ 13 labels, 1 of 6 archetypes — **not yet enough to validate any accuracy claim**. 141 draft rows await review in [drafts/](tests/fixtures/corpus/drafts/README.md) |
 | CMS pagination | ✅ Multi-page retrieval via `Link` cursor, `X-WP-TotalPages` and `?page=N`. Effect on live confidence **not yet measured** — see [build-log 0011 §5](docs/build-log/0011-cms-pagination.md) |
 | `core/circuit_breaker.py` — `CLOSED`/`OPEN`/`HALF_OPEN`, 5-failure threshold, 30s recovery | ✅ Implemented & tested (20 tests). This row said "❌ Not started" until cycle 0110; the file has existed since 2026-09-09 and is wired into `core/postgres_store.py`, `core/worker_dispatch_signing.py` and `integrations/gsc_token_manager.py`. Nothing wires a breaker to ADR 0015's worker-dispatch HTTP channel — that is an accepted v1 gap (ADR 0015 condition 10) and a different statement ([build-log 0098](docs/build-log/0098-expires-at-is-not-deletion.md), [0110](docs/build-log/0110-what-the-gate-had-not-been-run-on.md)). `CLAUDE.md` §8 still carries the old claim and needs the same correction |
+| `core/memory_budget.py` — process-wide budget on retained crawl HTML (`CRAWL_MEMORY_BUDGET_MIB`, default 3072 MiB) | ✅ Implemented & tested ([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md), [build-log 0136](docs/build-log/0136-a-crawl-that-stops-before-the-container-does.md)). Each async DOM-crawl page body is charged as it lands (`sys.getsizeof`); when the projected total reaches the budget, the largest crawl over its fair share (budget / `MAX_CONCURRENT_CRAWLS`) stops at a safe point and ends `partial` with "memory budget reached" instead of the container being OOM-killed. A crawl at or under its share is never stopped by another org's load. **Not an OOM guarantee**: sitemap/CMS bodies, the serial fallback, `/result` reads, deliverables and Screaming Frog jobs are uncounted, and the HTML is still retained until the job ends (step 2, not started) |
 | `core/state_store.py` — durable job records | ✅ Implemented & tested (`DiskJobStore`; see [CLAUDE.md](CLAUDE.md) §8 "Closed since the audit") |
 | `core/postgres_store.py` — durable job records over Postgres | ✅ Implemented & tested ([ADR 0022](docs/adr/0022-postgres-backed-job-store.md), [build-log 0118](docs/build-log/0118-a-store-that-only-wrote-its-own-name.md)). Every `JobStore` method now writes real Postgres, not just `create()`/`get()`/`list_jobs()` as before this cycle; falls back to `DiskJobStore` once its `CircuitBreaker` opens. `create_app()` selects it automatically whenever `PostgresSettings.is_configured()` is true, so a job's status, result, checkpoint and homepage snapshot survive a Railway redeploy — `DiskJobStore`'s `.jobs/` alone does not. `job_payloads` (migration 0006, plus migration 0008 for `reconciliation`/`performance` — [build-log 0121](docs/build-log/0121-a-scope-out-that-shipped-as-a-bug.md)) holds the large payloads. Delegating `reconciliation`/`performance` to the disk fallback unconditionally was a production bug, not a deferred feature: `create()` writes a Postgres-backed job's row to Postgres only, and `DiskJobStore`'s writers require the job to exist on disk first, so the write silently no-oped and every later `GET` (including the download buttons) 404'd for every job since this store became the default (build-log 0118). Fixed — same circuit-breaker/upsert pattern as every other method. The unrelated `.orgs`/`.operators` stores stay disk-only, a deferred follow-up |
 | `core/process_supervisor.py` + `_process_ledger.py`/`_process_orphans.py`/`_win32_bindings.py` — Windows Job Object process supervision (kill-on-close, PID+start-time ledger, startup reconciliation) | ✅ Implemented & tested (51 tests, [ADR 0013](docs/adr/0013-screaming-frog-cli-process-governance-exception.md), [build-log 0095](docs/build-log/0095-a-crash-the-kernel-cleans-up.md)). Domain-agnostic `core/` infrastructure, not SEO-specific. Now has a caller — see the row below. **A PID + start-time match is a liveness test, not an orphan test**, and treating it as one killed two live crawls of 1:05:47 and 1:47:39, one at 99.7% complete: `reconcile_orphans` runs on every API-server startup and every `TestClient(create_app(...))` runs `lifespan`, so `pytest` reaped the workstation's real ledger. `LedgerEntry` now also records `supervisor_pid`/`supervisor_start_time` (written by `launch_supervised` from `os.getpid()` + `GetProcessTimes(GetCurrentProcess())`), checked first, under the same start-time tolerance that guards child PID reuse; a live supervisor's entry is skipped **and kept** in the ledger. A legacy entry with no supervisor marker is still reaped, deliberately — unknown ownership must fail toward reaping, or every pre-upgrade entry becomes an immortal Screaming Frog process holding a licence seat. `create_app(..., process_ledger_path=)` and an import-time redirect in `tests/conftest.py` keep the suite off the real ledger and audit log; reconciliation itself stays on under test ([build-log 0113](docs/build-log/0113-the-test-suite-was-killing-live-crawls.md)) |
@@ -372,15 +373,27 @@ result, checkpoint and homepage snapshot now survive a container redeploy, not
 just its creation record ([ADR 0022](docs/adr/0022-postgres-backed-job-store.md)).
 A crawl interrupted mid-run is marked `failed` rather than resumed. Its last
 checkpoint (URLs found so far, and since cycle 0127 how each was found) is kept
-and renders as a partial tree, but nothing resumes from it
+and renders as a partial tree, but nothing resumes it automatically
 ([build-log 0019](docs/build-log/0019-checkpoints-and-partial-recovery.md),
 [0127](docs/build-log/0127-a-reason-the-crawl-never-recorded.md)). This
 paragraph said "there is no within-crawl checkpointing" until cycle 0127.
+`POST /jobs/{id}/resume` starts a separate job over the checkpoint's unfetched
+URLs; it is not merged into the original
+([build-log 0032](docs/build-log/0032-resume-excludes-what-was-already-fetched.md)).
+Until cycle 0136 this paragraph said "nothing resumes from it".
 
 The server runs at most 5 crawls at once by default and answers `429` beyond
-that; `MAX_CONCURRENT_CRAWLS` (1–10) sets the cap. It bounds memory, not CPU:
-each in-flight crawl holds its whole graph in RAM, so raise it only on a host
-with the RAM to match.
+that; `MAX_CONCURRENT_CRAWLS` (1–10) sets the cap. It limits how many crawls
+hold memory, not how much one crawl holds: each in-flight crawl keeps its whole
+graph, including every page's HTML, in RAM until the job ends — about 2.2 MiB
+per page on sites with ~1 MB pages. `CRAWL_MEMORY_BUDGET_MIB` (default 3072,
+256–65536) caps the HTML that async DOM crawls retain in total: when it is
+reached, the largest crawl over its fair share (budget / `MAX_CONCURRENT_CRAWLS`)
+stops and ends `partial` with "memory budget reached"
+([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md)).
+The default is sized for an 8 GB container (the operator's figure, unverified).
+It counts tracked DOM-crawl HTML only, so process memory as a whole is not
+bounded by it.
 
 `GET /api/v1/crawl-activity` (same bearer auth, scoped to the caller's org only) returns `{rankuno_active, rankuno_cap, sf_active}`, cached 5 s per org, and feeds the header indicator on every view (polled every 10 s visible / 60 s hidden). The two counts are deliberately separate: the cap governs server-run crawls only, and Screaming Frog worker dispatches are not limited by it ([build-log 0114](docs/build-log/0114-a-count-that-belongs-to-one-org.md)).
 
