@@ -380,7 +380,13 @@ paragraph said "there is no within-crawl checkpointing" until cycle 0127.
 `POST /jobs/{id}/resume` starts a separate job over the checkpoint's unfetched
 URLs; it is not merged into the original
 ([build-log 0032](docs/build-log/0032-resume-excludes-what-was-already-fetched.md)).
-Until cycle 0136 this paragraph said "nothing resumes from it".
+Until cycle 0136 this paragraph said "nothing resumes from it". Until cycle 0137
+the async crawl marked a page fetched only when its whole BFS level ended, so a
+crawl that died mid-level, and every resumed crawl (one level), checkpointed
+fetched pages as unfetched and its resume re-downloaded them. A page now counts
+as fetched when its HTML lands; errors and non-HTML responses stay unfetched and
+are retried. A resume of a resume can still re-fetch pages the first job fetched
+([build-log 0137](docs/build-log/0137-a-page-fetched-a-level-too-late.md)).
 
 The server runs at most 5 crawls at once by default and answers `429` beyond
 that; `MAX_CONCURRENT_CRAWLS` (1–10) sets the cap. It limits how many crawls

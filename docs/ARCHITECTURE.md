@@ -422,6 +422,10 @@ src/
     │       │                         # landed_url(): where a fetch ended up after
     │       │                         # redirects (cycle 0128)
     │       ├── async_discovery.py    # Concurrent crawl path (level-synchronous BFS).
+    │       │                         # HTML is stored in _ahtml as each fetch lands
+    │       │                         # (cycle 0137), not at the level boundary, so a
+    │       │                         # mid-level checkpoint's "unfetched" is accurate
+    │       │                         # and a resume skips pages already fetched.
     │       │                         # Cooperative cancellation (cycle 0126, ADR 0025):
     │       │                         # an optional threading.Event, checked in
     │       │                         # _gather_bounded before a queued fetch claims a
