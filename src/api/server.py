@@ -64,6 +64,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
@@ -73,12 +74,14 @@ from pydantic import Field, SecretStr, ValidationError
 from src.api.auth import build_auth_router, org_scoped_or_404, require_principal
 from src.api.crawl_activity import CrawlActivityCounter, build_crawl_activity_router
 from src.api.deliverables_routes import build_deliverables_router
+from src.api.local_signin import build_local_signin_router, ensure_local_operator
 from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password
 from src.core.config import ProcessRole, Settings, get_settings
 from src.core.errors import ConfigurationError, UnsafeUrlError
 from src.core.facet_router import FacetRouter
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
+from src.core.local_signin import DEFAULT_LINK_TTL_S, LocalSigninGate
 from src.core.logger import get_logger
 from src.core.memory_budget import MIB, MemoryBudget
 from src.core.postgres_config import get_postgres_settings
@@ -1530,12 +1533,25 @@ def create_app(
     Raises:
         ConfigurationError: This process declared itself a desktop worker.
             Production's cloud-secret checks are skipped for a worker (ADR
-            0030), so a server must never run under that role.
+            0030), so a server must never run under that role. Also raised
+            when a local sign-in token is set while Postgres is configured,
+            or when its dedicated operator is inactive or in another org
+            (ADR 0033).
     """
-    if get_settings().rankuno_process_role is ProcessRole.WORKER:
+    settings = get_settings()
+    if settings.rankuno_process_role is ProcessRole.WORKER:
         msg = (
             "RANKUNO_PROCESS_ROLE=worker cannot serve the cloud API: a worker skips "
             "the production secret checks the server depends on (ADR 0030)."
+        )
+        raise ConfigurationError(msg)
+    if settings.auth_local_autosignin_token is not None and get_postgres_settings().is_configured():
+        # Independent of the development-only check in `Settings`: Railway
+        # always has Postgres configured, so this holds even if ENVIRONMENT
+        # were unset there (ADR 0033).
+        msg = (
+            "AUTH_LOCAL_AUTOSIGNIN_TOKEN cannot be used while Postgres is configured: "
+            "the sign-in link is for a local server only (ADR 0033)."
         )
         raise ConfigurationError(msg)
     resolved_store: JobStore = store if store is not None else _default_job_store(jobs_root)
@@ -1553,6 +1569,20 @@ def create_app(
         operator_store if operator_store is not None else get_settings().operator_store
     )
     _seed_bootstrap_operator(resolved_operator_store, get_settings())
+    # After the bootstrap seed, so an empty store still gets its password
+    # operator before the local one makes it non-empty.
+    local_signin_gate: LocalSigninGate | None = None
+    if settings.auth_local_autosignin_token is not None:
+        local_operator = ensure_local_operator(resolved_operator_store, settings)
+        local_signin_gate = LocalSigninGate(settings.auth_local_autosignin_token)
+        _logger.warning(
+            "local_signin_armed",
+            extra={
+                "operator_id": local_operator.operator_id,
+                "org": local_operator.org_id,
+                "expires_in_s": DEFAULT_LINK_TTL_S,
+            },
+        )
     state = ApiState(
         store=resolved_store,
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
@@ -1647,6 +1677,10 @@ def create_app(
         # "the request never went out".
         allow_headers=["Content-Type", "Authorization"],
     )
+    if settings.api_allowed_host_list:
+        # Opt-in: unset, TestClient's `testserver` and Railway's own Host
+        # headers are untouched. The local launcher sets it (ADR 0033).
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.api_allowed_host_list)
 
     # Separate routers, not more routes bolted onto this factory: see
     # `deliverables_routes.py`'s module docstring for why the split exists
@@ -1656,6 +1690,17 @@ def create_app(
     app.include_router(build_auth_router(state), prefix=API_PREFIX)
     app.include_router(build_worker_router(state), prefix=API_PREFIX)
     app.include_router(build_crawl_activity_router(state), prefix=API_PREFIX)
+    if local_signin_gate is not None:
+        # Not mounted at all when the token is unset, so the path is a 404.
+        app.include_router(
+            build_local_signin_router(
+                state,
+                local_signin_gate,
+                operator_id=settings.auth_local_autosignin_operator_id,
+                org_id=settings.auth_local_autosignin_org_id,
+            ),
+            prefix=API_PREFIX,
+        )
 
     ui_dist_dir = Path("rankuno-ui/dist")
     if not ui_dist_dir.is_absolute():

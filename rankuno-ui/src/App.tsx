@@ -43,6 +43,10 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     void (async () => {
+      // A launcher sign-in link (ADR 0033) is exchanged before anything else
+      // talks to the engine, so the first authenticated request already has
+      // a session. A no-op, with no request, when the page opened without one.
+      await useAuthStore.getState().signInWithLink();
       const { adapter: chosen, offline: isOffline } = await chooseAdapter();
       setAdapter(chosen);
       setOffline(isOffline);

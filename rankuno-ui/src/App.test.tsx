@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import App from "./App";
-import { useAuthStore } from "./store/useAuthStore";
+import { captureSignInLink, useAuthStore } from "./store/useAuthStore";
 
 /**
  * The login gate ADR 0016 forced onto `App`.
@@ -111,5 +111,58 @@ describe("App", () => {
     // to guard — gating them behind a login screen would strand the exact
     // "server is not running" case that mode exists for.
     expect(screen.queryByText("LOGIN_SCREEN")).not.toBeInTheDocument();
+  });
+
+  describe("launcher sign-in link (ADR 0033)", () => {
+    const LINK_TOKEN = "3c".repeat(32);
+
+    it("exchanges the link before any other request and opens the dashboard", async () => {
+      window.history.replaceState(null, "", `/#autosignin=${LINK_TOKEN}`);
+      captureSignInLink();
+      (fetch as any)
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              token: "session-from-link",
+              token_type: "bearer",
+              org_id: "default",
+              expires_at: "2099-01-01T00:00:00Z",
+            }),
+            { status: 200 },
+          ),
+        ) // /auth/local-signin
+        .mockResolvedValueOnce(new Response("", { status: 200 })); // /health
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText("DASHBOARD_SHELL")).toBeInTheDocument();
+      });
+      const urls = (fetch as any).mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(urls[0]).toMatch(/\/auth\/local-signin$/);
+      expect(urls[1]).toMatch(/\/health$/);
+      expect(urls.join(" ")).not.toContain(LINK_TOKEN);
+      expect(init).toHaveBeenCalled();
+    });
+
+    it("shows the normal login screen when the link is refused", async () => {
+      window.history.replaceState(null, "", `/#autosignin=${LINK_TOKEN}`);
+      captureSignInLink();
+      (fetch as any)
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ detail: "sign-in link is invalid or expired" }), {
+            status: 401,
+          }),
+        )
+        .mockResolvedValueOnce(new Response("", { status: 200 }));
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText("LOGIN_SCREEN")).toBeInTheDocument();
+      });
+      expect(useAuthStore.getState().loginError).toMatch(/expired or was already used/);
+      expect(init).not.toHaveBeenCalled();
+    });
   });
 });

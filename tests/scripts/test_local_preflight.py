@@ -115,6 +115,34 @@ def test_no_value_reaches_the_output(
         assert "db.prod.invalid" not in stream
 
 
+TOKEN_SENTINEL = "f00d" * 16
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"AUTH_LOCAL_AUTOSIGNIN_TOKEN={TOKEN_SENTINEL}",
+        f"auth_local_autosignin_token = {TOKEN_SENTINEL}",
+        f"export AUTH_LOCAL_AUTOSIGNIN_TOKEN='{TOKEN_SENTINEL}'",
+        "AUTH_LOCAL_AUTOSIGNIN_TOKEN=",
+    ],
+)
+@pytest.mark.parametrize("name", preflight.DOTENV_FILES)
+def test_a_stored_signin_token_is_refused_by_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], line: str, name: str
+) -> None:
+    _write(tmp_path, line + "\n", name)
+    assert preflight.main(["scan", "--root", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "AUTH_LOCAL_AUTOSIGNIN_TOKEN" in captured.err
+    assert TOKEN_SENTINEL not in captured.out + captured.err
+
+
+def test_the_signin_operator_ids_are_not_refused(tmp_path: Path) -> None:
+    _write(tmp_path, "AUTH_LOCAL_AUTOSIGNIN_OPERATOR_ID=local\n")
+    assert preflight.scan_dotenv(tmp_path).refusals == []
+
+
 # -- budget -------------------------------------------------------------------
 
 
@@ -212,6 +240,105 @@ def test_postgres_worker_store_in_env_is_refused(
         monkeypatch.setenv(key, "")
     monkeypatch.setenv("WORKER_STORE_BACKEND", "postgres")
     assert preflight.main(["verify", "--expect-budget", "12990"]) == 1
+
+
+# -- ui-deps ------------------------------------------------------------------
+
+
+def _ui_dir(root: Path, *, installed: bool, lock_newer: bool) -> Path:
+    """A `rankuno-ui` with a real `node_modules`, current or stale."""
+    import os
+
+    ui = root / "ui"
+    modules = ui / "node_modules"
+    modules.mkdir(parents=True)
+    lock = ui / "package-lock.json"
+    lock.write_text("{}", encoding="utf-8")
+    if installed:
+        marker = modules / ".package-lock.json"
+        marker.write_text("{}", encoding="utf-8")
+        older, newer = 1_700_000_000, 1_700_000_100
+        os.utime(marker, (older, older) if lock_newer else (newer, newer))
+        os.utime(lock, (newer, newer) if lock_newer else (older, older))
+    return ui
+
+
+def _junction_ui(root: Path, *, installed: bool, lock_newer: bool) -> Path:
+    """A `rankuno-ui` whose `node_modules` is a junction to a real folder elsewhere."""
+    import _winapi  # type: ignore[import-not-found]
+
+    target_ui = _ui_dir(root / "target", installed=installed, lock_newer=False)
+    ui = root / "linked"
+    ui.mkdir()
+    lock = ui / "package-lock.json"
+    lock.write_text("{}", encoding="utf-8")
+    import os
+
+    stamp = 1_700_000_200 if lock_newer else 1_600_000_000
+    os.utime(lock, (stamp, stamp))
+    _winapi.CreateJunction(str(target_ui / "node_modules"), str(ui / "node_modules"))
+    return ui
+
+
+def test_current_dependencies_need_no_install(tmp_path: Path) -> None:
+    ui = _ui_dir(tmp_path, installed=True, lock_newer=False)
+    assert preflight.ui_dependency_action(ui) == preflight.UI_DEPS_CURRENT
+
+
+@pytest.mark.parametrize(("installed", "lock_newer"), [(False, False), (True, True)])
+def test_stale_real_folder_is_installed(tmp_path: Path, installed: bool, lock_newer: bool) -> None:
+    ui = _ui_dir(tmp_path, installed=installed, lock_newer=lock_newer)
+    assert preflight.ui_dependency_action(ui) == preflight.UI_DEPS_INSTALL
+
+
+def test_missing_node_modules_is_installed(tmp_path: Path) -> None:
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (ui / "package-lock.json").write_text("{}", encoding="utf-8")
+    assert preflight.ui_dependency_action(ui) == preflight.UI_DEPS_INSTALL
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
+def test_stale_junction_is_refused_and_its_target_left_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The incident: npm ci through a junction emptied the target checkout."""
+    ui = _junction_ui(tmp_path, installed=True, lock_newer=True)
+    target_files = sorted(p.name for p in (tmp_path / "target" / "ui" / "node_modules").iterdir())
+    with pytest.raises(preflight.LinkedNodeModulesError, match="link to another folder"):
+        preflight.ui_dependency_action(ui)
+    assert preflight.main(["ui-deps", "--ui-dir", str(ui)]) == 1
+    captured = capsys.readouterr()
+    assert "refusing to reinstall through it" in captured.err
+    assert "install" not in captured.out
+    assert sorted(p.name for p in (tmp_path / "target" / "ui" / "node_modules").iterdir()) == (
+        target_files
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
+def test_broken_junction_is_refused(tmp_path: Path) -> None:
+    ui = _junction_ui(tmp_path, installed=False, lock_newer=False)
+    with pytest.raises(preflight.LinkedNodeModulesError):
+        preflight.ui_dependency_action(ui)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
+def test_current_junction_is_used_as_is(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A build only reads node_modules, so a current link needs nothing done to it."""
+    ui = _junction_ui(tmp_path, installed=True, lock_newer=False)
+    assert preflight.main(["ui-deps", "--ui-dir", str(ui)]) == 0
+    assert capsys.readouterr().out.strip() == preflight.UI_DEPS_CURRENT
+
+
+def test_launcher_installs_only_on_the_preflight_answer() -> None:
+    """Parse-level guard: the old in-PowerShell staleness rule must not come back."""
+    script = (Path(preflight.__file__).parent / "run_local.ps1").read_text(encoding="utf-8")
+    assert "(Get-Item $installed).LastWriteTimeUtc" not in script
+    assert script.count("'ui-deps'") == 2
+    install_branch = script.index("if ($deps.Out -eq 'install') {")
+    assert script.index("@('ci')") > install_branch
+    assert script.count("@('ci')") == 1
 
 
 # -- the launcher itself --------------------------------------------------------

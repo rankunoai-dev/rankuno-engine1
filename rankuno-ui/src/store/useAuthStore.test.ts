@@ -143,6 +143,135 @@ describe("useAuthStore", () => {
     });
   });
 
+  describe("launcher sign-in link (ADR 0033)", () => {
+    const LINK_TOKEN = "7e".repeat(32);
+
+    function sessionResponse(status = 200): Response {
+      return new Response(
+        JSON.stringify(
+          status === 200
+            ? {
+                token: "session-from-link",
+                token_type: "bearer",
+                org_id: "default",
+                expires_at: "2099-01-01T00:00:00Z",
+              }
+            : { detail: "sign-in link is invalid or expired" },
+        ),
+        { status },
+      );
+    }
+
+    async function loadWithUrl(url: string) {
+      window.history.replaceState(null, "", url);
+      vi.resetModules();
+      return import("./useAuthStore");
+    }
+
+    function everythingStored(): string {
+      const values: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i += 1) {
+        const key = window.localStorage.key(i) ?? "";
+        values.push(key, window.localStorage.getItem(key) ?? "");
+      }
+      return values.join("\n");
+    }
+
+    it("strips the link from the address bar on load, before any request", async () => {
+      const replaceState = vi.spyOn(window.history, "replaceState");
+      await loadWithUrl(`/#autosignin=${LINK_TOKEN}`);
+
+      expect(window.location.hash).toBe("");
+      expect(window.location.href).not.toContain(LINK_TOKEN);
+      // Called by the module itself (the first call is this test's own setup).
+      expect(replaceState).toHaveBeenCalledTimes(2);
+      expect(fetch).not.toHaveBeenCalled();
+      replaceState.mockRestore();
+    });
+
+    it("keeps the path and query when it strips the fragment", async () => {
+      await loadWithUrl(`/login?tab=jobs#autosignin=${LINK_TOKEN}`);
+      expect(window.location.pathname).toBe("/login");
+      expect(window.location.search).toBe("?tab=jobs");
+      expect(window.location.hash).toBe("");
+    });
+
+    it("posts the token in the body, once, and stores the session the login way", async () => {
+      const { useAuthStore } = await loadWithUrl(`/#autosignin=${LINK_TOKEN}`);
+      const { API_BASE } = await import("../adapters/httpAdapter");
+      const consoleSpies = (["log", "info", "warn", "error", "debug"] as const).map((level) =>
+        vi.spyOn(console, level).mockImplementation(() => undefined),
+      );
+      (fetch as any).mockResolvedValueOnce(sessionResponse());
+
+      const ok = await useAuthStore.getState().signInWithLink();
+
+      expect(ok).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const [url, init] = (fetch as any).mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`${API_BASE}/auth/local-signin`);
+      expect(url).not.toContain(LINK_TOKEN);
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(String(init.body))).toEqual({ token: LINK_TOKEN });
+
+      const state = useAuthStore.getState();
+      expect(state.token).toBe("session-from-link");
+      expect(state.orgId).toBe("default");
+      expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "null")).toEqual({
+        token: "session-from-link",
+        orgId: "default",
+        expiresAt: "2099-01-01T00:00:00Z",
+      });
+      expect(JSON.stringify(state)).not.toContain(LINK_TOKEN);
+      expect(everythingStored()).not.toContain(LINK_TOKEN);
+      for (const spy of consoleSpies) {
+        expect(JSON.stringify(spy.mock.calls)).not.toContain(LINK_TOKEN);
+        spy.mockRestore();
+      }
+
+      // Read once: a second call has nothing to send.
+      expect(await useAuthStore.getState().signInWithLink()).toBe(false);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["a refused link", () => Promise.resolve(sessionResponse(401))],
+      ["a rate-limited link", () => Promise.resolve(sessionResponse(429))],
+      ["an unreachable engine", () => Promise.reject(new TypeError("Failed to fetch"))],
+    ])("falls back to the login screen with a generic message for %s", async (_name, reply) => {
+      const { useAuthStore } = await loadWithUrl(`/#autosignin=${LINK_TOKEN}`);
+      (fetch as any).mockImplementationOnce(reply);
+
+      const ok = await useAuthStore.getState().signInWithLink();
+
+      expect(ok).toBe(false);
+      const state = useAuthStore.getState();
+      expect(state.token).toBeNull();
+      expect(state.loggingIn).toBe(false);
+      expect(state.loginError).toMatch(/expired or was already used/);
+      expect(JSON.stringify(state)).not.toContain(LINK_TOKEN);
+      expect(everythingStored()).not.toContain(LINK_TOKEN);
+    });
+
+    it("strips a malformed link and never sends it", async () => {
+      const { useAuthStore } = await loadWithUrl("/#autosignin=not-a-hex-token");
+
+      expect(window.location.hash).toBe("");
+      expect(await useAuthStore.getState().signInWithLink()).toBe(false);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(useAuthStore.getState().loginError).toBeNull();
+    });
+
+    it("does nothing without a link", async () => {
+      const { useAuthStore } = await loadWithUrl("/#section=jobs");
+
+      expect(window.location.hash).toBe("#section=jobs");
+      expect(await useAuthStore.getState().signInWithLink()).toBe(false);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(useAuthStore.getState().loginError).toBeNull();
+    });
+  });
+
   describe("start-up restore", () => {
     it("restores a valid session from localStorage on module load", async () => {
       window.localStorage.setItem(

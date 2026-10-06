@@ -8,16 +8,19 @@ startup orphan recovery would then mark every job running on Railway as
 "interrupted by a server restart". So the guard logic lives here, in Python,
 where the quality gate tests it. The PowerShell script only orchestrates.
 
-Three subcommands, run by the launcher in this order:
+Four subcommands, run by the launcher in this order:
 
-* `scan` refuses a `.env` / `.env.local` that names any production-reaching key.
-  It matches key NAMES only and never prints a value.
+* `scan` refuses a `.env` / `.env.local` that names any production-reaching key,
+  or the per-run sign-in token. It matches key NAMES only and never prints a
+  value.
 * `budget` turns physical RAM into `CRAWL_MEMORY_BUDGET_MIB` (40%, clamped to the
   `Settings` bounds), or validates an explicit override.
 * `verify` runs inside the exact child environment the server will get, and
   proves the guard took effect rather than assuming it: Postgres is not
   configured, the environment is development, the worker store is disk, and the
   budget Settings resolved is the one the launcher exported.
+* `ui-deps` decides whether the UI's `node_modules` needs `npm ci` before a
+  build, and refuses when it would need one but is a link to another folder.
 
 Output from every subcommand is safe to show: key names, file names and
 numbers. A `verify` failure reports an exception's type, never its message,
@@ -29,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +56,14 @@ FORBIDDEN_KEYS: tuple[str, ...] = (
 Matched by name, whatever the value: an empty `DATABASE_URL=` is harmless today
 but is one paste away from production, and the launcher cannot tell a local URL
 from a Railway one without reading the value, which it must not do.
+"""
+
+AUTOSIGNIN_TOKEN_KEY = "AUTH_LOCAL_AUTOSIGNIN_TOKEN"  # noqa: S105 - a key name, not a value
+"""Refused in a dotenv file whatever its value (ADR 0033).
+
+The launcher generates this token fresh on every start and hands it only to the
+server process. One written to disk would be a standing password-free sign-in,
+reusable on every launch that forgot to override it.
 """
 
 DOTENV_FILES: tuple[str, ...] = (".env", ".env.local")
@@ -113,6 +125,12 @@ def scan_dotenv(root: Path) -> ScanResult:
                     f"{path} defines ENVIRONMENT: comment out or delete the ENVIRONMENT "
                     f"line in {path} (the launcher always runs development)."
                 )
+            elif key == AUTOSIGNIN_TOKEN_KEY:
+                refusals.append(
+                    f"{path} defines {key}: the launcher generates a fresh sign-in token "
+                    f"on every start, and one stored on disk would never expire. Delete "
+                    f"the {key} line in {path}."
+                )
             elif key in FORBIDDEN_KEYS:
                 refusals.append(
                     f"{path} defines {key}: a local server must never reach a shared "
@@ -160,6 +178,65 @@ def compute_budget_mib(total_bytes: int, override: str | None = None) -> int:
         raise ValueError(msg)
     derived = int((total_bytes / MIB) * BUDGET_FRACTION)
     return max(BUDGET_MIN_MIB, min(BUDGET_MAX_MIB, derived))
+
+
+UI_DEPS_CURRENT = "current"
+UI_DEPS_INSTALL = "install"
+LINKED_NODE_MODULES_MESSAGE = (
+    "node_modules is a link to another folder; refusing to reinstall through it. "
+    "Run npm ci in the link target, or remove the link."
+)
+
+
+class LinkedNodeModulesError(RuntimeError):
+    """`node_modules` needs reinstalling but is a junction or symlink."""
+
+
+def _is_link(path: Path) -> bool:
+    """Whether `path` is a symlink or a Windows junction (any reparse point)."""
+    try:
+        if path.is_symlink():
+            return True
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def ui_dependency_action(ui_dir: Path) -> str:
+    """Decide whether the UI build first needs `npm ci`.
+
+    Stale means `node_modules/.package-lock.json` is missing or older than
+    `package-lock.json`, the same rule the launcher always used. A stale
+    `node_modules` that is a link is refused rather than reinstalled: `npm ci`
+    deletes `node_modules` first, and through a junction that deletion lands
+    in the folder the link points at, which is how one launch emptied another
+    checkout's dependencies. A link that is current is fine: a build only
+    reads it.
+
+    Args:
+        ui_dir: The `rankuno-ui` directory.
+
+    Returns:
+        `UI_DEPS_CURRENT` or `UI_DEPS_INSTALL`.
+
+    Raises:
+        LinkedNodeModulesError: Stale, and `node_modules` is a link.
+    """
+    modules = ui_dir / "node_modules"
+    lock = ui_dir / "package-lock.json"
+    installed = modules / ".package-lock.json"
+    try:
+        stale = not installed.is_file() or (
+            lock.is_file() and lock.stat().st_mtime > installed.stat().st_mtime
+        )
+    except OSError:
+        stale = True
+    if not stale:
+        return UI_DEPS_CURRENT
+    if _is_link(modules):
+        raise LinkedNodeModulesError(LINKED_NODE_MODULES_MESSAGE)
+    return UI_DEPS_INSTALL
 
 
 def verify_environment(expect_budget_mib: int) -> dict[str, object]:
@@ -219,6 +296,8 @@ def build_parser() -> argparse.ArgumentParser:
     budget.add_argument("--override", default=None)
     verify = sub.add_parser("verify", help="Prove the guard inside the server env.")
     verify.add_argument("--expect-budget", type=int, required=True)
+    deps = sub.add_parser("ui-deps", help="Decide whether the UI needs npm ci.")
+    deps.add_argument("--ui-dir", type=Path, required=True)
     return parser
 
 
@@ -231,6 +310,13 @@ def main(argv: list[str] | None = None) -> int:
         for refusal in result.refusals:
             print(f"REFUSED: {refusal}", file=sys.stderr)
         return 1 if result.refusals else 0
+    if args.command == "ui-deps":
+        try:
+            print(ui_dependency_action(args.ui_dir))
+        except LinkedNodeModulesError as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if args.command == "budget":
         try:
             print(compute_budget_mib(args.total_bytes, args.override))

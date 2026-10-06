@@ -33,6 +33,45 @@ interface StoredSession {
 
 const STORAGE_KEY = "rankuno.auth";
 
+/**
+ * The local launcher's one-time sign-in link (ADR 0033).
+ *
+ * `scripts/run_local.ps1` opens `http://127.0.0.1:<port>/#autosignin=<token>`.
+ * The token rides in the fragment because a browser never sends a fragment to
+ * the server, so it reaches no access log. It is read once, at module load and
+ * so before any request, stripped from the address bar at once, and held only
+ * in this module-local variable until `signInWithLink` posts it. It is never
+ * put in store state, in `localStorage`, in a URL, or in a log.
+ */
+const LINK_PARAM = "autosignin";
+const LINK_TOKEN_SHAPE = /^[0-9a-f]{64,256}$/i;
+const LINK_FAILED =
+  "This sign-in link has expired or was already used. Sign in with your operator id and password.";
+
+let pendingLinkToken: string | null = null;
+
+/**
+ * Take a sign-in link's token out of `location.hash`, and out of the address bar.
+ *
+ * Runs once on module load. Exported so a test can drive it after changing
+ * `location`; calling it again with no link in the URL changes nothing.
+ */
+export function captureSignInLink(): void {
+  const hash = window.location.hash;
+  if (hash.length < 2) return;
+  const params = new URLSearchParams(hash.slice(1));
+  if (!params.has(LINK_PARAM)) return;
+  const value = params.get(LINK_PARAM) ?? "";
+  // Stripped whatever the value, and before anything is sent anywhere, so the
+  // link cannot linger in history, a bookmark or a copied address.
+  window.history.replaceState(
+    window.history.state,
+    "",
+    window.location.pathname + window.location.search,
+  );
+  pendingLinkToken = LINK_TOKEN_SHAPE.test(value) ? value : null;
+}
+
 interface AuthState {
   token: string | null;
   orgId: string | null;
@@ -49,6 +88,13 @@ interface AuthState {
    */
   loginError: string | null;
   login: (operatorId: string, password: string) => Promise<boolean>;
+  /**
+   * Exchange a captured launcher sign-in link for a session.
+   *
+   * Resolves `false` at once, without a request, when there is no link. Any
+   * failure falls back to the normal login screen with a generic message.
+   */
+  signInWithLink: () => Promise<boolean>;
   logout: () => void;
 }
 
@@ -81,6 +127,8 @@ function isExpired(expiresAt: string): boolean {
   return new Date(expiresAt).getTime() <= Date.now();
 }
 
+captureSignInLink();
+
 const restored = readStoredSession();
 // A token already past its own `expires_at` is dropped before it is ever
 // attached to a request. The server would reject it anyway with a `401`;
@@ -90,7 +138,26 @@ const restored = readStoredSession();
 const restoredValid = restored && !isExpired(restored.expiresAt) ? restored : null;
 if (restored && !restoredValid) writeStoredSession(null);
 
-export const useAuthStore = create<AuthState>((set) => ({
+export const useAuthStore = create<AuthState>((set) => {
+  /** The one path a session takes into this store, from either kind of sign-in. */
+  function storeSession(body: LoginResponseBody): void {
+    const session: StoredSession = {
+      token: body.token,
+      orgId: body.org_id,
+      expiresAt: body.expires_at,
+    };
+    writeStoredSession(session);
+    setAuthToken(session.token);
+    set({
+      token: session.token,
+      orgId: session.orgId,
+      expiresAt: session.expiresAt,
+      loggingIn: false,
+      loginError: null,
+    });
+  }
+
+  return {
   token: restoredValid?.token ?? null,
   orgId: restoredValid?.orgId ?? null,
   expiresAt: restoredValid?.expiresAt ?? null,
@@ -138,22 +205,32 @@ export const useAuthStore = create<AuthState>((set) => ({
       return false;
     }
 
-    const body = (await response.json()) as LoginResponseBody;
-    const session: StoredSession = {
-      token: body.token,
-      orgId: body.org_id,
-      expiresAt: body.expires_at,
-    };
-    writeStoredSession(session);
-    setAuthToken(session.token);
-    set({
-      token: session.token,
-      orgId: session.orgId,
-      expiresAt: session.expiresAt,
-      loggingIn: false,
-      loginError: null,
-    });
+    storeSession((await response.json()) as LoginResponseBody);
     return true;
+  },
+
+  async signInWithLink() {
+    const linkToken = pendingLinkToken;
+    pendingLinkToken = null;
+    if (!linkToken) return false;
+    set({ loggingIn: true, loginError: null });
+    try {
+      const response = await fetch(`${API_BASE}/auth/local-signin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: linkToken }),
+      });
+      if (response.ok) {
+        storeSession((await response.json()) as LoginResponseBody);
+        return true;
+      }
+    } catch {
+      // Unreachable server or an unreadable body: the same fallback as a 401.
+    }
+    // One message for every failure, the server's 401 and 429 included: the
+    // operator's next step is the same either way.
+    set({ loggingIn: false, loginError: LINK_FAILED });
+    return false;
   },
 
   logout() {
@@ -161,7 +238,8 @@ export const useAuthStore = create<AuthState>((set) => ({
     setAuthToken(null);
     set({ token: null, orgId: null, expiresAt: null, loginError: null });
   },
-}));
+  };
+});
 
 /**
  * Whether the store currently holds a session the server would still accept.

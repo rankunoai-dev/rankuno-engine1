@@ -84,6 +84,18 @@ so a name can never be mistaken for part of the `__` nesting syntax.
 
 _GSC_ACCOUNT_NAME_RE = re.compile(GSC_ACCOUNT_NAME_PATTERN)
 
+_IDENTIFIER_PATTERN = r"^[a-z0-9_-]{1,64}$"
+"""Operator and org ids: the same rule `src/core/auth.py` applies to both."""
+
+_AUTOSIGNIN_TOKEN_RE = re.compile(r"[0-9a-fA-F]{64,256}")
+"""What `AUTH_LOCAL_AUTOSIGNIN_TOKEN` must look like (ADR 0033).
+
+64 hex characters is the 32 random bytes the launcher generates; 256 is the
+route body's `max_length`, so a token that could never be redeemed cannot start
+the server. Checked in `model_post_init`, not as a `Field(pattern=...)`,
+because a pydantic validation error echoes the offending input.
+"""
+
 
 class GscAccountProfile(StrictModel):
     """One Google account authorised to read Search Console.
@@ -463,6 +475,36 @@ class Settings(BaseSettings):
         default=DEFAULT_ORG_ID,
         description="Org the bootstrap operator belongs to. Defaults to 'default'.",
     )
+    auth_local_autosignin_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Single-use sign-in token for `scripts/run_local.ps1` (ADR 0033). Its "
+            "presence mounts `POST /auth/local-signin`; unset, the route does not "
+            "exist. Development only, never alongside Postgres, generated fresh "
+            "by the launcher on every start and never stored in a dotenv file."
+        ),
+    )
+    auth_local_autosignin_operator_id: str = Field(
+        default="local",
+        pattern=_IDENTIFIER_PATTERN,
+        description=(
+            "The dedicated operator the local sign-in link signs in as. Created "
+            "at startup with an unusable password if absent (ADR 0033)."
+        ),
+    )
+    auth_local_autosignin_org_id: str = Field(
+        default=DEFAULT_ORG_ID,
+        pattern=_IDENTIFIER_PATTERN,
+        description="Org the local sign-in operator must belong to.",
+    )
+    api_allowed_hosts: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated Host header allowlist. Set, `create_app()` mounts "
+            "Starlette's TrustedHostMiddleware and any other Host gets a 400; "
+            "unset, no Host check runs at all (ADR 0033)."
+        ),
+    )
 
     # -- Worker daemon dispatch (ADR 0015) ------------------------------------
     worker_store_backend: WorkerStoreBackend = Field(
@@ -714,6 +756,19 @@ class Settings(BaseSettings):
             )
         return init_settings, env_settings, dotenv_settings, file_secret_settings
 
+    @field_validator("auth_local_autosignin_token", "api_allowed_hosts", mode="before")
+    @classmethod
+    def _empty_means_unset(cls, value: object) -> object:
+        """Treat an empty value as unset.
+
+        The launcher blanks `AUTH_LOCAL_AUTOSIGNIN_TOKEN` under
+        `-NoAutoSignIn` so a value inherited from the parent shell cannot turn
+        the route on; empty has to read as "off", not as a malformed token.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
@@ -742,6 +797,7 @@ class Settings(BaseSettings):
 
     def model_post_init(self, _context: Any, /) -> None:
         """Refuse unsafe production configurations at boot rather than at call time."""
+        self._check_local_autosignin()
         if self.environment is Environment.PRODUCTION:
             if not self.guardrails_enabled:
                 msg = "GUARDRAILS_ENABLED=false is not permitted in production."
@@ -973,6 +1029,36 @@ class Settings(BaseSettings):
 
             self._org_config_store = DiskOrgConfigStore(self.org_config_path)
         return self._org_config_store
+
+    def _check_local_autosignin(self) -> None:
+        """Refuse a local sign-in token outside development, or one of the wrong shape.
+
+        First in `model_post_init`, so this message wins over the production
+        secret checks. Neither message carries the value (ADR 0033).
+
+        Raises:
+            ConfigurationError: The token is set outside development, or is
+                not 64-256 hex characters.
+        """
+        if self.auth_local_autosignin_token is None:
+            return
+        if self.environment is not Environment.DEVELOPMENT:
+            msg = (
+                "AUTH_LOCAL_AUTOSIGNIN_TOKEN is permitted only with "
+                "ENVIRONMENT=development: it signs a browser in without a password "
+                "(ADR 0033)."
+            )
+            raise ConfigurationError(msg)
+        if not _AUTOSIGNIN_TOKEN_RE.fullmatch(self.auth_local_autosignin_token.get_secret_value()):
+            msg = "AUTH_LOCAL_AUTOSIGNIN_TOKEN must be 64-256 hexadecimal characters."
+            raise ConfigurationError(msg)
+
+    @property
+    def api_allowed_host_list(self) -> list[str]:
+        """`api_allowed_hosts` split on commas; empty means no Host check."""
+        if self.api_allowed_hosts is None:
+            return []
+        return [host.strip() for host in self.api_allowed_hosts.split(",") if host.strip()]
 
     @property
     def operator_store(self) -> OperatorStore:

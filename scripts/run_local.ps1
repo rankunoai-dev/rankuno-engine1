@@ -25,7 +25,12 @@
          inlined.
       6. Generate the per-run session secret (and, on an empty operator store
          only, the bootstrap password), in the child environment only.
-      7. Start uvicorn on loopback with one worker.
+      7. Start uvicorn on loopback with one worker, Host-checked against
+         127.0.0.1 and localhost.
+      8. Unless -NoAutoSignIn, wait for /api/v1/health and open the default
+         browser already signed in, through a single-use link that expires
+         five minutes after the server starts (ADR 0033). Only the plain
+         address is ever printed; normal login keeps working.
 
     Local data (.jobs, .operators, .orgs, rankuno-ui/dist) lands in the checkout
     this script lives in. It is never synced with production.
@@ -50,6 +55,16 @@
 .PARAMETER PromptPassword
     Type the bootstrap password instead of having one generated.
 
+.PARAMETER NoAutoSignIn
+    Do not open the browser signed in. Log in with an operator id and password.
+
+.PARAMETER AutoSignInOperatorId
+    Operator the sign-in link signs in as. Created on first use with no usable
+    password if it does not exist. Default 'local'.
+
+.PARAMETER AutoSignInOrgId
+    Org that operator must belong to. Default 'default'.
+
 .PARAMETER Python
     Python interpreter to use when this checkout has no .venv (a git worktree,
     for example). Defaults to <repo>\.venv\Scripts\python.exe.
@@ -58,6 +73,7 @@
     .\scripts\run_local.ps1
     .\scripts\run_local.ps1 -Port 8899 -MemoryBudgetMiB 16000
     .\scripts\run_local.ps1 -CheckOnly
+    .\scripts\run_local.ps1 -NoAutoSignIn
 #>
 [CmdletBinding()]
 param(
@@ -67,6 +83,9 @@ param(
     [switch]$CheckOnly,
     [ValidatePattern('^[a-z0-9_-]{1,64}$')][string]$BootstrapOperatorId = 'admin',
     [switch]$PromptPassword,
+    [switch]$NoAutoSignIn,
+    [ValidatePattern('^[a-z0-9_-]{1,64}$')][string]$AutoSignInOperatorId = 'local',
+    [ValidatePattern('^[a-z0-9_-]{1,64}$')][string]$AutoSignInOrgId = 'default',
     [string]$Python = ''
 )
 
@@ -81,7 +100,8 @@ $BuildStamp = Join-Path $DistDir '.rankuno-local-build'
 $ApiBase = '/api/v1'
 # Names only. The values are generated after the build, so they cannot be in it;
 # this checks nothing that names them was inlined either.
-$SecretNames = @('AUTH_SESSION_SECRET', 'AUTH_BOOTSTRAP_OPERATOR_PASSWORD', 'DATABASE_URL', 'POSTGRES_PASSWORD')
+$SecretNames = @('AUTH_SESSION_SECRET', 'AUTH_BOOTSTRAP_OPERATOR_PASSWORD', 'AUTH_LOCAL_AUTOSIGNIN_TOKEN',
+    'DATABASE_URL', 'POSTGRES_PASSWORD')
 
 function Stop-Launch([string]$Message) {
     Write-Host "REFUSED: $Message" -ForegroundColor Red
@@ -137,6 +157,31 @@ function New-HexSecret([int]$Bytes) {
     return -join ($buffer | ForEach-Object { $_.ToString('x2') })
 }
 
+function Wait-ServerHealthy([System.Diagnostics.Process]$Server, [string]$HealthUrl, [int]$TimeoutSeconds = 60) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($Server.HasExited) { return $false }
+        try {
+            $reply = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 2
+            if ($reply.StatusCode -eq 200) { return $true }
+        } catch {
+            # Not listening yet.
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Open-Browser([string]$Url) {
+    # A direct .NET call rather than Start-Process: PowerShell module logging
+    # (event 4103) records cmdlet parameter values, and this URL carries the
+    # one-time token in its fragment. ShellExecute picks the default browser.
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $Url
+    $info.UseShellExecute = $true
+    [void][System.Diagnostics.Process]::Start($info)
+}
+
 function Test-UiStale {
     $index = Join-Path $DistDir 'index.html'
     if ($Rebuild) { return 'rebuild requested' }
@@ -190,6 +235,10 @@ $childEnv = @{
     WORKER_STORE_BACKEND    = 'disk'
     ENVIRONMENT             = 'development'
     CRAWL_MEMORY_BUDGET_MIB = [string]$budgetMiB
+    API_ALLOWED_HOSTS       = '127.0.0.1,localhost'
+    # Blank unless step 6 generates one: the child inherits this shell's
+    # environment, and an inherited token must not switch the route on.
+    AUTH_LOCAL_AUTOSIGNIN_TOKEN = ''
 }
 
 # -- 4. Prove the guard ----------------------------------------------------------
@@ -210,7 +259,14 @@ Write-Host "  operator store empty: $($facts.operator_store_empty)"
 $staleReason = Test-UiStale
 if ($CheckOnly) {
     $uiState = if ($staleReason) { "would build ($staleReason)" } else { 'up to date' }
+    if ($staleReason) {
+        $deps = Invoke-Child $Python @($Preflight, 'ui-deps', '--ui-dir', $UiDir) @{} -Capture
+        $depsState = if ($deps.Code -ne 0) { 'would REFUSE (node_modules is a link that needs reinstalling)' } else { "dependencies $($deps.Out)" }
+        $uiState = "$uiState; $depsState"
+    }
     Write-Host "  UI                  : $uiState"
+    $signIn = if ($NoAutoSignIn) { 'off (-NoAutoSignIn)' } else { "on, as '$AutoSignInOperatorId' in org '$AutoSignInOrgId'" }
+    Write-Host "  auto sign-in        : $signIn"
     Write-Host "  would serve         : http://127.0.0.1:$Port/"
     Write-Host 'CheckOnly: nothing built, nothing started.' -ForegroundColor Cyan
     exit 0
@@ -223,9 +279,13 @@ if ($staleReason) {
     if (-not $node -or -not $npm) { Stop-Launch "Node.js 18+ is needed to build the UI ($staleReason). Install it from nodejs.org." }
     $nodeMajor = [int]((& $node.Source --version).TrimStart('v').Split('.')[0])
     if ($nodeMajor -lt 18) { Stop-Launch "Node.js 18+ is needed to build the UI; found $nodeMajor." }
-    $lockFile = Join-Path $UiDir 'package-lock.json'
-    $installed = Join-Path $UiDir 'node_modules\.package-lock.json'
-    if (-not (Test-Path $installed) -or (Get-Item $lockFile).LastWriteTimeUtc -gt (Get-Item $installed).LastWriteTimeUtc) {
+    # The decision lives in local_preflight.py where it is tested. It never
+    # answers "install" for a node_modules that is a junction or symlink:
+    # npm ci deletes node_modules first, and through a link that deletes the
+    # target folder's contents.
+    $deps = Invoke-Child $Python @($Preflight, 'ui-deps', '--ui-dir', $UiDir) @{} -Capture
+    if ($deps.Code -ne 0) { Stop-Launch 'node_modules is a link to another folder (see above).' }
+    if ($deps.Out -eq 'install') {
         Write-Host 'Installing UI dependencies (npm ci)...' -ForegroundColor Cyan
         $ci = Invoke-Child $npm.Source @('ci') @{} $UiDir
         if ($ci.Code -ne 0) { Stop-Launch 'npm ci failed (see above).' }
@@ -264,6 +324,13 @@ if ($facts.operator_store_empty) {
     $childEnv['AUTH_BOOTSTRAP_OPERATOR_ID'] = $BootstrapOperatorId
     $childEnv['AUTH_BOOTSTRAP_OPERATOR_PASSWORD'] = $bootstrapPassword
 }
+$autoSignInToken = $null
+if (-not $NoAutoSignIn) {
+    $autoSignInToken = New-HexSecret 32
+    $childEnv['AUTH_LOCAL_AUTOSIGNIN_TOKEN'] = $autoSignInToken
+    $childEnv['AUTH_LOCAL_AUTOSIGNIN_OPERATOR_ID'] = $AutoSignInOperatorId
+    $childEnv['AUTH_LOCAL_AUTOSIGNIN_ORG_ID'] = $AutoSignInOrgId
+}
 
 # -- 7. Serve --------------------------------------------------------------------
 try {
@@ -281,11 +348,36 @@ $server = [System.Diagnostics.Process]::Start($psi)
 # The child has its copy; drop ours.
 $psi.EnvironmentVariables.Remove('AUTH_SESSION_SECRET')
 $psi.EnvironmentVariables.Remove('AUTH_BOOTSTRAP_OPERATOR_PASSWORD')
+$psi.EnvironmentVariables.Remove('AUTH_LOCAL_AUTOSIGNIN_TOKEN')
 $childEnv.Remove('AUTH_SESSION_SECRET')
 $childEnv.Remove('AUTH_BOOTSTRAP_OPERATOR_PASSWORD')
+$childEnv.Remove('AUTH_LOCAL_AUTOSIGNIN_TOKEN')
 $bootstrapPassword = $null
 
 Write-Host "Serving http://127.0.0.1:$Port/ (server pid $($server.Id)). Ctrl+C to stop." -ForegroundColor Green
+
+# -- 8. Open the browser signed in -----------------------------------------------
+# The token rides in the fragment, which a browser never sends to the server, so
+# it reaches no access log. Only the plain address is ever printed: if the
+# browser cannot be opened, the fallback is normal login, never the link.
+if ($autoSignInToken) {
+    $opened = $false
+    if (Wait-ServerHealthy $server "http://127.0.0.1:$Port$ApiBase/health") {
+        try {
+            Open-Browser "http://127.0.0.1:$Port/#autosignin=$autoSignInToken"
+            $opened = $true
+        } catch {
+            $opened = $false
+        }
+    }
+    $autoSignInToken = $null
+    Remove-Variable autoSignInToken
+    if ($opened) {
+        Write-Host "Opened http://127.0.0.1:$Port/ in your browser, signed in as '$AutoSignInOperatorId' (org '$AutoSignInOrgId')." -ForegroundColor Green
+    } else {
+        Write-Host "Could not open a signed-in browser. Sign in at http://127.0.0.1:$Port/ with an operator id and password." -ForegroundColor Yellow
+    }
+}
 try {
     $server.WaitForExit()
 } finally {
