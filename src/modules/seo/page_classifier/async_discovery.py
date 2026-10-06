@@ -403,9 +403,16 @@ async def _ahtml(
     not a page.
 
     A returned body is charged to `memory_account` here, the moment it lands,
-    rather than when `store_html` keeps it: a BFS level holds every body it
-    fetched in its results list before any of them is stored, so counting at
-    storage would miss a whole level's worth of memory (ADR 0031).
+    rather than at the level boundary: a BFS level holds every body it fetched
+    in its results list until the whole level has landed, so counting there
+    would miss a whole level's worth of memory (ADR 0031).
+
+    The body is stored here too, for the same reason. Stored HTML is what
+    `SiteGraph.unfetched_urls` reads as "fetched", and a checkpoint is offered
+    after every page; storing only once the level ended meant every mid-level
+    checkpoint recorded that whole level as unfetched. A resumed crawl seeds
+    everything at depth 0, so its entire run is one level, and resuming one
+    that died re-downloaded the site. The serial path already stores at fetch.
     """
     try:
         # Bounded here rather than by httpx: its read timeout measures the gap
@@ -440,6 +447,7 @@ async def _ahtml(
         # `getsizeof` is O(1) and reports the PEP 393 width: one curly quote
         # makes a whole page two bytes per character.
         memory_account.charge(sys.getsizeof(result.body))
+    graph.store_html(url, result.body)
     return url, result.body
 
 
@@ -871,8 +879,6 @@ async def _acrawl(
             if item is None:
                 continue
             url, html = item
-            graph.store_html(url, html)
-
             links = extract_page_links(html, url, document_url=graph.landed_url(url))
             for target in graph.record_links(url, links, depth):
                 key = normalize_url(target)

@@ -38,6 +38,8 @@ from src.core.state_store import (
     JobStatus,
 )
 from src.core.url_safety import UrlSafetyPolicy
+from src.integrations.http_fetcher import HttpFetcher
+from src.modules.seo.page_classifier.async_discovery import adiscover_site
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.schemas import (
     ConsensusMethod,
@@ -1343,6 +1345,66 @@ class TestResume:
         # all, and asserting on a single attribute would miss a status or
         # telemetry rewrite.
         assert after == before
+
+    def test_a_crawl_that_died_mid_level_resumes_only_what_it_never_fetched(
+        self, client, store, stub_tool, settings, monkeypatch
+    ):
+        """The checkpoint a real crawl leaves, not a hand-written one.
+
+        A resumed crawl seeds everything at depth 0, so its whole run is one
+        BFS level. Pages used to be marked fetched only when their level ended,
+        so a crawl dying inside that level checkpointed every page as unfetched
+        and resuming it again re-downloaded the site — groundsguys.com:
+        "+7,238" died at 2,011 pages and its resume offered "+7,972".
+        """
+        monkeypatch.setattr(server_module, "CHECKPOINT_INTERVAL_S", 0.0)
+        stub_tool.result = StubResult(ok=True, data={"base_url": SAFE_URL})
+        original = run_job(client, store)
+        seeds = tuple(f"{SAFE_URL}s{n}/" for n in range(6))
+        leaf = "<html><body>leaf</body></html>"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+            if request.url.path == "/" or f"{SAFE_URL}{request.url.path[1:]}" in seeds:
+                return httpx.Response(200, text=leaf, headers={"content-type": "text/html"})
+            return httpx.Response(404, text="not found")
+
+        checkpointer = server_module.CrawlCheckpointer(store, original, SAFE_URL)
+        pages_seen = 0
+
+        def dies_after_three_pages(graph: SiteGraph) -> None:
+            # Every write after the third page is lost, as if the process died.
+            nonlocal pages_seen
+            if len(graph):
+                pages_seen += 1
+            if pages_seen <= 3:
+                checkpointer(graph)
+
+        async def crawl() -> None:
+            fetcher = HttpFetcher(
+                settings=settings,
+                url_policy=UrlSafetyPolicy(resolver=lambda host: [PUBLIC_IP]),
+                transport=httpx.MockTransport(handler),
+                async_transport=httpx.MockTransport(handler),
+            )
+            async with fetcher:
+                await adiscover_site(
+                    fetcher,
+                    SAFE_URL,
+                    concurrency=1,
+                    seed_urls=seeds,
+                    on_checkpoint=dies_after_three_pages,
+                )
+
+        asyncio.run(crawl())
+
+        response = client.post(f"{API_PREFIX}/jobs/{original}/resume")
+        assert response.status_code == 202, response.text
+        assert "resumed +4" in response.json()["label"]
+        request = store.get(response.json()["id"]).request
+        assert request["exclude_urls"] == [SAFE_URL, *seeds[:2]]
+        assert request["seed_urls"] == list(seeds[2:])
 
 
 class TestCancel:
