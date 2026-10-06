@@ -267,3 +267,100 @@ describe("CrawlJobsView masterfiles", () => {
     expect(buildMasterfile).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * A job imported from a local run (ADR 0034).
+ *
+ * The server refuses to retry or resume one with a 409, so the menu must not
+ * offer either; everything that only reads the stored result stays. A normal
+ * job in the same state must still get both, or the guard has simply removed
+ * the feature.
+ */
+describe("CrawlJobsView imported jobs", () => {
+  const IMPORTED = { sourceLabel: "gaurav-workstation", importedAt: "2026-10-02T08:30:00Z" };
+
+  function withRerunAdapter(): void {
+    useCrawlStore.setState({
+      adapter: {
+        // `startJob` is what turns relaunch on; `downloadUrlList` keeps the
+        // menu present even when it holds nothing else.
+        startJob: vi.fn(),
+        downloadUrlList: vi.fn(),
+      } as unknown as CrawlDataAdapter,
+    });
+  }
+
+  async function openMenu(): Promise<void> {
+    render(<CrawlJobsView />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions for this crawl/i }));
+    await screen.findByText("Download URLs");
+  }
+
+  it("badges an imported job, with the source and import time on focus", async () => {
+    withJob({ importedFrom: IMPORTED });
+    render(<CrawlJobsView />);
+
+    const badge = screen.getByText("imported from local");
+    expect(badge).toHaveAttribute("tabindex", "0");
+    expect(badge.getAttribute("aria-label")).toMatch(/Crawled on gaurav-workstation, imported /);
+
+    fireEvent.focus(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/Crawled on gaurav-workstation/);
+  });
+
+  it("says 'a local machine' when the import named no source", () => {
+    withJob({ importedFrom: { ...IMPORTED, sourceLabel: null } });
+    render(<CrawlJobsView />);
+    expect(screen.getByText("imported from local").getAttribute("aria-label")).toMatch(
+      /Crawled on a local machine, imported /,
+    );
+  });
+
+  it.each([
+    ["absent", {}],
+    ["null", { importedFrom: null }],
+  ])("shows no badge when provenance is %s", (_case, overrides) => {
+    withJob(overrides);
+    render(<CrawlJobsView />);
+    expect(screen.queryByText("imported from local")).not.toBeInTheDocument();
+  });
+
+  it("hides Resume and Run again on an imported partial job with a checkpoint", async () => {
+    withJob({ status: "partial", hasCheckpoint: true, importedFrom: IMPORTED });
+    withRerunAdapter();
+    await openMenu();
+    expect(screen.queryByText("Resume")).not.toBeInTheDocument();
+    expect(screen.queryByText("Run again")).not.toBeInTheDocument();
+  });
+
+  it("offers no menu at all on an imported failed job, whose only items were re-runs", () => {
+    // A failed job has no result to download, so Resume and Run again were the
+    // whole menu. An empty `...` would be a control that opens onto nothing.
+    withJob({ status: "failed", hasCheckpoint: true, importedFrom: IMPORTED });
+    withRerunAdapter();
+    render(<CrawlJobsView />);
+    expect(
+      screen.queryByRole("button", { name: /more actions for this crawl/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides Run again on an imported succeeded job but keeps the read-only items", async () => {
+    withJob({ status: "succeeded", importedFrom: IMPORTED });
+    withRerunAdapter();
+    await openMenu();
+    expect(screen.getByText("Download URLs")).toBeInTheDocument();
+    expect(screen.queryByText("Run again")).not.toBeInTheDocument();
+  });
+
+  it.each(["partial", "failed"] as const)(
+    "still offers Resume and Run again on a normal %s job with a checkpoint",
+    async (status) => {
+      withJob({ status, hasCheckpoint: true, importedFrom: null });
+      withRerunAdapter();
+      render(<CrawlJobsView />);
+      fireEvent.click(screen.getByRole("button", { name: /more actions for this crawl/i }));
+      expect(await screen.findByText("Resume")).toBeInTheDocument();
+      expect(screen.getByText("Run again")).toBeInTheDocument();
+    },
+  );
+});

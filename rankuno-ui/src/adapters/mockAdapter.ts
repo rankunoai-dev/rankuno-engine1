@@ -80,6 +80,7 @@ export class MockAdapter implements CrawlDataAdapter {
             crawledAt: null,
             hasCheckpoint: false,
             recoverable: false,
+            importedFrom: null,
           };
         }
         const synthetic = id.startsWith("synthetic");
@@ -97,6 +98,8 @@ export class MockAdapter implements CrawlDataAdapter {
           crawledAt: null,
           hasCheckpoint: false,
           recoverable: false,
+          // Fixtures are bundled, never imported.
+          importedFrom: null,
         };
       }),
     );

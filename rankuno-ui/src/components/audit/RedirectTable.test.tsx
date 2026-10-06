@@ -97,3 +97,41 @@ describe("RedirectTable", () => {
     expect(() => render(<RedirectTable pages={[legacy]} baseUrl="https://e.com/" />)).not.toThrow();
   });
 });
+
+/**
+ * Both addresses in a row come off a third-party site, and an imported bundle
+ * (ADR 0034) can carry anything. A non-http(s) value must reach the screen as
+ * text and never as an `href` — React 18 warns on `javascript:` and renders it.
+ */
+describe("RedirectTable link safety", () => {
+  const hostile = page("javascript:alert(1)", {
+    discovery_sources: { sitemap: true, dom_link: false, cms_api: false },
+    final_url: "java\tscript:alert(2)",
+    redirect_chain: ["https://e.com/mid/"],
+  });
+
+  it("renders a script URL in either column as text, with no anchor", () => {
+    const { container } = render(<RedirectTable pages={[hostile]} baseUrl="https://e.com/" />);
+    const table = screen.getByRole("table");
+
+    expect(within(table).getByText("javascript:alert(1)").closest("a")).toBeNull();
+    expect(within(table).getByText("java\tscript:alert(2)", { normalizer: (t) => t }).closest("a"))
+      .toBeNull();
+    for (const anchor of Array.from(container.querySelectorAll("a[href]"))) {
+      expect(anchor.getAttribute("href")).toMatch(/^https?:/);
+    }
+  });
+
+  it("still links an ordinary http(s) row", () => {
+    render(<RedirectTable pages={[chained]} baseUrl="https://e.com/" />);
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("https://e.com/old/").closest("a")).toHaveAttribute(
+      "href",
+      "https://e.com/old/",
+    );
+    expect(within(table).getByText("https://e.com/new/").closest("a")).toHaveAttribute(
+      "target",
+      "_blank",
+    );
+  });
+});

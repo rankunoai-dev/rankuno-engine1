@@ -6,6 +6,7 @@ import {
   type DashModel,
   type DashNode,
 } from "../../lib/dashboardModel";
+import { safeHref } from "../../lib/safeHref";
 import { reasonLabel } from "../../lib/treeOverlay";
 import { useDashboardStore } from "../../store/useDashboardStore";
 import { FullScreenTree } from "./FullScreenTree";
@@ -134,6 +135,10 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
 
     const hasChildren = node.kids.length > 0;
     const mark = active?.crossCheck ? active.mark[node.i] ?? "none" : "none";
+    // Crawled data can carry any scheme; only http(s) becomes a link. A row
+    // whose address fails the check renders as the inert label below.
+    const pageHref = node.profile ? safeHref(node.profile.url) : null;
+    const defaulterHref = !node.profile && node.kind === "defaulter" ? safeHref(node.url) : null;
     const missed = active?.crossCheck ? active.missedCnt[node.i] ?? 0 : 0;
     const added = active?.crossCheck ? active.addedCnt[node.i] ?? 0 : 0;
     const reason = active ? active.reason[node.i] : null;
@@ -184,10 +189,10 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
             The click stops here so opening the page does not also move the
             selection — reading a page and pointing at a row are different
             intentions, the same split the twisty makes. */}
-        {node.profile ? (
+        {node.profile && pageHref !== null ? (
           <a
             className="tlbl tlink"
-            href={node.profile.url}
+            href={pageHref}
             target="_blank"
             rel="noreferrer noopener"
             title={`Open ${node.profile.url} in a new tab`}
@@ -195,14 +200,14 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
           >
             {node.label}
           </a>
-        ) : node.kind === "defaulter" ? (
+        ) : defaulterHref !== null ? (
           // A real URL Screaming Frog listed, not a folder this tree needed to
           // hold children — it opens like a page link, not like the neutral
           // "no page crawled" segment below, which would assert this address
           // was never anything but a path this tree invented.
           <a
             className="tlbl tlink"
-            href={node.url}
+            href={defaulterHref}
             target="_blank"
             rel="noreferrer noopener"
             title={`Open ${node.url} in a new tab — not crawled by this engine`}

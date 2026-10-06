@@ -63,6 +63,23 @@ export interface CrawlJobSummary {
    * (possibly 16 MB) result — the job list must stay cheap.
    */
   stoppedReason?: string | null;
+  /**
+   * Set when the crawl ran on a local machine and was imported here (ADR 0034),
+   * from `JobRecord.provenance`; `null` or absent for a crawl this server ran.
+   *
+   * Only what the job list shows. The server refuses to retry or resume an
+   * imported job (409), so the list hides those actions instead of offering
+   * one that is certain to fail.
+   */
+  importedFrom?: ImportedFrom | null;
+}
+
+/** Where an imported crawl came from, as the job list shows it. */
+export interface ImportedFrom {
+  /** Operator-chosen name for the source machine, when one was given. */
+  sourceLabel: string | null;
+  /** When this server accepted the import, ISO-8601. */
+  importedAt: string;
 }
 
 /** Progress of a running job. */

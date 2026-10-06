@@ -12,7 +12,11 @@ import {
 import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useState } from "react";
-import type { CrawlJobSummary, JobStatus } from "../../adapters/adapterInterface";
+import type {
+  CrawlJobSummary,
+  ImportedFrom,
+  JobStatus,
+} from "../../adapters/adapterInterface";
 import { saveBlob } from "../../lib/download";
 import {
   elapsedSeconds,
@@ -42,6 +46,8 @@ interface JobRow {
   recoverable: boolean;
   hasCheckpoint: boolean;
   synthetic: boolean;
+  /** Ran on a local machine and was imported here (ADR 0034); null otherwise. */
+  importedFrom: ImportedFrom | null;
 }
 
 const STATUS_COLOUR: Record<JobStatus, string> = {
@@ -168,6 +174,7 @@ export function CrawlJobsView(): JSX.Element {
           <span className="jb-meta">
             {row.id === activeJobId && <Tag className="jb-viewing">viewing</Tag>}
             {row.synthetic && <Tag color="purple">synthetic</Tag>}
+            {row.importedFrom && <ImportedTag importedFrom={row.importedFrom} />}
             <span className="jb-when">{formatCrawlTime(row.crawledAt)}</span>
           </span>
         </div>
@@ -395,6 +402,11 @@ function ActionCell({
   // promising work on every completed crawl. A crawl that genuinely stopped
   // early is one that failed or hit its ceiling, and left a checkpoint.
   const stoppedEarly = row.hasCheckpoint && (row.status === "failed" || row.status === "partial");
+  // The server refuses to retry or resume an imported job (409, ADR 0034): it
+  // would crawl, and spend on, a site it never admitted, for a crawl it never
+  // ran. Hidden rather than offered and then failing; the badge's tooltip says
+  // where to run it instead.
+  const canRerunHere = canRelaunch && row.importedFrom === null;
   const running = row.status === "running" || row.status === "queued";
 
   /*
@@ -464,7 +476,7 @@ function ActionCell({
     });
   }
 
-  if (canRelaunch && stoppedEarly) {
+  if (canRerunHere && stoppedEarly) {
     extras.push({
       key: "resume",
       label: (
@@ -477,7 +489,7 @@ function ActionCell({
     });
   }
 
-  if (canRelaunch && finished) {
+  if (canRerunHere && finished) {
     extras.push({
       key: "retry",
       label: (
@@ -537,6 +549,29 @@ function ActionCell({
   );
 }
 
+/**
+ * The "imported from local" badge, with where and when in its tooltip.
+ *
+ * Focusable, and its tooltip opens on focus as well as hover, so the source and
+ * time are reachable without a mouse; the accessible name carries the same
+ * text for a screen reader, which does not announce antd tooltips.
+ */
+function ImportedTag({ importedFrom }: { importedFrom: ImportedFrom }): JSX.Element {
+  const source = importedFrom.sourceLabel
+    ? `Crawled on ${importedFrom.sourceLabel}`
+    : "Crawled on a local machine";
+  const detail =
+    `${source}, imported ${formatCrawlTime(importedFrom.importedAt)}. ` +
+    "It cannot be re-run here; run it again locally and import the new result.";
+  return (
+    <Tooltip title={detail} trigger={["hover", "focus"]}>
+      <Tag color="blue" className="jb-imported" tabIndex={0} aria-label={`Imported from local. ${detail}`}>
+        imported from local
+      </Tag>
+    </Tooltip>
+  );
+}
+
 /** Expanded row: the live URL stream for a running crawl. */
 function StreamPanel({ row }: { row: JobRow }): JSX.Element {
   const telemetry = row.live?.telemetry;
@@ -581,6 +616,7 @@ function buildRows(
       recoverable: job.recoverable === true,
       hasCheckpoint: job.hasCheckpoint === true,
       synthetic: job.synthetic,
+      importedFrom: job.importedFrom ?? null,
     };
   });
 
@@ -601,6 +637,7 @@ function buildRows(
       recoverable: false,
       hasCheckpoint: false,
       synthetic: false,
+      importedFrom: null,
     });
   }
 

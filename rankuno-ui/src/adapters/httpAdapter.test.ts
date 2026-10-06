@@ -237,3 +237,85 @@ describe("HttpAdapter.buildAllMasterfiles", () => {
     );
   });
 });
+
+describe("HttpAdapter.listJobs provenance", () => {
+  const record = {
+    id: "job-1",
+    tool_name: "page_classifier",
+    label: "https://e.com/",
+    status: "succeeded",
+    created_at: "2026-10-01T09:00:00Z",
+    updated_at: "2026-10-01T10:00:00Z",
+    started_at: "2026-10-01T09:00:05Z",
+    finished_at: "2026-10-01T10:00:00Z",
+    error: null,
+    has_result: true,
+    has_checkpoint: false,
+    telemetry: {},
+  };
+
+  function respond(records: unknown[]): void {
+    (fetch as any).mockResolvedValueOnce(new Response(JSON.stringify(records), { status: 200 }));
+  }
+
+  it("maps an imported job's label and import time, and nothing else", async () => {
+    respond([
+      {
+        ...record,
+        provenance: {
+          origin: "local_import",
+          source_instance_id: "inst-9",
+          source_label: "gaurav-workstation",
+          source_job_id: "local-42",
+          crawl_started_at: "2026-10-01T09:00:05Z",
+          crawl_finished_at: "2026-10-01T10:00:00Z",
+          imported_by: "operator-7",
+          imported_at: "2026-10-02T08:30:00Z",
+          bundle_sha256: "a".repeat(64),
+        },
+      },
+    ]);
+
+    const [job] = await new HttpAdapter("http://engine/api/v1").listJobs();
+
+    expect(job?.importedFrom).toEqual({
+      sourceLabel: "gaurav-workstation",
+      importedAt: "2026-10-02T08:30:00Z",
+    });
+  });
+
+  it("keeps a null source label rather than inventing one", async () => {
+    respond([
+      {
+        ...record,
+        provenance: {
+          origin: "local_import",
+          source_instance_id: "inst-9",
+          source_label: null,
+          source_job_id: "local-42",
+          crawl_started_at: "2026-10-01T09:00:05Z",
+          crawl_finished_at: "2026-10-01T10:00:00Z",
+          imported_by: "operator-7",
+          imported_at: "2026-10-02T08:30:00Z",
+          bundle_sha256: "a".repeat(64),
+        },
+      },
+    ]);
+
+    const [job] = await new HttpAdapter("http://engine/api/v1").listJobs();
+
+    expect(job?.importedFrom?.sourceLabel).toBeNull();
+  });
+
+  it.each([
+    ["null", { ...record, provenance: null }],
+    // A server predating ADR 0034 omits the field entirely.
+    ["absent", record],
+  ])("reads a %s provenance as a job this server ran", async (_case, wire) => {
+    respond([wire]);
+
+    const [job] = await new HttpAdapter("http://engine/api/v1").listJobs();
+
+    expect(job?.importedFrom).toBeNull();
+  });
+});

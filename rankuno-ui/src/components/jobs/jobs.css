@@ -69,6 +69,11 @@
   color: var(--ok);
 }
 
+/* Carries a tooltip (source and import time), so it says it has one. */
+.jb-imported {
+  cursor: help;
+}
+
 .jb-status {
   display: flex;
   flex-direction: column;

@@ -3,6 +3,7 @@ import type { ColumnsType } from "antd/es/table";
 import { useMemo, useState } from "react";
 import { discoverySourcesOf, orphanKind, type OrphanKind } from "../../lib/audit";
 import { downloadCsv, hostSlug, toCsv } from "../../lib/csv";
+import { safeHref } from "../../lib/safeHref";
 import type { FullPageIntelligenceProfile } from "../../types/schema";
 
 /**
@@ -179,11 +180,16 @@ export function OrphanTable({
             title: "URL",
             dataIndex: "url",
             ellipsis: true,
-            render: (url: string) => (
-              <a href={url} target="_blank" rel="noreferrer noopener" className="au-url">
-                {url}
-              </a>
-            ),
+            render: (url: string) => {
+              const href = safeHref(url);
+              return href !== null ? (
+                <a href={href} target="_blank" rel="noreferrer noopener" className="au-url">
+                  {url}
+                </a>
+              ) : (
+                <span className="au-url">{url}</span>
+              );
+            },
           },
           ...kindColumn,
           {

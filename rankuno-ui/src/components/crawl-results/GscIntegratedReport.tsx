@@ -10,6 +10,7 @@
  */
 
 import React, { useState, useMemo } from 'react';
+import { safeHref } from '../../lib/safeHref';
 import styles from './GscIntegratedReport.module.css';
 
 interface GscMetrics {
@@ -226,15 +227,19 @@ export const GscIntegratedReport: React.FC<GscIntegratedReportProps> = ({
             {sortedPages.map((page, idx) => (
               <tr key={`${page.url}-${idx}`} className={styles.row}>
                 <td className={styles.urlCell}>
-                  <a
-                    href={page.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={page.url}
-                    className={styles.urlLink}
-                  >
-                    {page.url.replace(baseUrl, '')}
-                  </a>
+                  {safeHref(page.url) !== null ? (
+                    <a
+                      href={safeHref(page.url) ?? undefined}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={page.url}
+                      className={styles.urlLink}
+                    >
+                      {page.url.replace(baseUrl, '')}
+                    </a>
+                  ) : (
+                    <span title={page.url}>{page.url.replace(baseUrl, '')}</span>
+                  )}
                 </td>
                 <td className={styles.levelCell}>{page.hierarchyLevel}</td>
                 <td className={styles.typeCell}>{page.primaryPageType}</td>

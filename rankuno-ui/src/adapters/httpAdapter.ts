@@ -1,5 +1,6 @@
 import { saveBlob } from "../lib/download";
 import type {
+  JobProvenance,
   JobTelemetry,
   PageClassificationInput,
   PageClassificationOutput,
@@ -43,6 +44,11 @@ interface JobRecord {
   has_result: boolean;
   has_checkpoint: boolean;
   telemetry: JobTelemetry;
+  /**
+   * Set only on a job imported from a local run (ADR 0034). Read as possibly
+   * absent as well as null: a server that predates the field omits it.
+   */
+  provenance?: JobProvenance | null;
 }
 
 /** Mirrors `WorkerJobListView` — the envelope around `GET /workers/jobs`. */
@@ -274,6 +280,14 @@ export class HttpAdapter implements CrawlDataAdapter {
       // Only meaningful on `partial`: `record.error` is also set for `failed`,
       // where the job list already renders it through the ordinary error path.
       stoppedReason: record.status === "partial" ? record.error : null,
+      // Only the two fields the list shows. The rest of the provenance —
+      // source ids, bundle hash, operator id — is audit data, not display.
+      importedFrom: record.provenance
+        ? {
+            sourceLabel: record.provenance.source_label,
+            importedAt: record.provenance.imported_at,
+          }
+        : null,
     };
   }
 

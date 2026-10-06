@@ -160,3 +160,26 @@ describe("toCsv", () => {
     expect(toCsv(["a", "b"], [["x", null]])).toBe("a,b\r\nx,");
   });
 });
+
+describe("OrphanTable link safety", () => {
+  it.each(["javascript:alert(1)", " JavaScript:alert(1)", "data:text/html,<b>x</b>", "//evil.example"])(
+    "renders %j as text, with no anchor",
+    (url) => {
+      const hostile = page(url, {
+        inbound_internal_links_count: 0,
+        discovery_sources: { sitemap: true, dom_link: false, cms_api: false },
+      });
+      render(<OrphanTable pages={[hostile, sitemapOrphan]} baseUrl="https://e.com/" />);
+      const table = screen.getByRole("table");
+
+      expect(
+        within(table).getByText(url.trim(), { exact: true }).closest("a"),
+      ).toBeNull();
+      // The ordinary row beside it is still a link.
+      expect(within(table).getByText("https://e.com/published/").closest("a")).toHaveAttribute(
+        "href",
+        "https://e.com/published/",
+      );
+    },
+  );
+});

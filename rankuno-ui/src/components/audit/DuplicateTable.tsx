@@ -2,6 +2,7 @@ import { Button, Input, Table, Tag, Tooltip } from "antd";
 import { useMemo, useState } from "react";
 import { suggestedSurvivor } from "../../lib/audit";
 import { downloadCsv, hostSlug, toCsv } from "../../lib/csv";
+import { safeHref } from "../../lib/safeHref";
 import type { FullPageIntelligenceProfile } from "../../types/schema";
 
 /**
@@ -141,9 +142,18 @@ export function DuplicateTable({
                   <Tag color={page.url === row.survivor.url ? "success" : "default"}>
                     {page.url === row.survivor.url ? "keep" : "point here"}
                   </Tag>
-                  <a href={page.url} target="_blank" rel="noreferrer noopener" className="au-url">
-                    {page.url}
-                  </a>
+                  {safeHref(page.url) !== null ? (
+                    <a
+                      href={safeHref(page.url) ?? undefined}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="au-url"
+                    >
+                      {page.url}
+                    </a>
+                  ) : (
+                    <span className="au-url">{page.url}</span>
+                  )}
                   <span className="au-member-meta">
                     {page.inbound_internal_links_count} inbound
                     {trailOf(page) !== "" && ` · ${trailOf(page)}`}
@@ -169,16 +179,16 @@ export function DuplicateTable({
             ),
             key: "survivor",
             ellipsis: true,
-            render: (_, row) => (
-              <a
-                href={row.survivor.url}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="au-url"
-              >
-                {row.survivor.url}
-              </a>
-            ),
+            render: (_, row) => {
+              const href = safeHref(row.survivor.url);
+              return href !== null ? (
+                <a href={href} target="_blank" rel="noreferrer noopener" className="au-url">
+                  {row.survivor.url}
+                </a>
+              ) : (
+                <span className="au-url">{row.survivor.url}</span>
+              );
+            },
           },
           {
             title: "Copies",

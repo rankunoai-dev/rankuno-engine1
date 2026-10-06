@@ -2,6 +2,7 @@ import { Button, Input, Table, Tag, Tooltip } from "antd";
 import { useMemo, useState } from "react";
 import { finalUrlOf, landsOnHomepage, redirectHops } from "../../lib/audit";
 import { downloadCsv, hostSlug, toCsv } from "../../lib/csv";
+import { safeHref } from "../../lib/safeHref";
 import type { FullPageIntelligenceProfile } from "../../types/schema";
 
 /**
@@ -100,11 +101,16 @@ export function RedirectTable({
             title: "Listed in the sitemap",
             dataIndex: "url",
             ellipsis: true,
-            render: (url: string) => (
-              <a href={url} target="_blank" rel="noreferrer noopener" className="au-url">
-                {url}
-              </a>
-            ),
+            render: (url: string) => {
+              const href = safeHref(url);
+              return href !== null ? (
+                <a href={href} target="_blank" rel="noreferrer noopener" className="au-url">
+                  {url}
+                </a>
+              ) : (
+                <span className="au-url">{url}</span>
+              );
+            },
           },
           {
             title: "Resolves to",
@@ -112,17 +118,22 @@ export function RedirectTable({
             ellipsis: true,
             render: (_, page) => {
               const destination = finalUrlOf(page);
+              const destinationHref = safeHref(destination);
               return (
                 <span className="au-redirect-to">
                   <span aria-hidden="true">→</span>{" "}
-                  <a
-                    href={destination}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="au-url"
-                  >
-                    {destination}
-                  </a>
+                  {destinationHref !== null ? (
+                    <a
+                      href={destinationHref}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="au-url"
+                    >
+                      {destination}
+                    </a>
+                  ) : (
+                    <span className="au-url">{destination}</span>
+                  )}
                   {landsOnHomepage(page) && (
                     <Tooltip title="Search engines usually read a redirect to the homepage as the page being gone rather than moved, which loses whatever the original ranked for.">
                       <Tag color="error">homepage</Tag>
