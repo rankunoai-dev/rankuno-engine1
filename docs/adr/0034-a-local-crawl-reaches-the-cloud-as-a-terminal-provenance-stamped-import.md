@@ -101,13 +101,13 @@ caller's org, stamped with where it came from.**
   Concurrency 1 and the 128 MiB cap bound it at roughly 1.1 to 1.5 GiB. The 128 MiB figure is
   extrapolated, not measured.
 - **What v1 bundles carry.** No checkpoint, reconciliation or performance report travels in v1.
-- **UI work** goes to ui-engineer:
+- **UI work not done**:
   - a "Copy to cloud" button, deferred because it would need an ADR 0032 amendment;
-  - the "Imported from local" badge;
-  - hiding Resume and Retry on imported jobs;
-  - a shared `safeHref()` at the 8 link sites;
   - a job deep link.
 
-  Until `safeHref()` lands, the URL audit is the only defence for imported data.
+  The rest of the UI work shipped in the same branch (commit `2c69c91`, build-log 0140): the
+  "imported from local" badge, Resume and Run again hidden on imported jobs, and a shared
+  `safeHref()` at the 8 link sites. The server-side URL audit and `safeHref()` are now two
+  independent defences.
 - **Spreadsheet formula injection.** Formula neutralisation in workbook and CSV exports is a
   separate known gap (F7), and imports widen who can supply that text.
