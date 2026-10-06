@@ -68,11 +68,21 @@ _JOB_FIELD_ORDER = (
     "has_result",
     "has_checkpoint",
     "telemetry",
+    "import_origin",
+    "source_instance_id",
+    "source_label",
+    "source_job_id",
+    "crawl_started_at",
+    "crawl_finished_at",
+    "imported_by",
+    "imported_at",
+    "bundle_sha256",
 )
 
 
 def _job_row(job: Mapping[str, object]) -> tuple[object, ...]:
-    return tuple(job[field] for field in _JOB_FIELD_ORDER)
+    # Provenance columns are NULL on every job `create()` writes (migration 009).
+    return tuple(job.get(field) for field in _JOB_FIELD_ORDER)
 
 
 class _FakeCursor:
@@ -95,6 +105,30 @@ class _FakeCursor:
             (org_id,) = params
             budget = self._db.org_budgets.get(org_id)
             self._one = (budget,) if budget is not None else None
+        elif q.startswith("INSERT INTO jobs") and "import_origin" in q:
+            self._insert_import(params)
+        elif q.startswith("SELECT id, org_id, tool_name") and "source_instance_id = %s" in q:
+            org_id, instance_id, source_job_id = params
+            match = [
+                job
+                for job in self._db.jobs.values()
+                if job["org_id"] == org_id
+                and job.get("source_instance_id") == instance_id
+                and job.get("source_job_id") == source_job_id
+            ]
+            self._one = _job_row(match[0]) if match else None
+        elif q.startswith("INSERT INTO job_payloads (job_id, result, homepage_html"):
+            import json
+
+            job_id, result_json, homepage, updated = params
+            self._db.payloads[job_id] = {
+                "result": json.loads(result_json),
+                "checkpoint": None,
+                "homepage_html": homepage,
+                "reconciliation": None,
+                "performance": None,
+                "updated_at": updated,
+            }
         elif q.startswith("INSERT INTO jobs"):
             job_id, org_id, tool_name, label, facet_id, request_json, status, created, updated = (
                 params
@@ -232,6 +266,31 @@ class _FakeCursor:
         else:  # pragma: no cover - defensive
             raise AssertionError(f"fake cursor does not understand transition: {q!r}")
         self._one = _job_row(self._db.jobs[job_id]) if job_id in self._db.jobs else None
+
+    def _insert_import(self, params: tuple[object, ...]) -> None:
+        """`import_terminal`'s INSERT, with migration 009's unique index and the org FK."""
+        import json
+
+        from psycopg import errors as pg_errors
+
+        # The INSERT binds every column except the two it writes as literals.
+        names = [f for f in _JOB_FIELD_ORDER if f not in ("has_result", "has_checkpoint")]
+        row: dict[str, object] = dict(zip(names, params, strict=True))
+        if row["org_id"] not in self._db.org_budgets:
+            raise pg_errors.ForeignKeyViolation("jobs_org_id_fkey")
+        for job in self._db.jobs.values():
+            if (
+                job["org_id"] == row["org_id"]
+                and job.get("source_instance_id") == row["source_instance_id"]
+                and job.get("source_job_id") == row["source_job_id"]
+            ):
+                raise pg_errors.UniqueViolation("uq_jobs_import_source")
+        row["request"] = json.loads(str(row["request"]))
+        row["telemetry"] = json.loads(str(row["telemetry"]))
+        row["has_result"] = True
+        row["has_checkpoint"] = False
+        self._db.jobs[str(row["id"])] = row
+        self._one = _job_row(row)
 
     def _recover_orphans(self, params: tuple[object, ...]) -> None:
         failed_status, checkpoint_reason, base_reason, finished, updated, queued, running = params

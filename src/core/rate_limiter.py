@@ -129,6 +129,21 @@ class TokenBucket:
             refill_per_second=requests_per_minute / 60.0,
         )
 
+    @classmethod
+    def per_hour(cls, key: str, requests_per_hour: int, burst: int) -> TokenBucket:
+        """Build a bucket from a requests-per-hour quota.
+
+        For actions that are rare by nature and heavy each time, such as a job
+        import (ADR 0034). `per_minute` takes a whole-number rate per minute,
+        so it cannot express six an hour.
+
+        Args:
+            key: Quota identifier.
+            requests_per_hour: Sustained rate.
+            burst: Tokens available at once.
+        """
+        return cls(key=key, capacity=max(1, burst), refill_per_second=requests_per_hour / 3600.0)
+
     def _refill_locked(self) -> None:
         """Add tokens accrued since the last update. Caller must hold the lock."""
         now = time.monotonic()
@@ -352,6 +367,25 @@ class RateLimiterRegistry:
                 bucket = TokenBucket.per_minute(key, rpm, burst)
                 self._buckets[key] = bucket
                 _logger.debug("bucket_created", extra={"bucket": key, "rpm": rpm})
+            return bucket
+
+    def get_or_create_per_hour(self, key: str, requests_per_hour: int, burst: int) -> TokenBucket:
+        """Return the hourly bucket for `key`, creating it on first use.
+
+        A separate method rather than a float `requests_per_minute`, so every
+        existing caller keeps its whole-number contract.
+
+        Args:
+            key: Quota identifier.
+            requests_per_hour: Sustained rate.
+            burst: Tokens available back to back.
+        """
+        with self._lock:
+            bucket = self._buckets.get(key)
+            if bucket is None:
+                bucket = TokenBucket.per_hour(key, requests_per_hour, burst)
+                self._buckets[key] = bucket
+                _logger.debug("bucket_created", extra={"bucket": key, "rph": requests_per_hour})
             return bucket
 
     def reset(self) -> None:

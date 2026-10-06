@@ -74,6 +74,7 @@ from pydantic import Field, SecretStr, ValidationError
 from src.api.auth import build_auth_router, org_scoped_or_404, require_principal
 from src.api.crawl_activity import CrawlActivityCounter, build_crawl_activity_router
 from src.api.deliverables_routes import build_deliverables_router
+from src.api.job_import_routes import build_job_import_router
 from src.api.local_signin import build_local_signin_router, ensure_local_operator
 from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password
@@ -1046,6 +1047,10 @@ class ApiState:
         # `web.crawl` key every crawl tool already uses — one bad actor must
         # not be able to starve every other org's admission capacity.
         self.principal_rate_limiter = RateLimiterRegistry()
+        # One job import at a time, process-wide (ADR 0034). Acquired without
+        # blocking: a second import is answered 429, never queued, because
+        # each one can hold ~1.1 GiB that the ADR 0031 budget does not count.
+        self.import_lock = threading.Lock()
         self._active: set[str] = set()
         self._facet_active: dict[str, set[str]] = {}  # facet_id -> active job ids
         # The cooperative-cancellation signal for the Python crawler
@@ -1688,6 +1693,7 @@ def create_app(
     # router follows the same shape for the same reason.
     app.include_router(build_deliverables_router(state), prefix=API_PREFIX)
     app.include_router(build_auth_router(state), prefix=API_PREFIX)
+    app.include_router(build_job_import_router(state), prefix=API_PREFIX)
     app.include_router(build_worker_router(state), prefix=API_PREFIX)
     app.include_router(build_crawl_activity_router(state), prefix=API_PREFIX)
     if local_signin_gate is not None:
@@ -2318,6 +2324,25 @@ def create_app(
 
         return JobAccepted(id=record.id, status=record.status.value, label=record.label)
 
+    def _refuse_imported(record: JobRecord, verb: str) -> None:
+        """Refuse to re-run a job that was imported rather than run here (ADR 0034).
+
+        Re-running one would make this server crawl, and spend on, a site
+        with settings it never validated at admission, on behalf of a crawl
+        it never ran. The operator who has the original runs it locally.
+
+        Raises:
+            HTTPException: `409` when the job carries import provenance.
+        """
+        if record.provenance is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    f"job {record.id} was imported from a local run and cannot be {verb} "
+                    "here; run the crawl again locally and import the new result"
+                ),
+            )
+
     def _stored_payload(job_id: str) -> PageClassificationInput:
         """Rebuild the input a job was started with.
 
@@ -2387,6 +2412,7 @@ def create_app(
         org_scoped_or_404(
             record=original_record, record_id=job_id, org_id=principal.org_id, kind="job"
         )
+        _refuse_imported(original_record, "retried")
 
         payload = _stored_payload(job_id)
         # Retry under the same facet and org as the original job
@@ -3662,6 +3688,7 @@ def create_app(
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
         org_scoped_or_404(record=record, record_id=job_id, org_id=principal.org_id, kind="job")
+        _refuse_imported(record, "resumed")
         payload = _stored_payload(job_id)
 
         if not record.is_terminal:

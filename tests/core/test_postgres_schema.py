@@ -166,3 +166,46 @@ class TestAlembicEnvironment:
             content = f.read()
 
         assert "def downgrade() -> None:" in content
+
+
+class TestJobImportProvenanceMigration:
+    """Migration 0009 (ADR 0034): nullable provenance columns and a per-org unique source."""
+
+    PATH = "alembic/versions/0009_job_import_provenance.py"
+
+    def _content(self) -> str:
+        with open(self.PATH, encoding="utf-8") as f:
+            return f.read()
+
+    def test_follows_008(self) -> None:
+        content = self._content()
+        assert 'revision: str = "009"' in content
+        assert 'down_revision: str | None = "008"' in content
+
+    def test_every_new_column_is_nullable(self) -> None:
+        content = self._content()
+        for column in (
+            "import_origin",
+            "source_instance_id",
+            "source_label",
+            "source_job_id",
+            "crawl_started_at",
+            "crawl_finished_at",
+            "imported_by",
+            "imported_at",
+            "bundle_sha256",
+        ):
+            assert f'sa.Column("{column}"' in content
+        assert "nullable=False" not in content
+
+    def test_the_dedupe_index_is_unique_partial_and_org_first(self) -> None:
+        content = self._content()
+        assert '["org_id", "source_instance_id", "source_job_id"]' in content
+        assert "unique=True" in content
+        assert 'postgresql_where=sa.text("source_job_id IS NOT NULL")' in content
+
+    def test_the_store_reads_exactly_these_columns(self) -> None:
+        from src.core.postgres_store import _JOB_COLUMNS
+
+        for column in ("import_origin", "source_job_id", "bundle_sha256"):
+            assert column in _JOB_COLUMNS

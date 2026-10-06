@@ -82,7 +82,9 @@ src/
 │   │                            # from app construction; 5 mismatches disarm it
 │   │                            # for the life of the process. No HTTP import
 │   ├── state_store.py           # Durable background-job records. Domain-agnostic:
-│   │                            # opaque request/result mappings, atomic writes
+│   │                            # opaque request/result mappings, atomic writes.
+│   │                            # JobRecord.provenance (None unless imported) and
+│   │                            # JobStore.import_terminal (ADR 0034)
 │   ├── json_stream.py           # Pull one field out of a huge JSON array without
 │   │                            # materialising the document (ADR 0023). A real
 │   │                            # 100,687-page result.json is 93 MB: json.load +
@@ -115,6 +117,22 @@ src/
 │   │                            # create_app() picks this store automatically
 │   │                            # whenever PostgresSettings.is_configured() is
 │   │                            # true; DiskJobStore otherwise (build-log 0118)
+│   │                            # import_terminal (ADR 0034, migration 0009): one
+│   │                            # transaction inserts an already-terminal jobs
+│   │                            # row plus its job_payloads row. Never create()/
+│   │                            # finish(): no budget lock, no cost_ledger row.
+│   │                            # No disk fallback: circuit open or DB error ->
+│   │                            # JobStoreUnavailableError (503). Org-scoped
+│   │                            # dedupe on (org_id, source_instance_id,
+│   │                            # source_job_id), partial unique index;
+│   │                            # UniqueViolation caught before DatabaseError
+│   ├── job_provenance.py        # ADR 0034: JobProvenance, where an imported job
+│   │                            # came from (random local instance id, local job
+│   │                            # id, crawl times, imported_by/at, bundle sha256).
+│   │                            # No path or hostname anywhere
+│   ├── bounded_gzip.py          # gunzip_capped: inflates one gzip member with the
+│   │                            # cap applied *while* inflating (decompressobj +
+│   │                            # max_length), and sha256 over the inflated bytes
 │   ├── process_supervisor.py    # Windows Job Object process supervision (ADR
 │   │                            # 0013). Domain-agnostic core infrastructure,
 │   │                            # not SEO-specific: launch_supervised(),
@@ -297,6 +315,16 @@ src/
 │   │                            # creates `local` with an unusable password, or
 │   │                            # refuses to start if it is inactive or in another
 │   │                            # org; never borrows an existing operator
+│   ├── job_import_routes.py     # ADR 0034: POST /jobs/import. Session -> per-
+│   │                            # operator hourly bucket (import:{operator}, 6/h,
+│   │                            # burst 2) -> application/gzip (415) -> process-
+│   │                            # wide import_lock, non-blocking (429) ->
+│   │                            # read_capped_body 32 MiB (413) -> on a thread:
+│   │                            # prepare_import, then store.import_terminal.
+│   │                            # 201 new / 200 duplicate / 409 changed source.
+│   │                            # 422 lists locations only, never values.
+│   │                            # Import memory is NOT counted by the ADR 0031
+│   │                            # budget (~1.1 GiB measured for an 89 MiB bundle)
 │   ├── deliverables_routes.py   # Workbook build/download HTTP surface (cycle
 │                                # 0087), plus POST /jobs/{id}/masterfile/
 │                                # {slug} (ADR 0017, build-log 0107), which
@@ -420,6 +448,12 @@ src/
 │   │                            # before registration; nothing retried, so a
 │   │                            # lost POST /workers response cannot mint a
 │   │                            # second worker; failures named by status only
+│   ├── rankuno_cloud_client.py  # ADR 0034: the import CLI's login + upload under
+│   │                            # BaseAPIClient (key rankuno_cloud_import).
+│   │                            # https only (http to loopback), redirects never
+│   │                            # followed, token in memory only; refusals are
+│   │                            # GuardrailViolationError so they are not retried,
+│   │                            # 429/5xx/transport errors retry the same bytes
 │   └── worker_cloud_client.py   # ADR 0015: the worker daemon's one outbound
 │                                # connection, to its own cloud API. poll()/
 │                                # upload_bundle()/report_failure() over httpx,
@@ -509,6 +543,18 @@ src/
     │       │                         # Search Console profile, or None (ADR 0012)
     │       ├── nav_tree_parser.py    # Header menu -> tree (footer excluded)
     │       ├── logical_hierarchy.py  # Maps URLs to menu sections; OTHERS bucket
+    │       ├── job_bundle.py         # ADR 0034: JobImportBundle (versioned,
+    │       │                         # extra=forbid: no org/id/has_*/telemetry)
+    │       │                         # and audit_url_schemes: http(s)+host on
+    │       │                         # every URL field, WHATWG-style scheme parse;
+    │       │                         # canonical_url refuses only real non-http
+    │       │                         # schemes (javascript:/data:/vbscript:/...)
+    │       ├── job_import.py         # prepare_import: capped gunzip ->
+    │       │                         # model_validate_json -> URL audit ->
+    │       │                         # ImportedJob built from server-side facts
+    │       ├── local_job_export.py   # CLI side: pick a finished local job, the
+    │       │                         # .jobs/.instance-id, deterministic bundle
+    │       │                         # bytes (gzip mtime=0) for idempotent retry
     │       ├── url_rules.py          # Layer 0 normalisation, pre-fetch rules.
     │       │                         # Path case preserved (ADR 0027, cycle
     │       │                         # 0129): only scheme/host lowercased; kept
@@ -922,6 +968,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0031](adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md) | **A crawl stops at a shared memory budget, fair share first.** Production crawls of sites with ~1.1 MB pages came back `FAILED` "interrupted by a server restart"; an OOM kill is inferred, not confirmed. `Settings.crawl_memory_budget_mib` (default 3072, 256–65536, no request field, no admin route) caps the HTML all running async DOM crawls retain. `_ahtml` charges `sys.getsizeof(body)` as each page lands, because PEP 393 width makes one curly quote double a page (1.10 MiB ASCII, 2.20 MiB with one U+2019, measured). When the projected total reaches the budget, the largest crawl over `budget // MAX_CONCURRENT_CRAWLS` stops at a safe point (checked before and after the governor slot, and at level boundaries after the cancel check) and ends `PARTIAL` with a fixed, numberless reason; a crawl at or under its share is never stopped by another tenant. Default derived as (8 − 0.5 − 1.5) / (1.10 × 1.25) = 4.36 GiB ceiling for an 8 GiB container, set to 3 GiB. Not an OOM guarantee; retaining the HTML at all is left to a later ADR ([build-log 0136](build-log/0136-a-crawl-that-stops-before-the-container-does.md)) |
 | [0032](adr/0032-a-local-server-never-reaches-a-shared-database.md) | **A local server never reaches a shared database, and proves it before it listens.** A workstation server that saw the production `DATABASE_URL` would choose `PostgresJobStore`, and its startup `recover_orphans()` would mark every in-flight Railway job `FAILED`. `scripts/run_local.ps1` refuses a `.env`/`.env.local` naming any database, cache or `ENVIRONMENT` key (by name, values never printed), sets the database and Redis keys to `""` in the server's environment (an empty process value beats dotenv and counts as unset; `env -u` does not, because removing a key leaves the dotenv value in force), and runs `local_preflight.py verify` in that exact environment, requiring `is_configured()` False before uvicorn starts on 127.0.0.1 with one worker. A launcher-level guard, not a code-level one ([build-log 0138](build-log/0138-a-site-that-runs-at-home-without-touching-production.md)) |
 | [0033](adr/0033-a-local-launch-signs-in-through-a-single-use-loopback-link.md) | **A local launch signs in through a single-use loopback link, never in production.** `scripts/run_local.ps1` mints a 32-byte token per start, in the server's environment only, and opens `http://127.0.0.1:<port>/#autosignin=<token>`; the fragment never reaches a server or access log. The SPA strips it before any request and exchanges it once at `POST /api/v1/auth/local-signin` for the same session `/auth/login` issues. The server holds only `sha256(token)`; single use under one lock, 300 s TTL, locked after 5 mismatches, `local-signin` bucket 10/min, loopback peer and loopback-bound socket required, one identical 401 for every refusal, route absent (404) when no token is set. Signs in as a dedicated `local` operator in org `default` (created with an unusable password; inactive or other-org refuses startup), never the first existing operator, a departure from ADR 0016's empty-store-only seeding. Kept out of production by independent layers: `Settings` refuses the token outside `ENVIRONMENT=development`, `create_app()` refuses it with Postgres configured, the loopback checks fail behind a proxy, and the token is per-launch. `API_ALLOWED_HOSTS` adds an opt-in `TrustedHostMiddleware` against DNS rebinding. Residuals: the browser's command line holds the spent link; a same-machine reverse proxy looks like loopback ([build-log 0139](build-log/0139-a-browser-that-opens-already-signed-in.md)) |
+| [0034](adr/0034-a-local-crawl-reaches-the-cloud-as-a-terminal-provenance-stamped-import.md) | **A local crawl reaches the cloud as a terminal, provenance-stamped import.** `scripts/push_job_to_cloud.py` reads `.jobs/` through `DiskJobStore` only and uploads a versioned, gzipped `JobImportBundle` to `POST /api/v1/jobs/import` with an operator session; the password is read by `getpass` only. The org, operator and job id come from the server, never the bundle. Limits: 32 MiB compressed, 128 MiB inflated (enforced while inflating), one import per process, 6/h per operator. Every URL field must be http(s) with a host (a canonical only refuses a real non-http scheme), else the whole bundle is refused with locations only. `JobStore.import_terminal` writes the job already terminal, in one transaction, with no budget gate and no ledger row, and with no disk fallback (503). Idempotent per org on `(source_instance_id, source_job_id)` + `bundle_sha256` (migration 0009). Retry and resume refuse imported jobs (409). Import memory is not counted by ADR 0031's budget |
 
 ---
 

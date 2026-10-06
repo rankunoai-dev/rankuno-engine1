@@ -322,6 +322,28 @@ export interface JobTelemetry {
   updated_at: string | null;
 }
 
+/** How an imported job reached this server. */
+export interface JobProvenance {
+  /** How the job arrived. Only local imports exist today. */
+  origin: "local_import";
+  /** Random id of the local job directory the crawl ran in. */
+  source_instance_id: string;
+  /** Optional operator-chosen name for the source machine. */
+  source_label: string | null;
+  /** The job's id on the source instance. Never a cloud job id. */
+  source_job_id: string;
+  /** When the crawl started on the source. */
+  crawl_started_at: string;
+  /** When the crawl finished on the source. */
+  crawl_finished_at: string;
+  /** Operator id that imported it, from the verified session. */
+  imported_by: string;
+  /** When this server accepted the import. */
+  imported_at: string;
+  /** SHA-256 of the decompressed bundle, used to tell a replay from a change. */
+  bundle_sha256: string;
+}
+
 /** Aggregate outcome of one crawl. */
 export interface CrawlSummary {
   pages_classified: number;

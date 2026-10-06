@@ -215,7 +215,9 @@ def validate_seed_url(state: ApiState, seed_url: str) -> str:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-async def read_capped_body(request: Request, *, max_bytes: int) -> bytes:
+async def read_capped_body(
+    request: Request, *, max_bytes: int, log_prefix: str = "worker_upload"
+) -> bytes:
     """Read the request body, refusing anything over `max_bytes`.
 
     Two checks, because either alone is insufficient:
@@ -230,6 +232,12 @@ async def read_capped_body(request: Request, *, max_bytes: int) -> bytes:
        enforced only after `await request.body()` has already materialised
        the whole thing in memory is not a cap.
 
+    Args:
+        request: The incoming request, body not yet read.
+        max_bytes: The cap.
+        log_prefix: Event-name prefix, so a rejected job import is not
+            logged as a rejected worker upload.
+
     Raises:
         HTTPException: `413` if either check trips. The message names the
             limit, so an operator seeing it knows what to change.
@@ -239,7 +247,7 @@ async def read_capped_body(request: Request, *, max_bytes: int) -> bytes:
 
     declared = request.headers.get("content-length")
     if declared is not None and declared.isdigit() and int(declared) > max_bytes:
-        _logger.warning("worker_upload_rejected_content_length", extra={"declared": declared})
+        _logger.warning(f"{log_prefix}_rejected_content_length", extra={"declared": declared})
         raise HTTPException(_HTTP_CONTENT_TOO_LARGE, detail=detail)
 
     chunks: list[bytes] = []
@@ -247,7 +255,7 @@ async def read_capped_body(request: Request, *, max_bytes: int) -> bytes:
     async for chunk in request.stream():
         total += len(chunk)
         if total > max_bytes:
-            _logger.warning("worker_upload_rejected_oversize_stream", extra={"read": total})
+            _logger.warning(f"{log_prefix}_rejected_oversize_stream", extra={"read": total})
             raise HTTPException(_HTTP_CONTENT_TOO_LARGE, detail=detail)
         chunks.append(chunk)
     return b"".join(chunks)

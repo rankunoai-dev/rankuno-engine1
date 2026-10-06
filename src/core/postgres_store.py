@@ -39,16 +39,22 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import psycopg
+from psycopg import errors as pg_errors
 
 from src.core.circuit_breaker import CircuitBreaker
+from src.core.job_provenance import JobProvenance
 from src.core.logger import get_logger
 from src.core.postgres_config import get_postgres_settings
 from src.core.state_store import (
     MAX_HOMEPAGE_BYTES,
+    ImportConflictError,
+    ImportedJob,
+    ImportOutcome,
     JobNotFoundError,
     JobRecord,
     JobStatus,
     JobStore,
+    JobStoreUnavailableError,
     JobTelemetry,
 )
 
@@ -59,11 +65,44 @@ _logger = get_logger(__name__)
 
 _JOB_COLUMNS = (
     "id, org_id, tool_name, label, facet_id, request, status, created_at, updated_at, "
-    "started_at, finished_at, error, has_result, has_checkpoint, telemetry"
+    "started_at, finished_at, error, has_result, has_checkpoint, telemetry, "
+    "import_origin, source_instance_id, source_label, source_job_id, crawl_started_at, "
+    "crawl_finished_at, imported_by, imported_at, bundle_sha256"
 )
 """Column list every `jobs` read/RETURNING clause uses, in the order
 `_row_to_job_record` expects. A fixed module constant, never built from
-caller input."""
+caller input. The last nine are migration 009's provenance columns."""
+
+_BASE_COLUMN_COUNT = 15
+"""Columns before the provenance block in `_JOB_COLUMNS`."""
+
+
+def _row_to_provenance(values: tuple[object, ...]) -> JobProvenance | None:
+    """Map the nine provenance columns onto a `JobProvenance`, or `None` if not imported."""
+    (
+        origin,
+        instance_id,
+        source_label,
+        source_job_id,
+        crawl_started_at,
+        crawl_finished_at,
+        imported_by,
+        imported_at,
+        bundle_sha256,
+    ) = values
+    if origin is None:
+        return None
+    return JobProvenance(
+        origin="local_import",
+        source_instance_id=str(instance_id),
+        source_label=None if source_label is None else str(source_label),
+        source_job_id=str(source_job_id),
+        crawl_started_at=cast(datetime, crawl_started_at),
+        crawl_finished_at=cast(datetime, crawl_finished_at),
+        imported_by=str(imported_by),
+        imported_at=cast(datetime, imported_at),
+        bundle_sha256=str(bundle_sha256),
+    )
 
 
 def _row_to_job_record(row: tuple[object, ...]) -> JobRecord:
@@ -84,8 +123,9 @@ def _row_to_job_record(row: tuple[object, ...]) -> JobRecord:
         has_result,
         has_checkpoint,
         telemetry,
-    ) = row
+    ) = row[:_BASE_COLUMN_COUNT]
     return JobRecord(
+        provenance=_row_to_provenance(row[_BASE_COLUMN_COUNT:]),
         id=str(job_id),
         org_id=str(org_id),
         tool_name=str(tool_name),
@@ -855,3 +895,110 @@ class PostgresJobStore(JobStore):
         if recovered:
             _logger.warning("orphaned_jobs_recovered", extra={"count": len(recovered)})
         return recovered
+
+    def import_terminal(self, job: ImportedJob, result_json: str) -> ImportOutcome:
+        """Insert an already-finished job and its payload in one transaction (ADR 0034).
+
+        Deliberately unlike every other method here in two ways:
+
+        * **No disk fallback.** An import that landed on container disk would
+          vanish on the next redeploy after the client had been told it
+          succeeded, so an open circuit or a database fault is a
+          `JobStoreUnavailableError` (503) and the client retries.
+        * **No budget gate, no ledger row.** `create()` locks the org's budget
+          and charges an estimate because it is about to spend money crawling.
+          An import spends nothing.
+
+        The duplicate lookup is org-scoped and backed by migration 009's
+        partial unique index, which is what makes two racing imports of the
+        same source safe: the loser's `UniqueViolation` is caught *before* the
+        generic `DatabaseError` handler (it is a subclass), so a normal
+        conflict never counts toward opening the circuit, and the lookup runs
+        again to answer as a duplicate or a conflict.
+
+        Raises:
+            ImportConflictError: Same source in this org, different content.
+            JobStoreUnavailableError: Circuit open, or the database failed.
+            ValueError: The org has no `org_configs` row (foreign key).
+        """
+        if self.circuit_breaker.is_open():
+            raise JobStoreUnavailableError("the job database is unavailable; try again shortly")
+        try:
+            outcome = self._import_once(job, result_json)
+        except pg_errors.UniqueViolation:
+            # A concurrent import of the same source won. Its row now exists.
+            outcome = self._import_once(job, result_json)
+        except pg_errors.ForeignKeyViolation as exc:
+            msg = f"organization {job.org_id} is not provisioned on this server"
+            raise ValueError(msg) from exc
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            self.circuit_breaker.record_failure(err)
+            _logger.warning("job_import_db_error", extra={"error": type(err).__name__})
+            raise JobStoreUnavailableError("the job database is unavailable; try again") from err
+        self.circuit_breaker.record_success()
+        return outcome
+
+    def _import_once(self, job: ImportedJob, result_json: str) -> ImportOutcome:
+        """One attempt at `import_terminal`'s transaction."""
+        source = job.provenance
+        with self._cursor() as cur:
+            cur.execute(
+                f"SELECT {_JOB_COLUMNS} FROM jobs WHERE org_id = %s "  # noqa: S608
+                "AND source_instance_id = %s AND source_job_id = %s",
+                (job.org_id, source.source_instance_id, source.source_job_id),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                existing = _row_to_job_record(row)
+                found = existing.provenance
+                if found is not None and found.bundle_sha256 == source.bundle_sha256:
+                    return ImportOutcome(record=existing, duplicate=True)
+                raise ImportConflictError(existing.id)
+
+            job_id = str(uuid.uuid4())
+            now = datetime.now(tz=UTC)
+            # `_JOB_COLUMNS` is a fixed module constant; every value is bound via `%s`.
+            cur.execute(
+                "INSERT INTO jobs "  # noqa: S608
+                "(id, org_id, tool_name, label, facet_id, request, status, created_at, "
+                "updated_at, started_at, finished_at, error, has_result, has_checkpoint, "
+                "telemetry, import_origin, source_instance_id, source_label, source_job_id, "
+                "crawl_started_at, crawl_finished_at, imported_by, imported_at, bundle_sha256) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, false, %s, "
+                f"%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_JOB_COLUMNS}",
+                (
+                    job_id,
+                    job.org_id,
+                    job.tool_name,
+                    job.label,
+                    job.facet_id,
+                    json.dumps(dict(job.request)),
+                    job.status.value,
+                    now,
+                    now,
+                    job.started_at,
+                    job.finished_at,
+                    job.error,
+                    json.dumps(job.telemetry.model_dump(mode="json")),
+                    source.origin,
+                    source.source_instance_id,
+                    source.source_label,
+                    source.source_job_id,
+                    source.crawl_started_at,
+                    source.crawl_finished_at,
+                    source.imported_by,
+                    source.imported_at,
+                    source.bundle_sha256,
+                ),
+            )
+            inserted = cur.fetchone()
+            cur.execute(
+                "INSERT INTO job_payloads (job_id, result, homepage_html, updated_at) "
+                "VALUES (%s, %s, %s, %s)",
+                (job_id, result_json, job.homepage_html, now),
+            )
+        if inserted is None:  # pragma: no cover - RETURNING on a successful INSERT always yields
+            raise JobNotFoundError(f"no job with id {job_id!r}")
+        record = _row_to_job_record(inserted)
+        _logger.info("job_import_stored", extra={"job_id": record.id, "org": record.org_id})
+        return ImportOutcome(record=record, duplicate=False)

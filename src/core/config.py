@@ -717,6 +717,45 @@ class Settings(BaseSettings):
             "job was approved against."
         ),
     )
+    cloud_import_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of the cloud API that `scripts/push_job_to_cloud.py` copies a "
+            "finished local crawl to (ADR 0034), e.g. https://api.example.com. Read "
+            "by that CLI only; the server never uses it. Must be https:// (plain "
+            "http:// only to a loopback host). Deliberately not a name the ADR 0032 "
+            "local-launch preflight refuses: it is a public URL, not a database."
+        ),
+    )
+    job_import_max_compressed_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        gt=0,
+        description=(
+            "Cap on the gzip body of POST /jobs/import (ADR 0034), 32 MiB by default. "
+            "Checked against Content-Length and again on the stream, before the body "
+            "is buffered. The largest local result measured (93 MB) gzips to 3.3 MiB."
+        ),
+    )
+    job_import_max_decompressed_bytes: int = Field(
+        default=128 * 1024 * 1024,
+        gt=0,
+        description=(
+            "Absolute cap on a decompressed import bundle, 128 MiB by default, "
+            "enforced while inflating so a gzip bomb stops at the cap. Import memory "
+            "is NOT counted by CRAWL_MEMORY_BUDGET_MIB (ADR 0031): an 89 MiB bundle "
+            "peaked at ~1.1 GiB on the development workstation."
+        ),
+    )
+    job_import_per_hour: int = Field(
+        default=6,
+        gt=0,
+        description="Sustained imports per operator per hour (ADR 0034).",
+    )
+    job_import_burst: int = Field(
+        default=2,
+        gt=0,
+        description="Imports an operator may make back to back before the hourly rate binds.",
+    )
     worker_consumed_jobs_path: Path = Field(
         default_factory=lambda: user_data_root() / ".worker_consumed_jobs.json",
         description=(

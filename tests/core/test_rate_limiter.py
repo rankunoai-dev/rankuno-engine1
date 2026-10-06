@@ -295,3 +295,21 @@ class TestBurstCapacity:
         bucket = AsyncTokenBucket.per_minute("host", 60, burst=2)
         assert bucket.capacity == 2
         assert AsyncTokenBucket.per_minute("api", 60).capacity == 60
+
+
+class TestPerHourBucket:
+    """ADR 0034: imports are limited per hour, which `per_minute` cannot express."""
+
+    def test_burst_then_refuses_until_the_hourly_rate_refills(self) -> None:
+        bucket = TokenBucket.per_hour("import:alice", requests_per_hour=6, burst=2)
+        assert bucket.capacity == 2
+        assert bucket.refill_per_second == pytest.approx(6 / 3600)
+        assert bucket.try_acquire()
+        assert bucket.try_acquire()
+        assert not bucket.try_acquire()
+
+    def test_registry_returns_one_bucket_per_key(self) -> None:
+        registry = RateLimiterRegistry()
+        first = registry.get_or_create_per_hour("import:alice", 6, 2)
+        assert registry.get_or_create_per_hour("import:alice", 6, 2) is first
+        assert registry.get_or_create_per_hour("import:bob", 6, 2) is not first

@@ -41,6 +41,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from pydantic import BaseModel  # noqa: E402
 from src.api.crawl_activity import CrawlActivityView  # noqa: E402
+from src.core.job_provenance import JobProvenance  # noqa: E402
 from src.core.state_store import JobTelemetry  # noqa: E402
 from src.modules.seo.page_classifier.discovery import (  # noqa: E402
     DiscoveredNode,
@@ -120,6 +121,7 @@ MODELS: tuple[type[BaseModel], ...] = (
     NavigationTree,
     NavCoverageReport,
     JobTelemetry,
+    JobProvenance,
     CrawlSummary,
     GscEnrichmentReport,
     PageClassificationInput,
