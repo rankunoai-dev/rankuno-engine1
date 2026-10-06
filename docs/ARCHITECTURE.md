@@ -74,6 +74,13 @@ src/
 │   │                            # is api/auth.py, not here. Governs *who* is
 │   │                            # calling; GuardrailEngine still governs *what a
 │   │                            # WRITE/FINANCIAL action may do*, unchanged
+│   ├── local_signin.py          # ADR 0033: LocalSigninGate, the server half of
+│   │                            # run_local.ps1's single-use sign-in link. Holds
+│   │                            # only sha256(token); check, hmac.compare_digest
+│   │                            # and consume under one threading.Lock, so two
+│   │                            # racing requests cannot both succeed. 300 s TTL
+│   │                            # from app construction; 5 mismatches disarm it
+│   │                            # for the life of the process. No HTTP import
 │   ├── state_store.py           # Durable background-job records. Domain-agnostic:
 │   │                            # opaque request/result mappings, atomic writes
 │   ├── json_stream.py           # Pull one field out of a huge JSON array without
@@ -232,6 +239,11 @@ src/
 │   │                            # DB/Redis keys refused in dotenv and blanked in
 │   │                            # its env, is_configured() proven False first by
 │   │                            # scripts/local_preflight.py; disk stores only
+│   │                            # create_app() refuses AUTH_LOCAL_AUTOSIGNIN_TOKEN
+│   │                            # with Postgres configured (after the WORKER
+│   │                            # refusal), and mounts TrustedHostMiddleware when
+│   │                            # API_ALLOWED_HOSTS is set; the launcher sets
+│   │                            # 127.0.0.1,localhost (ADR 0033)
 │   │                            # Runs at most MAX_CONCURRENT_CRAWLS jobs (default
 │   │                            # 5); the rest get 429. The cap limits how many
 │   │                            # crawls hold RAM, not how much one holds
@@ -274,6 +286,17 @@ src/
 │   │                            # build_auth_router() for POST /auth/login.
 │   │                            # Wraps core/auth.py; no route here has its own
 │   │                            # RiskClass — a login is not a BaseTool.run()
+│   ├── local_signin.py          # ADR 0033: POST /auth/local-signin, mounted only
+│   │                            # when AUTH_LOCAL_AUTOSIGNIN_TOKEN is set (else
+│   │                            # 404). Loopback peer AND loopback-bound socket ->
+│   │                            # local-signin bucket 10/min (429) -> gate.redeem
+│   │                            # -> operator re-read -> issue_session_token, the
+│   │                            # same LoginResponse and TTL as /auth/login. One
+│   │                            # identical 401 for every refusal; logs a reason
+│   │                            # category, never the token. ensure_local_operator
+│   │                            # creates `local` with an unusable password, or
+│   │                            # refuses to start if it is inactive or in another
+│   │                            # org; never borrows an existing operator
 │   ├── deliverables_routes.py   # Workbook build/download HTTP surface (cycle
 │                                # 0087), plus POST /jobs/{id}/masterfile/
 │                                # {slug} (ADR 0017, build-log 0107), which
@@ -898,6 +921,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0030](adr/0030-the-worker-ships-as-a-standalone-client.md) | **The worker ships as a standalone client.** Amends ADR 0015 (installation and worker state). The worker CLI's import closure held 11 engine modules through two incidental imports; three URL helpers moved to `core/url_hosts.py` and the upload allow-list became pinned literals (`bundle_filenames.py`), and a fresh-subprocess allowlist test keeps the closure engine-free. `core/app_paths.py`: `REPO_ROOT` when not frozen, `%LOCALAPPDATA%\Rankuno\Worker` when frozen. The credential lives in Windows Credential Manager (`core/credential_vault.py`); a frozen build never falls back to plaintext. `rankuno-worker setup` signs in once through `WorkerRegistrationClient`, verify key before registration, never retried. `RANKUNO_PROCESS_ROLE`: cloud-secret checks apply to `server` only, and `create_app` refuses `worker`. Packaging (Phase 3) is not decided here ([build-log 0135](build-log/0135-a-worker-that-carried-the-engine.md)) |
 | [0031](adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md) | **A crawl stops at a shared memory budget, fair share first.** Production crawls of sites with ~1.1 MB pages came back `FAILED` "interrupted by a server restart"; an OOM kill is inferred, not confirmed. `Settings.crawl_memory_budget_mib` (default 3072, 256–65536, no request field, no admin route) caps the HTML all running async DOM crawls retain. `_ahtml` charges `sys.getsizeof(body)` as each page lands, because PEP 393 width makes one curly quote double a page (1.10 MiB ASCII, 2.20 MiB with one U+2019, measured). When the projected total reaches the budget, the largest crawl over `budget // MAX_CONCURRENT_CRAWLS` stops at a safe point (checked before and after the governor slot, and at level boundaries after the cancel check) and ends `PARTIAL` with a fixed, numberless reason; a crawl at or under its share is never stopped by another tenant. Default derived as (8 − 0.5 − 1.5) / (1.10 × 1.25) = 4.36 GiB ceiling for an 8 GiB container, set to 3 GiB. Not an OOM guarantee; retaining the HTML at all is left to a later ADR ([build-log 0136](build-log/0136-a-crawl-that-stops-before-the-container-does.md)) |
 | [0032](adr/0032-a-local-server-never-reaches-a-shared-database.md) | **A local server never reaches a shared database, and proves it before it listens.** A workstation server that saw the production `DATABASE_URL` would choose `PostgresJobStore`, and its startup `recover_orphans()` would mark every in-flight Railway job `FAILED`. `scripts/run_local.ps1` refuses a `.env`/`.env.local` naming any database, cache or `ENVIRONMENT` key (by name, values never printed), sets the database and Redis keys to `""` in the server's environment (an empty process value beats dotenv and counts as unset; `env -u` does not, because removing a key leaves the dotenv value in force), and runs `local_preflight.py verify` in that exact environment, requiring `is_configured()` False before uvicorn starts on 127.0.0.1 with one worker. A launcher-level guard, not a code-level one ([build-log 0138](build-log/0138-a-site-that-runs-at-home-without-touching-production.md)) |
+| [0033](adr/0033-a-local-launch-signs-in-through-a-single-use-loopback-link.md) | **A local launch signs in through a single-use loopback link, never in production.** `scripts/run_local.ps1` mints a 32-byte token per start, in the server's environment only, and opens `http://127.0.0.1:<port>/#autosignin=<token>`; the fragment never reaches a server or access log. The SPA strips it before any request and exchanges it once at `POST /api/v1/auth/local-signin` for the same session `/auth/login` issues. The server holds only `sha256(token)`; single use under one lock, 300 s TTL, locked after 5 mismatches, `local-signin` bucket 10/min, loopback peer and loopback-bound socket required, one identical 401 for every refusal, route absent (404) when no token is set. Signs in as a dedicated `local` operator in org `default` (created with an unusable password; inactive or other-org refuses startup), never the first existing operator, a departure from ADR 0016's empty-store-only seeding. Kept out of production by independent layers: `Settings` refuses the token outside `ENVIRONMENT=development`, `create_app()` refuses it with Postgres configured, the loopback checks fail behind a proxy, and the token is per-launch. `API_ALLOWED_HOSTS` adds an opt-in `TrustedHostMiddleware` against DNS rebinding. Residuals: the browser's command line holds the spent link; a same-machine reverse proxy looks like loopback ([build-log 0139](build-log/0139-a-browser-that-opens-already-signed-in.md)) |
 
 ---
 

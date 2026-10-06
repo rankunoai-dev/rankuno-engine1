@@ -138,7 +138,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | CMS pagination | ✅ Multi-page retrieval via `Link` cursor, `X-WP-TotalPages` and `?page=N`. Effect on live confidence **not yet measured** — see [build-log 0011 §5](docs/build-log/0011-cms-pagination.md) |
 | `core/circuit_breaker.py` — `CLOSED`/`OPEN`/`HALF_OPEN`, 5-failure threshold, 30s recovery | ✅ Implemented & tested (20 tests). This row said "❌ Not started" until cycle 0110; the file has existed since 2026-09-09 and is wired into `core/postgres_store.py`, `core/worker_dispatch_signing.py` and `integrations/gsc_token_manager.py`. Nothing wires a breaker to ADR 0015's worker-dispatch HTTP channel — that is an accepted v1 gap (ADR 0015 condition 10) and a different statement ([build-log 0098](docs/build-log/0098-expires-at-is-not-deletion.md), [0110](docs/build-log/0110-what-the-gate-had-not-been-run-on.md)). `CLAUDE.md` §8 still carries the old claim and needs the same correction |
 | `core/memory_budget.py` — process-wide budget on retained crawl HTML (`CRAWL_MEMORY_BUDGET_MIB`, default 3072 MiB) | ✅ Implemented & tested ([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md), [build-log 0136](docs/build-log/0136-a-crawl-that-stops-before-the-container-does.md)). Each async DOM-crawl page body is charged as it lands (`sys.getsizeof`); when the projected total reaches the budget, the largest crawl over its fair share (budget / `MAX_CONCURRENT_CRAWLS`) stops at a safe point and ends `partial` with "memory budget reached" instead of the container being OOM-killed. A crawl at or under its share is never stopped by another org's load. **Not an OOM guarantee**: sitemap/CMS bodies, the serial fallback, `/result` reads, deliverables and Screaming Frog jobs are uncounted, and the HTML is still retained until the job ends (step 2, not started) |
-| `scripts/run_local.ps1` + `scripts/local_preflight.py` — the full site (API and built UI) on this workstation, loopback only, for crawls larger than the Railway container allows | ✅ Implemented; preflight tested (39 tests, [ADR 0032](docs/adr/0032-a-local-server-never-reaches-a-shared-database.md), [build-log 0138](docs/build-log/0138-a-site-that-runs-at-home-without-touching-production.md)). Refuses dotenv database/cache keys by name, blanks them in the server's environment and proves `is_configured()` is `False` before listening. The PowerShell launcher is only parse-checked by a test; a non-loopback database host is not refused in code. See [Running the full site locally](#running-the-full-site-locally-for-large-crawls) |
+| `scripts/run_local.ps1` + `scripts/local_preflight.py` — the full site (API and built UI) on this workstation, loopback only, for crawls larger than the Railway container allows | ✅ Implemented; preflight tested (56 tests, [ADR 0032](docs/adr/0032-a-local-server-never-reaches-a-shared-database.md), [build-log 0138](docs/build-log/0138-a-site-that-runs-at-home-without-touching-production.md)). Refuses dotenv database/cache keys by name, blanks them in the server's environment and proves `is_configured()` is `False` before listening. Opens the browser already signed in through a single-use, five-minute, loopback-only link (`POST /api/v1/auth/local-signin`, operator `local` in org `default`; `-NoAutoSignIn`, `-AutoSignInOperatorId`, `-AutoSignInOrgId`) and Host-checks with `API_ALLOWED_HOSTS` ([ADR 0033](docs/adr/0033-a-local-launch-signs-in-through-a-single-use-loopback-link.md), [build-log 0139](docs/build-log/0139-a-browser-that-opens-already-signed-in.md)). Refuses to `npm ci` through a linked `node_modules`. The PowerShell launcher is only parse-checked by a test; a non-loopback database host is not refused in code. See [Running the full site locally](#running-the-full-site-locally-for-large-crawls) |
 | `core/state_store.py` — durable job records | ✅ Implemented & tested (`DiskJobStore`; see [CLAUDE.md](CLAUDE.md) §8 "Closed since the audit") |
 | `core/postgres_store.py` — durable job records over Postgres | ✅ Implemented & tested ([ADR 0022](docs/adr/0022-postgres-backed-job-store.md), [build-log 0118](docs/build-log/0118-a-store-that-only-wrote-its-own-name.md)). Every `JobStore` method now writes real Postgres, not just `create()`/`get()`/`list_jobs()` as before this cycle; falls back to `DiskJobStore` once its `CircuitBreaker` opens. `create_app()` selects it automatically whenever `PostgresSettings.is_configured()` is true, so a job's status, result, checkpoint and homepage snapshot survive a Railway redeploy — `DiskJobStore`'s `.jobs/` alone does not. `job_payloads` (migration 0006, plus migration 0008 for `reconciliation`/`performance` — [build-log 0121](docs/build-log/0121-a-scope-out-that-shipped-as-a-bug.md)) holds the large payloads. Delegating `reconciliation`/`performance` to the disk fallback unconditionally was a production bug, not a deferred feature: `create()` writes a Postgres-backed job's row to Postgres only, and `DiskJobStore`'s writers require the job to exist on disk first, so the write silently no-oped and every later `GET` (including the download buttons) 404'd for every job since this store became the default (build-log 0118). Fixed — same circuit-breaker/upsert pattern as every other method. The unrelated `.orgs`/`.operators` stores stay disk-only, a deferred follow-up |
 | `core/process_supervisor.py` + `_process_ledger.py`/`_process_orphans.py`/`_win32_bindings.py` — Windows Job Object process supervision (kill-on-close, PID+start-time ledger, startup reconciliation) | ✅ Implemented & tested (51 tests, [ADR 0013](docs/adr/0013-screaming-frog-cli-process-governance-exception.md), [build-log 0095](docs/build-log/0095-a-crash-the-kernel-cleans-up.md)). Domain-agnostic `core/` infrastructure, not SEO-specific. Now has a caller — see the row below. **A PID + start-time match is a liveness test, not an orphan test**, and treating it as one killed two live crawls of 1:05:47 and 1:47:39, one at 99.7% complete: `reconcile_orphans` runs on every API-server startup and every `TestClient(create_app(...))` runs `lifespan`, so `pytest` reaped the workstation's real ledger. `LedgerEntry` now also records `supervisor_pid`/`supervisor_start_time` (written by `launch_supervised` from `os.getpid()` + `GetProcessTimes(GetCurrentProcess())`), checked first, under the same start-time tolerance that guards child PID reuse; a live supervisor's entry is skipped **and kept** in the ledger. A legacy entry with no supervisor marker is still reaped, deliberately — unknown ownership must fail toward reaping, or every pre-upgrade entry becomes an immortal Screaming Frog process holding a licence seat. `create_app(..., process_ledger_path=)` and an import-time redirect in `tests/conftest.py` keep the suite off the real ledger and audit log; reconciliation itself stays on under test ([build-log 0113](docs/build-log/0113-the-test-suite-was-killing-live-crawls.md)) |
@@ -431,10 +431,11 @@ The Railway container caps memory. For large crawls you can run the whole site,
 API and built UI together, on this workstation:
 
 ```powershell
-.\scripts\run_local.ps1                          # http://127.0.0.1:8000/
+.\scripts\run_local.ps1                          # opens http://127.0.0.1:8000/ signed in
 .\scripts\run_local.ps1 -Port 8899 -MemoryBudgetMiB 16000
 .\scripts\run_local.ps1 -CheckOnly               # run every guard, start nothing
 .\scripts\run_local.ps1 -Rebuild                 # force a fresh UI build
+.\scripts\run_local.ps1 -NoAutoSignIn            # log in with an operator id and password
 ```
 
 If the checkout has no `.venv` (a git worktree, for example), pass
@@ -442,7 +443,40 @@ If the checkout has no `.venv` (a git worktree, for example), pass
 
 **Loopback only.** The server binds `127.0.0.1` with one worker. It fetches arbitrary URLs on request, so on a routable interface it
 would be an open proxy whatever the login says
-([ADR 0008](docs/adr/0008-local-api-layer-and-job-store.md)).
+([ADR 0008](docs/adr/0008-local-api-layer-and-job-store.md)). The launcher also
+sets `API_ALLOWED_HOSTS=127.0.0.1,localhost`, so any other `Host` header gets a
+400. That closes the DNS-rebinding path by which a web page in the same browser
+could otherwise reach the local server under a foreign host name.
+
+**Signed in on launch.** Once `/api/v1/health` answers, the launcher opens the
+default browser already signed in
+([ADR 0033](docs/adr/0033-a-local-launch-signs-in-through-a-single-use-loopback-link.md)).
+It generates a fresh 32-byte token on every start, in the server's environment
+only, and opens `http://127.0.0.1:<port>/#autosignin=<token>`. The token rides in
+the URL fragment, which a browser never sends to a server. The UI strips it from
+the address bar before any request and exchanges it once at
+`POST /api/v1/auth/local-signin` for an ordinary session, with the same lifetime
+as a password login.
+
+- The link works once, for five minutes after the server starts, from loopback
+  only, and stops working after five wrong tokens. Every refusal is the same
+  401; the UI then shows the normal login screen.
+- It signs in as the operator `local` in org `default`, which is where local
+  crawls live. `-AutoSignInOperatorId` and `-AutoSignInOrgId` change that. If
+  the operator does not exist it is created with no usable password, so it can
+  never log in by password. If it exists but is inactive or in another org, the
+  server refuses to start. The link never signs in as whichever operator
+  happens to exist.
+- The console prints only `http://127.0.0.1:<port>/`, never the link. If no
+  browser can be opened, use normal login at that address.
+- `-NoAutoSignIn` turns it off, including a token inherited from the shell.
+  `-CheckOnly` reports whether it would be on.
+- The route exists only while a token is set. The server refuses a token
+  outside `ENVIRONMENT=development` and whenever Postgres is configured, and the
+  launcher refuses a dotenv that names `AUTH_LOCAL_AUTOSIGNIN_TOKEN`.
+- Residual: while the browser runs, its process command line holds the spent
+  link. Do not put a reverse proxy in front of the local server; a proxy on the
+  same machine looks like loopback.
 
 **Local data is separate from production.** Jobs go to `.jobs/` (`DiskJobStore`),
 and operators, orgs and workers go to `.operators/`, `.orgs/` and `.workers/`, all
@@ -461,6 +495,8 @@ running on Railway as failed. The launcher prevents that in four steps
    with or without an `export` prefix. No value is printed, and the only value
    read is `WORKER_STORE_BACKEND`'s. If you copied `.env.example`, comment out or delete
    the `ENVIRONMENT` line in that file; the launcher always runs `development`.
+   It also refuses a dotenv naming `AUTH_LOCAL_AUTOSIGNIN_TOKEN`: a sign-in
+   token stored on disk would never expire.
 2. In the server's environment it sets `DATABASE_URL`, `POSTGRES_URL`,
    `DATABASE_PRIVATE_URL`, `POSTGRES_PASSWORD`, `REDIS_URL` and
    `REDIS_PRIVATE_URL` to empty strings. A process value beats dotenv, and empty
@@ -478,7 +514,12 @@ running on Railway as failed. The launcher prevents that in four steps
 
 - Required: the Python venv. Node.js 18+ is needed only when the UI has to be
   built. The launcher runs `npm ci` when `rankuno-ui/node_modules` is missing or
-  older than `package-lock.json`.
+  older than `package-lock.json`. If `node_modules` is a junction or symlink
+  (common in a git worktree) and needs reinstalling, the launcher stops with
+  "node_modules is a link to another folder; refusing to reinstall through it.
+  Run npm ci in the link target, or remove the link." `npm ci` deletes
+  `node_modules` first, and through a link that empties the folder it points at.
+  A link that is current is used as is.
 - The UI is rebuilt with `VITE_API_BASE=/api/v1` when `dist` is missing, is
   older than its sources, or was not built by the launcher.
 - Search Console and Google Ads credentials are needed only for those features.
@@ -488,7 +529,9 @@ running on Railway as failed. The launcher prevents that in four steps
 **First run.** On an empty operator store the launcher creates the operator
 `admin` and shows a generated password once on the console. It is never written
 to disk. Use `-PromptPassword` to type your own, and use
-`scripts\create_operator.py` for more operators.
+`scripts\create_operator.py` for more operators. Bootstrap only fires on an empty
+store; the `local` sign-in operator is created alongside it, so from then on the
+store is never empty and `admin` is not seeded again in that checkout.
 
 **Memory budget.** `CRAWL_MEMORY_BUDGET_MIB` is set to 40% of physical RAM,
 clamped to 256–65536. For example, 12990 MiB on a 32 GB machine is a 2598 MiB
