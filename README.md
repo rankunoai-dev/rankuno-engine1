@@ -138,6 +138,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | CMS pagination | ✅ Multi-page retrieval via `Link` cursor, `X-WP-TotalPages` and `?page=N`. Effect on live confidence **not yet measured** — see [build-log 0011 §5](docs/build-log/0011-cms-pagination.md) |
 | `core/circuit_breaker.py` — `CLOSED`/`OPEN`/`HALF_OPEN`, 5-failure threshold, 30s recovery | ✅ Implemented & tested (20 tests). This row said "❌ Not started" until cycle 0110; the file has existed since 2026-09-09 and is wired into `core/postgres_store.py`, `core/worker_dispatch_signing.py` and `integrations/gsc_token_manager.py`. Nothing wires a breaker to ADR 0015's worker-dispatch HTTP channel — that is an accepted v1 gap (ADR 0015 condition 10) and a different statement ([build-log 0098](docs/build-log/0098-expires-at-is-not-deletion.md), [0110](docs/build-log/0110-what-the-gate-had-not-been-run-on.md)). `CLAUDE.md` §8 still carries the old claim and needs the same correction |
 | `core/memory_budget.py` — process-wide budget on retained crawl HTML (`CRAWL_MEMORY_BUDGET_MIB`, default 3072 MiB) | ✅ Implemented & tested ([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md), [build-log 0136](docs/build-log/0136-a-crawl-that-stops-before-the-container-does.md)). Each async DOM-crawl page body is charged as it lands (`sys.getsizeof`); when the projected total reaches the budget, the largest crawl over its fair share (budget / `MAX_CONCURRENT_CRAWLS`) stops at a safe point and ends `partial` with "memory budget reached" instead of the container being OOM-killed. A crawl at or under its share is never stopped by another org's load. **Not an OOM guarantee**: sitemap/CMS bodies, the serial fallback, `/result` reads, deliverables and Screaming Frog jobs are uncounted, and the HTML is still retained until the job ends (step 2, not started) |
+| `scripts/run_local.ps1` + `scripts/local_preflight.py` — the full site (API and built UI) on this workstation, loopback only, for crawls larger than the Railway container allows | ✅ Implemented; preflight tested (39 tests, [ADR 0032](docs/adr/0032-a-local-server-never-reaches-a-shared-database.md), [build-log 0138](docs/build-log/0138-a-site-that-runs-at-home-without-touching-production.md)). Refuses dotenv database/cache keys by name, blanks them in the server's environment and proves `is_configured()` is `False` before listening. The PowerShell launcher is only parse-checked by a test; a non-loopback database host is not refused in code. See [Running the full site locally](#running-the-full-site-locally-for-large-crawls) |
 | `core/state_store.py` — durable job records | ✅ Implemented & tested (`DiskJobStore`; see [CLAUDE.md](CLAUDE.md) §8 "Closed since the audit") |
 | `core/postgres_store.py` — durable job records over Postgres | ✅ Implemented & tested ([ADR 0022](docs/adr/0022-postgres-backed-job-store.md), [build-log 0118](docs/build-log/0118-a-store-that-only-wrote-its-own-name.md)). Every `JobStore` method now writes real Postgres, not just `create()`/`get()`/`list_jobs()` as before this cycle; falls back to `DiskJobStore` once its `CircuitBreaker` opens. `create_app()` selects it automatically whenever `PostgresSettings.is_configured()` is true, so a job's status, result, checkpoint and homepage snapshot survive a Railway redeploy — `DiskJobStore`'s `.jobs/` alone does not. `job_payloads` (migration 0006, plus migration 0008 for `reconciliation`/`performance` — [build-log 0121](docs/build-log/0121-a-scope-out-that-shipped-as-a-bug.md)) holds the large payloads. Delegating `reconciliation`/`performance` to the disk fallback unconditionally was a production bug, not a deferred feature: `create()` writes a Postgres-backed job's row to Postgres only, and `DiskJobStore`'s writers require the job to exist on disk first, so the write silently no-oped and every later `GET` (including the download buttons) 404'd for every job since this store became the default (build-log 0118). Fixed — same circuit-breaker/upsert pattern as every other method. The unrelated `.orgs`/`.operators` stores stay disk-only, a deferred follow-up |
 | `core/process_supervisor.py` + `_process_ledger.py`/`_process_orphans.py`/`_win32_bindings.py` — Windows Job Object process supervision (kill-on-close, PID+start-time ledger, startup reconciliation) | ✅ Implemented & tested (51 tests, [ADR 0013](docs/adr/0013-screaming-frog-cli-process-governance-exception.md), [build-log 0095](docs/build-log/0095-a-crash-the-kernel-cleans-up.md)). Domain-agnostic `core/` infrastructure, not SEO-specific. Now has a caller — see the row below. **A PID + start-time match is a liveness test, not an orphan test**, and treating it as one killed two live crawls of 1:05:47 and 1:47:39, one at 99.7% complete: `reconcile_orphans` runs on every API-server startup and every `TestClient(create_app(...))` runs `lifespan`, so `pytest` reaped the workstation's real ledger. `LedgerEntry` now also records `supervisor_pid`/`supervisor_start_time` (written by `launch_supervised` from `os.getpid()` + `GetProcessTimes(GetCurrentProcess())`), checked first, under the same start-time tolerance that guards child PID reuse; a live supervisor's entry is skipped **and kept** in the ledger. A legacy entry with no supervisor marker is still reaped, deliberately — unknown ownership must fail toward reaping, or every pre-upgrade entry becomes an immortal Screaming Frog process holding a licence seat. `create_app(..., process_ledger_path=)` and an import-time redirect in `tests/conftest.py` keep the suite off the real ledger and audit log; reconciliation itself stays on under test ([build-log 0113](docs/build-log/0113-the-test-suite-was-killing-live-crawls.md)) |
@@ -166,6 +167,9 @@ somebody else's server. Writes a self-contained interactive HTML report.
 `--max-pages` is what bounds a run; `--depth` is unlimited by default. A depth
 ceiling does not reduce how many pages are fetched — the page budget is spent
 either way — it only decides whether a deep site's lower levels are reachable.
+
+For large crawls through the full UI on this workstation instead of Railway, see
+[Running the full site locally for large crawls](#running-the-full-site-locally-for-large-crawls).
 
 ### Cross-checking against Screaming Frog (optional)
 
@@ -420,6 +424,104 @@ the column reads `Unknown` rather than substitute the URL
 Until cycle 0130 neither item actually downloaded: the UI called the adapter's
 download methods detached from the adapter, so they threw before sending a
 request ([build-log 0131](docs/build-log/0131-a-method-called-without-its-object.md)).
+
+### Running the full site locally for large crawls
+
+The Railway container caps memory. For large crawls you can run the whole site,
+API and built UI together, on this workstation:
+
+```powershell
+.\scripts\run_local.ps1                          # http://127.0.0.1:8000/
+.\scripts\run_local.ps1 -Port 8899 -MemoryBudgetMiB 16000
+.\scripts\run_local.ps1 -CheckOnly               # run every guard, start nothing
+.\scripts\run_local.ps1 -Rebuild                 # force a fresh UI build
+```
+
+If the checkout has no `.venv` (a git worktree, for example), pass
+`-Python <path to another checkout's .venv\Scripts\python.exe>`.
+
+**Loopback only.** The server binds `127.0.0.1` with one worker. It fetches arbitrary URLs on request, so on a routable interface it
+would be an open proxy whatever the login says
+([ADR 0008](docs/adr/0008-local-api-layer-and-job-store.md)).
+
+**Local data is separate from production.** Jobs go to `.jobs/` (`DiskJobStore`),
+and operators, orgs and workers go to `.operators/`, `.orgs/` and `.workers/`, all
+in the checkout you run from. Nothing is synced with Railway in either direction.
+Run from the main checkout to keep one local history.
+
+**The guard.** A server that saw a production database would choose
+`PostgresJobStore`, and its startup orphan recovery would mark every crawl
+running on Railway as failed. The launcher prevents that in four steps
+([ADR 0032](docs/adr/0032-a-local-server-never-reaches-a-shared-database.md)):
+
+1. It refuses to start if `.env` or `.env.local` names any of `DATABASE_URL`,
+   `POSTGRES_URL`, `DATABASE_PRIVATE_URL`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`,
+   `REDIS_URL`, `REDIS_PRIVATE_URL` or `ENVIRONMENT`, or sets
+   `WORKER_STORE_BACKEND=postgres`. Keys are matched by name in any case,
+   with or without an `export` prefix. No value is printed, and the only value
+   read is `WORKER_STORE_BACKEND`'s. If you copied `.env.example`, comment out or delete
+   the `ENVIRONMENT` line in that file; the launcher always runs `development`.
+2. In the server's environment it sets `DATABASE_URL`, `POSTGRES_URL`,
+   `DATABASE_PRIVATE_URL`, `POSTGRES_PASSWORD`, `REDIS_URL` and
+   `REDIS_PRIVATE_URL` to empty strings. A process value beats dotenv, and empty
+   counts as unset. (`env -u` is not a substitute: removing a key from the process
+   leaves the dotenv value in force.) It also pins
+   `ENVIRONMENT=development` and `WORKER_STORE_BACKEND=disk`.
+3. It runs Python in that exact environment and requires
+   `get_postgres_settings().is_configured()` to be `False` before anything
+   listens.
+4. It generates a fresh `AUTH_SESSION_SECRET` for every run, in the server's
+   environment only. Tokens issued locally therefore never verify anywhere else,
+   even if a dotenv carries another key.
+
+**Required versus optional.**
+
+- Required: the Python venv. Node.js 18+ is needed only when the UI has to be
+  built. The launcher runs `npm ci` when `rankuno-ui/node_modules` is missing or
+  older than `package-lock.json`.
+- The UI is rebuilt with `VITE_API_BASE=/api/v1` when `dist` is missing, is
+  older than its sources, or was not built by the launcher.
+- Search Console and Google Ads credentials are needed only for those features.
+- Screaming Frog dispatch routes will error locally. `PostgresWorkerDispatchStore`
+  cannot connect, and that is expected.
+
+**First run.** On an empty operator store the launcher creates the operator
+`admin` and shows a generated password once on the console. It is never written
+to disk. Use `-PromptPassword` to type your own, and use
+`scripts\create_operator.py` for more operators.
+
+**Memory budget.** `CRAWL_MEMORY_BUDGET_MIB` is set to 40% of physical RAM,
+clamped to 256–65536. For example, 12990 MiB on a 32 GB machine is a 2598 MiB
+fair share across the 5 concurrent crawls. `-MemoryBudgetMiB` overrides it, and
+any dotenv value is overridden with a notice. The budget counts retained page
+HTML only and is not an OOM guarantee
+([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md)).
+On sites with ~1.1 MB pages that is roughly 5,900 pages across all running crawls
+at the measured 2.2 MiB per page (any non-ASCII character in a page, such as one
+curly apostrophe, doubles its in-memory size), or about 11,800 if every page is
+pure ASCII.
+
+**One worker only.** The rate limiter and the cost ledger are in-process.
+A second worker would double both the API quota and the spend ceiling
+(CLAUDE.md §8).
+
+**Why the built UI rather than `npm run dev`.** The launcher gives you one
+process on one origin. A long-running crawl station therefore has no second dev
+server to die overnight, no hot-reload refresh dropping the page mid-crawl, and
+no CORS split between ports 5173 and 8000.
+
+**If you ever ran a server locally without this guard** while a dotenv held the
+Railway `DATABASE_URL`, check Railway's `jobs` table for crawls your local
+startup marked as interrupted:
+
+```sql
+SELECT id, status, finished_at FROM jobs
+WHERE error LIKE 'interrupted by a server restart%'
+ORDER BY finished_at;
+```
+
+Compare the `finished_at` times with Railway's deploy times. Rows that match no
+deploy were most likely failed by a local startup.
 
 ### Search Console accounts (optional)
 

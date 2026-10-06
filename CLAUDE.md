@@ -146,6 +146,7 @@ Recorded in full as ADRs in `docs/adr/`. Summary:
 | Deployment | Local workstation first (RTX GPU). Layers 2/3 sit behind an interface so a cloud implementation drops in later. | 0004 |
 | Layer 3 LLM | Provider-agnostic `LLMClient`. Default Claude Haiku 4.5 with structured outputs + Batch API. | 0005 |
 | Signal weights | Architecture is client-agnostic; **calibration is not**. Weights are selected through the seam in `weights.get_weight_profile()`. Adaptive selection is **off** until a golden corpus exists — do not enable it without one. | 0006 |
+| Local server isolation | A local server never reaches a shared database or cache. `scripts/run_local.ps1` refuses dotenv DB/Redis keys, blanks them in the child env, and proves `is_configured()` is false before listening. `env -u DATABASE_URL` is **not** a guard — dotenv still supplies it. | 0032 |
 
 ---
 
