@@ -144,8 +144,9 @@ class PageClassificationInput(StrictModel):
     """`None` means "every URL the crawl can reach", up to `ABSOLUTE_MAX_PAGES`.
 
     Not truly unbounded, and the difference matters: the graph holds every node
-    and every page body in memory, so an unbounded crawl of a large catalogue
-    would exhaust it hours in and lose the whole run. `resolved_max_pages`
+    in memory (page bodies are released once read, ADR 0035, unless
+    `Settings.crawl_release_page_html` is off), so an unbounded crawl of a large
+    catalogue would still exhaust it hours in and lose the whole run. `resolved_max_pages`
     performs the substitution, and the ceiling that was applied is reported in
     `DiscoveryReport` either way."""
     max_depth: Annotated[int, Field(ge=0, le=15)] | None = None
@@ -450,9 +451,10 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             checkpoint_sink: Optional durability hook, offered the graph so
                 partial work survives an interruption.
             homepage_sink: Optional hook handed the homepage body once the menu
-                has been read from it. The crawl discards all HTML when it ends,
-                so without this a later fix to the header-menu parser can never
-                be applied to this result. Offered rather than written here
+                has been read from it. The homepage's is the only body a crawl
+                holds (ADR 0035) and it is discarded when the job ends, so
+                without this a later fix to the header-menu parser can never be
+                applied to this result. Offered rather than written here
                 because where a body belongs is the caller's decision.
             progress_sink: Optional observability hook, called as pages are
                 fetched. Constructor-injected rather than a field on the input
@@ -1204,8 +1206,9 @@ def reparse_placement(
 
     What this cannot do, and why
     ----------------------------
-    A finished crawl stores no HTML. `SiteGraph._html` is discarded when the job
-    ends, and neither the result nor the checkpoint carries a body — the
+    A finished crawl stores no HTML. Each page body is released once read during
+    the crawl, the homepage's is discarded with the graph when the job ends
+    (ADR 0035), and neither the result nor the checkpoint carries a body — the
     checkpoint holds URLs only. Two consequences follow, and both are limits of
     the stored data rather than of this function:
 

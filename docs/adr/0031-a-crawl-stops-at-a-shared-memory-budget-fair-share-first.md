@@ -3,6 +3,8 @@
 - **Status**: Accepted
 - **Date**: 2026-10-05
 - **Deciders**: AI Lead, Lead AI Systems Engineer (user approved the plan and the victim policy)
+- **Amended by**: [ADR 0035](0035-a-crawl-releases-each-page-body-once-read.md) (2026-10-07) — see
+  the amendment at the end. The per-page figures below describe the accounting before it.
 
 ---
 
@@ -136,3 +138,38 @@ stops being retained (below).
   reason. That is a known defect, not addressed here.
 * The budget is in-process, like the rate limiter and the cost ledger. Several worker processes
   would each have their own budget.
+
+---
+
+## Amendment (2026-10-07): bodies are released once read (ADR 0035)
+
+With `Settings.crawl_release_page_html` on (the default), a crawl keeps no page body except the
+homepage's, and the accounting above changes as follows. With it off, everything above stands as
+written.
+
+* **Charge on land, credit on release.** A body is charged as it lands, as before, together with a
+  flat `LEAN_PAGE_BYTES` (32 KiB) and the measured size of what the page keeps. A released body is
+  credited back in the same frame, with no `await` in between. A credit is clamped against
+  outstanding body bytes, never selects a victim, and never decrements `pages`. An over-credit is
+  logged at ERROR (job id and counts only) and fails the test suite.
+* **Reserve.** The in-flight reserve uses the mean *landed* body, not the mean charged.
+* **The fair-share guarantee holds structurally.** Victim selection is per account and unchanged,
+  and a credit only lowers a projected total. A crawl at or under its share is still never stopped
+  by another organisation's load.
+* **It is not true that every crawl's projected total is at or below what it was.** The bound is
+  `projected ≤ (this ADR's accounting) + pages × LEAN_PAGE_BYTES + Σ retained`. A crawl of small
+  pages now reaches its 614 MiB share at about **19k pages** (≥ 32 KiB each), where under this
+  ADR a site of 10 KB pages reached it at about 60k. The ~280 / ~1,400-page figures above for
+  ~1 MB pages are superseded by about 19k and about 98k.
+* **"Pages evicted from `_html` are not credited back"** still holds: eviction never credits. A
+  released page was already credited when it landed.
+* **Coverage gaps are unchanged, plus one:**
+  - sitemaps
+  - the serial path
+  - `/result` reads
+  - deliverables
+  - Screaming Frog jobs
+  - imports
+  - **new:** discovered-but-unfetched nodes, which `LEAN_PAGE_BYTES` (charged per fetched page) does
+    not cover
+

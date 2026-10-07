@@ -137,7 +137,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | Golden corpus coverage | ⚠️ 13 labels, 1 of 6 archetypes — **not yet enough to validate any accuracy claim**. 141 draft rows await review in [drafts/](tests/fixtures/corpus/drafts/README.md) |
 | CMS pagination | ✅ Multi-page retrieval via `Link` cursor, `X-WP-TotalPages` and `?page=N`. Effect on live confidence **not yet measured** — see [build-log 0011 §5](docs/build-log/0011-cms-pagination.md) |
 | `core/circuit_breaker.py` — `CLOSED`/`OPEN`/`HALF_OPEN`, 5-failure threshold, 30s recovery | ✅ Implemented & tested (20 tests). This row said "❌ Not started" until cycle 0110; the file has existed since 2026-09-09 and is wired into `core/postgres_store.py`, `core/worker_dispatch_signing.py` and `integrations/gsc_token_manager.py`. Nothing wires a breaker to ADR 0015's worker-dispatch HTTP channel — that is an accepted v1 gap (ADR 0015 condition 10) and a different statement ([build-log 0098](docs/build-log/0098-expires-at-is-not-deletion.md), [0110](docs/build-log/0110-what-the-gate-had-not-been-run-on.md)). `CLAUDE.md` §8 still carries the old claim and needs the same correction |
-| `core/memory_budget.py` — process-wide budget on retained crawl HTML (`CRAWL_MEMORY_BUDGET_MIB`, default 3072 MiB) | ✅ Implemented & tested ([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md), [build-log 0136](docs/build-log/0136-a-crawl-that-stops-before-the-container-does.md)). Each async DOM-crawl page body is charged as it lands (`sys.getsizeof`); when the projected total reaches the budget, the largest crawl over its fair share (budget / `MAX_CONCURRENT_CRAWLS`) stops at a safe point and ends `partial` with "memory budget reached" instead of the container being OOM-killed. A crawl at or under its share is never stopped by another org's load. **Not an OOM guarantee**: sitemap/CMS bodies, the serial fallback, `/result` reads, deliverables and Screaming Frog jobs are uncounted, and the HTML is still retained until the job ends (step 2, not started) |
+| `core/memory_budget.py` — process-wide budget on crawl memory (`CRAWL_MEMORY_BUDGET_MIB`, default 3072 MiB) | ✅ Implemented & tested ([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md), [ADR 0035](docs/adr/0035-a-crawl-releases-each-page-body-once-read.md), [build-log 0136](docs/build-log/0136-a-crawl-that-stops-before-the-container-does.md)). Each async DOM-crawl page body is charged as it lands (`sys.getsizeof`), with a flat `LEAN_PAGE_BYTES` (32 KiB) plus the page's measured derived bytes; a released body is credited back in the same frame; when the projected total reaches the budget, the largest crawl over its fair share (budget / `MAX_CONCURRENT_CRAWLS`) stops at a safe point and ends `partial` with "memory budget reached" instead of the container being OOM-killed. A crawl at or under its share is never stopped by another org's load. **Not an OOM guarantee**: sitemap/CMS bodies, the serial fallback, `/result` reads, deliverables and Screaming Frog jobs and discovered-but-unfetched nodes are uncounted. Bodies are released once read except the homepage's (`CRAWL_RELEASE_PAGE_HTML`, default true; false is the rollback) |
 | `scripts/run_local.ps1` + `scripts/local_preflight.py` — the full site (API and built UI) on this workstation, loopback only, for crawls larger than the Railway container allows | ✅ Implemented; preflight tested (56 tests, [ADR 0032](docs/adr/0032-a-local-server-never-reaches-a-shared-database.md), [build-log 0138](docs/build-log/0138-a-site-that-runs-at-home-without-touching-production.md)). Refuses dotenv database/cache keys by name, blanks them in the server's environment and proves `is_configured()` is `False` before listening. Opens the browser already signed in through a single-use, five-minute, loopback-only link (`POST /api/v1/auth/local-signin`, operator `local` in org `default`; `-NoAutoSignIn`, `-AutoSignInOperatorId`, `-AutoSignInOrgId`) and Host-checks with `API_ALLOWED_HOSTS` ([ADR 0033](docs/adr/0033-a-local-launch-signs-in-through-a-single-use-loopback-link.md), [build-log 0139](docs/build-log/0139-a-browser-that-opens-already-signed-in.md)). Refuses to `npm ci` through a linked `node_modules`. The PowerShell launcher is only parse-checked by a test; a non-loopback database host is not refused in code. See [Running the full site locally](#running-the-full-site-locally-for-large-crawls) |
 | `scripts/push_job_to_cloud.py` + `POST /api/v1/jobs/import` — copy a finished local crawl into your cloud org | ✅ Implemented & tested ([ADR 0034](docs/adr/0034-a-local-crawl-reaches-the-cloud-as-a-terminal-provenance-stamped-import.md)). Terminal, provenance-stamped, idempotent per org; no ledger charge; whole-bundle refusal on any non-http(s) URL. The job list badges an imported job "imported from local" (source and import time in the tooltip) and hides its Resume and Run again actions; `rankuno-ui/src/lib/safeHref.ts` links only absolute http(s) URLs with a host at all 8 places the UI links a crawled URL, for every job, not only imported ones ([build-log 0140](docs/build-log/0140-a-local-crawl-copied-to-the-cloud.md)). **Not yet**: no "Copy to cloud" button; no checkpoint, reconciliation or performance report travels; import memory uncounted by the ADR 0031 budget; not yet run against production. See [Copying a finished local crawl to the cloud](#copying-a-finished-local-crawl-to-the-cloud) |
 | `core/state_store.py` — durable job records | ✅ Implemented & tested (`DiskJobStore`; see [CLAUDE.md](CLAUDE.md) §8 "Closed since the audit") |
@@ -396,15 +396,20 @@ are retried. A resume of a resume can still re-fetch pages the first job fetched
 The server runs at most 5 crawls at once by default and answers `429` beyond
 that; `MAX_CONCURRENT_CRAWLS` (1–10) sets the cap. It limits how many crawls
 hold memory, not how much one crawl holds: each in-flight crawl keeps its whole
-graph, including every page's HTML, in RAM until the job ends — about 2.2 MiB
-per page on sites with ~1 MB pages. `CRAWL_MEMORY_BUDGET_MIB` (default 3072,
-256–65536) caps the HTML that async DOM crawls retain in total: when it is
-reached, the largest crawl over its fair share (budget / `MAX_CONCURRENT_CRAWLS`)
-stops and ends `partial` with "memory budget reached"
-([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md)).
-The default is sized for an 8 GB container (the operator's figure, unverified).
-It counts tracked DOM-crawl HTML only, so process memory as a whole is not
-bounded by it.
+graph in RAM until the job ends. Page bodies are released once read, keeping
+only the homepage's ([ADR 0035](docs/adr/0035-a-crawl-releases-each-page-body-once-read.md)):
+about 0.025 MiB per page measured on ~1 MB pages, against 1.45 MiB when every
+body was kept. `CRAWL_RELEASE_PAGE_HTML=false` restores keeping every body.
+`CRAWL_MEMORY_BUDGET_MIB` (default 3072, 256–65536) caps what async DOM crawls
+hold in total — each body while held, plus a flat 32 KiB per fetched page and
+what the page keeps: when it is reached, the largest crawl over its fair share
+(budget / `MAX_CONCURRENT_CRAWLS`) stops and ends `partial` with "memory budget
+reached" ([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md)).
+At the default a crawl reaches its share at about 19k pages, whatever the page
+size. The default is sized for an 8 GB container (the operator's figure,
+unverified). Sitemaps, the serial path, `/result` reads, deliverables, Screaming
+Frog jobs and discovered-but-unfetched nodes are not counted, so process memory
+as a whole is not bounded by it.
 
 `GET /api/v1/crawl-activity` (same bearer auth, scoped to the caller's org only) returns `{rankuno_active, rankuno_cap, sf_active}`, cached 5 s per org, and feeds the header indicator on every view (polled every 10 s visible / 60 s hidden). The two counts are deliberately separate: the cap governs server-run crawls only, and Screaming Frog worker dispatches are not limited by it ([build-log 0114](docs/build-log/0114-a-count-that-belongs-to-one-org.md)).
 
@@ -537,13 +542,14 @@ store is never empty and `admin` is not seeded again in that checkout.
 **Memory budget.** `CRAWL_MEMORY_BUDGET_MIB` is set to 40% of physical RAM,
 clamped to 256–65536. For example, 12990 MiB on a 32 GB machine is a 2598 MiB
 fair share across the 5 concurrent crawls. `-MemoryBudgetMiB` overrides it, and
-any dotenv value is overridden with a notice. The budget counts retained page
-HTML only and is not an OOM guarantee
-([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md)).
-On sites with ~1.1 MB pages that is roughly 5,900 pages across all running crawls
-at the measured 2.2 MiB per page (any non-ASCII character in a page, such as one
-curly apostrophe, doubles its in-memory size), or about 11,800 if every page is
-pure ASCII.
+any dotenv value is overridden with a notice. The budget counts held page
+bodies and a flat 32 KiB per fetched page, and is not an OOM guarantee
+([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md),
+[ADR 0035](docs/adr/0035-a-crawl-releases-each-page-body-once-read.md)). With
+bodies released (the default) that is roughly 400k pages across all running
+crawls at 12990 MiB; with `CRAWL_RELEASE_PAGE_HTML=false` it falls back to
+roughly 5,900 pages of ~1.1 MB at the measured 2.2 MiB per page (any non-ASCII
+character in a page, such as one curly apostrophe, doubles its in-memory size).
 
 **One worker only.** The rate limiter and the cost ledger are in-process.
 A second worker would double both the API quota and the spend ceiling

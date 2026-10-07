@@ -714,9 +714,10 @@ class DiskJobStore:
     def write_homepage(self, job_id: str, html: str) -> None:
         """Save the homepage body so the menu can be re-parsed without the network.
 
-        A finished crawl otherwise keeps no HTML at all — `SiteGraph._html` is
-        discarded with the graph — so a fix to the header-menu parser could
-        never be applied to a result that already existed. One page is enough,
+        A finished crawl otherwise keeps no HTML at all — every other page's
+        body is released as it is read, and the homepage's is discarded with
+        the graph (ADR 0035) — so a fix to the header-menu parser could never be
+        applied to a result that already existed. One page is enough,
         because the menu is global and is read from the homepage only.
 
         Held to `MAX_HOMEPAGE_BYTES`. This is a convenience for re-parsing, not
