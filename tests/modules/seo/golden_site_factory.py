@@ -103,7 +103,7 @@ def _page(
     )
 
 
-def build_site() -> dict[str, Route]:  # noqa: PLR0915 - one linear description of a site
+def build_site() -> dict[str, Route]:
     """Return the whole site as `path -> Route`. Pure and deterministic."""
     rng = random.Random("golden-0")  # noqa: S311 - fixture data, not security
     site: dict[str, Route] = {"/": Route(301, "text/html", "", "/home/")}

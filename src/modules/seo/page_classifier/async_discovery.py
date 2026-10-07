@@ -407,8 +407,8 @@ async def _ahtml(
     in its results list until the whole level has landed, so counting there
     would miss a whole level's worth of memory (ADR 0031).
 
-    The body is stored here too, for the same reason. Stored HTML is what
-    `SiteGraph.unfetched_urls` reads as "fetched", and a checkpoint is offered
+    The body is stored here too, for the same reason. Storing it is what marks
+    the page fetched for `SiteGraph.unfetched_urls`, and a checkpoint is offered
     after every page; storing only once the level ended meant every mid-level
     checkpoint recorded that whole level as unfetched. A resumed crawl seeds
     everything at depth 0, so its entire run is one level, and resuming one
