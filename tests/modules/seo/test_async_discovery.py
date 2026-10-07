@@ -164,6 +164,15 @@ def run_async(
 class TestEquivalenceWithSerialPath:
     """Concurrency must change the speed, not the result."""
 
+    def test_unfetched_urls_match_serial_and_the_stored_body_definition(self, settings):
+        serial_graph, _ = discover_site(build_fetcher(settings), "https://e.com")
+        async_graph, _ = run_async(settings)
+        for graph in (serial_graph, async_graph):
+            assert graph.unfetched_urls() == tuple(
+                n.url for n in graph.nodes if graph.html_for(n.url) is None
+            )
+        assert async_graph.unfetched_urls() == serial_graph.unfetched_urls()
+
     def test_finds_the_same_urls(self, settings):
         _, serial = discover_site(build_fetcher(settings), "https://e.com")
         _, concurrent = run_async(settings)

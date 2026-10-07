@@ -532,6 +532,7 @@ class SiteGraph:
         self.pre_crawl_budget = max(1, max_pages - self.dom_reserve)
         self._nodes: dict[str, DiscoveredNode] = {}
         self._html: dict[str, str] = {}
+        self._fetched: set[str] = set()
         self.truncated = False
         self.stopped_reason: str | None = None
         """Set when the crawl is abandoned rather than completed. See
@@ -682,6 +683,7 @@ class SiteGraph:
                 if self._nodes.pop(stale, None) is not None:
                     self.loop_urls_skipped += 1
                 self._html.pop(stale, None)
+                self._fetched.discard(stale)
             if refuse:
                 self.loop_urls_skipped += 1
                 return None
@@ -831,7 +833,9 @@ class SiteGraph:
 
     def store_html(self, url: str, html: str) -> None:
         """Retain a page's HTML for later evidence assembly."""
-        self._html[normalize_url(url)] = html
+        key = normalize_url(url)
+        self._html[key] = html
+        self._fetched.add(key)
 
     def all_urls(self) -> tuple[str, ...]:
         """Every URL in the graph, in discovery order.
@@ -854,10 +858,10 @@ class SiteGraph:
     def unfetched_urls(self) -> tuple[str, ...]:
         """URLs in the graph whose body was never retrieved.
 
-        Stored HTML is the definition of "fetched": `store_html` is called only
-        after a successful retrieval, so the absence of a body is exactly the
-        absence of a fetch. No separate flag is needed and none is kept, because
-        a second source of truth would be one that could disagree.
+        "Fetched" means `store_html` ran, which happens only after a successful
+        retrieval. `_fetched` is written in that one method, beside the body, and
+        discarded wherever the body is evicted, so the two cannot disagree.
+        It is a separate set so the answer survives the body being released.
 
         The *unfetched* set is returned rather than the fetched one because it
         is what a resumed crawl needs and, on a healthy crawl, much the smaller
@@ -870,7 +874,9 @@ class SiteGraph:
         fetch, both appear. Callers deciding whether a crawl has unfinished work
         must consult `truncated` and `stopped_reason`, not this length.
         """
-        return tuple(node.url for node in self._nodes.values() if node.normalized not in self._html)
+        return tuple(
+            node.url for node in self._nodes.values() if node.normalized not in self._fetched
+        )
 
     def html_for(self, url: str) -> str | None:
         """Retrieve a stored page body, or `None` if it was never fetched.

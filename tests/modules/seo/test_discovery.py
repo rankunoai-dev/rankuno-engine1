@@ -1041,6 +1041,59 @@ class TestUnfetchedUrls:
         assert graph.unfetched_urls() == ("https://e.com/orphan/",)
 
 
+class TestUnfetchedMatchesStoredBodyDefinition:
+    """`_fetched` must agree with the old `not in _html` definition everywhere."""
+
+    @staticmethod
+    def _old(graph: SiteGraph) -> tuple[str, ...]:
+        return tuple(n.url for n in graph._nodes.values() if n.normalized not in graph._html)
+
+    def test_a_crawl_with_404_non_html_and_sitemap_only_pages(self, settings):
+        home = '<a href="/ok/">ok</a><a href="/gone/">g</a><a href="/data/">d</a>'
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": html(f"<html><body>{home}</body></html>"),
+            "/ok/": html(LEAF_HTML),
+            "/data/": json_body("{}"),
+            "/sitemap.xml": xml(
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                "<url><loc>https://e.com/orphan/</loc></url></urlset>"
+            ),
+        }
+        graph, _ = discover_site(site_fetcher(routes, settings), "https://e.com")
+        unfetched = graph.unfetched_urls()
+        assert unfetched == self._old(graph)
+        assert "https://e.com/gone/" in unfetched
+        assert "https://e.com/data/" in unfetched
+        assert "https://e.com/orphan/" in unfetched
+        assert "https://e.com/ok/" not in unfetched
+
+    def test_a_depth_capped_crawl(self, settings):
+        routes = {
+            "/robots.txt": httpx.Response(200, text=ROBOTS),
+            "/": html('<html><body><a href="/a/">a</a></body></html>'),
+            "/a/": html('<html><body><a href="/a/b/">b</a></body></html>'),
+            "/a/b/": html(LEAF_HTML),
+        }
+        graph, _ = discover_site(site_fetcher(routes, settings), "https://e.com", max_depth=1)
+        assert graph.unfetched_urls() == self._old(graph)
+
+    def test_loop_eviction_leaves_no_fetched_entry_behind(self):
+        from src.modules.seo.page_classifier.relative_loops import MIN_LOOP_URLS
+
+        graph = SiteGraph(base_url="https://e.com/", max_pages=10_000)
+        urls = [
+            f"https://e.com/{'/'.join(f'p{i}s{lv}' for lv in range(i % 8 + 1))}/x/y/z"
+            for i in range(MIN_LOOP_URLS * 4)
+        ]
+        for url in urls:
+            if graph.add(url, dom_link=True) is not None:
+                graph.store_html(url, "<html></html>")
+        assert len(graph._html) < len(urls), "the loop was never evicted; the test proves nothing"
+        assert graph._fetched == set(graph._html)
+        assert graph.unfetched_urls() == self._old(graph)
+
+
 class TestResumeSeeding:
     """A resumed crawl starts from what the interrupted one never reached."""
 
