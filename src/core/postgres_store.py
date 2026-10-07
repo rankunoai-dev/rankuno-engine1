@@ -1037,6 +1037,4 @@ class PostgresJobStore(JobStore):
                 "job_delete_db_error",
                 extra={"job_id": job_id, "error": type(err).__name__},
             )
-            raise JobStoreUnavailableError(
-                "the job database is unavailable; try again"
-            ) from err
+            raise JobStoreUnavailableError("the job database is unavailable; try again") from err

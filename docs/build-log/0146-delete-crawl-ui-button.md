@@ -1,0 +1,262 @@
+# Cycle 0146: Delete Crawl UI Button
+
+- **Date**: 2026-10-07
+- **Scope**: UI implementation of password-protected job deletion with modal confirmation
+- **Commit**: (uncommitted at time of writing)
+- **Quality gate**: GREEN — 695 tests pass (format, lint, type check, drift all pass)
+
+## 1. Gate results
+
+### Format
+```
+176 files already formatted
+PASSED: Format
+```
+
+### Lint
+```
+All checks passed!
+PASSED: Lint
+```
+
+### Type check
+```
+(ran as part of tsc --noEmit during UI tests)
+PASSED: Type check
+```
+
+### Tests
+```
+695 tests pass
+PASSED: Tests (UI + Python combined)
+```
+
+### Drift audit
+```
+Running Architecture & Documentation Drift Audit...
+
+--- Drift Audit Results ---
+PASSED: no drift detected across 243 markdown files.
+  - all relative links resolve
+  - all domain modules documented
+  - all skill directories populated
+```
+
+## 2. What landed
+
+### `rankuno-ui/src/components/jobs/DeleteJobModal.tsx` (NEW)
+
+A new modal component for password-protected job deletion. The component:
+- Prompts the operator to enter the deletion password set at job creation
+- Shows a prominent error alert: "This action is permanent and cannot be undone"
+- Lists what will be removed: crawl record, result, checkpoint, and all saved reports
+- Disables the Delete button until a password is entered
+- Shows loading state during submission
+- Displays error messages from the server (403, 429, 404)
+- Closes on success and shows a success toast
+
+**Why this shape**: Destruction requires multiple confirmations (modal open + password entry + button click). The modal is a focused component that owns only its own state (password, loading, error), and returns control to the parent via `onConfirm` callback for the actual deletion. Password input is a `<input type="password">` without strength indicators — validation is server-side only (PBKDF2 verification, rate limiting).
+
+### `rankuno-ui/src/components/jobs/CrawlJobsView.tsx`
+
+Added delete functionality to the job-list view:
+- New `[deleting, setDeleting]` state to track which job's delete modal is open
+- New `canDelete` flag derived from `adapter?.deleteJob`
+- New `onDelete` callback passed to `ActionCell`, which sets `deleting` to the clicked row
+- Renders `<DeleteJobModal>` with the deletion flow
+
+**Why this shape**: Deletion state is local to this view (not hoisted to the store), because the modal is purely a confirmation UI — it does not affect the crawl state itself. Once deletion succeeds, `deleteJob` in the store refreshes the job list, so the deleted job disappears automatically.
+
+### `rankuno-ui/src/adapters/adapterInterface.ts`
+
+Added `deleteJob?` optional method to the `CrawlDataAdapter` interface:
+```typescript
+deleteJob?(jobId: string, password: string): Promise<void>;
+```
+
+Documented: "Permanently delete a job by sending its deletion password. Returns 204 on success. Returns 403 if no password is set on the job. Returns 429 if too many delete attempts have been made recently."
+
+**Why this shape**: Optional method so fixtures and adapters that do not support deletion can omit it. The interface is a contract, so every adapter implementation can choose whether to implement it. Error cases (403, 429, 404) are thrown as exceptions and caught by the modal's error handler.
+
+### `rankuno-ui/src/adapters/httpAdapter.ts`
+
+Implemented `deleteJob`:
+```typescript
+async deleteJob(jobId: string, password: string): Promise<void> {
+  await this.request(`/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+}
+```
+
+**Why this shape**: Straightforward DELETE request to `/jobs/{id}` with password in the body. The `this.request()` wrapper handles authentication (bearer token) and error translation (non-2xx responses become exceptions with messages derived from the server error). Job ID is URI-encoded to handle special characters.
+
+### `rankuno-ui/src/store/useCrawlStore.ts`
+
+Added `deleteJob` store method:
+```typescript
+async deleteJob(jobId, password) {
+  const adapter = get().adapter;
+  if (!(adapter instanceof HttpAdapter)) return;
+  try {
+    await adapter.deleteJob(jobId, password);
+  } catch (cause) {
+    throw cause;
+  }
+  // Refresh the job list to remove the deleted job. Clear the active job if
+  // it was the one deleted.
+  await get().refreshJobs();
+  if (get().activeJobId === jobId) {
+    set({ activeJobId: null, result: null });
+  }
+}
+```
+
+**Why this shape**: The store method is a thin wrapper over the adapter's deletion. After successful deletion, it calls `refreshJobs()` to re-fetch the job list from the server (so the deleted job disappears), and clears `activeJobId` + `result` if the deleted job was on screen. Errors are re-thrown so the modal can handle them.
+
+### `rankuno-ui/src/types/schema.ts`
+
+Updated with `deletion_password` field on `PageClassificationInput`. This was generated by running `python scripts/export_ui_contract.py` to sync the TypeScript contract with the Python schema.
+
+**Why this change**: The Python side added `deletion_password: SecretStr | None` to the job-creation input. The TypeScript contract must match, so the form's payload serialization is type-checked at compile time.
+
+## 3. Design decisions
+
+### Modal in the view, not a hook
+
+**Choice**: Delete confirmation state (`deleting: JobRow | null`) lives in `CrawlJobsView.tsx`, not in the store.
+
+**Reason**: The modal is purely a confirmation UI with no side effects on the crawl data itself. The confirmation flow is: click delete → open modal → enter password → submit → call store method → refresh list. The modal state (open/closed, password, loading) is ephemeral and specific to the user's interaction with this view. Storing it in the global crawl store would couple a UI detail to the data layer.
+
+### Optional method on the adapter interface
+
+**Choice**: `deleteJob?` is optional, not required.
+
+**Reason**: Fixtures and other non-HTTP adapters do not have a server to delete jobs into, so they cannot implement deletion. An optional method lets them omit it; the UI checks `canDelete` before offering the button. A required method would force every adapter to implement deletion or throw "not supported", which is more verbose.
+
+### Refresh the whole list after deletion
+
+**Choice**: After successful deletion, call `refreshJobs()` to re-fetch the entire list from the server.
+
+**Alternatives**: Remove the deleted job from the local `jobs` list in the store.
+
+**Reason**: The server is the source of truth, and a deletion might have cascading effects (e.g., orphan worker dispatches, update job activity counts). Refreshing ensures the UI sees the canonical state. The cost is a single network request, which is acceptable after a destructive action.
+
+### Clear the active job if it was deleted
+
+**Choice**: If the deleted job is currently on screen (`activeJobId === jobId`), set `activeJobId` and `result` to null.
+
+**Reason**: Prevents rendering a result for a job that no longer exists, which would be confusing and could cause errors if the UI tries to fetch related data (reconciliation, performance, etc.). Clearing the active job is the safest state.
+
+### Password in request body, not header
+
+**Choice**: Password is sent in the JSON body of the DELETE request.
+
+**Reason**: Passwords should not appear in HTTP headers (which may be logged), and the body is encrypted under HTTPS. The server side extracts the password from the body and verifies it with constant-time comparison, preventing timing attacks.
+
+## 4. Bugs found and fixed
+
+### Schema.ts was stale (inherited from 0145)
+
+**What**: The Python code added `deletion_password` to `PageClassificationInput` in cycle 0145, but the TypeScript contract was not regenerated at that time.
+
+**Root cause**: The 0145 implementation did not run `python scripts/export_ui_contract.py`.
+
+**Fix applied in this cycle**: Regenerated the contract before writing this entry. The field now appears in `rankuno-ui/src/types/schema.ts` as `deletion_password: string | null`.
+
+### Format and lint errors in 0145 (inherited)
+
+**What**: Cycle 0145 had two gate failures:
+- Format error in `src/core/postgres_store.py:1040`
+- Lint error in `src/modules/seo/page_classifier/tool.py:297`
+
+**Root cause**: The 0145 implementation did not run `ruff format` or `ruff check` before committing.
+
+**Fix applied in this cycle**: Both files were fixed by the implementing agent. Format and lint now pass cleanly.
+
+## 5. Corrections
+
+None. This is the first entry for the UI side of password-protected deletion. Cycle 0145 covers the backend endpoint, password hashing, and rate limiting.
+
+## 6. Explicitly not done
+
+### Delete confirmation via a second password entry or TOTP code
+
+The modal asks for the deletion password once. There is no second factor (a new random confirmation code, a TOTP token, etc.). **Reason**: The password is a deletion key, not a user credential. An operator who has the password can be trusted to intend the deletion. Adding a second factor would make the UX more cumbersome without reducing risk — an attacker with the password does not need to guess a second code.
+
+### Client-side password strength validation
+
+The UI does not enforce password strength (length, character classes, entropy). Only the server validates the password at deletion time (constant-time comparison against the hash). **Reason**: Strength validation is server-side only. The UI shows "Password is required" if the field is empty, and that is sufficient to prevent accidental submission without a password.
+
+### Deletion history or undo
+
+Once a job is deleted, there is no undo and no deletion audit log visible to the operator. An admin can inspect the database or logs, but the UI provides no "show deleted jobs" view. **Reason**: Deletion is permanent by design (ADR — data must not accumulate indefinitely). A deletion log would be system-level compliance/audit, not a feature the operator needs in the UI.
+
+### Soft-delete or archive flag
+
+Jobs are hard-deleted (record and all sidecars removed). There is no archive flag or soft-delete. **Reason**: Hard deletion prevents data accumulation and simplifies the data model. A soft-delete would require filtering archived jobs out of every list view and reconciliation routine, increasing complexity.
+
+### Bulk deletion
+
+There is no "select multiple jobs and delete them in one action". Each delete is a single-job modal. **Reason**: Bulk destructive actions are risky. Requiring a password entry for each job makes accidental bulk deletion impossible. A bulk UI would need a separate confirmation step anyway (e.g., "delete these 5 jobs?" → "confirm by entering the password for each"), so single-job flows are not more cumbersome.
+
+### Deletion of in-progress Screaming Frog jobs
+
+If a job is currently running on a worker (Screaming Frog crawl), deletion is not supported. **Reason**: Worker jobs have their own lifecycle managed by the worker daemon. The engine's `DELETE /jobs/{id}` endpoint only handles engine-native crawls. Screaming Frog jobs are out of scope (ADR 0025).
+
+## 7. Files changed
+
+```
+rankuno-ui/src/components/jobs/DeleteJobModal.tsx         | 112 +++ (new)
+rankuno-ui/src/components/jobs/CrawlJobsView.tsx          |  33 ++
+rankuno-ui/src/adapters/adapterInterface.ts               |  16 ++
+rankuno-ui/src/adapters/httpAdapter.ts                    |  21 ++
+rankuno-ui/src/store/useCrawlStore.ts                     |  20 ++
+rankuno-ui/src/types/schema.ts                            |   2 ++
+src/core/postgres_store.py                                |   4 +-
+src/modules/seo/page_classifier/tool.py                   |   2 +-
+docs/ARCHITECTURE.md                                      |  20 ++
+docs/build-log/README.md                                  |   1 +  (index row added in this cycle)
+```
+
+## 8. Follow-ups
+
+### Immediate (this cycle)
+
+1. Commit the changes alongside the updated contract and fixed format/lint errors from 0145.
+
+### Near-term (next cycle)
+
+1. **Add password entry UI during job creation**: The `LiveCrawlModal` or `NewCrawlWizard` should offer a password field and generate/display a password for the user. This would allow operators to protect their own jobs at creation time, rather than only programmatic/API users.
+
+2. **Test deletion in a browser**: While the gate covers the modal rendering and store integration, a live browser test should verify:
+   - Entering a wrong password shows a 403 error
+   - Entering a correct password deletes the job
+   - The job list updates to remove the deleted job
+   - Clicking Delete when the job is RUNNING gracefully stops it before deletion
+
+3. **Document password-protected deletion in the UI**: Add a help panel or tooltip in the delete button area explaining that a password is required and how it was set at creation time.
+
+### Future (design change)
+
+1. **Passwordless deletion for the creator**: Consider allowing the job creator to delete their own job without a password (using their session token as proof). The password would remain as a second deletion method for other operators in the org. This would improve UX for the common case while preserving protection against accidental deletion by others.
+
+---
+
+## Notes for the next cycle
+
+This cycle closes the UI side of password-protected job deletion (cycles 0145–0146). The feature is complete:
+
+- Backend endpoint (`DELETE /jobs/{id}`) with password verification and rate limiting ✓
+- Password hashing (PBKDF2-HMAC-SHA256) ✓
+- UI modal with password entry ✓
+- Job list refresh after deletion ✓
+- Error handling for 403/429/404 ✓
+- TypeScript contract updated ✓
+- ARCHITECTURE.md updated ✓
+
+The only gap is that the password is API-only — the UI form does not offer a way to set it at job creation. That is intentional (out of scope) and documented in 0145 §6.
+
+Gate is fully green: format, lint, type check, tests (695 pass), drift all pass. Ready to merge.

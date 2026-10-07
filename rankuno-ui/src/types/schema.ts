@@ -390,6 +390,8 @@ export interface PageClassificationInput {
   include_patterns: string[] | null;
   /** Optional URL blacklist patterns (wildcard or regex). If provided, URLs matching any pattern are excluded. */
   exclude_patterns: string[] | null;
+  /** Optional password for deletion protection. */
+  deletion_password: string | null;
 }
 
 /** Everything one crawl job produced. */

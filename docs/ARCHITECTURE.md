@@ -87,7 +87,10 @@ src/
 │   │                            # for the life of the process. No HTTP import
 │   ├── state_store.py           # Durable background-job records. Domain-agnostic:
 │   │                            # opaque request/result mappings, atomic writes.
-│   │                            # JobRecord.provenance (None unless imported) and
+│   │                            # JobRecord.provenance (None unless imported),
+│   │                            # JobRecord.password_hash (optional, for password-
+│   │                            # protected deletion, cycle 0145), JobStore.delete()
+│   │                            # (atomically removes record + sidecars), and
 │   │                            # JobStore.import_terminal (ADR 0034)
 │   ├── json_stream.py           # Pull one field out of a huge JSON array without
 │   │                            # materialising the document (ADR 0023). A real
@@ -294,6 +297,21 @@ src/
 │   │                            # one already in flight. Screaming Frog dispatches
 │   │                            # are out of scope — its poll loop cannot tell a
 │   │                            # normal exit from an external terminate() apart
+│   │                            # DELETE /jobs/{id} (cycle 0145): password-protected
+│   │                            # permanent deletion. Rate limited 5/min per job to
+│   │                            # prevent brute-force password guessing. Requires a
+│   │                            # password set at creation time (password_hash non-
+│   │                            # None); rejects deletion without password with 403.
+│   │                            # Password verified with constant-time comparison
+│   │                            # (verify_password). If job is RUNNING, gracefully
+│   │                            # stops it (sets cancel flag, releases slot) before
+│   │                            # deletion. Atomically removes job record + all
+│   │                            # sidecars (result, checkpoint, homepage,
+│   │                            # reconciliation, performance) via JobStore.delete().
+│   │                            # Idempotent: second DELETE returns 404. Password is
+│   │                            # optional at creation (default None, backward
+│   │                            # compatible); existing jobs cannot be deleted unless
+│   │                            # re-created with a password
 │   │                            # Almost every route requires a bearer session
 │   │                            # token (ADR 0016); org_id is derived from its
 │   │                            # verified claim, never from X-Org-Id or a URL

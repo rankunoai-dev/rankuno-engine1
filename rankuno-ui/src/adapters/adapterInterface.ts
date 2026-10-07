@@ -945,6 +945,18 @@ export interface CrawlDataAdapter {
    * indicator is simply not rendered when this is absent.
    */
   getCrawlActivity?(): Promise<CrawlActivityView>;
+
+  /**
+   * Permanently delete a job using a password.
+   *
+   * Returns void on success (204 No Content). Optional like `startJob`:
+   * fixtures have no server behind them to delete anything.
+   *
+   * The endpoint is rate-limited to prevent brute-force attempts.
+   * Returns 403 if the job has no password set or the password is wrong.
+   * Returns 429 if too many delete attempts have been made recently.
+   */
+  deleteJob?(jobId: string, password: string): Promise<void>;
 }
 
 /**
@@ -1081,4 +1093,8 @@ export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   // though the engine treats both as "no restriction".
   include_patterns: null,
   exclude_patterns: null,
+  // Password for deletion protection. The UI does not currently provide a way
+  // to set this (see cycle 0145 §6), so it is always null for operator-started
+  // crawls. Programmatic callers may set it.
+  deletion_password: null,
 };

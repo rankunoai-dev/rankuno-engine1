@@ -294,7 +294,7 @@ class PageClassificationInput(StrictModel):
         default=None,
         min_length=1,
         max_length=256,
-        description="Optional password for deletion protection. If set, the crawl can only be deleted by providing this password.",
+        description="Optional password for deletion protection.",
     )
     """Optional password to protect this job from accidental or malicious deletion.
 

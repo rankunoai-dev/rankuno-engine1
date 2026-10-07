@@ -665,6 +665,27 @@ export class HttpAdapter implements CrawlDataAdapter {
   }
 
   /**
+   * Permanently delete a job using a password.
+   *
+   * Deletion is irreversible and removes all associated data: the job record,
+   * result, checkpoint, homepage snapshot, reconciliation, and performance
+   * reports. Once deleted, no trace of the job remains.
+   *
+   * This method returns void on success (204 No Content) and throws an
+   * ApiError on failure. Specific error codes:
+   * - 403 if the job has no password set or the password is wrong
+   * - 429 if too many delete attempts have been made recently
+   * - 404 if the job does not exist
+   */
+  async deleteJob(jobId: string, password: string): Promise<void> {
+    await this.request(`/jobs/${encodeURIComponent(jobId)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+  }
+
+  /**
    * Run a finished job's crawl again with the settings it originally used.
    *
    * Returns the *new* job's id. The engine never mutates the original: its

@@ -150,6 +150,8 @@ interface CrawlState {
   relaunch: (jobId: string, mode: "retry" | "resume", label: string) => Promise<string | null>;
   /** Abandon a running job and reclaim its concurrency slot. */
   cancel: (jobId: string) => Promise<void>;
+  /** Permanently delete a job using its password. */
+  deleteJob: (jobId: string, password: string) => Promise<void>;
 }
 
 const STORAGE_KEY = "rankuno.crawl";
@@ -492,6 +494,24 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     // the job was still cancellable, and a row that flips to cancelled locally
     // and back on the next poll is worse than one that waits a beat.
     await get().refreshJobs();
+  },
+
+  async deleteJob(jobId, password) {
+    const adapter = get().adapter;
+    if (!(adapter instanceof HttpAdapter)) return;
+    try {
+      await adapter.deleteJob(jobId, password);
+    } catch (cause) {
+      // Errors are surfaced by the modal, not here. Just re-throw so the
+      // caller sees them.
+      throw cause;
+    }
+    // Refresh the job list to remove the deleted job. Clear the active job if
+    // it was the one deleted.
+    await get().refreshJobs();
+    if (get().activeJobId === jobId) {
+      set({ activeJobId: null, status: "idle", result: null, reconciliation: null });
+    }
   },
 
   setGrouping(grouping) {

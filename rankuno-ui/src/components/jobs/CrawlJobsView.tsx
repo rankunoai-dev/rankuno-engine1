@@ -31,6 +31,7 @@ import { useUiStore } from "../../store/useUiStore";
 import { token } from "../../styles/tokens";
 import { PerformancePanel } from "./PerformancePanel";
 import { ReconcilePanel } from "./ReconcilePanel";
+import { DeleteJobModal } from "./DeleteJobModal";
 import { UrlTicker } from "../telemetry/UrlTicker";
 import "./jobs.css";
 
@@ -107,8 +108,12 @@ export function CrawlJobsView(): JSX.Element {
   // principle build one export and not the other, and each menu item's
   // visibility should answer only for the method it calls.
   const canDownloadUrlsPdf = adapter?.downloadUrlListPdf !== undefined;
+  // Same reasoning as others: fixtures cannot delete, so the button is hidden.
+  const canDelete = useCrawlStore((state) => state.adapter?.deleteJob !== undefined);
+  const deleteJob = useCrawlStore((state) => state.deleteJob);
   const [reconciling, setReconciling] = useState<JobRow | null>(null);
   const [performing, setPerforming] = useState<JobRow | null>(null);
+  const [deleting, setDeleting] = useState<JobRow | null>(null);
 
   /**
    * Fetch the workbook and save it — no panel, the click is the whole flow.
@@ -216,11 +221,13 @@ export function CrawlJobsView(): JSX.Element {
           onPerformance={() => setPerforming(row)}
           onDownloadUrls={() => void downloadUrls(row)}
           onDownloadUrlsPdf={() => void downloadUrlsPdf(row)}
+          onDelete={() => setDeleting(row)}
           canRelaunch={canRelaunch}
           canReconcile={canReconcile}
           canIngestGsc={canIngestGsc}
           canDownloadUrls={canDownloadUrls}
           canDownloadUrlsPdf={canDownloadUrlsPdf}
+          canDelete={canDelete}
         />
       ),
     },
@@ -270,6 +277,15 @@ export function CrawlJobsView(): JSX.Element {
           label={performing.label}
           open
           onClose={() => setPerforming(null)}
+        />
+      )}
+
+      {deleting && (
+        <DeleteJobModal
+          label={deleting.label}
+          open
+          onClose={() => setDeleting(null)}
+          onConfirm={(password) => deleteJob(deleting.id, password)}
         />
       )}
     </div>
@@ -363,7 +379,7 @@ function describeEta(live: LiveJob): string {
   return "discovering URLs…";
 }
 
-/** View, recover, retry, resume and cancel buttons for one row. */
+/** View, recover, retry, resume, cancel and delete buttons for one row. */
 function ActionCell({
   row,
   onOpen,
@@ -373,11 +389,13 @@ function ActionCell({
   onPerformance,
   onDownloadUrls,
   onDownloadUrlsPdf,
+  onDelete,
   canRelaunch,
   canReconcile,
   canIngestGsc,
   canDownloadUrls,
   canDownloadUrlsPdf,
+  canDelete,
 }: {
   row: JobRow;
   onOpen: () => void;
@@ -387,11 +405,13 @@ function ActionCell({
   onPerformance: () => void;
   onDownloadUrls: () => void;
   onDownloadUrlsPdf: () => void;
+  onDelete: () => void;
   canRelaunch: boolean;
   canReconcile: boolean;
   canIngestGsc: boolean;
   canDownloadUrls: boolean;
   canDownloadUrlsPdf: boolean;
+  canDelete: boolean;
 }): JSX.Element {
   const ready = row.status === "succeeded" || row.status === "partial";
   const finished = ready || row.status === "failed";
@@ -543,6 +563,17 @@ function ActionCell({
               Kill
             </Button>
           </Popconfirm>
+        </Tooltip>
+      )}
+
+      {/* Delete button: destructive and visible like Kill, but for finished jobs.
+          Shown only when the adapter supports deletion (fixtures do not) and the
+          job is finished. Password confirmation is required and happens in a modal. */}
+      {canDelete && finished && (
+        <Tooltip title="Permanently delete this crawl and all associated data. This action cannot be undone.">
+          <Button size="small" type="text" danger onClick={onDelete}>
+            Delete
+          </Button>
         </Tooltip>
       )}
     </div>
