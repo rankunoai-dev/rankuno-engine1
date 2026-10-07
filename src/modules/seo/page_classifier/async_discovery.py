@@ -47,6 +47,7 @@ import functools
 import sys
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import TypeVar
 
 from src.core.logger import get_logger
@@ -390,22 +391,73 @@ async def _abody(graph: SiteGraph, fetcher: HttpFetcher, url: str) -> tuple[str 
     return result.body, False
 
 
+@dataclass(frozen=True, slots=True)
+class _LandedPage:
+    """One retrieved page, reduced to what the level loop still needs from it.
+
+    The level loop used to receive the body and extract links from it after the
+    whole level had landed, so a level's results list held every body it had
+    fetched until then. Links are now extracted the moment the page lands, and
+    the body is never handed to the level loop at all.
+
+    Recording stays in the level loop, in input order: node insertion order is
+    what fixes result order and which link the page ceiling refuses, and that
+    must not start depending on which response happened to land first.
+
+    Attributes:
+        url: The URL requested.
+        document_url: What `SiteGraph.landed_url` answered when the page landed
+            — the address its relative links were resolved against.
+        links: Outbound links resolved against `document_url`.
+        links_if_evicted: The same links resolved against `url` itself, or
+            `None` when the page did not redirect (the two would be identical).
+            Needed because the level loop resolved against `landed_url` *at
+            the level boundary*, and an earlier sibling's links can confirm a
+            relative-href loop that evicts this node first. `landed_url` then
+            answers `url`, which is also what the serial path resolves against
+            in that case — it evicts the node before fetching it. Computed only
+            for redirected pages, and only so that answer survives unchanged.
+        error: An exception raised extracting links, re-raised by the level
+            loop at this page's input position, where it used to be raised.
+            Swallowing it here would leave the page fetched but uncounted.
+    """
+
+    url: str
+    document_url: str
+    links: tuple[str, ...] = ()
+    links_if_evicted: tuple[str, ...] | None = None
+    error: Exception | None = None
+
+    def links_for(self, document_url: str) -> tuple[str, ...]:
+        """The links as resolved against `document_url`, which must be one of the two known."""
+        if document_url == self.document_url:
+            return self.links
+        if self.links_if_evicted is not None and document_url == self.url:
+            return self.links_if_evicted
+        # `final_url` is written only by `record_fetch`, once per URL per crawl,
+        # and eviction only ever makes `landed_url` answer `url`. Anything else
+        # is a bug in that reasoning, and must not be papered over with links
+        # resolved against an address nobody asked about.
+        msg = f"{self.url} landed at {self.document_url}, now reported at {document_url}"
+        raise AssertionError(msg)
+
+
 async def _ahtml(
     graph: SiteGraph,
     fetcher: HttpFetcher,
     url: str,
     *,
     memory_account: MemoryAccount | None = None,
-) -> tuple[str, str] | None:
-    """Fetch a URL, returning `(url, html)` only when the response is HTML.
+) -> _LandedPage | None:
+    """Fetch a URL, returning its outbound links only when the response is HTML.
 
     A non-HTML 200 is not a failure: the server answered, the payload simply is
     not a page.
 
     A returned body is charged to `memory_account` here, the moment it lands,
-    rather than at the level boundary: a BFS level holds every body it fetched
-    in its results list until the whole level has landed, so counting there
-    would miss a whole level's worth of memory (ADR 0031).
+    rather than at the level boundary: the graph retains it from this moment,
+    so counting at the boundary would miss a whole level's worth of memory
+    (ADR 0031).
 
     The body is stored here too, for the same reason. Storing it is what marks
     the page fetched for `SiteGraph.unfetched_urls`, and a checkpoint is offered
@@ -448,7 +500,15 @@ async def _ahtml(
         # makes a whole page two bytes per character.
         memory_account.charge(sys.getsizeof(result.body))
     graph.store_html(url, result.body)
-    return url, result.body
+    document_url = graph.landed_url(url)
+    try:
+        links = extract_page_links(result.body, url, document_url=document_url)
+        fallback = (
+            extract_page_links(result.body, url, document_url=url) if document_url != url else None
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised by the level loop, in input order
+        return _LandedPage(url=url, document_url=document_url, error=exc)
+    return _LandedPage(url=url, document_url=document_url, links=links, links_if_evicted=fallback)
 
 
 async def adiscover_site(
@@ -874,13 +934,18 @@ async def _acrawl(
             graph.abandoned_in_flight = exc.in_flight
             break
 
+        # Links were extracted as each page landed; they are recorded here, after
+        # the level, in input order — see `_LandedPage`. A level abandoned above
+        # never reaches this loop, so its completed pages stay fetched with no
+        # links recorded (build-log 0137 §4.2).
         next_level: list[str] = []
         for item in results:
             if item is None:
                 continue
-            url, html = item
-            links = extract_page_links(html, url, document_url=graph.landed_url(url))
-            for target in graph.record_links(url, links, depth):
+            if item.error is not None:
+                raise item.error
+            links = item.links_for(graph.landed_url(item.url))
+            for target in graph.record_links(item.url, links, depth):
                 key = normalize_url(target)
                 if key not in seen:
                     seen.add(key)
