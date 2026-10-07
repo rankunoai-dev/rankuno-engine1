@@ -3,7 +3,8 @@
 - **Status**: Accepted
 - **Date**: 2026-10-07
 - **Deciders**: AI Lead, Lead AI Systems Engineer (user chose "A: extract at fetch, phased";
-  security review of the P4 design PASS WITH CONDITIONS C1–C10)
+  security review of the P4 design PASS WITH CONDITIONS C1–C10; follow-up review PASS WITH
+  CONDITIONS R1–R2; the user set the fetch URL ceiling to 8,192 and approved 5,000 links per page)
 - **Amends**: [ADR 0031](0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md)
 
 ---
@@ -63,8 +64,9 @@ Everything a page keeps after its body is gone has a bound:
 | :--- | :--- | :--- |
 | Breadcrumb label | 256 characters, 12 steps | Truncated (display text) |
 | Schema types | 8 distinct, document order, ≤ 256 characters each | Not recognised, on both the body and the stored path |
-| Canonical URL | 2048 (`contracts.audit.MAX_URL_LENGTH`) | Dropped: a truncated URL was never named by the site |
-| Any fetched or redirect-hop URL | 2048 (`MAX_FETCH_URL_LENGTH`, pinned equal) | Fetch refused as `UnsafeUrlError`: not retried, recorded `guardrail_refused` |
+| Canonical URL | 2,048 (`contracts.audit.MAX_URL_LENGTH`) | Dropped: a truncated URL was never named by the site |
+| Any fetched or redirect-hop URL | 8,192 (`core.url_safety.MAX_FETCH_URL_LENGTH`) | Fetch refused as `UnsafeUrlError`: not retried, recorded `guardrail_refused` |
+| Any extracted link | 8,192 (the same constant) | Dropped inside `extract_page_links` before it is collected (R1) |
 | Title / meta / H1 | 500 / 500 / 1000 (already capped) | Truncated |
 | Links per page | 5,000 (`MAX_LINKS_PER_PAGE`) | Ignored in document order, counted on `SiteGraph.links_capped`, logged |
 
@@ -73,11 +75,51 @@ Notes on the bounds:
 - The first recognised schema type is unchanged by de-duplication and the cap of 8. The length
   rule lives in `_recognised`, which both Signal 4 paths use, so the homepage (body) and every
   other page (stored) agree.
-- The worst case a page can keep at every cap at once is ≤ 128 KiB (asserted in
-  `test_release_bodies.py`).
-- 5,000 links per page is a judgement, not a measurement of the stored corpus.
+- The worst case a page can keep at every cap at once is ≤ 256 KiB, computed at four bytes a
+  character with the 8,192 fetch ceiling (`test_release_bodies.py`, test 12). That bound is a
+  **sanity check on the caps, not the safety mechanism**: what a page keeps is measured and
+  charged (`retained_page_bytes`), so the budget is right even where the arithmetic is not.
+- 5,000 links per page is a judgement, not a measurement of the stored corpus. **An HTML sitemap
+  page with more than 5,000 links loses its tail**: the links past the 5,000th are not followed
+  from that page (they may still arrive through XML sitemaps or other pages). The overflow is
+  counted on `SiteGraph.links_capped` and logged (`page_links_capped`).
 - The overflow count is not in `DiscoveryReport`. Adding it there changes the persisted result
-  contract.
+  contract (handoff to `api-data-engineer`).
+
+### Link length and link bytes (R1, R2)
+
+The follow-up review measured a 104 KB body with a long same-site `<base href>` and 200
+`href="?n"` anchors producing 20,013,290 bytes of link strings, about 193 times the body, because
+every relative link resolves to the full base. Two changes close that:
+
+- **R1, length.** `extract_page_links` drops any resolved link longer than
+  `MAX_FETCH_URL_LENGTH` before it is added to the result, so the long string is never collected
+  or held. It is the same constant the fetcher enforces, defined once in `core.url_safety`.
+- **R2, bytes.** While a level is in flight, its pages' link tuples are counted.
+  - When a page lands, `charge_links` charges `getsizeof` of the tuple and every string in it,
+    both readings when the page redirected.
+  - The level loop credits exactly that (`credit_links`) once it has recorded the page. That loop
+    has no `await`, and the charge sits in the same no-`await` stretch as the body charge and
+    credit (an AST test covers both).
+  - `credit_links` clamps against outstanding *link* bytes, logs an over-credit at ERROR, and never
+    selects a victim.
+  - A level abandoned before it is recorded (build-log 0137 §4.2), and the pages after an
+    extraction error in the same level, never credit. Their link charge stays until the crawl
+    ends: the safe over-count.
+  - Link accounting applies with release on and off. It is not tied to the flag.
+
+### The 8,192-character fetch ceiling is a behaviour change
+
+Before extract-at-fetch, nothing bounded URL length on the crawl path. Now:
+
+- **Over 8,192 characters:** a link is not collected, so it never becomes a node. A URL of that
+  length that still reaches the fetcher (a sitemap entry, a seed, a redirect) is refused as
+  `guardrail_refused`.
+- **2,049 to 8,192 characters:** a URL behaves exactly as on main. It is discovered, fetched and
+  classified, and because every node is in the audit spine, `to_audit_dataset` raises
+  `AuditExportError` ("profiles do not satisfy the audit contract"), so the workbook build for
+  that crawl fails. That failure predates this ADR and is unchanged (confirmed against `1eff2d0`;
+  pinned in `test_long_urls.py`). The audit contract is not changed here.
 
 ### The memory budget (C3–C5, C8–C10)
 
@@ -114,6 +156,13 @@ body still predicts the size of the next one in flight.
 
 `Settings.crawl_release_page_html` (env `CRAWL_RELEASE_PAGE_HTML`) defaults to `true`.
 
+**It rolls back body release only.** With it off, every body is retained and the body
+accounting is ADR 0031's. It does not undo the rest of this ADR:
+- the fetched set and fetch-time extraction (P0–P3)
+- the caps and the 8,192 ceiling
+- the 5,000-link limit
+- link charging
+
 - `false` retains every body and charges exactly as ADR 0031.
 - The tool reads it once per crawl through `get_settings()` and fixes it on the `SiteGraph` at
   construction.
@@ -146,11 +195,10 @@ page now costs at least `LEAN_PAGE_BYTES` whatever its size, so:
 - the serial fallback path (no account)
 - `/result` reads, deliverables, and Screaming Frog jobs
 - discovered-but-unfetched nodes: `LEAN_PAGE_BYTES` is charged per *fetched* page, so a sitemap-only
-  node, or a URL found by a link and never fetched, costs memory uncharged. That includes its URL
-  string, whose length is not capped.
+  node, or a URL found by a link and never fetched, costs memory uncharged. Its URL string is
+  capped at 8,192 characters when it came from a link (R1); a sitemap or CMS entry is not
+  length-checked until it is fetched.
 - the job-import path (ADR 0034)
-- links while their level is in flight: bounded by `MAX_LINKS_PER_PAGE`, held until the level is
-  recorded, uncharged
 
 ## Measured
 
@@ -162,10 +210,11 @@ peak working set via `GetProcessMemoryInfo` minus the pre-run peak. Median of 3.
 | :--- | ---: | ---: |
 | Before (1eff2d0) | 1.4504 | 2961.4 |
 | Release off (rollback) | 1.4525 | 2966.5 |
-| **Release on (default)** | **0.0245** | **109.3** |
+| Release on, before R1/R2 (5258968) | 0.0245 | 109.3 |
+| **Release on (default), with R1/R2** | **0.0247** | **109.5** |
 
 **Extrapolated, not measured:** at 36,000 such pages, release on would peak at about 60 + 36,000 ×
-0.0245 ≈ 0.9 GiB; release off would need about 51 GiB, and ADR 0031's budget would stop it long
+0.0247 ≈ 0.9 GiB; release off would need about 51 GiB, and ADR 0031's budget would stop it long
 before. The extrapolation assumes the per-page cost stays linear.
 
 ## Consequences
@@ -180,5 +229,4 @@ before. The extrapolation assumes the per-page cost stays linear.
   - serial-path budget parity
   - a homepage sidecar for resumed crawls
   - de-duplicating LoopWatcher tails
-  - charging links in flight
   - adding `links_capped` to `DiscoveryReport`

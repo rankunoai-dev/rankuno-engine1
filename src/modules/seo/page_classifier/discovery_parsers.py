@@ -41,6 +41,7 @@ from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.core.url_safety import MAX_FETCH_URL_LENGTH
 from src.modules.seo.page_classifier.signal_parsers import CmsRecord
 from src.modules.seo.page_classifier.url_rules import is_crawlable_url, safe_split, site_host
 
@@ -347,6 +348,11 @@ def extract_page_links(
             # abort extraction for the whole page — every other link on it was
             # lost with it.
             _logger.debug("link_unparseable", extra={"href": href, "error": str(exc)})
+            continue
+        # Dropped before anything keeps it: the fetcher would refuse it anyway,
+        # and a long `<base href>` under thousands of short relative hrefs
+        # otherwise makes every one of them a full-length string (ADR 0035).
+        if len(absolute) > MAX_FETCH_URL_LENGTH:
             continue
         parts = safe_split(absolute)
         if parts is None:

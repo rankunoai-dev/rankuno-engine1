@@ -399,7 +399,10 @@ hold memory, not how much one crawl holds: each in-flight crawl keeps its whole
 graph in RAM until the job ends. Page bodies are released once read, keeping
 only the homepage's ([ADR 0035](docs/adr/0035-a-crawl-releases-each-page-body-once-read.md)):
 about 0.025 MiB per page measured on ~1 MB pages, against 1.45 MiB when every
-body was kept. `CRAWL_RELEASE_PAGE_HTML=false` restores keeping every body.
+body was kept. `CRAWL_RELEASE_PAGE_HTML=false` restores keeping every body
+(it rolls back body release only, not the caps). A URL longer than 8,192
+characters is neither collected from a page nor fetched, and a page's links are
+capped at 5,000 and charged to the budget until their level is recorded.
 `CRAWL_MEMORY_BUDGET_MIB` (default 3072, 256–65536) caps what async DOM crawls
 hold in total — each body while held, plus a flat 32 KiB per fetched page and
 what the page keeps: when it is reached, the largest crawl over its fair share

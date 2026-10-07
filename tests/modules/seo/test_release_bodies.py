@@ -19,7 +19,9 @@ import pytest
 from pydantic import ValidationError
 from src.core.config import reset_settings_cache
 from src.core.memory_budget import LEAN_PAGE_BYTES, MemoryAccount, MemoryBudget
+from src.core.url_safety import MAX_FETCH_URL_LENGTH
 from src.integrations.http_fetcher import FetchResult
+from src.modules.seo.contracts.audit import MAX_URL_LENGTH
 from src.modules.seo.page_classifier import async_discovery
 from src.modules.seo.page_classifier import tool as tool_module
 from src.modules.seo.page_classifier.async_discovery import adiscover_site
@@ -120,17 +122,24 @@ def ledger(monkeypatch) -> dict[str, list[Any]]:
     return seen
 
 
-def test_1_release_off_charges_exactly_as_adr_0031(tmp_path, ledger):
-    """One charge per body as it lands, no overhead, no credit, the 0031 projection."""
+def test_1_release_off_charges_bodies_exactly_as_adr_0031(tmp_path, ledger):
+    """One body charge per page as it lands, no overhead, no body credit.
+
+    Link tuples are charged at land and credited when their level is recorded
+    in both modes (review R2) — the caps and link accounting are not tied to the
+    flag — so mid-level the projected total also holds them. Once the crawl has
+    recorded every level they net to zero, leaving ADR 0031's total exactly.
+    """
     account = MemoryBudget(10**12, 5).open("job", in_flight_ceiling=10)
     graph, _ = crawl(tmp_path, build_site(), release=False, account=account)
     assert ledger["credits"] == []
     assert [c[0] for c in ledger["charges"]] == [s[1] for s in ledger["stores"]]
     for index, (_nbytes, overhead, projected, charged, landed) in enumerate(ledger["charges"]):
         assert overhead == 0
-        assert charged == landed, "nothing but bodies, as in ADR 0031"
-        assert projected == charged + 10 * (charged // (index + 1))
+        assert projected == charged + 10 * (landed // (index + 1))
     assert not any(released for *_, released in ledger["stores"])
+    assert account.links_charged_bytes == account.links_credited_bytes > 0
+    assert account.charged_bytes == account.landed_body_bytes, "nothing but bodies, as in 0031"
     assert graph.loop_urls_skipped > 0, "evictions happened and charged nothing back"
 
 
@@ -220,7 +229,7 @@ def test_12_what_a_hostile_page_keeps_is_bounded_and_charged(tmp_path):
         f'</head><body><nav aria-label="breadcrumb"><ol>{labels}</ol></nav>'
         f"<h1>{wide * 5000}</h1></body></html>"
     )
-    hops = tuple(f"{BASE}/{i}" + "h" * 2040 for i in range(5))
+    hops = tuple(f"{BASE}/{i}" + "h" * (MAX_FETCH_URL_LENGTH - 40) for i in range(6))
     url = f"{BASE}/p/"
     graph = SiteGraph(BASE, release_bodies=True)
     graph.add(url, dom_link=True)
@@ -241,20 +250,25 @@ def test_12_what_a_hostile_page_keeps_is_bounded_and_charged(tmp_path):
     def worst(chars: int) -> int:
         return sys.getsizeof(wide * chars)
 
+    # A sanity check on the caps, not the safety mechanism: whatever a page
+    # keeps is measured and charged (`retained_page_bytes`), so the budget is
+    # right even if this arithmetic were wrong. Four bytes a character
+    # throughout, although fetched URLs are in practice ASCII.
     bound = (
         worst(500) * 2
         + worst(1000)  # title, meta, H1 (content_signals caps)
-        + worst(2048) * 2
-        + worst(2048 + 200)  # canonical, final URL, verdict quoting it
-        + sys.getsizeof(hops)
-        + worst(2048) * 5  # five redirect hops
+        + worst(MAX_URL_LENGTH)  # canonical (the audit contract's 2,048)
+        + worst(MAX_URL_LENGTH + 200)  # the verdict quoting it
+        + worst(MAX_FETCH_URL_LENGTH)  # final URL
+        + sys.getsizeof(tuple(range(5)))
+        + worst(MAX_FETCH_URL_LENGTH) * 5  # at most five redirect hops
         + sys.getsizeof(tuple(range(12)))
         + worst(MAX_BREADCRUMB_LABEL_CHARS) * 12
         + sys.getsizeof(tuple(range(8)))
         + worst(MAX_SCHEMA_TYPE_CHARS) * MAX_SCHEMA_TYPES
     )
     assert len(html) > 30_000_000
-    assert kept <= bound <= 128 * 1024, (kept, bound)
+    assert kept <= bound <= 256 * 1024, (kept, bound)
 
 
 def test_13_the_flag_is_operator_configuration_read_once_per_crawl(tmp_path, monkeypatch):

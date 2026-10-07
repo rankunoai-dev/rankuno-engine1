@@ -14,9 +14,12 @@ import asyncio
 import json
 
 import pytest
+from src.core import url_safety
 from src.core.errors import UnsafeUrlError
-from src.integrations.http_fetcher import MAX_FETCH_URL_LENGTH
+from src.core.url_safety import MAX_FETCH_URL_LENGTH
+from src.integrations import http_fetcher
 from src.modules.seo.contracts.audit import MAX_URL_LENGTH
+from src.modules.seo.page_classifier import discovery_parsers
 from src.modules.seo.page_classifier.async_discovery import adiscover_site
 from src.modules.seo.page_classifier.discovery import (
     MAX_BREADCRUMB_LABEL_CHARS,
@@ -107,22 +110,37 @@ class TestCanonical:
 
 
 class TestRedirectHops:
-    def test_the_fetcher_limit_is_the_audit_contracts(self):
-        assert MAX_FETCH_URL_LENGTH == MAX_URL_LENGTH
+    def test_one_ceiling_is_shared_by_the_fetcher_and_link_extraction(self):
+        """The user's 8,192, deliberately not the audit contract's 2,048."""
+        assert http_fetcher.MAX_FETCH_URL_LENGTH is url_safety.MAX_FETCH_URL_LENGTH
+        assert discovery_parsers.MAX_FETCH_URL_LENGTH is url_safety.MAX_FETCH_URL_LENGTH
+        assert url_safety.MAX_FETCH_URL_LENGTH == 8192
+        assert MAX_URL_LENGTH == 2048, "the audit contract is unchanged"
 
     def test_a_redirect_to_an_over_long_url_is_refused_without_retry(self, tmp_path):
-        target = "/" + "r" * MAX_URL_LENGTH
+        target = "/" + "r" * MAX_FETCH_URL_LENGTH
         site = {"/robots.txt": ROBOTS, "/go/": Route(301, "text/html", "", target)}
         fetcher = build_fetcher(golden_settings(tmp_path), site)
         with pytest.raises(UnsafeUrlError):
             fetcher.fetch(f"{BASE}/go/")
+
+    def test_a_redirect_to_a_url_under_the_ceiling_is_followed(self, tmp_path):
+        target = "/" + "r" * (MAX_URL_LENGTH + 100) + "/"
+        site = {
+            "/robots.txt": ROBOTS,
+            "/go/": Route(301, "text/html", "", target),
+            target: Route(200, "text/html", "<p>landed</p>"),
+        }
+        result = build_fetcher(golden_settings(tmp_path), site).fetch(f"{BASE}/go/")
+        assert result.ok
+        assert result.final_url == f"{BASE}{target}"
 
     @pytest.mark.parametrize("use_async", [False, True], ids=["serial", "async"])
     def test_the_crawl_records_it_as_a_guardrail_refusal(self, tmp_path, use_async):
         site = {
             "/robots.txt": ROBOTS,
             "/": Route(200, "text/html", '<a href="/go/">go</a>'),
-            "/go/": Route(301, "text/html", "", "/" + "r" * MAX_URL_LENGTH),
+            "/go/": Route(301, "text/html", "", "/" + "r" * MAX_FETCH_URL_LENGTH),
         }
         fetcher = build_fetcher(golden_settings(tmp_path), site, seed=1 if use_async else None)
         if use_async:

@@ -128,6 +128,14 @@ class MemoryAccount:
         self.overhead_bytes = 0
         """Flat and derived per-page charges (`LEAN_PAGE_BYTES` plus what each
         page kept). Never credited: they live as long as the crawl."""
+        self.links_charged_bytes = 0
+        """Outbound-link tuples charged as a page lands. Monotonic. Links are
+        held from then until their BFS level has been recorded, and a hostile
+        page can make them far larger than its own body (ADR 0035)."""
+        self.links_credited_bytes = 0
+        """Link bytes credited back once the level recorded them. Monotonic, and
+        never more than `links_charged_bytes`. A level abandoned before it is
+        recorded never credits, which over-counts on the safe side."""
         self.fetches_skipped = 0
         """Fetches not made because of the stop. Touched only on the crawl's own
         event-loop thread, so it needs no lock; the crawl reads it to tell a
@@ -156,6 +164,14 @@ class MemoryAccount:
     def credit(self, nbytes: int) -> None:
         """Return the bytes of one released body. See `MemoryBudget.credit`."""
         self._budget.credit(self, nbytes)
+
+    def charge_links(self, nbytes: int) -> None:
+        """Count a landed page's outbound links. See `MemoryBudget.charge_links`."""
+        self._budget.charge_links(self, nbytes)
+
+    def credit_links(self, nbytes: int) -> None:
+        """Return a recorded page's link bytes. See `MemoryBudget.credit_links`."""
+        self._budget.credit_links(self, nbytes)
 
     def record_skip(self) -> None:
         """Note a fetch that was not made because of the stop."""
@@ -244,22 +260,93 @@ class MemoryBudget:
             account.landed_body_bytes += nbytes
             account.overhead_bytes += overhead_bytes
             account.pages += 1
-            if account.sequence not in self._accounts:
-                return
-            projected = self._projected_locked()
-            if projected < self.budget_bytes:
-                self._overrun_logged = False
-                return
-            victim = self._choose_victim_locked()
-            if victim is not None:
-                victim.request_stop()
-                victim_bytes = victim.projected_bytes
-            elif self._overrun_logged:
-                return
-            else:
-                self._overrun_logged = True
+            outcome = self._after_charge_locked(account)
+        self._log_outcome(account, outcome)
 
-        # Logged outside the lock. Job ids and byte counts are server-side only.
+    def charge_links(self, account: MemoryAccount, nbytes: int) -> None:
+        """Count a landed page's outbound links until its level records them.
+
+        A charge like any other — it can choose a victim — but not a page: the
+        page was counted when its body was charged.
+
+        Args:
+            account: The crawl that extracted them.
+            nbytes: `getsizeof` of the link tuple(s) and every string in them.
+
+        Raises:
+            ValueError: If `nbytes` is negative.
+        """
+        if nbytes < 0:
+            raise ValueError("nbytes must not be negative")
+        with self._lock:
+            account.charged_bytes += nbytes
+            account.links_charged_bytes += nbytes
+            outcome = self._after_charge_locked(account)
+        self._log_outcome(account, outcome)
+
+    def credit_links(self, account: MemoryAccount, nbytes: int) -> None:
+        """Return a page's link bytes once its level has recorded them.
+
+        Clamped against outstanding *link* bytes and logged at ERROR on an
+        over-credit, exactly like `credit` for bodies; never selects a victim.
+
+        Args:
+            account: The crawl that recorded them.
+            nbytes: Exactly what `charge_links` was given for that page.
+
+        Raises:
+            ValueError: If `nbytes` is negative.
+        """
+        if nbytes < 0:
+            raise ValueError("nbytes must not be negative")
+        with self._lock:
+            outstanding = account.links_charged_bytes - account.links_credited_bytes
+            applied = min(nbytes, outstanding)
+            account.links_credited_bytes += applied
+            account.charged_bytes -= applied
+            self._rearm_locked(account)
+        if applied < nbytes:
+            _logger.error(
+                "crawl_memory_budget_over_credit",
+                extra={
+                    "job_id": account.account_id,
+                    "requested_bytes": nbytes,
+                    "outstanding_link_bytes": outstanding,
+                },
+            )
+
+    def _after_charge_locked(
+        self, account: MemoryAccount
+    ) -> tuple[int, MemoryAccount | None, int] | None:
+        """Choose a victim if the budget is reached. Returns what to log, if anything."""
+        if account.sequence not in self._accounts:
+            return None
+        projected = self._projected_locked()
+        if projected < self.budget_bytes:
+            self._overrun_logged = False
+            return None
+        victim = self._choose_victim_locked()
+        if victim is not None:
+            victim.request_stop()
+            return projected, victim, victim.projected_bytes
+        if self._overrun_logged:
+            return None
+        self._overrun_logged = True
+        return projected, None, 0
+
+    def _rearm_locked(self, account: MemoryAccount) -> None:
+        """Re-arm the overrun log once a credit takes the total below the budget."""
+        if account.sequence in self._accounts and self._projected_locked() < self.budget_bytes:
+            self._overrun_logged = False
+
+    def _log_outcome(
+        self, account: MemoryAccount, outcome: tuple[int, MemoryAccount | None, int] | None
+    ) -> None:
+        """Log a charge's outcome outside the lock."""
+        if outcome is None:
+            return
+        projected, victim, victim_bytes = outcome
+        # Job ids and byte counts are server-side only.
         if victim is not None:
             _logger.warning(
                 "crawl_memory_budget_victim",
@@ -304,10 +391,7 @@ class MemoryBudget:
             applied = min(nbytes, outstanding)
             account.credited_body_bytes += applied
             account.charged_bytes -= applied
-            if account.sequence in self._accounts and (
-                self._projected_locked() < self.budget_bytes
-            ):
-                self._overrun_logged = False
+            self._rearm_locked(account)
         if applied < nbytes:
             # Job id and counts only: never a body, never page text.
             _logger.error(

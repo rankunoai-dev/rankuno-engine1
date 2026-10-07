@@ -120,8 +120,10 @@ MAX_LINKS_PER_PAGE = 5_000
 """Outbound links read from one page; the rest are counted and ignored.
 
 Links are held from the moment a page lands until its BFS level has been
-recorded, uncounted by the memory budget (ADR 0035), so their number needs a
-bound of its own. 5,000 is chosen well above a navigational page — a mega-menu
+recorded. The async crawl charges them to the memory budget for that time
+(ADR 0035), and each is at most `MAX_FETCH_URL_LENGTH` long, but their number
+still needs a bound of its own: an HTML sitemap page with more than 5,000 links
+loses its tail here. 5,000 is chosen well above a navigational page — a mega-menu
 plus footer is typically hundreds — and is a judgement, not a measurement of the
 stored corpus. A page past it is an index or a trap, and its children remain
 reachable through sitemaps and pagination. Kept in document order, so what is

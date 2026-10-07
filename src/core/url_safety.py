@@ -37,6 +37,7 @@ __all__ = [
     "ALLOWED_SCHEMES",
     "BLOCKED_HOST_SUFFIXES",
     "DEFAULT_ALLOWED_PORTS",
+    "MAX_FETCH_URL_LENGTH",
     "Resolver",
     "SafeUrl",
     "UrlSafetyPolicy",
@@ -47,6 +48,22 @@ __all__ = [
 _logger = get_logger("core.url_safety")
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+MAX_FETCH_URL_LENGTH = 8192
+"""Longest URL a crawl will request or even collect (ADR 0035).
+
+One constant for two places that must agree: `HttpFetcher` refuses to request a
+longer URL, whether asked for or reached by a redirect, and
+`discovery_parsers.extract_page_links` drops a longer link before it is
+collected. Both exist for memory, not safety: a redirect hop is kept on the
+page's record after its body is released, and a link is held until its BFS
+level is recorded, so an unbounded length was memory a hostile page could
+multiply — one long `<base href>` resolved under thousands of `href="?n"`
+turned a 104 KB body into 20 MB of link strings.
+
+8,192 is the operator's choice: long enough for any real address, and well past
+the 2,048 the SEO audit contract (`contracts.audit.MAX_URL_LENGTH`) accepts for
+export, which is a separate rule with its own consequences."""
 """Only plain web schemes. Blocks `file:`, `gopher:`, `ftp:`, `data:` and the
 redirect-to-`file:` trick that turns a fetcher into an arbitrary file reader."""
 

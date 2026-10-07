@@ -420,6 +420,9 @@ class _LandedPage:
         error: An exception raised extracting links, re-raised by the level
             loop at this page's input position, where it used to be raised.
             Swallowing it here would leave the page fetched but uncounted.
+        links_bytes: What `links` and `links_if_evicted` were charged to the
+            memory budget as the page landed, credited back by the level loop
+            once it has recorded them. `0` when no budget applies.
     """
 
     url: str
@@ -427,6 +430,7 @@ class _LandedPage:
     links: tuple[str, ...] = ()
     links_if_evicted: tuple[str, ...] | None = None
     error: Exception | None = None
+    links_bytes: int = 0
 
     def links_for(self, document_url: str) -> tuple[str, ...]:
         """The links as resolved against `document_url`, which must be one of the two known."""
@@ -524,9 +528,28 @@ async def _ahtml(
         # (a safe over-count). The traceback is dropped because its frames hold
         # the body; the level loop re-raises the exception from its own frame.
         return _LandedPage(url=url, document_url=document_url, error=exc.with_traceback(None))
+    # The links are held from here until the level records them, and a hostile
+    # page can make them far larger than its own body, so they are charged now
+    # and credited by the level loop (ADR 0035). Both readings, when there are
+    # two. Still no `await` since the body was charged above.
+    links_bytes = 0
+    if memory_account is not None:
+        links_bytes = _sizeof_links(links) + (_sizeof_links(fallback) if fallback else 0)
+        memory_account.charge_links(links_bytes)
     if released and memory_account is not None:
         memory_account.credit(body_bytes)
-    return _LandedPage(url=url, document_url=document_url, links=links, links_if_evicted=fallback)
+    return _LandedPage(
+        url=url,
+        document_url=document_url,
+        links=links,
+        links_if_evicted=fallback,
+        links_bytes=links_bytes,
+    )
+
+
+def _sizeof_links(links: tuple[str, ...]) -> int:
+    """`getsizeof` of a link tuple and every string in it. O(links), at most 5,000."""
+    return sys.getsizeof(links) + sum(sys.getsizeof(link) for link in links)
 
 
 async def adiscover_site(
@@ -975,6 +998,13 @@ async def _acrawl(
                 if key not in seen:
                     seen.add(key)
                     next_level.append(target)
+            # Recorded, so this page's link tuples are no longer held by the
+            # crawl. This loop has no `await`: nothing else runs between the
+            # recording and the credit. A level abandoned above, and the pages
+            # after an error raised just before, never get here — their link
+            # charge stays until the crawl ends, a safe over-count.
+            if memory_account is not None and item.links_bytes:
+                memory_account.credit_links(item.links_bytes)
 
         _logger.debug(
             "crawl_level_complete",

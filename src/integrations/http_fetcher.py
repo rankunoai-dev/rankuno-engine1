@@ -62,7 +62,12 @@ from src.core.rate_limiter import (
 from src.core.retry import TRANSIENT_ERRORS
 from src.core.robots import DEFAULT_USER_AGENT, RobotsTxt, parse_robots_txt
 from src.core.schemas import StrictModel
-from src.core.url_safety import SafeUrl, UrlSafetyPolicy, describe_ip_block
+from src.core.url_safety import (
+    MAX_FETCH_URL_LENGTH,
+    SafeUrl,
+    UrlSafetyPolicy,
+    describe_ip_block,
+)
 from src.integrations.base_client import BaseAPIClient
 
 BROWSER_USER_AGENT = (
@@ -148,16 +153,6 @@ for thousands has made a mistake rather than a choice."""
 
 DEFAULT_MAX_REDIRECTS = 5
 """Redirect hops permitted. Each is independently re-validated."""
-
-MAX_FETCH_URL_LENGTH = 2048
-"""Longest URL requested, whether asked for or reached by a redirect.
-
-Equal to the SEO audit contract's `MAX_URL_LENGTH`, which this layer may not
-import (a test pins the two together). Every hop is kept on the page's record
-after its body is released (ADR 0035), so a redirect to a megabyte-long address
-would be memory held per page for a URL no report could carry. Refused as a
-guardrail violation: the fetch fails, is not retried, and the page is recorded
-as not retrieved."""
 
 DEFAULT_MAX_BODY_BYTES = 5 * 1024 * 1024
 """Response body ceiling. A 2 GB response would take out a 512 MB worker."""
