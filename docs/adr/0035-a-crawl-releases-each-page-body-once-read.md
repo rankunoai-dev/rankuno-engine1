@@ -131,7 +131,10 @@ Before extract-at-fetch, nothing bounded URL length on the crawl path. Now:
   - `retained` is `SiteGraph.retained_page_bytes`, the measured `getsizeof` of everything the page
     derived from its own body. It is charged on top because the worst case (above) exceeds the
     flat constant. A page cannot make the constant a lie.
-- With release off, the overhead is 0 and the accounting is exactly ADR 0031's.
+- With release off, the overhead is 0 and the body accounting is exactly ADR 0031's. Link tuples
+  are still charged while their level is in flight (R2), so mid-level the total is higher; they
+  net to zero once every level is recorded, except for an abandoned level or the pages after an
+  extraction error, which keep their charge.
 
 **Credit.**
 - `credit(body_bytes)` is called only when `store_html` returned `released`, with the exact count
@@ -163,7 +166,8 @@ accounting is ADR 0031's. It does not undo the rest of this ADR:
 - the 5,000-link limit
 - link charging
 
-- `false` retains every body and charges exactly as ADR 0031.
+- `false` retains every body and charges bodies exactly as ADR 0031, plus the in-flight link
+  charge above.
 - The tool reads it once per crawl through `get_settings()` and fixes it on the `SiteGraph` at
   construction.
 - It is not a `PageClassificationInput` field. A request naming it is refused (422).

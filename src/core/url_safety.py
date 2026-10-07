@@ -48,6 +48,8 @@ __all__ = [
 _logger = get_logger("core.url_safety")
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
+"""Only plain web schemes. Blocks `file:`, `gopher:`, `ftp:`, `data:` and the
+redirect-to-`file:` trick that turns a fetcher into an arbitrary file reader."""
 
 MAX_FETCH_URL_LENGTH = 8192
 """Longest URL a crawl will request or even collect (ADR 0035).
@@ -64,8 +66,6 @@ turned a 104 KB body into 20 MB of link strings.
 8,192 is the operator's choice: long enough for any real address, and well past
 the 2,048 the SEO audit contract (`contracts.audit.MAX_URL_LENGTH`) accepts for
 export, which is a separate rule with its own consequences."""
-"""Only plain web schemes. Blocks `file:`, `gopher:`, `ftp:`, `data:` and the
-redirect-to-`file:` trick that turns a fetcher into an arbitrary file reader."""
 
 DEFAULT_ALLOWED_PORTS = frozenset({80, 443, 8080, 8443})
 """Ports a public web server plausibly listens on. An unrestricted port set

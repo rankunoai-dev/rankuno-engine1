@@ -408,8 +408,8 @@ hold in total — each body while held, plus a flat 32 KiB per fetched page and
 what the page keeps: when it is reached, the largest crawl over its fair share
 (budget / `MAX_CONCURRENT_CRAWLS`) stops and ends `partial` with "memory budget
 reached" ([ADR 0031](docs/adr/0031-a-crawl-stops-at-a-shared-memory-budget-fair-share-first.md)).
-At the default a crawl reaches its share at about 19k pages, whatever the page
-size. The default is sized for an 8 GB container (the operator's figure,
+With bodies released, a crawl reaches its share at the default at about 19k pages,
+whatever the page size. The default is sized for an 8 GB container (the operator's figure,
 unverified). Sitemaps, the serial path, `/result` reads, deliverables, Screaming
 Frog jobs and discovered-but-unfetched nodes are not counted, so process memory
 as a whole is not bounded by it.

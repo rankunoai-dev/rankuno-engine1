@@ -254,9 +254,10 @@ class Settings(BaseSettings):
         description=(
             "Release each page body once the crawl has read what it needs from it, "
             "keeping only the homepage's (ADR 0035). False retains every body until "
-            "the job ends and charges the memory budget exactly as ADR 0031 did: "
-            "the rollback. Operator configuration only — never a crawl-request "
-            "field."
+            "the job ends and charges bodies as ADR 0031 did: the rollback. It rolls "
+            "back body release only — the per-page caps, the URL ceiling and the "
+            "per-level link charge stay on either way. Operator configuration "
+            "only — never a crawl-request field."
         ),
     )
 

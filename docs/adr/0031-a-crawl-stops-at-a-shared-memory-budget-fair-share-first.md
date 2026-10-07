@@ -144,8 +144,9 @@ stops being retained (below).
 ## Amendment (2026-10-07): bodies are released once read (ADR 0035)
 
 With `Settings.crawl_release_page_html` on (the default), a crawl keeps no page body except the
-homepage's, and the accounting above changes as follows. With it off, everything above stands as
-written.
+homepage's, and the accounting above changes as follows. With it off, the body accounting above stands as
+written; in both modes a page's links are also charged while its BFS level is in flight
+and credited when the level records them (ADR 0035, R2).
 
 * **Charge on land, credit on release.** A body is charged as it lands, as before, together with a
   flat `LEAN_PAGE_BYTES` (32 KiB) and the measured size of what the page keeps. A released body is
