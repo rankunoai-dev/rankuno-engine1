@@ -77,7 +77,7 @@ from src.api.deliverables_routes import build_deliverables_router
 from src.api.job_import_routes import build_job_import_router
 from src.api.local_signin import build_local_signin_router, ensure_local_operator
 from src.api.worker_routes import build_worker_router
-from src.core.auth import Operator, OperatorStore, hash_password
+from src.core.auth import Operator, OperatorStore, hash_password, verify_password
 from src.core.config import ProcessRole, Settings, get_settings
 from src.core.errors import ConfigurationError, UnsafeUrlError
 from src.core.facet_router import FacetRouter
@@ -879,6 +879,16 @@ class ScreamingFrogTemplatesView(StrictModel):
     """Every pre-authored `.seospiderconfig` an operator may select by name."""
 
     templates: list[ScreamingFrogTemplate]
+
+
+class DeleteJobRequest(StrictModel):
+    """Request to delete a job using its password.
+
+    Attributes:
+        password: The password set at job creation time. Used to authorize deletion.
+    """
+
+    password: SecretStr = Field(min_length=1, max_length=256)
 
 
 class ScreamingFrogJobPreviewRequest(StrictModel):
@@ -2307,12 +2317,21 @@ def create_app(
             )
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
         try:
+            # Extract deletion password, hash it, and remove it from the stored request
+            # (never store plaintext credentials).
+            request_dict = payload.model_dump(mode="json")
+            deletion_password = request_dict.pop("deletion_password", None)
+            password_hash = None
+            if deletion_password:
+                password_hash = hash_password(deletion_password)
+
             record = state.store.create(
                 TOOL_NAME,
-                payload.model_dump(mode="json"),
+                request_dict,
                 label=label,
                 facet_id=facet_id,
                 org_id=org_id,
+                password_hash=password_hash,
             )
         except Exception:
             # The store failed, so there is no job and nothing will ever release
@@ -3644,6 +3663,100 @@ def create_app(
         )
         _logger.warning("job_cancelled", extra={"job_id": job_id})
         return updated
+
+    @app.delete(f"{API_PREFIX}/jobs/{{job_id}}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_job(
+        job_id: str,
+        payload: DeleteJobRequest,
+        authorization: str | None = Header(default=None),
+    ) -> None:
+        """Delete a crawl permanently using the password set at creation.
+
+        Deletion is irreversible and removes all associated data: the job record,
+        result, checkpoint, homepage snapshot, reconciliation, and performance
+        reports. Once deleted, no trace of the job remains.
+
+        This endpoint is idempotent: calling it on an already-deleted job returns
+        404 (not 204), making it safe to retry.
+
+        Args:
+            job_id: The job to delete.
+            payload: Request body containing the password set at creation time.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
+        Raises:
+            HTTPException: `401` if the token is missing or invalid, `404` if
+                there is no such job (or it was already deleted), `403` if another
+                org owns it (ADR 0016 condition 2) or if the job has no password
+                set (deletion requires a password), `429` if too many delete
+                attempts are made in a short time (rate limited to prevent
+                brute-force attacks).
+
+        Returns:
+            204 No Content on successful deletion.
+        """
+        # Rate limit: 5 attempts per minute per job, to prevent brute-force.
+        bucket = state.principal_rate_limiter.get_or_create(
+            f"delete:{job_id}", requests_per_minute=5, burst=5
+        )
+        if not bucket.try_acquire():
+            _logger.warning("delete_job_rate_limited", extra={"job_id": job_id})
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many delete attempts; wait a moment and try again",
+            )
+
+        # Verify session token and extract org_id.
+        principal = require_principal(authorization, session_secret=state.session_secret)
+
+        # Get job record.
+        try:
+            record = state.store.get(job_id)
+        except JobNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+
+        # Check org ownership.
+        org_scoped_or_404(record=record, record_id=job_id, org_id=principal.org_id, kind="job")
+
+        # Check if job has password_hash set. Deletion requires one.
+        if record.password_hash is None:
+            _logger.warning(
+                "delete_job_no_password_hash",
+                extra={"job_id": job_id, "org_id": principal.org_id},
+            )
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="deletion requires a password set at job creation",
+            )
+
+        # Verify password (constant-time compare).
+        if not verify_password(payload.password.get_secret_value(), record.password_hash):
+            _logger.warning(
+                "delete_job_wrong_password", extra={"job_id": job_id, "org_id": principal.org_id}
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="incorrect password")
+
+        # If job is still running, signal it to stop gracefully.
+        if record.status == JobStatus.RUNNING:
+            event = state.cancel_event(job_id)
+            if event is not None:
+                event.set()
+            # Release the concurrency slot so admission doesn't wait forever.
+            state.release(job_id, record.facet_id)
+
+        # Delete from disk (and all sidecars atomically).
+        try:
+            state.store.delete(job_id)
+        except JobNotFoundError as exc:
+            # Idempotent: second call returns 404.
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
+
+        _logger.info(
+            "job_deleted",
+            extra={"job_id": job_id, "org_id": principal.org_id, "previous_status": record.status},
+        )
+        # 204 No Content — no body, just success status code.
 
     @app.post(
         f"{API_PREFIX}/jobs/{{job_id}}/resume",

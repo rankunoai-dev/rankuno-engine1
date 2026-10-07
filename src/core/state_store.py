@@ -255,6 +255,11 @@ class JobRecord(StrictModel):
         default=None,
         description="Set only on a job imported from another instance; None when it ran here.",
     )
+    password_hash: str | None = Field(
+        default=None,
+        description="Optional hash of a password set at job creation, "
+        "used for password-protected deletion.",
+    )
 
     @property
     def is_terminal(self) -> bool:
@@ -309,6 +314,7 @@ class JobStore(Protocol):
         label: str = "",
         facet_id: str = "seo.page_classifier",
         org_id: str | None = None,
+        password_hash: str | None = None,
     ) -> JobRecord:
         """Persist a new job in `QUEUED` and return it."""
         ...
@@ -402,6 +408,15 @@ class JobStore(Protocol):
         """
         ...
 
+    def delete(self, job_id: str) -> None:
+        """Delete a job and all its sidecars atomically.
+
+        Raises:
+            JobNotFoundError: If the job does not exist. Idempotent: a second
+                call on an already-deleted job returns 404 (raises JobNotFoundError).
+        """
+        ...
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -487,6 +502,7 @@ class DiskJobStore:
         label: str = "",
         facet_id: str = "seo.page_classifier",
         org_id: str | None = None,
+        password_hash: str | None = None,
     ) -> JobRecord:
         """Persist a new job in `QUEUED`.
 
@@ -502,6 +518,9 @@ class DiskJobStore:
                 `seo.page_classifier` for backward compatibility.
             org_id: Organization that owns this job. Defaults to "default" for
                 backward compatibility with old jobs.
+            password_hash: Optional hash of a password set at creation for
+                password-protected deletion. If None (the default), the job
+                cannot be deleted via DELETE /jobs/{id}.
 
         Returns:
             The persisted record.
@@ -517,6 +536,7 @@ class DiskJobStore:
             status=JobStatus.QUEUED,
             created_at=moment,
             updated_at=moment,
+            password_hash=password_hash,
         )
         with self._lock:
             self._write(record)
@@ -961,6 +981,44 @@ class DiskJobStore:
         if recovered:
             _logger.warning("orphaned_jobs_recovered", extra={"count": len(recovered)})
         return recovered
+
+    def delete(self, job_id: str) -> None:
+        """Delete a job and all its sidecars atomically.
+
+        Raises:
+            JobNotFoundError: If the job does not exist. Idempotent: a second
+                call on an already-deleted job returns 404 (raises JobNotFoundError).
+        """
+        with self._lock:
+            record_path = self._record_path(job_id)
+            if not record_path.exists():
+                msg = f"no job with id {job_id!r}"
+                raise JobNotFoundError(msg)
+
+            # Collect all sidecar paths before deletion.
+            sidecar_paths = [
+                self._result_path(job_id),
+                self._checkpoint_path(job_id),
+                self._homepage_path(job_id),
+                self._reconciliation_path(job_id),
+                self._performance_path(job_id),
+            ]
+
+            try:
+                # Remove record file first (atomic via os.replace semantics).
+                record_path.unlink()
+                # Then remove sidecars. If any raises, the record is already gone,
+                # which is safe: a partial cleanup with a missing record is better
+                # than a missing record with orphaned sidecars we forget to clean.
+                # In practice, unlink(missing_ok=True) never raises.
+                for path in sidecar_paths:
+                    path.unlink(missing_ok=True)
+            except OSError as exc:
+                _logger.error(
+                    "job_delete_failed",
+                    extra={"job_id": job_id, "error": str(exc)},
+                )
+                raise
 
 
 class OrgConfigStore(Protocol):

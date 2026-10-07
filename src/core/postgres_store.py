@@ -235,6 +235,7 @@ class PostgresJobStore(JobStore):
         label: str = "",
         facet_id: str = "seo.page_classifier",
         org_id: str | None = None,
+        password_hash: str | None = None,
     ) -> JobRecord:
         """Create a new job with atomic cost charging.
 
@@ -252,6 +253,7 @@ class PostgresJobStore(JobStore):
             label: Human-facing description.
             facet_id: Facet identifier.
             org_id: Organization ID. Defaults to 'default'.
+            password_hash: Optional hash of a password for protected deletion.
 
         Returns:
             The created JobRecord.
@@ -280,6 +282,7 @@ class PostgresJobStore(JobStore):
                 label=label,
                 facet_id=facet_id,
                 org_id=org_id,
+                password_hash=password_hash,
             )
 
         # Attempt atomic transaction
@@ -335,6 +338,7 @@ class PostgresJobStore(JobStore):
                     status=JobStatus.QUEUED,
                     created_at=now,
                     updated_at=now,
+                    password_hash=password_hash,
                 )
 
             finally:
@@ -357,6 +361,7 @@ class PostgresJobStore(JobStore):
                     label=label,
                     facet_id=facet_id,
                     org_id=org_id,
+                    password_hash=password_hash,
                 )
             raise
 
@@ -1002,3 +1007,36 @@ class PostgresJobStore(JobStore):
         record = _row_to_job_record(inserted)
         _logger.info("job_import_stored", extra={"job_id": record.id, "org": record.org_id})
         return ImportOutcome(record=record, duplicate=False)
+
+    def delete(self, job_id: str) -> None:
+        """Delete a job and all its related data atomically.
+
+        Raises:
+            JobNotFoundError: If the job does not exist. Idempotent: a second
+                call on an already-deleted job returns 404 (raises JobNotFoundError).
+            JobStoreUnavailableError: Circuit open or database error.
+        """
+        if self.circuit_breaker.is_open():
+            raise JobStoreUnavailableError("the job database is unavailable; try again shortly")
+        try:
+            with self._cursor() as cur:
+                # Check job exists before attempting delete.
+                cur.execute("SELECT id FROM jobs WHERE id = %s", (job_id,))
+                if cur.fetchone() is None:
+                    raise JobNotFoundError(f"no job with id {job_id!r}")
+                # Delete job_payloads first (foreign key).
+                cur.execute("DELETE FROM job_payloads WHERE job_id = %s", (job_id,))
+                # Delete the job record itself.
+                cur.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+            self.circuit_breaker.record_success()
+        except JobNotFoundError:
+            raise
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            self.circuit_breaker.record_failure(err)
+            _logger.warning(
+                "job_delete_db_error",
+                extra={"job_id": job_id, "error": type(err).__name__},
+            )
+            raise JobStoreUnavailableError(
+                "the job database is unavailable; try again"
+            ) from err

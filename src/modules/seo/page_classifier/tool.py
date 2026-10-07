@@ -290,6 +290,19 @@ class PageClassificationInput(StrictModel):
     exclude are provided, include is applied first (whitelist), then exclude
     is applied (blacklist)."""
 
+    deletion_password: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Optional password for deletion protection. If set, the crawl can only be deleted by providing this password.",
+    )
+    """Optional password to protect this job from accidental or malicious deletion.
+
+    If provided at creation, the job can only be deleted via DELETE /jobs/{id}
+    when the correct password is supplied. If None (the default), the job cannot
+    be deleted, only cancelled or allowed to finish. See `src/api/server.py`'s
+    `delete_job` endpoint for the deletion mechanism."""
+
 
 class CrawlSummary(StrictModel):
     """Aggregate outcome of one crawl.
