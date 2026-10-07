@@ -1,10 +1,13 @@
 import { useMemo } from "react";
 import type { PageClassificationOutput } from "../../types/schema";
 import type { DashModel } from "../../lib/dashboardModel";
+import { useDashboardStore } from "../../store/useDashboardStore";
 
 interface Props {
   result: PageClassificationOutput;
 }
+
+const KPI_GRID_ID = "kpi-metrics-grid";
 
 /**
  * Where a site's pages get their published position, and how many have none.
@@ -99,6 +102,8 @@ function navSources(result: PageClassificationOutput): NavSources {
  */
 export function KpiMetricStrip({ result }: Props): JSX.Element {
   const { summary, discovery } = result;
+  const kpisExpanded = useDashboardStore((state) => state.kpisExpanded);
+  const toggleKpisExpanded = useDashboardStore((state) => state.toggleKpisExpanded);
 
   // Memoized because the legacy branch walks every page, and at 27,656 pages
   // that is not something to redo on an unrelated re-render.
@@ -109,7 +114,21 @@ export function KpiMetricStrip({ result }: Props): JSX.Element {
   const placedPercent = total ? Math.round((placed / total) * 100) : 0;
 
   return (
-    <div className="kpis">
+    <div className="kpis-section">
+      <div className="kpis-header">
+        <h3>Key Performance Indicators</h3>
+        <button
+          type="button"
+          className="kpi-toggle"
+          aria-expanded={kpisExpanded}
+          aria-controls={KPI_GRID_ID}
+          title={kpisExpanded ? "Collapse KPI metrics" : "Expand KPI metrics"}
+          onClick={() => toggleKpisExpanded()}
+        >
+          {kpisExpanded ? "▾" : "▸"}
+        </button>
+      </div>
+      <div id={KPI_GRID_ID} className="kpis" aria-hidden={!kpisExpanded}>
       <div className="kpi">
         <div className="lab">URLs classified</div>
         <div className="val">{summary.pages_classified.toLocaleString()}</div>
@@ -160,6 +179,7 @@ export function KpiMetricStrip({ result }: Props): JSX.Element {
           {summary.escalated_to_llm.toLocaleString()} escalated ·{" "}
           {(summary.escalation_rate * 100).toFixed(2)}%
         </div>
+      </div>
       </div>
     </div>
   );

@@ -45,7 +45,16 @@ interface DashboardState {
   hiddenReasons: Set<string>;
   /** The whole-screen tree is open. */
   fullScreen: boolean;
+  /**
+   * The inline card's "Filters and cross-check" section is open. Closed by
+   * default so the list gets the card's height; the full-screen view ignores it.
+   */
+  filtersOpen: boolean;
+  /** The KPI metrics grid is expanded. Open by default. */
+  kpisExpanded: boolean;
 
+  setFiltersOpen: (open: boolean) => void;
+  toggleKpisExpanded: () => void;
   setModel: (model: DashModel) => void;
   setOverlay: (overlay: TreeOverlay | null, model: DashModel) => void;
   toggleCrossCheck: (model: DashModel) => void;
@@ -155,6 +164,16 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   missedOnly: false,
   hiddenReasons: new Set<string>(),
   fullScreen: false,
+  filtersOpen: false,
+  kpisExpanded: true,
+
+  setFiltersOpen(filtersOpen) {
+    set({ filtersOpen });
+  },
+
+  toggleKpisExpanded() {
+    set({ kpisExpanded: !get().kpisExpanded });
+  },
 
   setOverlay(overlay, model) {
     // Re-flattened only when the mask can change what is shown. The overlay

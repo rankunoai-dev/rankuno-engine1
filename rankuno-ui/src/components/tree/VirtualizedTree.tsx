@@ -94,6 +94,18 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
 
   useEffect(recompute, [recompute, flat]);
 
+  // The viewport's height changes when the filter section folds or the window
+  // resizes, and nothing else re-reads it: without this the list would keep the
+  // old window and leave blank space under the last mounted row. jsdom has no
+  // ResizeObserver, hence the guard.
+  useEffect(() => {
+    const element = viewport.current;
+    if (!element || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() => recompute());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [recompute]);
+
   // Scroll the focused row into view when selection arrives from elsewhere —
   // teleport search, a graph node, a breadcrumb. Without this, selecting a node
   // 12,000 rows down highlights a row nobody can see.

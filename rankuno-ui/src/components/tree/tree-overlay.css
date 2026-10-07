@@ -61,6 +61,12 @@
   color: var(--ink);
   border-color: var(--faint);
 }
+/* The fold button reads as a control, not a heading: same chrome as `.xbtn`,
+   with a focus ring because it is the one control that changes the layout. */
+.xctl .xfold { white-space: nowrap; }
+.xctl .xfold:focus-visible,
+.xctl .xfull:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.xdetails { border-top: 1px dashed var(--line); margin-top: 2px; }
 .xtoggle.on { color: var(--ink); }
 .xtoggle.off { color: var(--faint); cursor: not-allowed; }
 .xtoggle input { margin: 0; }

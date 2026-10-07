@@ -74,6 +74,7 @@ export function DashboardShell(): JSX.Element {
 
   const loadCheckpoint = useCrawlStore((state) => state.loadCheckpoint);
   const setModel = useDashboardStore((state) => state.setModel);
+  const filtersOpen = useDashboardStore((state) => state.filtersOpen);
   const [crawlOpen, setCrawlOpen] = useState(false);
   const [printedAt, setPrintedAt] = useState<Date | null>(null);
 
@@ -228,7 +229,9 @@ export function DashboardShell(): JSX.Element {
                       <span>virtual · ~25 rows in DOM</span>
                     </div>
                     <TeleportSearch model={model} />
-                    <LevelFilterRow model={model} />
+                    {/* Folded with the cross-check controls: the fold button is
+                        in `TreeControls`, and the chips return when it opens. */}
+                    {filtersOpen && <LevelFilterRow model={model} />}
                     {/* The depth commands moved into `TreeControls`, which sits
                         inside the tree itself and renders in the full-screen
                         view too — that view had no way to collapse anything.

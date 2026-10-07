@@ -48,12 +48,17 @@ function tree() {
   return model;
 }
 
+function openFilters() {
+  fireEvent.click(screen.getByRole("button", { name: /Filters and cross-check/ }));
+}
+
 beforeEach(() => {
   useDashboardStore.setState({
     overlay: null,
     crossCheckOn: false,
     missedOnly: false,
     fullScreen: false,
+    filtersOpen: false,
     hiddenReasons: new Set<string>(),
   });
   useCrawlStore.setState({ reconciliation: null, result: null, includeDefaulters: false });
@@ -63,6 +68,7 @@ describe("cross-check toggle", () => {
   it("is disabled, with the reason, when no cross-check is saved", () => {
     const model = tree();
     render(<VirtualizedTree model={model} />);
+    openFilters();
     const toggle = screen.getByLabelText("Cross-check") as HTMLInputElement;
     expect(toggle.disabled).toBe(true);
     expect(screen.getByText(/No Screaming Frog cross-check is saved/)).toBeInTheDocument();
@@ -72,6 +78,7 @@ describe("cross-check toggle", () => {
     const model = tree();
     useCrawlStore.setState({ reconciliation: reconciliation() });
     const { container } = render(<VirtualizedTree model={model} />);
+    openFilters();
 
     expect(container.querySelector(".xmark-missed")).toBeNull();
     fireEvent.click(screen.getByLabelText("Cross-check"));
@@ -87,6 +94,7 @@ describe("cross-check toggle", () => {
     const model = tree();
     useCrawlStore.setState({ reconciliation: reconciliation() });
     const { container } = render(<VirtualizedTree model={model} />);
+    openFilters();
     fireEvent.click(screen.getByLabelText("Cross-check"));
     fireEvent.click(screen.getByText("Sitemap Orphan · 1"));
 
@@ -101,6 +109,43 @@ describe("cross-check toggle", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("filters and cross-check fold", () => {
+  it("starts folded, with the depth commands and Full screen still in reach", () => {
+    const model = tree();
+    render(<VirtualizedTree model={model} />);
+    const fold = screen.getByRole("button", { name: /Filters and cross-check/ });
+    expect(fold.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByLabelText("Cross-check")).toBeNull();
+    expect(screen.queryByText(/No Screaming Frog cross-check is saved/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Collapse all" })).toBeInTheDocument();
+    expect(screen.getByText("⛶ Full screen")).toBeInTheDocument();
+  });
+
+  it("opens and closes from the button, keeping aria-expanded in step", () => {
+    const model = tree();
+    render(<VirtualizedTree model={model} />);
+    const fold = screen.getByRole("button", { name: /Filters and cross-check/ });
+    fireEvent.click(fold);
+    expect(fold.getAttribute("aria-expanded")).toBe("true");
+    expect(useDashboardStore.getState().filtersOpen).toBe(true);
+    expect(screen.getByLabelText("Cross-check")).toBeInTheDocument();
+    expect(screen.getByLabelText("Include Defaulters")).toBeInTheDocument();
+    expect(screen.getByText(/No Screaming Frog cross-check is saved/)).toBeInTheDocument();
+    fireEvent.click(fold);
+    expect(fold.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByLabelText("Cross-check")).toBeNull();
+  });
+
+  it("shows everything in full screen, with no fold button there", () => {
+    const model = tree();
+    render(<VirtualizedTree model={model} />);
+    fireEvent.click(screen.getByText("⛶ Full screen"));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("Cross-check")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /Filters and cross-check/ })).toBeNull();
   });
 });
 
@@ -190,6 +235,7 @@ describe("Include Defaulters toggle", () => {
   it("is disabled, with the reason, when no cross-check is saved", () => {
     const model = tree();
     render(<VirtualizedTree model={model} />);
+    openFilters();
     const toggle = screen.getByLabelText("Include Defaulters") as HTMLInputElement;
     expect(toggle.disabled).toBe(true);
     expect(toggle.checked).toBe(false);
@@ -200,6 +246,7 @@ describe("Include Defaulters toggle", () => {
     const model = tree();
     useCrawlStore.setState({ reconciliation: reconciliation() });
     render(<VirtualizedTree model={model} />);
+    openFilters();
     const toggle = screen.getByLabelText("Include Defaulters") as HTMLInputElement;
     expect(toggle.disabled).toBe(false);
     expect(toggle.checked).toBe(false);
@@ -209,6 +256,7 @@ describe("Include Defaulters toggle", () => {
     const model = tree();
     useCrawlStore.setState({ reconciliation: reconciliation() });
     render(<VirtualizedTree model={model} />);
+    openFilters();
 
     fireEvent.click(screen.getByLabelText("Include Defaulters"));
     expect(useCrawlStore.getState().includeDefaulters).toBe(true);

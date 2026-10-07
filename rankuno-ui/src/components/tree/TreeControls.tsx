@@ -4,6 +4,8 @@ import { REASON_MEANINGS, reasonLabel, type TreeOverlay } from "../../lib/treeOv
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useDashboardStore } from "../../store/useDashboardStore";
 
+const DETAILS_ID = "tree-filter-details";
+
 interface Props {
   model: DashModel;
   overlay: TreeOverlay;
@@ -40,6 +42,9 @@ export function TreeControls({ model, overlay, fullScreen = false }: Props): JSX
 
   const reasons = Object.entries(overlay.reasons).sort((a, b) => b[1] - a[1]);
   const on = crossCheckOn && overlay.crossCheck;
+  const filtersOpen = useDashboardStore((state) => state.filtersOpen);
+  const setFiltersOpen = useDashboardStore((state) => state.setFiltersOpen);
+  const showDetails = fullScreen || filtersOpen;
 
   return (
     <div className="xctl">
@@ -83,6 +88,50 @@ export function TreeControls({ model, overlay, fullScreen = false }: Props): JSX
             Collapse all
           </button>
         </div>
+        {/* The fold. Inline, everything below the depth commands lives behind
+            this button so the list keeps the card's height; the full-screen
+            view has room and shows it all, so it gets no button. */}
+        {!fullScreen && (
+          <button
+            type="button"
+            className="xbtn xfold"
+            aria-expanded={filtersOpen}
+            aria-controls={DETAILS_ID}
+            title="Show or hide the level and confidence chips, cross-check and defaulter toggles"
+            onClick={() => setFiltersOpen(!filtersOpen)}
+          >
+            {filtersOpen ? "▾" : "▸"} Filters and cross-check
+            {!filtersOpen && on ? " (on)" : ""}
+          </button>
+        )}
+        {/* One slot at the right of the row, two states. Full screen is a place
+            you go and a place you come back from, and the way back belonged
+            beside the controls rather than only in the overlay's header — the
+            header is a strip you scroll away from the moment you start reading
+            the tree. */}
+        {fullScreen ? (
+          <button
+            type="button"
+            className="xfull"
+            title="Back to the tree on the main dashboard"
+            onClick={() => setFullScreen(false)}
+          >
+            <ApartmentOutlined /> Main tree view
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="xfull"
+            title="Open the tree across the whole screen, with per-section totals and the OTHERS breakdown"
+            onClick={() => setFullScreen(true)}
+          >
+            ⛶ Full screen
+          </button>
+        )}
+      </div>
+      {showDetails && (
+        <div id={DETAILS_ID} className="xdetails">
+      <div className="xctl-row">
         <label
           className={`xtoggle${on ? " on" : ""}${overlay.crossCheck ? "" : " off"}`}
           title={
@@ -129,30 +178,6 @@ export function TreeControls({ model, overlay, fullScreen = false }: Props): JSX
             Missed only
           </button>
         )}
-        {/* One slot at the right of the row, two states. Full screen is a place
-            you go and a place you come back from, and the way back belonged
-            beside the controls rather than only in the overlay's header — the
-            header is a strip you scroll away from the moment you start reading
-            the tree. */}
-        {fullScreen ? (
-          <button
-            type="button"
-            className="xfull"
-            title="Back to the tree on the main dashboard"
-            onClick={() => setFullScreen(false)}
-          >
-            <ApartmentOutlined /> Main tree view
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="xfull"
-            title="Open the tree across the whole screen, with per-section totals and the OTHERS breakdown"
-            onClick={() => setFullScreen(true)}
-          >
-            ⛶ Full screen
-          </button>
-        )}
       </div>
       {on && reasons.length > 0 && (
         <div className="xctl-row xreasons">
@@ -175,6 +200,8 @@ export function TreeControls({ model, overlay, fullScreen = false }: Props): JSX
       )}
       {!overlay.crossCheck && !fullScreen && (
         <div className="xnote">{overlay.crossCheckUnavailable}</div>
+      )}
+        </div>
       )}
     </div>
   );

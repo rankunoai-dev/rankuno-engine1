@@ -791,11 +791,58 @@
 }
 
 /* ===== KPIs ===== */
+.kpis-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: none;
+}
+.kpis-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+  gap: 8px;
+}
+.kpis-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.kpi-toggle {
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.kpi-toggle:hover {
+  background-color: var(--hover-light);
+}
+.kpi-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
 .kpis {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 10px;
   flex: none;
+  transition: max-height 200ms ease, opacity 200ms ease, visibility 200ms ease;
+  max-height: 1000px;
+  opacity: 1;
+  visibility: visible;
+  overflow: hidden;
+}
+.kpis[aria-hidden="true"] {
+  max-height: 0;
+  opacity: 0;
+  visibility: hidden;
 }
 .kpi {
   background: var(--panel);
@@ -982,6 +1029,9 @@
 /* ===== virtualized tree ===== */
 .vtree {
   flex: 1;
+  /* Without this a flex child will not shrink below its content, and the list
+     would push the card taller than the viewport instead of scrolling. */
+  min-height: 0;
   overflow-y: auto;
   position: relative;
 }
