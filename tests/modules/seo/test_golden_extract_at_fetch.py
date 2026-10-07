@@ -89,7 +89,11 @@ def project_graph(graph: SiteGraph) -> dict[str, Any]:
     """Everything discovery hands on, with bodies reduced to their hashes."""
     evidence = []
     for item in graph.to_page_evidence():
-        dumped = item.model_dump(mode="json")
+        # `jsonld_types` was added after the snapshot (P3), so it is left out of
+        # the projection rather than written into it: the snapshot keeps
+        # pinning the evidence contract as it stood. The new field has its own
+        # equality test against the body (`test_fetch_time_extraction`).
+        dumped = item.model_dump(mode="json", exclude={"jsonld_types"})
         dumped["html"] = _sha(item.html)
         evidence.append(dumped)
     return {

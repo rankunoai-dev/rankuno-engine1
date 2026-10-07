@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from html.parser import HTMLParser
 from urllib.parse import urljoin
 
@@ -55,6 +55,7 @@ __all__ = [
     "PageEvidence",
     "extract_canonical_url",
     "extract_robots_directives",
+    "extract_schema_types",
     "indexability_of",
     "SignalParser",
     "collect_structural_signals",
@@ -277,6 +278,11 @@ class PageEvidence(StrictModel):
         h1_text: Text of the page's first `<h1>` element, `""` if none or
             never fetched.
         h1_count: Every `<h1>` occurrence seen, independent of text.
+        jsonld_types: Every **recognised** schema.org `@type` the page declares,
+            in document order, read when the page was fetched
+            (`extract_schema_types`). Lets Signal 4 run on evidence that no
+            longer carries the body; when `html` is present it is read instead,
+            so a corpus or test fixture holding only HTML is unaffected.
     """
 
     url: str = Field(min_length=1)
@@ -303,6 +309,7 @@ class PageEvidence(StrictModel):
     meta_description_outside_head: bool = False
     h1_text: str = ""
     h1_count: int = Field(default=0, ge=0)
+    jsonld_types: tuple[str, ...] = ()
 
 
 class _NavLinkExtractor(HTMLParser):
@@ -535,38 +542,83 @@ def _iter_schema_types(node: object) -> Iterable[str]:
             yield from _iter_schema_types(item)
 
 
+def _iter_declared_types(html: str) -> Iterator[str]:
+    """Yield every `@type` in every JSON-LD block of a page, in document order.
+
+    Lazy, so Signal 4 stops parsing at the first recognised type exactly as it
+    always has.
+    """
+    for block in _JSONLD_BLOCK_RE.findall(html):
+        try:
+            document = json.loads(block.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue  # A broken JSON-LD block is common and not worth failing on.
+        yield from _iter_schema_types(document)
+
+
+def _recognised(declared: str) -> tuple[HierarchyLevel, PrimaryPageType] | None:
+    return _SCHEMA_TYPE_MAP.get(declared.split("/")[-1].lower())
+
+
+def extract_schema_types(html: str) -> tuple[str, ...]:
+    """Every recognised `@type` a page declares, in document order.
+
+    Read at fetch time so Signal 4 can run once the body is gone. Only types
+    Signal 4 recognises are kept: it acts on the first of them, so the rest of a
+    page's structured data — every `ListItem` of a breadcrumb, every `Offer` —
+    would be memory held for nothing. Kept verbatim and in order, because the
+    signal's note quotes the type as declared and the first one wins.
+
+    Unlike the lazy walk Signal 4 makes over a body, this reads every block, so
+    a block too deeply nested to parse (`RecursionError`) is skipped like a
+    broken one rather than allowed to fail the fetch that found it.
+
+    Args:
+        html: Raw page HTML.
+
+    Returns:
+        Recognised types, possibly empty.
+    """
+    recognised: list[str] = []
+    for block in _JSONLD_BLOCK_RE.findall(html):
+        try:
+            declared = tuple(_iter_schema_types(json.loads(block.strip())))
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            continue
+        recognised.extend(name for name in declared if _recognised(name) is not None)
+    return tuple(recognised)
+
+
 def parse_jsonld_signal(evidence: PageEvidence) -> SignalScore | None:
     """Signal 4 — Schema.org `@type` declarations embedded in the page.
 
     Walks nested `@graph` structures, since real sites rarely put the
     interesting type at the top level.
 
+    Reads the body when the evidence carries one, and otherwise the types the
+    crawl read from it at fetch time (`PageEvidence.jsonld_types`). Either way
+    the first recognised type in document order decides.
+
     Args:
-        evidence: Page evidence carrying HTML.
+        evidence: Page evidence carrying HTML, or the types read from it.
 
     Returns:
         A scored suggestion, or `None` when no recognised type is present.
     """
-    if not evidence.html:
-        return None
-
-    for block in _JSONLD_BLOCK_RE.findall(evidence.html):
-        try:
-            document = json.loads(block.strip())
-        except (json.JSONDecodeError, ValueError):
-            continue  # A broken JSON-LD block is common and not worth failing on.
-
-        for declared in _iter_schema_types(document):
-            mapped = _SCHEMA_TYPE_MAP.get(declared.split("/")[-1].lower())
-            if mapped is not None:
-                level, page_type = mapped
-                return SignalScore(
-                    source=SignalSource.SCHEMA_JSONLD,
-                    suggested_level=level,
-                    suggested_page_type=page_type,
-                    confidence=0.80,
-                    notes=f"schema.org @type '{declared}'",
-                )
+    declared_types: Iterable[str] = (
+        _iter_declared_types(evidence.html) if evidence.html else evidence.jsonld_types
+    )
+    for declared in declared_types:
+        mapped = _recognised(declared)
+        if mapped is not None:
+            level, page_type = mapped
+            return SignalScore(
+                source=SignalSource.SCHEMA_JSONLD,
+                suggested_level=level,
+                suggested_page_type=page_type,
+                confidence=0.80,
+                notes=f"schema.org @type '{declared}'",
+            )
     return None
 
 

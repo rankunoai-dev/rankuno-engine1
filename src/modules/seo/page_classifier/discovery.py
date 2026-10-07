@@ -64,6 +64,7 @@ from src.modules.seo.page_classifier.signal_parsers import (
     PageEvidence,
     extract_canonical_url,
     extract_robots_directives,
+    extract_schema_types,
     indexability_of,
 )
 from src.modules.seo.page_classifier.url_rules import (
@@ -541,6 +542,15 @@ class SiteGraph:
         depends on whether its body is still held. Written in exactly one
         place (`store_html`) and removed in exactly one (loop eviction in
         `add`), so the two cannot disagree while both exist."""
+        self._breadcrumbs: dict[str, tuple[str, ...]] = {}
+        """Breadcrumb section labels read from each page's body at fetch time.
+
+        The only per-page reading of a body that classification used to make
+        after the crawl. Written beside `_fetched` and dropped beside it, and
+        holding only non-empty trails: most pages publish none."""
+        self._jsonld_types: dict[str, tuple[str, ...]] = {}
+        """Recognised schema.org types read from each body at fetch time, in
+        document order (`extract_schema_types`). Non-empty entries only."""
         self.truncated = False
         self.stopped_reason: str | None = None
         """Set when the crawl is abandoned rather than completed. See
@@ -692,6 +702,8 @@ class SiteGraph:
                     self.loop_urls_skipped += 1
                 self._html.pop(stale, None)
                 self._fetched.discard(stale)
+                self._breadcrumbs.pop(stale, None)
+                self._jsonld_types.pop(stale, None)
             if refuse:
                 self.loop_urls_skipped += 1
                 return None
@@ -845,10 +857,29 @@ class SiteGraph:
         Called by both crawl paths only after a successful HTML retrieval, so an
         error or a non-HTML answer is never marked. An empty body still is: the
         server answered with a page, and the page happened to be empty.
+
+        The page's breadcrumb trail and schema.org types are read here too, so
+        nothing after the crawl needs the body for them. The trail is resolved
+        against the **node's** URL, not where the fetch landed, and reduced by
+        `section_labels` against the crawl root — exactly the reading
+        `to_page_evidence` used to make. A node already evicted gets neither:
+        it can never reach `to_page_evidence`, because a confirmed loop refuses
+        it for the rest of the crawl.
         """
         key = normalize_url(url)
         self._html[key] = html
         self._fetched.add(key)
+        self._breadcrumbs.pop(key, None)
+        self._jsonld_types.pop(key, None)
+        node = self._nodes.get(key)
+        if not html or node is None:
+            return
+        labels = extract_breadcrumb(html, node.url).section_labels(self.base_url, node.url)
+        if labels:
+            self._breadcrumbs[key] = labels
+        types = extract_schema_types(html)
+        if types:
+            self._jsonld_types[key] = types
 
     def all_urls(self) -> tuple[str, ...]:
         """Every URL in the graph, in discovery order.
@@ -928,26 +959,24 @@ class SiteGraph:
         size = total_pages if total_pages is not None else len(self._nodes)
         evidence: list[PageEvidence] = []
         for node in self._nodes.values():
-            html = self._html.get(node.normalized)
-            # The page's own statement about where it sits. Extracted here
-            # because this is the one place that holds both the URL and the
-            # body, and because a trail is per-page evidence — unlike the header
-            # menu, which is read once from the homepage.
-            trail = extract_breadcrumb(html, node.url) if html else None
+            # The page's own statement about where it sits, and its declared
+            # schema.org types, were both read from the body when it landed
+            # (`store_html`). The body itself still travels for any parser
+            # that wants it.
+            key = node.normalized
             evidence.append(
                 PageEvidence(
                     url=node.url,
                     normalized_path=node.normalized,
-                    html=html,
+                    html=self._html.get(key),
                     discovery_sources=node.sources,
                     sitemap_source=node.sitemap_source,
                     cms_record=node.cms_record,
                     inbound_internal_links=node.inbound_links,
                     outbound_internal_links=node.outbound_links,
                     total_pages_in_crawl=size,
-                    breadcrumb_path=(
-                        trail.section_labels(self.base_url, node.url) if trail else ()
-                    ),
+                    breadcrumb_path=self._breadcrumbs.get(key, ()),
+                    jsonld_types=self._jsonld_types.get(key, ()),
                     final_url=node.final_url,
                     redirect_chain=node.redirect_chain,
                     canonical_url=node.canonical_url,
