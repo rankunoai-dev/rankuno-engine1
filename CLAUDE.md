@@ -189,13 +189,20 @@ resolutions. **Follow the "Ruling" column, not the source documents.**
   draft rows await review in `tests/fixtures/corpus/drafts/`.
 - Observed LLM escalation rate is ~50x the assumption in ADR 0005, so the cost model
   is **not trustworthy** (build-log 0007).
-- A crawl holds its entire graph, including page HTML, in RAM until the job ends
-  (~2 MiB per page on sites with ~1 MB HTML). A process-wide budget
-  (`CRAWL_MEMORY_BUDGET_MIB`, default 3 GiB, fair share = budget / crawl cap of 5)
-  stops the largest over-share crawl as PARTIAL "memory budget reached" instead of an
-  OOM kill (ADR 0031). It counts async DOM-crawl HTML only — sitemaps/CMS, the serial
-  fallback, `/result` reads, deliverables and Screaming Frog jobs are uncounted — so it
-  is **not** an OOM guarantee, and the 8 GB container limit it is sized for is unverified.
+- A crawl holds its graph in RAM until the job ends. Page bodies are **released once
+  read**, keeping only the homepage's (ADR 0035; measured 0.0247 MiB/page at 2,001
+  ~1 MB pages, against 1.45 when every body is kept). `CRAWL_RELEASE_PAGE_HTML=false`
+  rolls back body release only; the per-page caps, the 8,192-character URL ceiling
+  (longer links are never collected, such URLs never fetched) and link charging stay.
+  A process-wide budget (`CRAWL_MEMORY_BUDGET_MIB`, default 3 GiB, fair share = budget /
+  crawl cap of 5) charges each async DOM-crawl body as it lands and credits it on
+  release, charges a flat 32 KiB plus the page's measured retained bytes per fetched
+  page, and charges a page's links (at most 5,000) until their BFS level is recorded;
+  the largest over-share crawl stops as PARTIAL "memory budget reached" (ADR 0031,
+  amended by 0035). Small-page crawls now reach their share at ~19k pages. It does
+  **not** count sitemap/CMS bodies, the serial fallback, `/result` reads, deliverables,
+  Screaming Frog jobs, imports, or discovered-but-unfetched nodes, so it is **not** an
+  OOM guarantee, and the 8 GB container limit it is sized for is unverified.
 - Checkpoints are never deleted and hold URLs only — no navigation footprint. A
   checkpoint is for *viewing* what was found (build-log 0019 §6). Manual resume exists
   (`POST /jobs/{id}/resume`, build-log 0032) but starts a new, unmerged job; there is no
