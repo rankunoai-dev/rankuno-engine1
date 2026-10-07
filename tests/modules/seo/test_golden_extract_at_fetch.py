@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from src.core.config import Settings
+from src.core.config import Settings, reset_settings_cache
 from src.modules.seo.page_classifier.async_discovery import adiscover_site
 from src.modules.seo.page_classifier.discovery import SiteGraph, discover_site
 from src.modules.seo.page_classifier.tool import PageClassificationInput, PageClassificationTool
@@ -119,16 +119,17 @@ def run_discovery(
     *,
     seed: int | None,
     completions: list[str] | None = None,
+    release: bool = False,
 ) -> SiteGraph:
     """Run discovery alone. `seed=None` is the serial path."""
     fetcher = build_fetcher(settings, site, seed=seed, completions=completions)
     if seed is None:
-        graph, _ = discover_site(fetcher, BASE)
+        graph, _ = discover_site(fetcher, BASE, release_bodies=release)
         return graph
 
     async def scenario() -> SiteGraph:
         async with fetcher:
-            found, _ = await adiscover_site(fetcher, BASE)
+            found, _ = await adiscover_site(fetcher, BASE, release_bodies=release)
             return found
 
     return asyncio.run(scenario())
@@ -237,3 +238,39 @@ class TestTheFixtureExercisesWhatItClaims:
         urls = {page["url"] for page in snapshot["tool"]["pages"]}
         assert f"{BASE}/new/sub/child/" in urls
         assert f"{BASE}/moved/child/" not in urls
+
+
+class TestReleasingBodiesChangesNothingProduced:
+    """ADR 0035: release on or off, the stored result is the same bytes."""
+
+    @pytest.mark.parametrize("release", ["true", "false"])
+    @pytest.mark.parametrize("seed", [None, 1], ids=["serial", "async"])
+    def test_the_tool_output_is_identical(self, golden, site, snapshot, monkeypatch, release, seed):
+        monkeypatch.setenv("CRAWL_RELEASE_PAGE_HTML", release)
+        reset_settings_cache()
+        output = json.loads(canonical(run_tool(golden, site, seed=seed)))
+        assert_identical({"tool": output}, {"tool": snapshot["tool"]}, f"release={release}")
+
+    @pytest.mark.parametrize("seed", [None, 1], ids=["serial", "async"])
+    def test_only_the_homepage_body_is_held_and_nothing_else_moves(
+        self, golden, site, snapshot, seed
+    ):
+        released = project_graph(run_discovery(golden, site, seed=seed, release=True))
+        homepage = f"{BASE}/"
+        for item in released["evidence"]:
+            expected = item["html"] if item["normalized_path"] == homepage else None
+            assert item["html"] == expected, item["url"]
+        held = [item for item in released["evidence"] if item["html"] is not None]
+        assert [item["normalized_path"] for item in held] == [homepage]
+
+        def without_bodies(projection: dict[str, Any]) -> dict[str, Any]:
+            stripped = json.loads(canonical(projection))
+            for item in stripped["evidence"]:
+                item.pop("html")
+            return stripped
+
+        assert_identical(without_bodies(released), without_bodies(snapshot["graph"]), "release")
+        (snap_home,) = (
+            i for i in snapshot["graph"]["evidence"] if i["normalized_path"] == homepage
+        )
+        assert held[0]["html"] == snap_home["html"]

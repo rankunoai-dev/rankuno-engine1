@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from src.core.logger import get_logger
-from src.core.memory_budget import MEMORY_BUDGET_REASON, MemoryAccount
+from src.core.memory_budget import LEAN_PAGE_BYTES, MEMORY_BUDGET_REASON, MemoryAccount
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.discovery import (
     DEFAULT_DOM_RESERVE_FRACTION,
@@ -495,11 +495,18 @@ async def _ahtml(
         graph.pages_not_retrieved += 1
         return None
     graph.record_outcome(OUTCOME_OK)
+    # From here to the return there is no `await`: the charge, the release and
+    # the credit happen in one uninterrupted stretch of this task, so no other
+    # page can land between a body being charged and being credited, and no
+    # other task can observe a credited body that is still referenced.
+    #
+    # `getsizeof` is O(1) and reports the PEP 393 width: one curly quote makes
+    # a whole page two bytes per character.
+    body_bytes = sys.getsizeof(result.body)
+    released = graph.store_html(url, result.body)
     if memory_account is not None:
-        # `getsizeof` is O(1) and reports the PEP 393 width: one curly quote
-        # makes a whole page two bytes per character.
-        memory_account.charge(sys.getsizeof(result.body))
-    graph.store_html(url, result.body)
+        overhead = LEAN_PAGE_BYTES + graph.retained_page_bytes(url) if graph.release_bodies else 0
+        memory_account.charge(body_bytes, overhead_bytes=overhead)
     document_url = graph.landed_url(url)
     try:
         links = graph.cap_links(
@@ -513,7 +520,12 @@ async def _ahtml(
             else None
         )
     except Exception as exc:  # noqa: BLE001 - re-raised by the level loop, in input order
-        return _LandedPage(url=url, document_url=document_url, error=exc)
+        # No credit on this path: the body stays counted until the crawl ends
+        # (a safe over-count). The traceback is dropped because its frames hold
+        # the body; the level loop re-raises the exception from its own frame.
+        return _LandedPage(url=url, document_url=document_url, error=exc.with_traceback(None))
+    if released and memory_account is not None:
+        memory_account.credit(body_bytes)
     return _LandedPage(url=url, document_url=document_url, links=links, links_if_evicted=fallback)
 
 
@@ -534,6 +546,7 @@ async def adiscover_site(
     url_filter: URLFilter | None = None,
     cancel_event: threading.Event | None = None,
     memory_account: MemoryAccount | None = None,
+    release_bodies: bool = False,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths concurrently and merge them.
 
@@ -579,8 +592,13 @@ async def adiscover_site(
             (ADR 0031). Like `cancel_event` it is honoured on Path B only, at
             the same two points; a crawl it stops ends with `stopped_reason`
             `MEMORY_BUDGET_REASON` and `truncated` untouched. Only DOM-crawl
-            HTML is charged: it is the only body discovery retains. `None`
-            means no budget applies.
+            pages are charged: each body as it lands and, with
+            `release_bodies`, a flat per-page charge plus what the page keeps,
+            the body being credited back once released (ADR 0035). Sitemaps,
+            CMS pages and the serial path are not counted. `None` means no
+            budget applies.
+        release_bodies: Keep no page body but the homepage's (ADR 0035). See
+            `SiteGraph`.
 
     Returns:
         The merged graph and its report.
@@ -591,6 +609,7 @@ async def adiscover_site(
         max_pages=max_pages,
         dom_reserve_fraction=dom_reserve_fraction,
         url_filter=url_filter,
+        release_bodies=release_bodies,
     )
 
     graph.sitemaps_fetched = await _asitemaps(fetcher, base_url, graph, bounded, on_progress)

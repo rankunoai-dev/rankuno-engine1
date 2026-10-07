@@ -35,6 +35,7 @@ looks complete is worse than one that says it stopped.
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections import Counter, deque
 from collections.abc import Callable, Iterator, Mapping
 
@@ -131,7 +132,8 @@ ABSOLUTE_MAX_PAGES = 500_000
 """What "no ceiling" actually resolves to.
 
 There is no genuinely unbounded mode, and offering one would be a lie about the
-implementation. `SiteGraph` holds every node **and every page's HTML** in memory;
+implementation. `SiteGraph` holds every node in memory (and, with body release
+off, every page's HTML — ADR 0035);
 ADR 0001 sets 500k as the top of the range these structures are built for and
 defers the Bloom-filter and disk-spill path needed beyond it.
 
@@ -536,6 +538,7 @@ class SiteGraph:
         max_pages: int = DEFAULT_MAX_PAGES,
         dom_reserve_fraction: float = DEFAULT_DOM_RESERVE_FRACTION,
         url_filter: URLFilter | None = None,
+        release_bodies: bool = False,
     ) -> None:
         """Create an empty graph rooted at `base_url`.
 
@@ -548,8 +551,14 @@ class SiteGraph:
                 somewhere to land.
             url_filter: Optional URL filter (include/exclude patterns). If
                 provided, only URLs matching the filter are added to the graph.
+            release_bodies: Keep no page body but the homepage's (ADR 0035).
+                Everything after the crawl reads what `store_html` extracted
+                instead. `False` retains every body, as before ADR 0035. Set
+                from `Settings.crawl_release_page_html` by the tool, once per
+                crawl; the default is for direct callers and tests.
         """
         self.base_url = base_url
+        self.release_bodies = release_bodies
         self.max_pages = max_pages
         self.url_filter = url_filter
         self.dom_reserve = int(max_pages * max(0.0, min(dom_reserve_fraction, 0.9)))
@@ -558,6 +567,9 @@ class SiteGraph:
         self.pre_crawl_budget = max(1, max_pages - self.dom_reserve)
         self._nodes: dict[str, DiscoveredNode] = {}
         self._html: dict[str, str] = {}
+        """Page bodies, by normalised key. With `release_bodies`, only the
+        homepage's: the header menu is read from it after the crawl
+        (`html_for`). Otherwise every fetched page's, as before ADR 0035."""
         self._fetched: set[str] = set()
         """Normalised keys of every page retrieved as HTML: the definition of
         "fetched" that `unfetched_urls` reads, and so what checkpoints and
@@ -881,8 +893,8 @@ class SiteGraph:
             redirected_to=result.final_url,
         )
 
-    def store_html(self, url: str, html: str) -> None:
-        """Retain a page's HTML for later evidence assembly, and mark it fetched.
+    def store_html(self, url: str, html: str) -> bool:
+        """Read what is needed from a fetched page, mark it fetched, keep or release it.
 
         Called by both crawl paths only after a successful HTML retrieval, so an
         error or a non-HTML answer is never marked. An empty body still is: the
@@ -895,21 +907,71 @@ class SiteGraph:
         `to_page_evidence` used to make. A node already evicted gets neither:
         it can never reach `to_page_evidence`, because a confirmed loop refuses
         it for the rest of the crawl.
+
+        The body is then kept only if it is the homepage's, or if bodies are not
+        being released at all. The homepage is recognised by key —
+        `normalize_url(url) == normalize_url(base_url)` — so a trailing slash or
+        a capitalised host on the crawl root still keeps it, and a redirected
+        homepage is kept under the key it was requested at, which is where
+        `html_for(base_url)` looks.
+
+        Returns:
+            `True` when the body was released. The caller credits the memory
+            budget on exactly this answer, and on nothing else.
         """
         key = normalize_url(url)
-        self._html[key] = html
+        released = self.release_bodies and key != normalize_url(self.base_url)
+        if released:
+            self._html.pop(key, None)
+        else:
+            self._html[key] = html
         self._fetched.add(key)
         self._breadcrumbs.pop(key, None)
         self._jsonld_types.pop(key, None)
         node = self._nodes.get(key)
         if not html or node is None:
-            return
+            return released
         labels = extract_breadcrumb(html, node.url).section_labels(self.base_url, node.url)
         if labels:
             self._breadcrumbs[key] = tuple(label[:MAX_BREADCRUMB_LABEL_CHARS] for label in labels)
         types = extract_schema_types(html)
         if types:
             self._jsonld_types[key] = types
+        return released
+
+    def retained_page_bytes(self, url: str) -> int:
+        """Bytes a fetched page keeps that it derived from its own body.
+
+        Charged to the memory budget on top of `LEAN_PAGE_BYTES` when bodies are
+        released (ADR 0035): the title, description, H1, canonical and the
+        verdict quoting it, where the fetch landed and how, the breadcrumb and
+        the schema types. Each is capped where it is read, so this is bounded;
+        it is measured rather than assumed so a page near those caps pays for
+        them. Empty values are interned singletons and cost the page nothing.
+        """
+        key = normalize_url(url)
+        total = 0
+        for values in (self._breadcrumbs.get(key), self._jsonld_types.get(key)):
+            if values:
+                total += sys.getsizeof(values) + sum(sys.getsizeof(v) for v in values)
+        node = self._nodes.get(key)
+        if node is None:
+            return total
+        for text in (
+            node.final_url,
+            node.canonical_url,
+            node.indexability_reason,
+            node.page_title,
+            node.meta_description,
+            node.h1_text,
+        ):
+            if text:
+                total += sys.getsizeof(text)
+        if node.redirect_chain:
+            total += sys.getsizeof(node.redirect_chain) + sum(
+                sys.getsizeof(hop) for hop in node.redirect_chain
+            )
+        return total
 
     def cap_links(self, url: str, links: tuple[str, ...], *, count: bool = True) -> tuple[str, ...]:
         """Bound one page's outbound links to `MAX_LINKS_PER_PAGE`, in document order.
@@ -976,11 +1038,13 @@ class SiteGraph:
         )
 
     def html_for(self, url: str) -> str | None:
-        """Retrieve a stored page body, or `None` if it was never fetched.
+        """Retrieve a stored page body, or `None` if none is held.
 
         Exists for the navigation parse, which needs the homepage's markup after
         the crawl rather than during it — the header menu is global, so it is
-        read once from the root instead of on every page.
+        read once from the root instead of on every page. With `release_bodies`
+        the homepage's is the only body held, so `None` here no longer means
+        "never fetched": ask `unfetched_urls` that.
         """
         return self._html.get(normalize_url(url))
 
@@ -1109,6 +1173,7 @@ def discover_site(
     seed_urls: tuple[str, ...] = (),
     exclude_urls: tuple[str, ...] = (),
     url_filter: URLFilter | None = None,
+    release_bodies: bool = False,
 ) -> tuple[SiteGraph, DiscoveryReport]:
     """Run all three discovery paths and merge them into one graph.
 
@@ -1138,6 +1203,8 @@ def discover_site(
             again, with the seeds merely appended to it.
         url_filter: Optional URL filter for include/exclude patterns. If
             provided, only URLs matching the filter are added to the graph.
+        release_bodies: Keep no page body but the homepage's (ADR 0035). See
+            `SiteGraph`.
 
     Returns:
         The merged graph and its report.
@@ -1147,6 +1214,7 @@ def discover_site(
         max_pages=max_pages,
         dom_reserve_fraction=dom_reserve_fraction,
         url_filter=url_filter,
+        release_bodies=release_bodies,
     )
 
     graph.sitemaps_fetched = _discover_from_sitemaps(fetcher, base_url, graph)

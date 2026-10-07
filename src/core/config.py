@@ -238,13 +238,25 @@ class Settings(BaseSettings):
         ge=256,
         le=65536,
         description=(
-            "Page HTML, in MiB, that all running crawls together may retain before "
-            "the largest crawl over its fair share (budget / max_concurrent_crawls) "
-            "is stopped as partial with 'memory budget reached' (ADR 0031). Sized "
+            "What all running crawls together may hold, in MiB, before the largest "
+            "crawl over its fair share (budget / max_concurrent_crawls) is stopped "
+            "as partial with 'memory budget reached' (ADR 0031). Counted: every page "
+            "body while it is held, and — with crawl_release_page_html — a flat "
+            "32 KiB per fetched page plus what the page keeps (ADR 0035). Sized "
             "for an 8 GB container with headroom for what it does not count — "
             "sitemaps, result reads, workbook builds — so it is not an OOM "
             "guarantee. The 8 GB figure is the operator's statement of the Railway "
             "plan; the process never reads its own limit."
+        ),
+    )
+    crawl_release_page_html: bool = Field(
+        default=True,
+        description=(
+            "Release each page body once the crawl has read what it needs from it, "
+            "keeping only the homepage's (ADR 0035). False retains every body until "
+            "the job ends and charges the memory budget exactly as ADR 0031 did: "
+            "the rollback. Operator configuration only — never a crawl-request "
+            "field."
         ),
     )
 

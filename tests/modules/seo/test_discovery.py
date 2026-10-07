@@ -379,10 +379,16 @@ class TestPageEvidenceProduction:
         evidence = {item.normalized_path: item for item in graph.to_page_evidence()}
         assert evidence["https://e.com/services/"].inbound_internal_links >= 1
 
-    def test_retains_html_for_dom_based_signals(self, settings):
-        graph, _ = discover_site(site_fetcher(FULL_SITE, settings), "https://e.com")
+    @pytest.mark.parametrize("release", [False, True], ids=["retained", "released"])
+    def test_pages_are_fetched_for_dom_based_signals(self, settings, release):
+        """Fetched either way; the body is held only when release is off (ADR 0035)."""
+        graph, _ = discover_site(
+            site_fetcher(FULL_SITE, settings), "https://e.com", release_bodies=release
+        )
         evidence = {item.normalized_path: item for item in graph.to_page_evidence()}
-        assert evidence["https://e.com/services/"].html is not None
+        assert "https://e.com/services/" not in graph.unfetched_urls()
+        assert (evidence["https://e.com/services/"].html is None) is release
+        assert evidence["https://e.com/"].html is not None, "the homepage is always kept"
 
     def test_crawl_size_can_be_overridden_for_in_degree_scaling(self, settings):
         graph, _ = discover_site(site_fetcher(FULL_SITE, settings), "https://e.com")
@@ -1058,8 +1064,9 @@ class TestResumeSeeding:
             site_fetcher(self.SEED_SITE, settings),
             "https://e.com",
             seed_urls=("https://e.com/missed/",),
+            release_bodies=True,
         )
-        assert graph.html_for("https://e.com/missed/") is not None
+        assert "https://e.com/missed/" not in graph.unfetched_urls()
 
     def test_links_found_from_a_seed_are_followed(self, settings):
         """Seeds are crawl roots, not a fetch list.
@@ -1071,8 +1078,9 @@ class TestResumeSeeding:
             site_fetcher(self.SEED_SITE, settings),
             "https://e.com",
             seed_urls=("https://e.com/missed/",),
+            release_bodies=True,
         )
-        assert graph.html_for("https://e.com/missed/deeper/") is not None
+        assert "https://e.com/missed/deeper/" not in graph.unfetched_urls()
 
     def test_the_site_root_is_still_crawled(self, settings):
         """Seeding narrows nothing. Sitemap and CMS discovery still run too."""
@@ -1080,17 +1088,20 @@ class TestResumeSeeding:
             site_fetcher(self.SEED_SITE, settings),
             "https://e.com",
             seed_urls=("https://e.com/missed/",),
+            release_bodies=True,
         )
-        assert graph.html_for("https://e.com/") is not None
-        assert graph.html_for("https://e.com/a/") is not None
+        assert graph.html_for("https://e.com/") is not None, "the homepage body is kept"
+        assert "https://e.com/a/" not in graph.unfetched_urls()
 
     def test_a_seed_that_duplicates_the_root_is_not_crawled_twice(self, settings):
         graph, report = discover_site(
             site_fetcher(self.SEED_SITE, settings),
             "https://e.com",
             seed_urls=("https://e.com/",),
+            release_bodies=True,
         )
-        assert report.pages_fetched == len([n for n in graph.nodes if graph.html_for(n.url)])
+        unfetched = set(graph.unfetched_urls())
+        assert report.pages_fetched == len([n for n in graph.nodes if n.url not in unfetched])
 
     def test_a_seed_the_graph_refuses_is_dropped(self, settings):
         """A seed is admitted on the same terms as any other URL.

@@ -252,11 +252,17 @@ class TestConcurrentBehaviour:
         _, report = run_async(settings, site_profile=SiteProfile(cms_family=CmsFamily.WORDPRESS))
         assert report.from_cms >= 2
 
-    def test_retains_html_for_dom_signals(self, settings):
-        """The bug class from cycle 0004: URLs found but bodies never captured."""
-        graph, _ = run_async(settings)
+    @pytest.mark.parametrize("release", [False, True], ids=["retained", "released"])
+    def test_pages_are_fetched_for_dom_signals(self, settings, release):
+        """The bug class from cycle 0004: URLs found but pages never fetched.
+
+        Fetched either way; the body is held only when release is off (ADR 0035).
+        """
+        graph, _ = run_async(settings, release_bodies=release)
         evidence = {item.normalized_path: item for item in graph.to_page_evidence()}
-        assert evidence["https://e.com/services/"].html is not None
+        assert "https://e.com/services/" not in graph.unfetched_urls()
+        assert (evidence["https://e.com/services/"].html is None) is release
+        assert evidence["https://e.com/"].html is not None, "the homepage is always kept"
 
     def test_respects_the_depth_ceiling(self, settings):
         _, report = run_async(settings, max_depth=0)

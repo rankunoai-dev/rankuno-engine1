@@ -40,6 +40,7 @@ from typing import Annotated, ClassVar, Literal, Protocol, runtime_checkable
 from pydantic import Field
 
 from src.core.base_tool import BaseTool
+from src.core.config import get_settings
 from src.core.errors import CrawlBlockedError
 from src.core.logger import get_logger
 from src.core.memory_budget import MemoryAccount
@@ -835,6 +836,11 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             # exclusion is what made a resume a full re-crawl with extra steps.
             "exclude_urls": payload.exclude_urls,
             "url_filter": url_filter,
+            # Read once per crawl, here, and fixed on the graph at construction
+            # (ADR 0035). Operator configuration, deliberately not a payload
+            # field: a request must not be able to make the server hold every
+            # body it fetches.
+            "release_bodies": get_settings().crawl_release_page_html,
         }
 
         if payload.use_async_crawl and not _event_loop_running():

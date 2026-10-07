@@ -12,7 +12,12 @@ import sys
 import threading
 
 import httpx
-from src.core.memory_budget import MEMORY_BUDGET_REASON, MemoryAccount, MemoryBudget
+from src.core.memory_budget import (
+    LEAN_PAGE_BYTES,
+    MEMORY_BUDGET_REASON,
+    MemoryAccount,
+    MemoryBudget,
+)
 from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.http_fetcher import HttpFetcher
 from src.modules.seo.page_classifier.async_discovery import _gather_bounded, adiscover_site
@@ -111,8 +116,30 @@ def test_a_small_budget_ends_the_crawl_partial_with_the_memory_reason(settings):
     assert report.truncated is False, "truncated means the page ceiling, not memory"
     assert 1 < report.pages_fetched < CHILDREN + 1
     assert account.fetches_skipped > 0
-    assert graph.html_for("https://e.com/") is not None, "fetched pages keep their HTML"
+    assert graph.html_for("https://e.com/") is not None, "release is off: bodies are kept"
     assert not report.retrieved_nothing
+
+
+def test_with_bodies_released_a_small_budget_still_ends_partial_on_lean_charges(settings):
+    """ADR 0035: released bodies are credited, so it is the flat page charge that fills it.
+
+    Budget: the homepage body (held), one body's in-flight reserve, and about
+    four pages' worth of `LEAN_PAGE_BYTES`. The 0031 budget above would let
+    every page through now; this one must not.
+    """
+    body = sys.getsizeof(HOME)
+    account = MemoryBudget(2 * body + 4 * LEAN_PAGE_BYTES + LEAN_PAGE_BYTES // 2, 5).open(
+        "job", in_flight_ceiling=1
+    )
+
+    graph, report = _run(settings, account, release_bodies=True)
+
+    assert report.stopped_reason == MEMORY_BUDGET_REASON
+    assert 1 < report.pages_fetched < CHILDREN + 1
+    assert graph.html_for("https://e.com/") is not None, "the homepage keeps its HTML"
+    assert graph.html_for("https://e.com/p0/") is None, "a child's body was released"
+    assert "https://e.com/p0/" not in graph.unfetched_urls(), "and it was still fetched"
+    assert account.credited_body_bytes == account.landed_body_bytes - body
 
 
 def test_a_budget_smaller_than_the_homepage_still_fetches_the_homepage(settings):
@@ -167,6 +194,21 @@ def test_the_charge_is_the_retained_size_including_pep_393_width(settings):
     assert account.pages == 1
     assert account.charged_bytes == sys.getsizeof(home)
     assert account.charged_bytes > 2 * len(home)
+
+
+def test_with_bodies_released_the_landed_size_keeps_its_pep_393_width(settings):
+    """The width still sets the landed charge, and the in-flight reserve built on it."""
+    child = _page("", extra="It’s")
+    home = _page('<a href="/p0/">P0</a>')
+    account = MemoryBudget(10**9, 5).open("job")
+
+    graph, _ = _run(settings, account, routes={"/": home, "/p0/": child}, release_bodies=True)
+
+    assert account.pages == 2
+    assert account.landed_body_bytes == sys.getsizeof(home) + sys.getsizeof(child)
+    assert account.credited_body_bytes == sys.getsizeof(child) > 2 * len(child)
+    kept = sum(graph.retained_page_bytes(url) for url in ("https://e.com", "https://e.com/p0/"))
+    assert account.charged_bytes == sys.getsizeof(home) + 2 * LEAN_PAGE_BYTES + kept
 
 
 def test_no_account_means_no_budget(settings):
