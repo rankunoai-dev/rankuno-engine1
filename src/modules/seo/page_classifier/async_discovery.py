@@ -502,9 +502,15 @@ async def _ahtml(
     graph.store_html(url, result.body)
     document_url = graph.landed_url(url)
     try:
-        links = extract_page_links(result.body, url, document_url=document_url)
+        links = graph.cap_links(
+            url, extract_page_links(result.body, url, document_url=document_url)
+        )
         fallback = (
-            extract_page_links(result.body, url, document_url=url) if document_url != url else None
+            graph.cap_links(
+                url, extract_page_links(result.body, url, document_url=url), count=False
+            )
+            if document_url != url
+            else None
         )
     except Exception as exc:  # noqa: BLE001 - re-raised by the level loop, in input order
         return _LandedPage(url=url, document_url=document_url, error=exc)

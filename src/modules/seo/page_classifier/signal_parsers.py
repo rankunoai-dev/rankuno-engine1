@@ -31,6 +31,7 @@ from urllib.parse import urljoin
 from pydantic import Field
 
 from src.core.schemas import StrictModel
+from src.modules.seo.contracts.audit import MAX_URL_LENGTH
 from src.modules.seo.page_classifier.schemas import (
     DiscoverySource,
     HierarchyLevel,
@@ -49,6 +50,8 @@ from src.modules.seo.page_classifier.url_rules import (
 
 __all__ = [
     "L1_HUB_INBOUND_LINK_THRESHOLD",
+    "MAX_SCHEMA_TYPES",
+    "MAX_SCHEMA_TYPE_CHARS",
     "CmsRecord",
     "Indexability",
     "NavLink",
@@ -168,6 +171,21 @@ it runs once per fetched page, and a full-document regex over a 1 MB body times
 ten thousand pages is real time spent for nothing.
 """
 
+MAX_SCHEMA_TYPES = 8
+"""Distinct recognised `@type`s kept per page by `extract_schema_types`.
+
+Signal 4 acts on the first recognised type only, so the cap and the de-duplication
+cannot change its answer: the first occurrence is always kept. They exist because
+the list outlives the body (extract-at-fetch, ADR 0035), and an uncapped list let
+one hostile page repeat `"@type": "Product"` until it held megabytes."""
+
+MAX_SCHEMA_TYPE_CHARS = 256
+"""Longest `@type` value Signal 4 will recognise, on either path.
+
+A real type is a word or a schema.org URL. A longer one can only be an attempt
+to make the stored list large, and applying the limit in `_recognised` — which
+both the body path and the stored path go through — keeps the two agreeing."""
+
 _LINK_TAG = re.compile(r"<link\s[^>]*>", re.IGNORECASE)
 _ATTR = re.compile(r"""([a-zA-Z-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s">]+))""")
 
@@ -220,6 +238,12 @@ def extract_canonical_url(html: str, base_url: str) -> str:
         # a site that emits `<a href=` into an address emits it into a canonical
         # too, and 91 such URLs were measured on one crawl.
         if safe_split(absolute) is None or is_malformed_url(absolute):
+            return ""
+        # Dropped rather than truncated: a truncated URL is one the site never
+        # named. `MAX_URL_LENGTH` is the audit contract's own limit, so an
+        # over-long canonical could never have been exported anyway — and it
+        # outlives the body, so its length is memory the crawl holds per page.
+        if len(absolute) > MAX_URL_LENGTH:
             return ""
         return str(absolute)
     return ""
@@ -557,6 +581,8 @@ def _iter_declared_types(html: str) -> Iterator[str]:
 
 
 def _recognised(declared: str) -> tuple[HierarchyLevel, PrimaryPageType] | None:
+    if len(declared) > MAX_SCHEMA_TYPE_CHARS:
+        return None
     return _SCHEMA_TYPE_MAP.get(declared.split("/")[-1].lower())
 
 
@@ -567,7 +593,9 @@ def extract_schema_types(html: str) -> tuple[str, ...]:
     Signal 4 recognises are kept: it acts on the first of them, so the rest of a
     page's structured data — every `ListItem` of a breadcrumb, every `Offer` —
     would be memory held for nothing. Kept verbatim and in order, because the
-    signal's note quotes the type as declared and the first one wins.
+    signal's note quotes the type as declared and the first one wins; repeats
+    are dropped and at most `MAX_SCHEMA_TYPES` kept, neither of which can change
+    which type is first.
 
     Unlike the lazy walk Signal 4 makes over a body, this reads every block, so
     a block too deeply nested to parse (`RecursionError`) is skipped like a
@@ -585,7 +613,11 @@ def extract_schema_types(html: str) -> tuple[str, ...]:
             declared = tuple(_iter_schema_types(json.loads(block.strip())))
         except (json.JSONDecodeError, ValueError, RecursionError):
             continue
-        recognised.extend(name for name in declared if _recognised(name) is not None)
+        for name in declared:
+            if _recognised(name) is not None and name not in recognised:
+                recognised.append(name)
+                if len(recognised) == MAX_SCHEMA_TYPES:
+                    return tuple(recognised)
     return tuple(recognised)
 
 

@@ -110,6 +110,7 @@ __all__ = [
     "DEFAULT_MAX_REDIRECTS",
     "FETCH_RETRY_ON",
     "MAX_CONNECTIONS",
+    "MAX_FETCH_URL_LENGTH",
     "POOL_TIMEOUT_S",
     "FetchResult",
     "HttpFetcher",
@@ -147,6 +148,16 @@ for thousands has made a mistake rather than a choice."""
 
 DEFAULT_MAX_REDIRECTS = 5
 """Redirect hops permitted. Each is independently re-validated."""
+
+MAX_FETCH_URL_LENGTH = 2048
+"""Longest URL requested, whether asked for or reached by a redirect.
+
+Equal to the SEO audit contract's `MAX_URL_LENGTH`, which this layer may not
+import (a test pins the two together). Every hop is kept on the page's record
+after its body is released (ADR 0035), so a redirect to a megabyte-long address
+would be memory held per page for a URL no report could carry. Refused as a
+guardrail violation: the fetch fails, is not retried, and the page is recorded
+as not retrieved."""
 
 DEFAULT_MAX_BODY_BYTES = 5 * 1024 * 1024
 """Response body ceiling. A 2 GB response would take out a 512 MB worker."""
@@ -612,6 +623,7 @@ class HttpFetcher(BaseAPIClient):
         current = url
 
         for _ in range(self._max_redirects + 1):
+            self._refuse_overlong(url, current)
             safe, robots = self._prepare(current, is_robots=is_robots)
             self._throttle_sync(safe, robots)
 
@@ -635,6 +647,7 @@ class HttpFetcher(BaseAPIClient):
         current = url
 
         for _ in range(self._max_redirects + 1):
+            self._refuse_overlong(url, current)
             safe = self._policy.validate(current)
             robots = None
             if not is_robots and self._respect_robots:
@@ -674,6 +687,20 @@ class HttpFetcher(BaseAPIClient):
 
         self._robots[host] = parsed
         return parsed
+
+    @staticmethod
+    def _refuse_overlong(requested: str, current: str) -> None:
+        """Refuse a hop longer than `MAX_FETCH_URL_LENGTH`, before any socket opens.
+
+        `UnsafeUrlError`, like the SSRF guard's refusals: it is decided from the
+        URL alone, it must not be retried (`IntegrationError` would be), and both
+        crawl paths already record it as a guardrail refusal.
+        """
+        if len(current) > MAX_FETCH_URL_LENGTH:
+            raise UnsafeUrlError(
+                current[:200],
+                f"longer than {MAX_FETCH_URL_LENGTH} characters (reached from '{requested[:200]}')",
+            )
 
     @staticmethod
     def _redirect_target(response: httpx.Response, safe: SafeUrl) -> str | None:

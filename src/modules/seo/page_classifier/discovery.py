@@ -83,6 +83,8 @@ from src.modules.seo.url_filter import URLFilter
 __all__ = [
     "ABSOLUTE_MAX_PAGES",
     "DEFAULT_MAX_PAGES",
+    "MAX_BREADCRUMB_LABEL_CHARS",
+    "MAX_LINKS_PER_PAGE",
     "MAX_SITEMAP_FETCH_ATTEMPTS",
     "CheckpointSink",
     "ProgressSink",
@@ -101,6 +103,29 @@ _logger = get_logger("modules.seo.discovery")
 DEFAULT_MAX_PAGES = 20_000
 """Node ceiling for one crawl job. ADR 0001 targets 20k–500k; beyond that the
 in-memory implementations need replacing with the Bloom-filter path."""
+
+MAX_BREADCRUMB_LABEL_CHARS = 256
+"""Longest breadcrumb label kept; longer ones are truncated.
+
+The parser bounds the number of steps (`MAX_BREADCRUMB_STEPS`) but not their
+length, and the labels outlive the body (ADR 0035), so one hostile page could
+otherwise keep megabytes. Truncated rather than dropped: a label is display
+text, and its first 256 characters still say where the page sits. A real label
+is a few words, or at most a page title, which `content_signals` already caps at
+500 characters — so 256 is generous rather than measured.
+"""
+
+MAX_LINKS_PER_PAGE = 5_000
+"""Outbound links read from one page; the rest are counted and ignored.
+
+Links are held from the moment a page lands until its BFS level has been
+recorded, uncounted by the memory budget (ADR 0035), so their number needs a
+bound of its own. 5,000 is chosen well above a navigational page — a mega-menu
+plus footer is typically hundreds — and is a judgement, not a measurement of the
+stored corpus. A page past it is an index or a trap, and its children remain
+reachable through sitemaps and pagination. Kept in document order, so what is
+followed is what a reader meets first. The overflow is counted on the graph
+(`SiteGraph.links_capped`) and logged."""
 
 ABSOLUTE_MAX_PAGES = 500_000
 """What "no ceiling" actually resolves to.
@@ -592,6 +617,11 @@ class SiteGraph:
         """Confirms relative-href loops as the crawl runs."""
         self.loop_urls_skipped = 0
         """URLs refused as members of a confirmed relative-href loop."""
+        self.links_capped = 0
+        """Links ignored because a page carried more than `MAX_LINKS_PER_PAGE`.
+
+        Not yet in `DiscoveryReport`: adding a field there is a change to the
+        persisted result contract, which is a decision of its own."""
         self.traps_skipped = 0
         """URLs refused as self-referential crawl loops.
 
@@ -876,10 +906,32 @@ class SiteGraph:
             return
         labels = extract_breadcrumb(html, node.url).section_labels(self.base_url, node.url)
         if labels:
-            self._breadcrumbs[key] = labels
+            self._breadcrumbs[key] = tuple(label[:MAX_BREADCRUMB_LABEL_CHARS] for label in labels)
         types = extract_schema_types(html)
         if types:
             self._jsonld_types[key] = types
+
+    def cap_links(self, url: str, links: tuple[str, ...], *, count: bool = True) -> tuple[str, ...]:
+        """Bound one page's outbound links to `MAX_LINKS_PER_PAGE`, in document order.
+
+        Args:
+            url: The page the links were read from, for the log.
+            links: Its links, de-duplicated and in document order.
+            count: Whether to count the overflow. `False` for a second reading
+                of the same page, so one page is never counted twice.
+
+        Returns:
+            At most `MAX_LINKS_PER_PAGE` links.
+        """
+        if len(links) <= MAX_LINKS_PER_PAGE:
+            return links
+        if count:
+            self.links_capped += len(links) - MAX_LINKS_PER_PAGE
+            _logger.warning(
+                "page_links_capped",
+                extra={"url": url, "found": len(links), "kept": MAX_LINKS_PER_PAGE},
+            )
+        return links[:MAX_LINKS_PER_PAGE]
 
     def all_urls(self) -> tuple[str, ...]:
         """Every URL in the graph, in discovery order.
@@ -1448,7 +1500,9 @@ def _crawl_dom(
         _notify(on_progress, graph, fetched, recent)
         _checkpoint(on_checkpoint, graph)
 
-        links = extract_page_links(result, url, document_url=graph.landed_url(url))
+        links = graph.cap_links(
+            url, extract_page_links(result, url, document_url=graph.landed_url(url))
+        )
         for target in graph.record_links(url, links, depth):
             key = normalize_url(target)
             if key not in seen:
