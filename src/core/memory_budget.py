@@ -1,20 +1,26 @@
-"""A process-wide byte budget shared by concurrent crawls (ADR 0031).
+"""A process-wide byte budget shared by concurrent crawls (ADR 0031, ADR 0035).
 
-Every crawl retains the HTML of every page it fetches until its job ends, and
-the server runs several crawls at once. Nothing bounded the sum, so a container
-reaching its memory limit was SIGKILLed mid-crawl and every running job came
-back `FAILED`, "interrupted by a server restart". This module is the safety net:
-it counts what the crawls retain and asks one of them to stop *cleanly*, while
-there is still memory to classify what it has, so the job ends partial instead
-of dead.
+The server runs several crawls at once, and nothing bounded what they held
+together, so a container reaching its memory limit was SIGKILLed mid-crawl and
+every running job came back `FAILED`, "interrupted by a server restart". This
+module is the safety net: it counts what the crawls hold and asks one of them to
+stop *cleanly*, while there is still memory to classify what it has, so the job
+ends partial instead of dead.
+
+A crawl used to hold the HTML of every page it fetched until its job ended.
+Since ADR 0035 it releases each body once the page has been read, keeping only
+the homepage's, unless the operator turns that off
+(`Settings.crawl_release_page_html`).
 
 Design stance
 -------------
-* **Counted, not measured.** Bytes are charged by the caller, one charge per
-  retained body (`sys.getsizeof`, O(1)). The process RSS is never read: a
-  syscall per page is the cost this avoids, and RSS cannot say *which* crawl to
-  stop. The measured ratio of RSS growth to counted bytes was 1.005-1.03
-  (ADR 0031), so the count is a faithful proxy for the HTML it covers.
+* **Counted, not measured.** Bytes are charged by the caller (`sys.getsizeof`,
+  O(1)): every body when it lands, and — when bodies are released — a flat
+  `LEAN_PAGE_BYTES` plus the measured size of what the page keeps. A released
+  body is credited back (`credit`). The process RSS is never read: a syscall
+  per page is the cost this avoids, and RSS cannot say *which* crawl to stop.
+  The measured ratio of RSS growth to counted bytes was 1.005-1.03 (ADR 0031)
+  for retained HTML.
 * **Fair share first, then largest.** Each live crawl is guaranteed
   `budget // fair_share_slots`. When the projected total reaches the budget,
   only crawls *over* that share are candidates, the largest first, the latest
@@ -40,6 +46,7 @@ from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 
 __all__ = [
+    "LEAN_PAGE_BYTES",
     "MEMORY_BUDGET_REASON",
     "MIB",
     "MemoryAccount",
@@ -50,6 +57,18 @@ __all__ = [
 _logger = get_logger(__name__)
 
 MIB: Final = 1024 * 1024
+
+LEAN_PAGE_BYTES: Final = 32 * 1024
+"""Flat charge per fetched page once its body is released (ADR 0035).
+
+Covers what a page costs that is not a body and not separately measured: its
+graph node, its share of the loop watcher, and the evidence and profile built
+for it after the crawl. Measured at about 17 KiB per page end to end on a
+2,000-page crawl of small pages; the investigation measured 20-36 KiB with
+three-segment URLs. 32 KiB is the upper end, rounded. What a page keeps that it
+derived from its own body — title, canonical, redirect hops, breadcrumb, schema
+types — is charged on top, measured, so a page cannot make this constant a lie
+by being large."""
 
 MEMORY_BUDGET_REASON: Final = "memory budget reached"
 """The tenant-visible stop reason. Fixed and numberless on purpose.
@@ -97,7 +116,18 @@ class MemoryAccount:
         self.sequence = sequence
         self.in_flight_ceiling = max(1, in_flight_ceiling)
         self.charged_bytes = 0
+        """What this crawl is counted as holding now: bodies landed and not yet
+        credited, plus every flat and derived per-page charge."""
         self.pages = 0
+        self.landed_body_bytes = 0
+        """Every body charged, ever. Monotonic, and the basis of the in-flight
+        reserve: a released body still says how large the next one will be."""
+        self.credited_body_bytes = 0
+        """Bodies released and credited back. Monotonic, and never more than
+        `landed_body_bytes`."""
+        self.overhead_bytes = 0
+        """Flat and derived per-page charges (`LEAN_PAGE_BYTES` plus what each
+        page kept). Never credited: they live as long as the crawl."""
         self.fetches_skipped = 0
         """Fetches not made because of the stop. Touched only on the crawl's own
         event-loop thread, so it needs no lock; the crawl reads it to tell a
@@ -116,12 +146,16 @@ class MemoryAccount:
         The reserve is zero until the first page lands, which is harmless: an
         account with no pages can never be chosen as a victim anyway.
         """
-        mean = self.charged_bytes // self.pages if self.pages else 0
+        mean = self.landed_body_bytes // self.pages if self.pages else 0
         return self.charged_bytes + self.in_flight_ceiling * mean
 
-    def charge(self, nbytes: int) -> None:
-        """Count one retained page body against the budget."""
-        self._budget.charge(self, nbytes)
+    def charge(self, nbytes: int, *, overhead_bytes: int = 0) -> None:
+        """Count one landed body, and any per-page overhead, against the budget."""
+        self._budget.charge(self, nbytes, overhead_bytes=overhead_bytes)
+
+    def credit(self, nbytes: int) -> None:
+        """Return the bytes of one released body. See `MemoryBudget.credit`."""
+        self._budget.credit(self, nbytes)
 
     def record_skip(self) -> None:
         """Note a fetch that was not made because of the stop."""
@@ -189,20 +223,26 @@ class MemoryBudget:
             if self._projected_locked() < self.budget_bytes:
                 self._overrun_logged = False
 
-    def charge(self, account: MemoryAccount, nbytes: int) -> None:
-        """Count one retained body and choose a victim if the budget is reached.
+    def charge(self, account: MemoryAccount, nbytes: int, *, overhead_bytes: int = 0) -> None:
+        """Count one landed body and choose a victim if the budget is reached.
 
         Args:
-            account: The crawl that retained it.
-            nbytes: Its size in memory.
+            account: The crawl that fetched it.
+            nbytes: The body's size in memory.
+            overhead_bytes: What the page costs beyond its body for the rest of
+                the crawl — `LEAN_PAGE_BYTES` plus what it derived from the
+                body — when bodies are released. `0` keeps the ADR 0031
+                accounting exactly: one charge per retained body.
 
         Raises:
-            ValueError: If `nbytes` is negative.
+            ValueError: If either count is negative.
         """
-        if nbytes < 0:
-            raise ValueError("nbytes must not be negative")
+        if nbytes < 0 or overhead_bytes < 0:
+            raise ValueError("nbytes and overhead_bytes must not be negative")
         with self._lock:
-            account.charged_bytes += nbytes
+            account.charged_bytes += nbytes + overhead_bytes
+            account.landed_body_bytes += nbytes
+            account.overhead_bytes += overhead_bytes
             account.pages += 1
             if account.sequence not in self._accounts:
                 return
@@ -236,6 +276,47 @@ class MemoryBudget:
             _logger.warning(
                 "crawl_memory_budget_overrun_no_victim",
                 extra={"projected_bytes": projected, "budget_bytes": self.budget_bytes},
+            )
+
+    def credit(self, account: MemoryAccount, nbytes: int) -> None:
+        """Return a released body's bytes. Never selects a victim.
+
+        Clamped against the account's outstanding *body* bytes — landed minus
+        already credited — never against its total charge, so the flat and
+        derived per-page charges can never be credited away. An over-credit is a
+        bug in the caller (a body credited twice, or one never charged): it is
+        clamped so the count stays an over-estimate, and logged at ERROR, which
+        the test suite turns into a failure. `pages` is never decremented: a
+        crawl that has landed a page has retrieved something, whatever it still
+        holds, so it stays eligible as a victim exactly as before.
+
+        Args:
+            account: The crawl releasing the body.
+            nbytes: Exactly what was charged for it.
+
+        Raises:
+            ValueError: If `nbytes` is negative.
+        """
+        if nbytes < 0:
+            raise ValueError("nbytes must not be negative")
+        with self._lock:
+            outstanding = account.landed_body_bytes - account.credited_body_bytes
+            applied = min(nbytes, outstanding)
+            account.credited_body_bytes += applied
+            account.charged_bytes -= applied
+            if account.sequence in self._accounts and (
+                self._projected_locked() < self.budget_bytes
+            ):
+                self._overrun_logged = False
+        if applied < nbytes:
+            # Job id and counts only: never a body, never page text.
+            _logger.error(
+                "crawl_memory_budget_over_credit",
+                extra={
+                    "job_id": account.account_id,
+                    "requested_bytes": nbytes,
+                    "outstanding_body_bytes": outstanding,
+                },
             )
 
     def snapshot(self) -> MemoryBudgetSnapshot:

@@ -45,6 +45,7 @@ os.environ["AUDIT_LOG_PATH"] = os.path.join(_TEST_STATE_DIR, "audit.jsonl")
 os.environ["PROCESS_SUPERVISOR_LEDGER_PATH"] = os.path.join(_TEST_STATE_DIR, ".process_ledger.json")
 
 import pytest  # noqa: E402 - must not import `src` before the block above runs
+from src.core import memory_budget as _memory_budget  # noqa: E402
 from src.core.config import Environment, Settings, reset_settings_cache  # noqa: E402
 from src.core.guardrails import AutoApproveProvider, GuardrailEngine  # noqa: E402
 from src.core.rate_limiter import CostLedger  # noqa: E402
@@ -58,6 +59,36 @@ def _isolate_settings_cache() -> Iterator[None]:
     reset_settings_cache()
     yield
     reset_settings_cache()
+
+
+@pytest.fixture
+def allow_over_credit() -> None:
+    """Opt a test out of `_fail_on_memory_over_credit`, for tests of the clamp itself."""
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_memory_over_credit(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Fail any test during which the memory budget was over-credited (ADR 0035).
+
+    Production clamps an over-credit and logs it at ERROR, because a crawl must
+    not die for a bookkeeping bug. That makes the bug silent unless something
+    reads the log, so the suite reads it: any test that over-credits — a body
+    credited twice, or one never charged — fails here, whichever thread did it.
+    """
+    seen: list[object] = []
+    real = _memory_budget._logger.error
+
+    def spy(event: str, *args: object, **kwargs: object) -> None:
+        if event == "crawl_memory_budget_over_credit":
+            seen.append(kwargs.get("extra"))
+        real(event, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_memory_budget._logger, "error", spy)
+    yield
+    if seen and "allow_over_credit" not in request.fixturenames:
+        pytest.fail(f"the memory budget was over-credited: {seen}")
 
 
 @pytest.fixture(autouse=True)
