@@ -347,6 +347,11 @@ src/
 │   │                            # 422 lists locations only, never values.
 │   │                            # Import memory is NOT counted by the ADR 0031
 │   │                            # budget (~1.1 GiB measured for an 89 MiB bundle)
+│   ├── job_view.py              # Cycle 0147: JobView, the response model for
+│   │                            # every route that returns a job. JobRecord minus
+│   │                            # password_hash, plus has_delete_password (bool).
+│   │                            # JobRecord itself is unchanged: DiskJobStore
+│   │                            # persists it with model_dump.
 │   ├── deliverables_routes.py   # Workbook build/download HTTP surface (cycle
 │                                # 0087), plus POST /jobs/{id}/masterfile/
 │                                # {slug} (ADR 0017, build-log 0107), which

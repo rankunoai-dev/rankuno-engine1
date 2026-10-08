@@ -44,6 +44,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, 
 from pydantic import Field, ValidationError
 
 from src.api.auth import org_scoped_or_404, require_principal
+from src.api.job_view import JobView, job_views
 from src.api.worker_dashboard_routes import human_owned_job
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
@@ -430,16 +431,16 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             bundle_path.unlink(missing_ok=True)
             raise
 
-    @router.get("/deliverables", response_model=list[JobRecord])
-    def list_deliverables(authorization: str | None = Header(default=None)) -> list[JobRecord]:
+    @router.get("/deliverables", response_model=list[JobView])
+    def list_deliverables(authorization: str | None = Header(default=None)) -> list[JobView]:
         """Every deliverable build for the organization, newest first."""
         org_id = require_principal(authorization, session_secret=state.session_secret).org_id
-        return [r for r in state.deliverable_store.list_jobs() if r.org_id == org_id]
+        return job_views(r for r in state.deliverable_store.list_jobs() if r.org_id == org_id)
 
-    @router.get("/deliverables/{deliverable_id}", response_model=JobRecord)
+    @router.get("/deliverables/{deliverable_id}", response_model=JobView)
     def get_deliverable(
         deliverable_id: str, authorization: str | None = Header(default=None)
-    ) -> JobRecord:
+    ) -> JobView:
         """One deliverable build's status.
 
         Raises:
@@ -455,7 +456,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
         org_scoped_or_404(
             record=record, record_id=deliverable_id, org_id=org_id, kind="deliverable"
         )
-        return record
+        return JobView.from_record(record)
 
     @router.get("/deliverables/{deliverable_id}/download")
     def download_deliverable(

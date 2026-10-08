@@ -75,6 +75,7 @@ from src.api.auth import build_auth_router, org_scoped_or_404, require_principal
 from src.api.crawl_activity import CrawlActivityCounter, build_crawl_activity_router
 from src.api.deliverables_routes import build_deliverables_router
 from src.api.job_import_routes import build_job_import_router
+from src.api.job_view import JobView, job_views
 from src.api.local_signin import build_local_signin_router, ensure_local_operator
 from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password, verify_password
@@ -2065,8 +2066,8 @@ def create_app(
 
         return result
 
-    @app.get(f"{API_PREFIX}/jobs", response_model=list[JobRecord])
-    def list_jobs(authorization: str | None = Header(default=None)) -> list[JobRecord]:
+    @app.get(f"{API_PREFIX}/jobs", response_model=list[JobView])
+    def list_jobs(authorization: str | None = Header(default=None)) -> list[JobView]:
         """Every job for the organization, newest first. Metadata only — never a result blob.
 
         Args:
@@ -2081,10 +2082,10 @@ def create_app(
         """
         principal = require_principal(authorization, session_secret=state.session_secret)
         all_jobs = state.store.list_jobs()
-        return [job for job in all_jobs if job.org_id == principal.org_id]
+        return job_views(job for job in all_jobs if job.org_id == principal.org_id)
 
-    @app.get(f"{API_PREFIX}/jobs/{{job_id}}", response_model=JobRecord)
-    def get_job(job_id: str, authorization: str | None = Header(default=None)) -> JobRecord:
+    @app.get(f"{API_PREFIX}/jobs/{{job_id}}", response_model=JobView)
+    def get_job(job_id: str, authorization: str | None = Header(default=None)) -> JobView:
         """One job's status.
 
         Args:
@@ -2103,7 +2104,7 @@ def create_app(
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
 
         org_scoped_or_404(record=job, record_id=job_id, org_id=principal.org_id, kind="job")
-        return job
+        return JobView.from_record(job)
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/result")
     def get_result(
@@ -2442,10 +2443,8 @@ def create_app(
             org_id=original_record.org_id,
         )
 
-    @app.post(f"{API_PREFIX}/jobs/{{job_id}}/reparse", response_model=JobRecord)
-    async def reparse_job(
-        job_id: str, authorization: str | None = Header(default=None)
-    ) -> JobRecord:
+    @app.post(f"{API_PREFIX}/jobs/{{job_id}}/reparse", response_model=JobView)
+    async def reparse_job(job_id: str, authorization: str | None = Header(default=None)) -> JobView:
         """Re-run placement over a finished job under today's rules.
 
         Synchronous and offline. No worker thread, no concurrency slot, no
@@ -2518,7 +2517,7 @@ def create_app(
                 "org": original_record.org_id,
             },
         )
-        return state.store.get(record.id)
+        return JobView.from_record(state.store.get(record.id))
 
     @app.post(
         f"{API_PREFIX}/jobs/{{job_id}}/reconcile/screaming-frog",
@@ -3594,10 +3593,8 @@ def create_app(
         name = f"cross-check-{job_id[:8]}{half}-{stamp or 'undated'}.xlsx"
         return _workbook_response(sheets, name)
 
-    @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobRecord)
-    async def cancel_job(
-        job_id: str, authorization: str | None = Header(default=None)
-    ) -> JobRecord:
+    @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobView)
+    async def cancel_job(job_id: str, authorization: str | None = Header(default=None)) -> JobView:
         """Abandon a job and stop it from making new requests.
 
         Applies to the Python crawler (`PageClassificationTool`) only —
@@ -3662,7 +3659,7 @@ def create_app(
             "finishes or the server restarts",
         )
         _logger.warning("job_cancelled", extra={"job_id": job_id})
-        return updated
+        return JobView.from_record(updated)
 
     @app.delete(f"{API_PREFIX}/jobs/{{job_id}}", status_code=status.HTTP_204_NO_CONTENT)
     async def delete_job(

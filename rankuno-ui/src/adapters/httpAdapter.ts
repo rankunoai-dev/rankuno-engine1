@@ -30,8 +30,13 @@ import type {
   WorkerTemplatesView,
 } from "./adapterInterface";
 
-/** Mirrors `JobRecord` in `src/core/state_store.py`. */
+/**
+ * Mirrors `JobView` in `src/api/job_view.py` — `JobRecord` minus its secrets.
+ * The server never sends the delete-password hash; `has_delete_password` is
+ * optional because a server that predates it omits it.
+ */
 interface JobRecord {
+  has_delete_password?: boolean;
   id: string;
   tool_name: string;
   label: string;
