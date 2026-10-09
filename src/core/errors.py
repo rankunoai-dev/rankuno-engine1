@@ -11,8 +11,10 @@ __all__ = [
     "BudgetExceededError",
     "ConfigurationError",
     "CrawlBlockedError",
+    "GscAccountStoreUnavailableError",
     "GscAuthenticationError",
     "GscAuthorizationError",
+    "GscCredentialDecryptionError",
     "GscPropertyNotFoundError",
     "GscQuotaExceededError",
     "GscApiDeprecatedError",
@@ -48,6 +50,40 @@ class CrawlBlockedError(RankunoError):
     `robots.txt`, and the job reported `succeeded` with one page at 0.97
     confidence.
     """
+
+
+class GscAccountStoreUnavailableError(RankunoError):
+    """The org GSC account store cannot answer, so no credential may be chosen.
+
+    Deliberately not an `OSError`, `ValueError` or `KeyError`. Those are what
+    the disk store's fail-soft read path swallows, and a Postgres outage must
+    never be mistaken for "this org has no accounts": that would let a
+    same-named `.env.local` profile answer in its place (ADR 0037). The
+    message is fixed and carries no database detail, which can quote a row.
+    """
+
+    def __init__(self) -> None:
+        """Build the one fixed, safe-to-render message."""
+        super().__init__("GSC account storage is temporarily unavailable; try again shortly.")
+
+
+class GscCredentialDecryptionError(RankunoError):
+    """One stored GSC account's ciphertext cannot be decrypted with this server's keys.
+
+    Names the account and nothing else: never the ciphertext, the key or any
+    plaintext. Other accounts in the org are unaffected (ADR 0037).
+
+    Attributes:
+        account_name: The account whose stored credential failed.
+    """
+
+    def __init__(self, account_name: str) -> None:
+        """Record which account failed, with the operator's remedy."""
+        self.account_name = account_name
+        super().__init__(
+            f"Stored credentials for GSC account '{account_name}' cannot be decrypted "
+            "with this server's key; re-add the account."
+        )
 
 
 class GuardrailViolationError(RankunoError):

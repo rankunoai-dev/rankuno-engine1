@@ -732,6 +732,10 @@ class TestStartupRecovery:
         assert store.get(job_id).status is JobStatus.FAILED
 
 
+TEST_GSC_CREDENTIAL_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
+"""A fixed 32-byte test key for the encrypted GSC account store. Not a secret."""
+
+
 class TestDefaultJobStoreSelection:
     """`create_app()` picks a store based on whether Postgres is configured.
 
@@ -758,6 +762,9 @@ class TestDefaultJobStoreSelection:
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost/db")
+        # Postgres also selects the encrypted GSC account store, which refuses
+        # to start without its key (ADR 0037). A fixed test key, never a real one.
+        monkeypatch.setenv("GSC_CREDENTIAL_ENCRYPTION_KEY", TEST_GSC_CREDENTIAL_KEY)
         reset_postgres_settings_cache()
         try:
             app = create_app(jobs_root=tmp_path / "jobs", session_secret=TEST_SESSION_SECRET)

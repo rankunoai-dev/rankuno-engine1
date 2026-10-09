@@ -11,6 +11,7 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 import { CRAWL_SPEEDS, DEFAULT_CRAWL_REQUEST } from "../../adapters/adapterInterface";
+import { gscPropertyError } from "../../lib/gscEnrichment";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import type { PageClassificationInput } from "../../types/schema";
 
@@ -219,12 +220,17 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
         <Form.Item
           name="gsc_property_url"
           label="Google Search Console property (optional)"
-          extra="To enrich pages with GSC data (clicks, impressions, position, CTR), provide a property URL from your GSC account. Usually the domain like https://example.com. Requires OAuth credentials configured."
+          extra="To enrich pages with GSC data (clicks, impressions, position, CTR), enter the property exactly as Search Console lists it: a URL prefix such as https://www.example.com/ or a domain property such as sc-domain:example.com. Requires an authorised Google account."
           rules={[
-            { type: "url", message: "Must be a full URL, including https://" },
+            {
+              validator: async (_rule, value: string | null | undefined) => {
+                const error = gscPropertyError(value);
+                if (error) throw new Error(error);
+              },
+            },
           ]}
         >
-          <Input placeholder="https://example.com (leave empty to skip GSC enrichment)" />
+          <Input placeholder="https://www.example.com/ or sc-domain:example.com (leave empty to skip)" />
         </Form.Item>
 
         {accounts.length > 0 && (

@@ -50,15 +50,17 @@ export function gscEnrichmentWarning(
         "this property, then re-run to add metrics."
       );
     case "succeeded":
-      // Distinct from a failure, and the distinction matters: the request
-      // worked, so the credentials and the property are fine. Nothing lined up
-      // with a crawled URL, which is a hostname, protocol or trailing-slash
-      // difference between the property and the crawl.
+      // Distinct from a refusal (403/404 arrive as `failed`), but an answer
+      // with no matching rows does not prove access is fine: the account may
+      // not see this property's data, the property may have none for these
+      // pages, or it covers a different hostname or protocol than the crawl.
       if (gsc.pages_matched === 0) {
         return (
           "Search Console answered, but none of its URLs matched a crawled page " +
-          `(0 of ${gsc.pages_crawled.toLocaleString()}). Check the property covers the ` +
-          "same hostname and protocol as the crawl, then re-run."
+          `(0 of ${gsc.pages_crawled.toLocaleString()}). Possible causes: ${account} ` +
+          "cannot see this property, the property has no search data for " +
+          "these pages, or it covers a different hostname or protocol than the crawl. " +
+          "Check the property in Search Console, then re-run."
         );
       }
       return "";
@@ -88,4 +90,34 @@ export function gscWarningTone(
   gsc: GscEnrichmentReport | null | undefined,
 ): "info" | "warning" {
   return gsc?.status === "failed" || gsc?.status === "property_mismatch" ? "warning" : "info";
+}
+
+/** Search Console's Domain-property form: `sc-domain:` plus a dotted hostname. */
+const DOMAIN_PROPERTY = /^sc-domain:(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/i;
+
+/**
+ * Why a GSC property value would be refused, or `null` when it is acceptable.
+ *
+ * Search Console lists a property in one of two forms, and the engine sends
+ * either one to Google exactly as typed: an http(s) URL prefix, or a Domain
+ * property `sc-domain:example.com`. antd's `type: "url"` rule refused the
+ * second, so a Domain property could not be entered at all. Empty is fine —
+ * the field is optional.
+ */
+export function gscPropertyError(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return null;
+  const refusal =
+    "Enter the property as Search Console lists it: https://www.example.com/ or sc-domain:example.com";
+  if (/^sc-domain:/i.test(trimmed)) {
+    return DOMAIN_PROPERTY.test(trimmed) ? null : refusal;
+  }
+  try {
+    const url = new URL(trimmed);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.hostname
+      ? null
+      : refusal;
+  } catch {
+    return refusal;
+  }
 }

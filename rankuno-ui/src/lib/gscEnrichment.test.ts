@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { GscEnrichmentReport } from "../types/schema";
-import { gscEnrichmentWarning, gscWarningFor, gscWarningTone } from "./gscEnrichment";
+import {
+  gscEnrichmentWarning,
+  gscPropertyError,
+  gscWarningFor,
+  gscWarningTone,
+} from "./gscEnrichment";
 
 /**
  * One message per enrichment outcome.
@@ -46,6 +51,40 @@ describe("gscEnrichmentWarning", () => {
     expect(message).toMatch(/1,200/);
   });
 
+  it("does not claim the credentials and property are fine when nothing matched", () => {
+    /* A 0-match answer does not prove access: the account may not see the
+       property's data. The message used to say the opposite. */
+    const message = gscEnrichmentWarning(
+      report({ status: "succeeded", pages_matched: 0, pages_crawled: 10 }),
+    );
+    expect(message).not.toMatch(/credentials and the property are fine/i);
+    expect(message).toMatch(/account cannot see this property/i);
+  });
+
+  it("repeats the engine's explanation for a 403", () => {
+    const message = gscEnrichmentWarning(
+      report({
+        status: "failed",
+        reason: "GscAuthorizationError: this Google account cannot access this property",
+        account: "acme",
+      }),
+    );
+    expect(message).toMatch(/GscAuthorizationError/);
+    expect(message).toMatch(/this Google account cannot access this property/);
+    expect(message).toMatch(/"acme"/);
+  });
+
+  it("repeats the engine's explanation for a 404", () => {
+    const message = gscEnrichmentWarning(
+      report({
+        status: "failed",
+        reason: "GscPropertyNotFoundError: property not found in Search Console",
+      }),
+    );
+    expect(message).toMatch(/GscPropertyNotFoundError/);
+    expect(message).toMatch(/property not found/);
+  });
+
   it("repeats the validator's explanation for a property mismatch", () => {
     const message = gscEnrichmentWarning(
       report({
@@ -85,5 +124,33 @@ describe("gscEnrichmentWarning", () => {
     expect(gscEnrichmentWarning(undefined)).toBe("");
     expect(gscWarningFor(undefined)).toBe("");
     expect(gscWarningFor({} as never)).toBe("");
+  });
+});
+
+describe("gscPropertyError", () => {
+  it.each([
+    "",
+    "   ",
+    "https://example.com/",
+    "http://www.example.com/blog/",
+    "https://example.com",
+    "sc-domain:example.com",
+    "sc-domain:rankuno.co.uk",
+    "SC-DOMAIN:Example.com",
+  ])("accepts %j", (value) => {
+    expect(gscPropertyError(value)).toBeNull();
+  });
+
+  it.each([
+    "example.com",
+    "www.example.com/",
+    "ftp://example.com/",
+    "sc-domain:",
+    "sc-domain:https://example.com",
+    "sc-domain:example.com/",
+    "sc-domain:localhost",
+    "https://",
+  ])("rejects %j", (value) => {
+    expect(gscPropertyError(value)).toMatch(/sc-domain:/);
   });
 });

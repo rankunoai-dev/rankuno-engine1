@@ -203,3 +203,46 @@ describe("LiveCrawlModal custom speed", () => {
     expect(startCrawl).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * The Search Console property field.
+ *
+ * The rule under test: both forms Search Console lists a property under — an
+ * http(s) URL prefix and a `sc-domain:` Domain property — are accepted and
+ * submitted unchanged. Anything else is refused before submission.
+ */
+describe("LiveCrawlModal GSC property field", () => {
+  const PROPERTY_LABEL = "Google Search Console property (optional)";
+
+  function fillProperty(value: string): void {
+    fireEvent.change(screen.getByLabelText(PROPERTY_LABEL), { target: { value } });
+  }
+
+  it.each(["sc-domain:rankuno.com", "https://www.rankuno.com/"])(
+    "submits %j unchanged",
+    async (value) => {
+      const startCrawl = mount(adapter());
+      fillProperty(value);
+
+      const request = await submit(startCrawl);
+      expect(request.gsc_property_url).toBe(value);
+    },
+  );
+
+  it.each(["rankuno.com", "ftp://rankuno.com/"])("refuses %j", async (value) => {
+    const startCrawl = mount(adapter());
+    fireEvent.change(screen.getByPlaceholderText("https://www.example.com/"), {
+      target: { value: "https://e.com/" },
+    });
+    fillProperty(value);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start crawl" }));
+    expect(await screen.findByText(/or sc-domain:example\.com/)).toBeInTheDocument();
+    expect(startCrawl).not.toHaveBeenCalled();
+  });
+
+  it("explains both accepted forms", () => {
+    mount(adapter());
+    expect(screen.getByText(/exactly as Search Console lists it/)).toBeInTheDocument();
+  });
+});

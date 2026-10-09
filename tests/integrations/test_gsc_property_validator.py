@@ -218,3 +218,66 @@ class TestMalformedURLs:
             "/path/only",
         )
         assert result.is_valid is False
+
+
+class TestWwwIsNotStripped:
+    """A URL-prefix property covers its own host; www is not canonicalised away.
+
+    Google: "a URL-prefix property only includes URLs with the specified prefix,
+    including the protocol (http or https)", and for www/m. variants to share a
+    property "consider adding a Domain property instead".
+    https://support.google.com/webmasters/answer/34592
+    """
+
+    def test_www_property_does_not_cover_apex_crawl(self, validator):
+        result = validator.validate("https://www.example.com/", "https://example.com/")
+        assert result.is_valid is False
+
+    def test_apex_property_accepts_www_crawl_through_the_subdomain_rule(self, validator):
+        # Pre-existing behaviour of the subdomain rule, pinned beside the
+        # opposite direction so neither changes silently.
+        result = validator.validate("https://example.com/", "https://www.example.com/")
+        assert result.is_valid is True
+        assert result.match_type == "subdomain"
+
+
+class TestDomainProperty:
+    """`sc-domain:example.com` covers every host under example.com on any protocol."""
+
+    @pytest.mark.parametrize(
+        "crawl",
+        [
+            "https://example.com/",
+            "http://example.com/",
+            "https://www.example.com/",
+            "http://www.example.com/",
+            "https://blog.example.com/",
+            "http://blog.example.com/posts/",
+            "https://EXAMPLE.com",
+        ],
+    )
+    def test_domain_property_covers_its_hosts(self, validator, crawl):
+        result = validator.validate("sc-domain:example.com", crawl)
+        assert result.is_valid is True
+        assert result.match_type == "domain"
+
+    @pytest.mark.parametrize(
+        "crawl",
+        [
+            "https://other.com/",
+            "https://example.com.evil.net/",
+            "https://notexample.com/",
+            "https://example.co/",
+        ],
+    )
+    def test_domain_property_rejects_other_domains(self, validator, crawl):
+        result = validator.validate("sc-domain:example.com", crawl)
+        assert result.is_valid is False
+
+    def test_domain_property_tolerates_a_trailing_slash(self, validator):
+        result = validator.validate("sc-domain:example.com/", "https://www.example.com/")
+        assert result.is_valid is True
+
+    def test_empty_domain_property_is_rejected(self, validator):
+        result = validator.validate("sc-domain:", "https://example.com/")
+        assert result.is_valid is False
