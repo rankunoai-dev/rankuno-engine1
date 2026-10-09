@@ -648,8 +648,20 @@ the default. The full key set is in [.env.example](.env.example).
 
 ```
 GET  /api/v1/gsc/accounts        -> {"accounts": ["acme", ...]}   names only, never credentials
-POST /api/v1/jobs                {"base_url": ..., "gsc_property": ..., "gsc_account": "acme"}
+POST /api/v1/jobs                {"base_url": ..., "gsc_property_url": ..., "gsc_account": "acme"}
 ```
+
+`gsc_property_url` takes the property exactly as Search Console lists it: a URL
+prefix (`https://www.example.com/`) or a Domain property (`sc-domain:example.com`).
+A URL prefix covers only its own protocol and host, so `https://www.example.com/`
+does not cover `https://example.com/`; a Domain property covers the domain, its
+subdomains and both protocols, and only rows for the crawled site's own scheme
+and host are matched to its pages. The job result's GSC enrichment status is
+`failed` when Google refuses the property (403: "this Google account cannot
+access this property"; 404: "property not found in Search Console"). A
+`succeeded` status with 0 matched pages does not prove access: a quota or
+deprecation error still returns an empty response
+([build-log 0152](docs/build-log/0152-a-refusal-that-read-as-success.md)).
 
 > **Validated against a live site.**
 > [build-log/0007](docs/build-log/0007-first-live-run.md) records the first real
