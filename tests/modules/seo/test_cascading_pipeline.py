@@ -120,6 +120,26 @@ class TestConsensus:
         """LLM_ZERO_SHOT carries no consensus weight by design."""
         assert resolve_consensus([signal(SignalSource.LLM_ZERO_SHOT)]) is None
 
+    def test_orphan_blog_with_schema_jsonld_at_increased_weight(self) -> None:
+        """Orphan pages with BlogPosting schema should classify as BLOG_ARTICLE.
+
+        Regression test for issue where an orphan page (zero inbound links)
+        with BlogPosting schema.org markup was misclassified as OTHERS instead
+        of BLOG_ARTICLE. The fix increased SCHEMA_JSONLD weight from 0.15 to
+        0.20 and decreased ARIA_NAV_TREE from 0.25 to 0.20, giving schema
+        confidence (0.80 on BlogPosting) enough weight to settle the
+        classification without inbound links.
+
+        Real-world example: gep.com/blog/mind/gdpr-and-its-implications-for-corporate-travel
+        """
+        signals = [
+            signal(SignalSource.SCHEMA_JSONLD, confidence=0.80),
+        ]
+        outcome = resolve_consensus(signals)
+        assert outcome is not None
+        assert outcome.suggested_page_type is PrimaryPageType.BLOG_ARTICLE
+        assert outcome.confidence >= 0.75  # Schema signal at 0.80 confidence
+
 
 class TestLayerZero:
     def test_homepage_exits_at_layer_zero(self):

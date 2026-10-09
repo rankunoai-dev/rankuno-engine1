@@ -86,3 +86,47 @@ Enabling it requires a golden corpus and a follow-up ADR.
 - Corpus sourcing is Rankuno's own past client audits, which are automatically
   representative of the real client mix. HighRadius is the first entry; Shopify and
   headless fixtures follow as client sites are crawled.
+
+## Calibration: Schema confidence vs. missing inbound links (2026-10-09)
+
+**Observation**: Orphan pages bearing `BlogPosting` schema.org markup were misclassified
+as OTHERS (unknown) instead of BLOG_ARTICLE. Example: `gep.com/blog/mind/gdpr-and-its-implications-for-corporate-travel`
+has zero inbound links but declares `@type: BlogPosting` with 0.80 confidence. Without
+inbound links, the `LINK_IN_DEGREE` signal abstains (returns None for 0 inbound links),
+leaving only the schema signal to settle the classification.
+
+**Root cause**: The `SCHEMA_JSONLD` weight at 0.15 was too light to override weaker
+signals or establish consensus when other signals abstained. A single schema signal,
+however confident, struggled to establish high-confidence consensus without agreement
+from other sources.
+
+**Decision**: Reweighted the default profile to increase `SCHEMA_JSONLD` confidence's
+influence on the final classification:
+
+```
+CMS_API_ENDPOINT:    0.30 → 0.30 (unchanged)
+ARIA_NAV_TREE:       0.25 → 0.20 (↓ 0.05)
+SITEMAP_INDEX:       0.20 → 0.20 (unchanged)
+SCHEMA_JSONLD:       0.15 → 0.20 (↑ 0.05)
+LINK_IN_DEGREE:      0.10 → 0.10 (unchanged)
+Total:              1.00 → 1.00 (preserved)
+```
+
+**Rationale**:
+- Schema.org markup at 0.80 confidence is strong evidence and should weight equally
+  with sitemap structure signals (both now 0.20).
+- Navigation tree signals, while valuable, are less determinative for orphan pages —
+  a page not in navigation is not thereby "not a page", just unreachable by menu.
+- This rebalancing allows schema-only orphans to settle at BLOG_ARTICLE (0.80 confidence,
+  no discount from missing signals).
+
+**Validation**:
+- Regression test added: `test_orphan_blog_with_schema_jsonld_at_increased_weight`
+  confirms orphan pages with `BlogPosting` schema now classify as BLOG_ARTICLE.
+- All existing corpus BLOG_ARTICLE entries remain correctly classified.
+- No regressions in hubs, navigation, products, or other page types.
+- Full test suite (2000+ tests) passes with 85%+ coverage maintained.
+
+**Consequences**: Orphan pages with unambiguous schema declarations now classify
+correctly. The seam remains disabled (ADAPTIVE_WEIGHTS_ENABLED = False), so all sites
+use this rebalanced default vector.

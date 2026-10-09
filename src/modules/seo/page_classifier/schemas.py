@@ -310,9 +310,9 @@ class ConsensusMethod(StrEnum):
 SIGNAL_WEIGHTS: Mapping[SignalSource, float] = MappingProxyType(
     {
         SignalSource.CMS_API_ENDPOINT: 0.30,
-        SignalSource.ARIA_NAV_TREE: 0.25,
+        SignalSource.ARIA_NAV_TREE: 0.20,
         SignalSource.SITEMAP_INDEX: 0.20,
-        SignalSource.SCHEMA_JSONLD: 0.15,
+        SignalSource.SCHEMA_JSONLD: 0.20,
         SignalSource.LINK_IN_DEGREE: 0.10,
     }
 )
