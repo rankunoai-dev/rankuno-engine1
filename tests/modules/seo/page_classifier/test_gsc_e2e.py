@@ -669,3 +669,68 @@ class TestGscEnrichmentReporting:
         # `None`, not a defaulted "not_requested": an old crawl cannot say which
         # of the four outcomes it had, and claiming one would be a fabrication.
         assert output.gsc is None
+
+
+class TestGscRefusalsAreReportedAsFailures:
+    """A 403 or 404 from Search Console is a failed step, not an empty success.
+
+    The client used to catch both and return an empty response, so the crawl
+    reported `succeeded` with 0 matched pages and the dashboard told the
+    operator the credentials and the property were fine. These drive the real
+    `GscApiClient` with only Google's transport mocked, so the whole path from
+    the HTTP status to the rendered reason is under test.
+    """
+
+    # Stands in for anything sensitive Google might echo back. None of it may
+    # reach `reason`, which is rendered in a browser.
+    _BODY = b'{"error": {"message": "secret-body ya29.LEAKED-TOKEN"}}'
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch) -> None:
+        monkeypatch.setattr("tenacity.nap.time.sleep", lambda _seconds: None)
+
+    def _refuse_with(self, tool, pages, status: int, phrase: str) -> tuple:
+        import httplib2
+        from googleapiclient.errors import HttpError
+
+        resp = httplib2.Response({"status": str(status)})
+        resp.reason = phrase
+        token_manager = Mock()
+        token_manager.get_or_refresh_token.return_value = "ya29.LEAKED-TOKEN"
+        payload = PageClassificationInput(
+            base_url="https://example.com",
+            gsc_property_url="https://example.com",
+        )
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            query = mock_build.return_value.searchanalytics.return_value.query
+            query.return_value.execute.side_effect = HttpError(resp, self._BODY)
+            return tool._enrich_with_gsc(tuple(pages), payload)
+
+    def _assert_nothing_sensitive(self, report) -> None:
+        dumped = report.model_dump_json()
+        assert "ya29" not in dumped
+        assert "secret-body" not in dumped
+        # Google's reason phrase is not engine-written text either.
+        assert "Forbidden" not in dumped
+        assert "Not Found" not in dumped
+
+    def test_a_403_is_a_failed_step_naming_the_access_problem(self, tool, medium_crawl):
+        pages, report = self._refuse_with(tool, medium_crawl, 403, "Forbidden")
+
+        assert pages == tuple(medium_crawl)
+        assert report.status == "failed"
+        assert "GscAuthorizationError" in report.reason
+        assert "this Google account cannot access this property" in report.reason
+        self._assert_nothing_sensitive(report)
+
+    def test_a_404_is_a_failed_step_naming_the_missing_property(self, tool, medium_crawl):
+        pages, report = self._refuse_with(tool, medium_crawl, 404, "Not Found")
+
+        assert pages == tuple(medium_crawl)
+        assert report.status == "failed"
+        assert "GscPropertyNotFoundError" in report.reason
+        assert "property not found" in report.reason
+        self._assert_nothing_sensitive(report)

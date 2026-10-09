@@ -463,10 +463,14 @@ src/
 │   │                            # robots, per-host throttling. Sync + async.
 │   ├── gsc_client.py            # Search Console API (read-only scope, ADR 0010).
 │   │                            # Takes `account=` to pick a named profile (ADR 0012)
+│   │                            # 403/404 propagate (not an empty response);
+│   │                            # sc-domain: sent without a trailing "/" (0152)
 │   ├── gsc_token_manager.py     # OAuth refresh per profile; identity logged as
 │   │                            # oauth2://profile/<name>. Refresh is outside the
 │   │                            # retry loop so a revoked token fails once
-│   ├── gsc_property_validator.py# Property URL validation before any query
+│   ├── gsc_property_validator.py# Property URL validation before any query.
+│   │                            # sc-domain: covers domain + subdomains on
+│   │                            # whole DNS labels; URL prefix never strips www
 │   ├── gsc_schemas.py           # GscOAuthToken (SecretStr), metrics rows, errors
 │   ├── llm_client.py            # Provider-agnostic LLM interface + spend metering
 │   ├── worker_registration_client.py  # ADR 0030: the operator calls behind
@@ -568,6 +572,10 @@ src/
     │       │                         # crawl job, RiskClass.READ (ADR 0003).
     │       │                         # Input carries gsc_account: the named
     │       │                         # Search Console profile, or None (ADR 0012)
+    │       │                         # GSC 403/404 -> enrichment "failed" with a
+    │       │                         # fixed reason, never Google's text (0152)
+    │       ├── gsc_aggregator.py     # GSC rows -> crawled pages: exact, then
+    │       │                         # whole-URL prefix (scheme + host must agree)
     │       ├── nav_tree_parser.py    # Header menu -> tree (footer excluded)
     │       ├── logical_hierarchy.py  # Maps URLs to menu sections; OTHERS bucket
     │       ├── job_bundle.py         # ADR 0034: JobImportBundle (versioned,

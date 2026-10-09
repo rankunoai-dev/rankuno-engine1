@@ -396,3 +396,95 @@ class TestAuthenticationIsNotRetried:
 
         assert mock_post.call_count == 1
         mock_build.assert_not_called()
+
+
+class TestRefusalsPropagate:
+    """A 403 or 404 is raised, not turned into an empty response.
+
+    An empty response is indistinguishable from "this property has no search
+    data", so the crawl reported success with 0 matched pages. The caller
+    (`PageClassificationTool._enrich_with_gsc`) owns graceful degradation and
+    reports the refusal as a failed step.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch) -> None:
+        monkeypatch.setattr("tenacity.nap.time.sleep", lambda _seconds: None)
+
+    @staticmethod
+    def _http_error(status: int) -> Exception:
+        import httplib2
+        from googleapiclient.errors import HttpError
+
+        return HttpError(httplib2.Response({"status": str(status)}), b"{}")
+
+    def _fetch_raising(self, mock_settings, mock_token_manager, status: int) -> None:
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            query = mock_build.return_value.searchanalytics.return_value.query
+            query.return_value.execute.side_effect = self._http_error(status)
+            client = GscApiClient(settings=mock_settings)
+            client.fetch_analytics("https://example.com", "2026-08-01", "2026-08-31")
+
+    def test_a_403_raises_authorization_error(self, mock_settings, mock_token_manager):
+        from src.core.errors import GscAuthorizationError
+
+        with pytest.raises(GscAuthorizationError):
+            self._fetch_raising(mock_settings, mock_token_manager, 403)
+
+    def test_a_404_raises_property_not_found(self, mock_settings, mock_token_manager):
+        from src.core.errors import GscPropertyNotFoundError
+
+        with pytest.raises(GscPropertyNotFoundError):
+            self._fetch_raising(mock_settings, mock_token_manager, 404)
+
+
+class TestDomainProperty:
+    """`sc-domain:` properties are sent exactly as Search Console lists them."""
+
+    def test_sc_domain_property_is_sent_without_a_trailing_slash(
+        self, mock_settings, mock_token_manager
+    ):
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            analytics = mock_build.return_value.searchanalytics.return_value
+            analytics.query.return_value.execute.return_value = {"rows": []}
+            client = GscApiClient(settings=mock_settings)
+            response = client.fetch_analytics("sc-domain:example.com", "2026-08-01", "2026-08-31")
+
+        assert analytics.query.call_args[1]["siteUrl"] == "sc-domain:example.com"
+        assert response.property_url == "sc-domain:example.com"
+
+    def test_a_typed_trailing_slash_is_dropped_from_a_domain_property(
+        self, mock_settings, mock_token_manager
+    ):
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            analytics = mock_build.return_value.searchanalytics.return_value
+            analytics.query.return_value.execute.return_value = {"rows": []}
+            client = GscApiClient(settings=mock_settings)
+            client.fetch_analytics("sc-domain:example.com/", "2026-08-01", "2026-08-31")
+
+        assert analytics.query.call_args[1]["siteUrl"] == "sc-domain:example.com"
+
+    def test_a_domain_property_is_recognised_whatever_its_case(
+        self, mock_settings, mock_token_manager
+    ):
+        # The form and the validator accept `SC-DOMAIN:` case-insensitively, so the
+        # client must too, or it would append "/" and name no property at all.
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            analytics = mock_build.return_value.searchanalytics.return_value
+            analytics.query.return_value.execute.return_value = {"rows": []}
+            client = GscApiClient(settings=mock_settings)
+            client.fetch_analytics("SC-Domain:Example.com/", "2026-08-01", "2026-08-31")
+
+        assert analytics.query.call_args[1]["siteUrl"] == "sc-domain:example.com"

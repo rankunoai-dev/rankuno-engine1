@@ -29,6 +29,9 @@ __all__ = ["GscApiClient"]
 
 _logger = get_logger("integrations.gsc_client")
 
+_DOMAIN_PROPERTY_PREFIX = "sc-domain:"
+"""How Search Console names a Domain property: `sc-domain:example.com`."""
+
 
 class GscApiClient(BaseAPIClient):
     """Google Search Console API connector.
@@ -45,10 +48,11 @@ class GscApiClient(BaseAPIClient):
       the retry policy treats as transient, so a refresh inside the loop turned
       one revoked token into four `invalid_grant` POSTs.
     - Errors are mapped to specific exception types for upstream handling
-    - Graceful degradation: property/fetch errors return empty data, not
-      exceptions. Authentication errors are the exception to that: an empty
-      result on a revoked token would read as "no search data" rather than
-      "re-authorise this account", so they propagate.
+    - Graceful degradation: transient fetch errors return empty data, not
+      exceptions. Authentication, authorization (403) and property-not-found
+      (404) errors are the exception to that: an empty result would read as
+      "no search data" rather than "re-authorise this account" or "this
+      account cannot see this property", so they propagate to the caller.
     """
 
     service_name = "google.search_console"
@@ -184,7 +188,8 @@ class GscApiClient(BaseAPIClient):
         for the specified date range.
 
         Args:
-            property_url: GSC property URL (e.g., "https://example.com/")
+            property_url: GSC property, either a URL prefix
+                ("https://example.com/") or a domain ("sc-domain:example.com").
             start_date: Start date (YYYY-MM-DD)
             end_date: End date (YYYY-MM-DD)
             row_limit: Max rows to return (GSC max is 25,000 per request)
@@ -195,6 +200,9 @@ class GscApiClient(BaseAPIClient):
         Raises:
             GscAuthenticationError: If the refresh token is revoked or invalid.
                 Raised once, before any analytics request; never retried.
+            GscAuthorizationError: On a 403 — this account cannot access the
+                property.
+            GscPropertyNotFoundError: On a 404 — no such property.
         """
         token = self._token_manager.get_or_refresh_token()
 
@@ -202,10 +210,16 @@ class GscApiClient(BaseAPIClient):
             try:
                 service = self._get_service(token)
 
-                # Ensure property URL ends with / for API call
-                api_property_url = (
-                    property_url if property_url.endswith("/") else f"{property_url}/"
-                )
+                # A URL-prefix property is listed with a trailing slash. A domain
+                # property is not, and `sc-domain:example.com/` names nothing.
+                # Matched case-insensitively, as the form and the validator do,
+                # and sent in the lowercase form Search Console lists it under.
+                if property_url.lower().startswith(_DOMAIN_PROPERTY_PREFIX):
+                    api_property_url = property_url.rstrip("/").lower()
+                elif property_url.endswith("/"):
+                    api_property_url = property_url
+                else:
+                    api_property_url = f"{property_url}/"
 
                 request = service.searchanalytics().query(
                     siteUrl=api_property_url,
@@ -279,9 +293,12 @@ class GscApiClient(BaseAPIClient):
 
         try:
             return self.call("fetch_analytics", attempt)
+        except (GscPropertyNotFoundError, GscAuthorizationError):
+            # Not degraded to an empty response: that reads as "no search data"
+            # and the crawl reported success with 0 matched pages. The caller
+            # reports these as a failed enrichment step instead.
+            raise
         except (
-            GscPropertyNotFoundError,
-            GscAuthorizationError,
             GscQuotaExceededError,
             GscApiDeprecatedError,
         ):

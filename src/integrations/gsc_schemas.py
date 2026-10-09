@@ -144,7 +144,7 @@ class GscPropertyValidationResult(StrictModel):
     )
     match_type: str = Field(
         default="",
-        description="Type of match: 'exact', 'subdomain', 'prefix', or empty if invalid",
+        description="Type of match: 'exact', 'subdomain', 'prefix', 'domain', or empty if invalid",
     )
     reason: str = Field(
         ...,
