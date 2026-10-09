@@ -307,6 +307,22 @@ describe("HttpAdapter.listJobs provenance", () => {
     expect(job?.importedFrom?.sourceLabel).toBeNull();
   });
 
+  it("carries the server's telemetry through to the summary", async () => {
+    const telemetry = {
+      completed: 10,
+      discovered: 40,
+      rate_per_sec: 2,
+      eta_seconds: 15,
+      recent_items: ["https://e.com/x"],
+      updated_at: "2026-10-01T09:05:00Z",
+    };
+    respond([{ ...record, status: "running", telemetry }]);
+
+    const [job] = await new HttpAdapter("http://engine/api/v1").listJobs();
+
+    expect(job?.telemetry).toEqual(telemetry);
+  });
+
   it.each([
     ["null", { ...record, provenance: null }],
     // A server predating ADR 0034 omits the field entirely.

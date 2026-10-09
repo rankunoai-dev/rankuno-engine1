@@ -293,6 +293,9 @@ export class HttpAdapter implements CrawlDataAdapter {
             importedAt: record.provenance.imported_at,
           }
         : null,
+      // Kept, not dropped: it is what lets a reloaded page show the progress of
+      // a crawl that kept running while the tab was closed.
+      telemetry: record.telemetry,
     };
   }
 

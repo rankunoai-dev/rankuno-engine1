@@ -289,13 +289,238 @@
   --progress-from: #df212a;
   --progress-to: #f37f5e;
 
+  /* ── Surfaces (theme seam) ───────────────────────────────────────────────
+     The dark theme is glass: translucent panels over a gradient, blurred by
+     `backdrop-filter`. Panels read these instead of `--panel`/`--line` so the
+     dark block below can swap the treatment without any component naming a
+     theme. In light every one resolves to the value the surface already had,
+     so this block moves no pixel.
+
+     `--glass-filter` is only ever applied to panels, the header, the rail and
+     overlays. Never to a repeated row: the tree is virtualised over up to
+     20,000 nodes and a backdrop blur per row is a compositor layer per row. */
+  --glass-bg: var(--panel);
+  --glass-bg-strong: var(--panel);
+  --glass-border: var(--line);
+  --glass-filter: none;
+  --glass-mask-filter: none;
+  --glass-shadow: none;
+  --app-backdrop: var(--bg);
+  /* Focus-graph canvas and node cards. Opaque in both themes: they are drawn
+     in numbers and carry the lane colour, so they are not blurred. */
+  --node-bg: #ffffff;
+  --node-shadow: 0 2px 6px rgba(29, 38, 53, 0.08);
+  --stage-bg: #fbfbfc;
+  --stage-dot: #e3e3e4;
+  --wire: #7d8aa0;
+  --hits-shadow: 0 10px 28px rgba(29, 38, 53, 0.16);
+  --card-shadow: 0 10px 28px rgba(29, 38, 53, 0.1);
+  --row-divider: rgba(0, 0, 0, 0.06);
+  --on-fill: #ffffff;
+  --line-soft: #e8e8e8;
+  /* The running-crawl badge is a FILL under white text, so it cannot use `--ok`,
+     which in dark is the light green chosen for text. */
+  --ok-fill: #14713f;
+
   --sans: "Montserrat", "Segoe UI", system-ui, -apple-system, sans-serif;
   --display: "Roboto Slab", Georgia, "Times New Roman", serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/*
+ * Dark theme: an ADDITIVE alternate token set.
+ *
+ * Selected by `data-theme="dark"` on <html>, written by an inline script in
+ * index.html before first paint and kept current by `store/useThemeStore.ts`.
+ * It reassigns the same custom properties the light palette defines, so no
+ * component names a theme. The slice antd needs by value is mirrored in
+ * `styles/tokens.ts` (`CSS_TOKENS_DARK`) and held here by `tokens.test.ts`.
+ *
+ * What is NOT reassigned is deliberate: the level fills (`--l0f`..), `--primary`
+ * and `--stream-*` are fills or already dark, and carry their own dark text.
+ * `--color-*` / `--metric-*` for the GSC report are set by that component's own
+ * `:root[data-theme='dark']` rule.
+ */
+:root[data-theme="dark"] {
+  --bg: #0b101c;
+  --panel: #151b2b;
+  --line: #2a3348;
+  --line2: #353f55;
+  --ink: #e8ecf4;
+  --dim: #b1b9ca;
+  --faint: #96a0b4;
+
+  --primary: #df212a;
+  --primary-hover: #b3151d;
+  --primary-bg: #3a1519;
+  --primary-ink: #ff8a8f;
+
+  --rail-bg: rgba(10, 14, 24, 0.62);
+  --rail-bg-hover: rgba(255, 255, 255, 0.08);
+  --rail-line: rgba(255, 255, 255, 0.1);
+  --rail-text: #c3cbd9;
+
+  --l0: #f0c04a;
+  --l0bg: #2e2812;
+  --l0band: #26210f;
+  --l1: #c4a3ff;
+  --l1bg: #2a1f4a;
+  --l1band: #231b3d;
+  --l2: #5fd6e8;
+  --l2bg: #0f3239;
+  --l2band: #0e2a30;
+  --l3: #62d48f;
+  --l3bg: #11331f;
+  --l3band: #0f2b1a;
+  --oth: #aab6c9;
+  --othbg: #252d3b;
+  --othband: #202735;
+
+  --ok: #62d48f;
+  --warn: #f0b94d;
+  --danger: #ff8a80;
+  --ok-bg: #12301f;
+  --ok-line: #25613d;
+  --warn-bg: #33290f;
+  --warn-line: #6b5420;
+  --danger-bg: #3b1a1d;
+  --danger-line: #7a2f33;
+
+  /* Filled destructive controls. White text needs a mid red; `--danger` is the
+     light red that reads as text on dark, and white on it is 2.1:1. */
+  --danger-fill: #c93a30;
+  --ok-fill: #177a44;
+
+  --line-faint: #1d2433;
+  --scroll-thumb: #3a4458;
+  --scroll-thumb-hover: #55617a;
+  --meta-text: #9aa4b8;
+  --accent-soft: #ff8a8f;
+  --accent-soft-hover: #ffb0b3;
+  --accent-pale: #c3cbd9;
+  --export-line: #6b7690;
+  --export-bg: #151b2b;
+  --export-bg-hover: #3a1519;
+  --export-text: #ff8a8f;
+  --overlay-bg: #1b2233;
+  --overlay-line: #353f55;
+  --overlay-line-strong: #6b7690;
+  --btn-muted-text-hover: #ffffff;
+  --link-muted-hover: #ffb0b3;
+
+  --status-success: #6fd04a;
+  --status-warning: #f0b94d;
+  --status-warning-soft: #e0a82e;
+  --status-warning-bg: #33290f;
+  --status-warning-ink: #f5c76a;
+  --status-caution: #ff9a73;
+  --status-critical: #ff8a80;
+  --status-critical-soft: #ff9e95;
+  --status-critical-bg: #3b1a1d;
+  --status-critical-line: #7a2f33;
+  --text-strong: #f4f6fb;
+  --text-secondary: #b4bccc;
+  --text-muted: #98a2b6;
+  --surface-sunken: #10151f;
+  --surface-hover: #1c2434;
+  --hairline: #232b3d;
+  --hairline-strong: #353f55;
+  --gsc-accent: #5aa9f5;
+  --gsc-accent-ink: #8cc4ff;
+  --gsc-info-bg: #0f2740;
+  --gsc-callout-bg: #121a2a;
+  --gsc-summary-bg: #112038;
+  --gsc-summary-line: #23406e;
+
+  --glass-bg: rgba(24, 31, 48, 0.58);
+  --glass-bg-strong: rgba(21, 27, 43, 0.86);
+  --glass-border: rgba(255, 255, 255, 0.13);
+  --glass-filter: blur(18px) saturate(150%);
+  /* The inner highlight is the top edge catching light; the drop shadow lifts
+     the pane off the gradient. */
+  --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 32px rgba(0, 0, 0, 0.35);
+  --app-backdrop:
+    radial-gradient(900px 600px at 12% -10%, rgba(223, 33, 42, 0.22), transparent 60%),
+    radial-gradient(800px 600px at 95% 10%, rgba(80, 70, 200, 0.2), transparent 60%),
+    radial-gradient(900px 700px at 60% 110%, rgba(14, 130, 150, 0.16), transparent 60%),
+    linear-gradient(160deg, #0b101c 0%, #0e1424 55%, #0a0e19 100%);
+
+  --node-bg: #1b2336;
+  --node-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --stage-bg: rgba(10, 14, 24, 0.5);
+  --stage-dot: rgba(255, 255, 255, 0.07);
+  --wire: #8b98ab;
+  --hits-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 10px 28px rgba(0, 0, 0, 0.45);
+  --row-divider: rgba(255, 255, 255, 0.08);
+  --line-soft: #2a3348;
+  --glass-mask-filter: blur(6px);
+}
+
+/* No backdrop-filter (older Firefox, some embedded webviews): glass without
+   blur is a see-through panel with text over a moving gradient, which is worse
+   than no glass. Fall back to the solid surfaces. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root[data-theme="dark"] {
+    --glass-bg: var(--panel);
+    --glass-bg-strong: var(--panel);
+    --rail-bg: #0d1220;
+    --glass-filter: none;
+    --glass-mask-filter: none;
+  }
+}
+/* Transparency is a readability cost for some people, and the OS can say so. */
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-theme="dark"] {
+    --glass-bg: var(--panel);
+    --glass-bg-strong: var(--panel);
+    --rail-bg: #0d1220;
+    --glass-filter: none;
+    --glass-mask-filter: none;
+  }
+}
+@media (prefers-contrast: more) {
+  :root[data-theme="dark"] {
+    --glass-bg: var(--panel);
+    --glass-bg-strong: var(--panel);
+    --rail-bg: #0d1220;
+    --glass-filter: none;
+    --glass-mask-filter: none;
+    --glass-border: #8c97ad;
+    --line: #5a6680;
+    --dim: #d3d9e6;
+    --faint: #c3cbd9;
+  }
+}
+
+/* Print is always the light palette. Re-asserting the light values here (rather
+   than dropping the attribute) means the app can stay dark on screen while the
+   paper copy is not a dark page. The report is the only thing printed, but its
+   tokens come from :root, so they are what is overridden. */
+@media print {
+  :root[data-theme="dark"] {
+    color-scheme: light;
+    --bg: #f5f5f6;
+    --panel: #ffffff;
+    --line: #e6e6e6;
+    --line2: #dcdcdc;
+    --ink: #1d2635;
+    --dim: #595a5c;
+    --faint: #6e6e6e;
+    --primary-bg: #fdecec;
+    --primary-ink: #c01a22;
+    --ok: #14713f;
+    --warn: #8a6300;
+    --danger: #b42318;
+    --l0bg: #fdf6de;
+    --l3bg: #def4e7;
+    --line-faint: #eeeeee;
+    --app-backdrop: #ffffff;
+  }
+}
+
 .rk-dash {
-  background: var(--bg);
+  background: var(--app-backdrop);
   color: var(--ink);
   font-family: var(--sans);
   font-size: 13px;
@@ -431,6 +656,8 @@
   flex: none;
   background: var(--rail-bg);
   border-right: 1px solid var(--rail-line);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -520,7 +747,7 @@
   height: 15px;
   padding: 0 4px;
   border-radius: var(--radius);
-  background: var(--ok);
+  background: var(--ok-fill);
   /* Was near-black on a mid green. `--ok` darkened to clear 4.5:1 as text
      elsewhere, and dark-on-dark would have taken the count with it; the badge
      reads as a count, so the count is the part that has to survive. */
@@ -563,8 +790,11 @@
 .hdr {
   min-height: 54px;
   flex: none;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  background: var(--glass-bg);
+  border-bottom: 1px solid var(--glass-border);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
+  box-shadow: var(--glass-shadow);
   display: flex;
   align-items: center;
   gap: 14px;
@@ -586,6 +816,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* The theme switch sits at the far end of the header. Like `.crawlact`, it only
+   claims the free space itself when nothing to its left already has. */
+.hdr .theme-toggle {
+  flex: none;
+  margin-left: auto;
+}
+.bgpill ~ .theme-toggle,
+.perf ~ .theme-toggle,
+.crawlact ~ .theme-toggle {
+  margin-left: 0;
 }
 /* One row of the crawl selector. Two lines, because the same site is crawled
    repeatedly while settings are tuned and the URL alone does not distinguish
@@ -673,14 +914,14 @@
   padding: 0 5px;
   border-radius: var(--radius);
   background: var(--primary);
-  color: var(--panel);
+  color: var(--on-fill);
   font-weight: 700;
 }
 .bgpill-cta {
   padding: 2px 8px;
   border-radius: var(--radius-pill);
   background: var(--primary);
-  color: var(--panel);
+  color: var(--on-fill);
   font-weight: 700;
 }
 @keyframes bgpill-pulse {
@@ -845,10 +1086,13 @@
   visibility: hidden;
 }
 .kpi {
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius);
   padding: 10px 14px;
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
+  box-shadow: var(--glass-shadow);
 }
 .kpi .lab {
   font-size: 10.5px;
@@ -873,16 +1117,45 @@
 }
 
 .split {
-  display: grid;
-  grid-template-columns: minmax(320px, 400px) minmax(0, 1fr);
+  display: flex;
   gap: 12px;
   flex: 1;
   min-height: 0;
 }
+
+.split > section:first-of-type {
+  min-width: 320px;
+  width: var(--left-panel-width, 400px);
+  flex: 0 0 var(--left-panel-width, 400px);
+}
+
+.split > section:last-of-type {
+  flex: 1;
+  min-width: 0;
+}
+
+.split-divider {
+  width: 8px;
+  cursor: col-resize;
+  background: linear-gradient(90deg, transparent 0%, var(--line) 50%, transparent 100%);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  flex: 0 0 8px;
+  position: relative;
+  margin: 0 -4px;
+}
+
+.split-divider:hover,
+.split-divider.dragging {
+  opacity: 1;
+}
 .card {
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
+  box-shadow: var(--glass-shadow);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -936,10 +1209,12 @@
   top: 36px;
   left: 0;
   right: 0;
-  background: var(--panel);
+  background: var(--glass-bg-strong);
   border: 1px solid var(--line2);
   border-radius: var(--radius);
-  box-shadow: 0 10px 28px rgba(29, 38, 53, 0.16);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
+  box-shadow: var(--hits-shadow);
   max-height: 300px;
   overflow: auto;
 }
@@ -1221,8 +1496,8 @@
   min-height: 280px;
   overflow: hidden;
   background:
-    radial-gradient(circle at 1px 1px, #e3e3e4 1px, transparent 0) 0 0 / 20px 20px,
-    #fbfbfc;
+    radial-gradient(circle at 1px 1px, var(--stage-dot) 1px, transparent 0) 0 0 / 20px 20px,
+    var(--stage-bg);
   border-bottom: 1px solid var(--line);
 }
 .lanes {
@@ -1293,7 +1568,7 @@ svg.wires {
    following. */
 .wire {
   fill: none;
-  stroke: #7d8aa0;
+  stroke: var(--wire);
   stroke-width: 1;
   opacity: 0.3;
 }
@@ -1311,12 +1586,12 @@ svg.wires {
   position: absolute;
   z-index: 3;
   transform: translate(-50%, -50%);
-  background: #fff;
+  background: var(--node-bg);
   border: 1.5px solid;
   border-radius: var(--radius);
   padding: 4px 9px;
   cursor: pointer;
-  box-shadow: 0 2px 6px rgba(29, 38, 53, 0.08);
+  box-shadow: var(--node-shadow);
   /* Fixed, not max-width. The layout spaces columns against this number, so a
      card free to be narrower or wider makes the spacing wrong in both
      directions — cards drifted apart, or overlapped and ran their labels
@@ -1368,7 +1643,7 @@ svg.wires {
   right: 12px;
   top: 10px;
   z-index: 4;
-  background: #fff;
+  background: var(--node-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 5px 10px;
@@ -1524,8 +1799,10 @@ svg.wires {
   flex: none;
   display: flex;
   align-items: center;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  background: var(--glass-bg);
+  border-bottom: 1px solid var(--glass-border);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
   padding: 2px 8px;
 }
 /* Scoped under `.rk-dash` for specificity, not for nesting. The local button

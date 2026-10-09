@@ -5,6 +5,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Rankuno — Site Architecture Visualizer</title>
     <!--
+      Sets the theme on <html> before first paint. The bundle that owns the theme
+      (`src/store/useThemeStore.ts`) is a module and runs after the first frame,
+      so without this a dark-theme operator sees the light page flash on every
+      load. Same rule as the store: a stored choice wins, otherwise the OS, and
+      light when neither can be read. Each lookup has its own try/catch because
+      storage can throw (disabled, sandboxed iframe) and that must not cost the
+      OS preference, nor the OS lookup cost the stored choice.
+    -->
+    <script>
+      (function () {
+        var theme = null;
+        try {
+          var raw = window.localStorage.getItem("rankuno.theme");
+          var stored = raw ? JSON.parse(raw) : null;
+          if (stored && (stored.theme === "dark" || stored.theme === "light")) theme = stored.theme;
+        } catch (e) {}
+        if (theme === null) {
+          try {
+            theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          } catch (e) {
+            theme = "light";
+          }
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <!--
       The brand faces, requested here rather than through an `@import` in
       design-system.css so the fetch can start alongside the stylesheet instead
       of after it.

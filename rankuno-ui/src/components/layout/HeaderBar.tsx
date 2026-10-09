@@ -7,6 +7,7 @@ import type { LiveJob } from "../../store/useCrawlStore";
 import { isLive, newestLiveJob, useCrawlStore } from "../../store/useCrawlStore";
 import { modeOfView, useUiStore } from "../../store/useUiStore";
 import { CrawlActivityIndicator } from "./CrawlActivityIndicator";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   /** True when a header menu was parsed, so navigation grouping is meaningful. */
@@ -62,6 +63,7 @@ export function HeaderBar({ navParsed, onNewCrawl, onPrint }: Props): JSX.Elemen
         <h1>{view === "screaming-frog" ? "Screaming Frog" : "Rankuno"}</h1>
         {lead && <BackgroundPill lead={lead} runningCount={runningCount} />}
         <CrawlActivityIndicator />
+        <ThemeToggle />
       </header>
     );
   }
@@ -150,6 +152,7 @@ export function HeaderBar({ navParsed, onNewCrawl, onPrint }: Props): JSX.Elemen
         </div>
       )}
       <CrawlActivityIndicator />
+      <ThemeToggle />
     </header>
   );
 }

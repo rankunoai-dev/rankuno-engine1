@@ -209,3 +209,38 @@ class TestJobImportProvenanceMigration:
 
         for column in ("import_origin", "source_job_id", "bundle_sha256"):
             assert column in _JOB_COLUMNS
+
+
+class TestJobPasswordHashMigration:
+    """Migration 010 (audit F2): nullable `jobs.password_hash`, idempotent, reversible."""
+
+    PATH = "alembic/versions/0010_job_password_hash.py"
+
+    def _content(self) -> str:
+        with open(self.PATH, encoding="utf-8") as f:
+            return f.read()
+
+    def test_follows_009(self) -> None:
+        content = self._content()
+        assert 'revision: str = "010"' in content
+        assert 'down_revision: str | None = "009"' in content
+
+    def test_single_head_is_010(self) -> None:
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+
+        script = ScriptDirectory.from_config(Config("alembic.ini"))
+        assert script.get_heads() == ["010"]
+
+    def test_column_is_nullable_text_added_idempotently(self) -> None:
+        content = self._content()
+        assert "ADD COLUMN IF NOT EXISTS password_hash TEXT" in content
+        assert "NOT NULL" not in content
+
+    def test_downgrade_drops_the_column(self) -> None:
+        assert "DROP COLUMN IF EXISTS password_hash" in self._content()
+
+    def test_the_store_reads_the_column(self) -> None:
+        from src.core.postgres_store import _JOB_COLUMNS
+
+        assert _JOB_COLUMNS.endswith("password_hash")
