@@ -8,10 +8,15 @@
 #   DATABASE_URL          = ${{Postgres.DATABASE_URL}}
 #   GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET / GOOGLE_OAUTH_REFRESH_TOKEN
 #   GUARDRAILS_ENABLED=true, REQUIRE_APPROVAL_FOR_WRITES=true, REQUIRE_APPROVAL_FOR_SPEND=true
+#   GSC_CREDENTIAL_ENCRYPTION_KEY = base64url of 32 random bytes (ADR 0036). Required
+#       because DATABASE_URL is set: without it the server refuses to start and the
+#       healthcheck keeps the previous deployment serving. Back it up; losing it
+#       means re-adding every org GSC account.
 #
-# Known gap: jobs (/app/.jobs), org GSC accounts (/app/.orgs) and operator
-# logins (/app/.operators) live on the container disk, so a redeploy wipes them.
-# The jobs directory is not yet configurable, so one volume cannot hold all three.
+# Org GSC accounts are durable: they live in Postgres (org_gsc_accounts, encrypted,
+# ADR 0036), not in /app/.orgs. Known gap: other org settings (/app/.orgs) and
+# operator logins (/app/.operators) still live on the container disk, so a
+# redeploy wipes them. Jobs are in Postgres (ADR 0022).
 #
 # The start command lives in the Dockerfile CMD, so there is one source of truth.
 

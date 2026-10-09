@@ -106,6 +106,19 @@ src/
 │   │                            # attempt a connection rather than raising until
 │   │                            # its own circuit breaker opens on a workstation
 │   │                            # with no Postgres installed
+│   ├── gsc_account_store.py     # ADR 0036: GscAccountStore seam (org-scoped list/
+│   │                            # names/get/upsert/delete) + DiskGscAccountStore
+│   │                            # over OrgConfig.gsc_accounts (local, unchanged,
+│   │                            # fail-soft reads). Settings.gsc_account_store is
+│   │                            # the one selection point (Postgres iff
+│   │                            # is_configured()), shared by API and crawl
+│   ├── gsc_credential_crypto.py # ADR 0036: AES-256-GCM, fresh 12-byte nonce,
+│   │                            # AAD = label|key_id|org|account|field; key chosen
+│   │                            # by the row's key_id (current or _PREVIOUS)
+│   ├── postgres_gsc_account_store.py # ADR 0036: org_gsc_accounts (migration
+│   │                            # 010). No disk fallback: breaker/DB error ->
+│   │                            # GscAccountStoreUnavailableError (503). Listing
+│   │                            # never decrypts. Logs class + SQLSTATE only
 │   ├── postgres_store.py        # PostgresJobStore (ADR 0022): the same JobStore
 │   │                            # Protocol as state_store.py's DiskJobStore, over
 │   │                            # real Postgres (jobs + job_payloads, migration
@@ -337,6 +350,15 @@ src/
 │   │                            # creates `local` with an unusable password, or
 │   │                            # refuses to start if it is inactive or in another
 │   │                            # org; never borrows an existing operator
+│   ├── error_handlers.py        # ADR 0036: app-wide 422 handler that strips
+│   │                            # `input`/`ctx` (a missing-field 422 echoed the
+│   │                            # refresh token), and GscAccountStoreUnavailable
+│   │                            # -> 503 for account routes, picker and intake
+│   ├── gsc_account_routes.py    # ADR 0016/0036: /orgs/{org}/gsc-accounts list,
+│   │                            # create/replace (201), delete (204). 403 before
+│   │                            # any lookup for another org; full-match names;
+│   │                            # bounded secrets; principal bucket (429); audit
+│   │                            # events carry org/account/operator_id only
 │   ├── job_import_routes.py     # ADR 0034: POST /jobs/import. Session -> per-
 │   │                            # operator hourly bucket (import:{operator}, 6/h,
 │   │                            # burst 2) -> application/gzip (415) -> process-
@@ -997,6 +1019,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0033](adr/0033-a-local-launch-signs-in-through-a-single-use-loopback-link.md) | **A local launch signs in through a single-use loopback link, never in production.** `scripts/run_local.ps1` mints a 32-byte token per start, in the server's environment only, and opens `http://127.0.0.1:<port>/#autosignin=<token>`; the fragment never reaches a server or access log. The SPA strips it before any request and exchanges it once at `POST /api/v1/auth/local-signin` for the same session `/auth/login` issues. The server holds only `sha256(token)`; single use under one lock, 300 s TTL, locked after 5 mismatches, `local-signin` bucket 10/min, loopback peer and loopback-bound socket required, one identical 401 for every refusal, route absent (404) when no token is set. Signs in as a dedicated `local` operator in org `default` (created with an unusable password; inactive or other-org refuses startup), never the first existing operator, a departure from ADR 0016's empty-store-only seeding. Kept out of production by independent layers: `Settings` refuses the token outside `ENVIRONMENT=development`, `create_app()` refuses it with Postgres configured, the loopback checks fail behind a proxy, and the token is per-launch. `API_ALLOWED_HOSTS` adds an opt-in `TrustedHostMiddleware` against DNS rebinding. Residuals: the browser's command line holds the spent link; a same-machine reverse proxy looks like loopback ([build-log 0139](build-log/0139-a-browser-that-opens-already-signed-in.md)) |
 | [0034](adr/0034-a-local-crawl-reaches-the-cloud-as-a-terminal-provenance-stamped-import.md) | **A local crawl reaches the cloud as a terminal, provenance-stamped import.** `scripts/push_job_to_cloud.py` reads `.jobs/` through `DiskJobStore` only and uploads a versioned, gzipped `JobImportBundle` to `POST /api/v1/jobs/import` with an operator session; the password is read by `getpass` only. The org, operator and job id come from the server, never the bundle. Limits: 32 MiB compressed, 128 MiB inflated (enforced while inflating), one import per process, 6/h per operator. Every URL field must be http(s) with a host (a canonical only refuses a real non-http scheme), else the whole bundle is refused with locations only. `JobStore.import_terminal` writes the job already terminal, in one transaction, with no budget gate and no ledger row, and with no disk fallback (503). Idempotent per org on `(source_instance_id, source_job_id)` + `bundle_sha256` (migration 0009). Retry and resume refuse imported jobs (409); the job list badges them and hides Resume and Run again. `rankuno-ui/src/lib/safeHref.ts` links only absolute http(s) URLs with a host at all 8 UI link sites. Import memory is not counted by ADR 0031's budget ([build-log 0140](build-log/0140-a-local-crawl-copied-to-the-cloud.md)) |
 | [0035](adr/0035-a-crawl-releases-each-page-body-once-read.md) | **A crawl releases each page body once it has been read.** Links, content signals, canonical, robots, breadcrumb labels and recognised schema types are read at fetch time; `SiteGraph.store_html` keeps only the homepage's body (`normalize_url` match) and returns whether it released. The budget charges body + `LEAN_PAGE_BYTES` (32 KiB) + measured derived bytes on land and credits the body in the same frame (no `await` between); credits clamp to outstanding body bytes, never pick a victim, and an over-credit fails the test suite. Caps: breadcrumb label 256, schema types 8 distinct ≤ 256 chars, canonical 2,048, fetched and extracted URLs 8,192 (one constant in `core.url_safety`), links 5,000/page, link bytes charged at land and credited when the level records them (an abandoned level keeps its charge). The flag rolls back body release only. Fair share holds structurally; projected ≤ ADR 0031's + pages × LEAN + retained, so small-page crawls reach a share at ~19k pages. `CRAWL_RELEASE_PAGE_HTML=false` is the rollback. Measured 0.0247 vs 1.4504 MiB/page (2,001 × ~1 MB pages) |
+| [0036](adr/0036-cloud-gsc-credentials-are-encrypted-in-postgres.md) | **Cloud GSC credentials are encrypted in Postgres.** Amends ADR 0010 §3. With Postgres configured, org GSC accounts live in `org_gsc_accounts` (migration 010), not on the container disk Railway wipes. The refresh token and client secret are AES-256-GCM encrypted under `GSC_CREDENTIAL_ENCRYPTION_KEY` (AAD binds key id, org, account and field), required at boot in every environment once Postgres is selected; `..._PREVIOUS` keeps rotated rows readable. `Settings.gsc_account_store` is the one selection point, shared by the API and crawl-time resolution. Fail closed: store errors propagate as 503 (routes, picker, intake) or `failed` enrichment; only a genuine not-found falls through to `.env.local`. An app-wide 422 handler strips `input`/`ctx`. Invalid names are 422. Writes are rate-limited and audited. Local disk behaviour unchanged |
 
 ---
 

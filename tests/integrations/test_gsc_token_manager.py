@@ -10,7 +10,13 @@ import requests
 from pydantic import SecretStr
 from src.core.circuit_breaker import CircuitBreakerState
 from src.core.config import DEFAULT_ORG_ID, Settings
-from src.core.errors import ConfigurationError, GscAuthenticationError
+from src.core.errors import (
+    ConfigurationError,
+    GscAccountStoreUnavailableError,
+    GscAuthenticationError,
+    GscCredentialDecryptionError,
+)
+from src.core.gsc_account_store import GscAccountStore
 from src.core.schemas import GscAccountCredential, OrgConfig
 from src.core.state_store import OrgConfigStore
 from src.integrations.gsc_token_manager import GSC_READONLY_SCOPE, GscTokenManager
@@ -478,3 +484,24 @@ class TestCircuitBreaker:
             mock_post.assert_called_once()
             assert not breaker.is_open()
             assert breaker.state() is CircuitBreakerState.CLOSED
+
+
+class TestStoreFailuresPropagate:
+    """ADR 0036 C4: the manager never treats a store failure as "unknown account"."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [GscAccountStoreUnavailableError(), GscCredentialDecryptionError("acme")],
+        ids=["unavailable", "undecryptable"],
+    )
+    def test_constructor_raises_the_store_error(self, error: Exception) -> None:
+        class _Failing:
+            def get_credential(self, org_id: str, account_name: str) -> None:
+                raise error
+
+        settings = _settings(gsc_accounts={"acme": {"refresh_token": "rt-env-acme"}})
+        settings._gsc_account_store = cast(GscAccountStore, _Failing())  # noqa: SLF001
+        with patch("src.integrations.gsc_token_manager.requests.post") as mock_post:
+            with pytest.raises(type(error)):
+                GscTokenManager(settings=settings, account="acme")
+            mock_post.assert_not_called()

@@ -52,7 +52,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import re
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -74,6 +73,8 @@ from pydantic import Field, SecretStr, ValidationError
 from src.api.auth import build_auth_router, org_scoped_or_404, require_principal
 from src.api.crawl_activity import CrawlActivityCounter, build_crawl_activity_router
 from src.api.deliverables_routes import build_deliverables_router
+from src.api.error_handlers import install_error_handlers
+from src.api.gsc_account_routes import build_gsc_account_router
 from src.api.job_import_routes import build_job_import_router
 from src.api.job_view import JobView, job_views
 from src.api.local_signin import build_local_signin_router, ensure_local_operator
@@ -82,6 +83,7 @@ from src.core.auth import Operator, OperatorStore, hash_password, verify_passwor
 from src.core.config import ProcessRole, Settings, get_settings
 from src.core.errors import ConfigurationError, UnsafeUrlError
 from src.core.facet_router import FacetRouter
+from src.core.gsc_account_store import DiskGscAccountStore, GscAccountStore
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.local_signin import DEFAULT_LINK_TTL_S, LocalSigninGate
 from src.core.logger import get_logger
@@ -91,7 +93,7 @@ from src.core.postgres_store import PostgresJobStore
 from src.core.postgres_worker_dispatch_store import PostgresWorkerDispatchStore
 from src.core.process_supervisor import ProcessSupervisorUnavailableError, reconcile_orphans
 from src.core.rate_limiter import RateLimiterRegistry
-from src.core.schemas import GscAccountCredential, StrictModel, ToolMetadata
+from src.core.schemas import StrictModel, ToolMetadata
 from src.core.state_store import (
     MAX_RECENT_ITEMS,
     DiskJobStore,
@@ -832,42 +834,6 @@ class GscAccountsView(StrictModel):
     accounts: list[str]
 
 
-class OrgGscAccountRequest(StrictModel):
-    """Request body for adding/updating an org-level GSC account.
-
-    Attributes:
-        account_name: Profile name for the account. Must match ^[a-z0-9_-]{1,64}$.
-        refresh_token: OAuth 2.0 refresh token (SecretStr).
-        client_id: Optional OAuth client ID override.
-        client_secret: Optional OAuth client secret override.
-    """
-
-    account_name: str
-    refresh_token: SecretStr
-    client_id: str | None = None
-    client_secret: SecretStr | None = None
-
-
-class OrgGscAccountView(StrictModel):
-    """Org-level GSC account for read operations (no secret exposure).
-
-    Attributes:
-        account_name: Profile name.
-        client_id: OAuth client ID (or None if inherits from Settings).
-        has_secret_override: Whether this account has a custom client_secret.
-    """
-
-    account_name: str
-    client_id: str | None = None
-    has_secret_override: bool = False
-
-
-class OrgGscAccountsView(StrictModel):
-    """List of org-level GSC accounts."""
-
-    accounts: list[OrgGscAccountView]
-
-
 class JobAccepted(StrictModel):
     """What `POST /jobs` returns: an id to poll, not a result."""
 
@@ -955,6 +921,7 @@ class ApiState:
         bundle_encryption_secret: SecretStr | None = None,
         dispatch_signing_key: DispatchSigningKey | None = None,
         memory_budget: MemoryBudget | None = None,
+        gsc_account_store: GscAccountStore | None = None,
     ) -> None:
         """Build the shared state.
 
@@ -962,6 +929,8 @@ class ApiState:
             store: Job persistence.
             url_policy: SSRF policy used at admission and by the crawl.
             org_config_store: Organization configuration persistence.
+            gsc_account_store: Org GSC account persistence (ADR 0036).
+                Defaults to the disk store over `org_config_store`.
             max_concurrent_jobs: Simultaneous crawls before requests are refused.
                 (Deprecated in Phase 1: per-facet limits now apply instead.)
             deliverable_store: Persistence for workbook build jobs. A
@@ -1017,6 +986,11 @@ class ApiState:
         self.store = store
         self.url_policy = url_policy
         self.org_config_store = org_config_store
+        self.gsc_account_store: GscAccountStore = (
+            gsc_account_store
+            if gsc_account_store is not None
+            else DiskGscAccountStore(org_config_store)
+        )
         self.max_concurrent_jobs = max_concurrent_jobs
         self.facet_router = FacetRouter(max_concurrent=max_concurrent_jobs)
         self.memory_budget = memory_budget or MemoryBudget(
@@ -1459,6 +1433,22 @@ def _default_job_store(jobs_root: Path | str | None) -> JobStore:
     return PostgresJobStore(fallback_store=disk_store)
 
 
+def _default_gsc_account_store(
+    injected_org_store: OrgConfigStore | None, resolved_org_store: OrgConfigStore
+) -> GscAccountStore:
+    """Pick the GSC account store `create_app()` uses when none is injected (ADR 0036).
+
+    `Settings.gsc_account_store` is the one selection point, and the store
+    crawl-time resolution reads, so it is used whenever it applies: always on
+    Postgres, and on disk when no org store was injected. A test that injects
+    its own org store gets the disk store over *that* store, exactly what the
+    account routes read before the seam existed.
+    """
+    if injected_org_store is None or get_postgres_settings().is_configured():
+        return get_settings().gsc_account_store
+    return DiskGscAccountStore(resolved_org_store)
+
+
 def create_app(
     store: JobStore | None = None,
     url_policy: UrlSafetyPolicy | None = None,
@@ -1480,6 +1470,7 @@ def create_app(
     bundle_encryption_secret: SecretStr | None = None,
     process_ledger_path: Path | None = None,
     dispatch_signing_key: DispatchSigningKey | None = None,
+    gsc_account_store: GscAccountStore | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -1542,6 +1533,9 @@ def create_app(
             (cycle 0113).
         dispatch_signing_key: Ed25519 dispatch signing key (ADR 0028).
             Defaults to `Settings.dispatch_ed25519_signing_key`.
+        gsc_account_store: Org GSC account persistence (ADR 0036). Defaults
+            to `_default_gsc_account_store`, which is the same object
+            crawl-time credential resolution reads.
 
     Returns:
         The configured application.
@@ -1581,6 +1575,13 @@ def create_app(
     resolved_org_config_store: OrgConfigStore = (
         org_config_store if org_config_store is not None else get_settings().org_config_store
     )
+    # Resolved eagerly so a missing GSC_CREDENTIAL_ENCRYPTION_KEY stops boot
+    # when Postgres is configured, rather than surfacing on the first request.
+    resolved_gsc_account_store: GscAccountStore = (
+        gsc_account_store
+        if gsc_account_store is not None
+        else _default_gsc_account_store(org_config_store, resolved_org_config_store)
+    )
     resolved_operator_store: OperatorStore = (
         operator_store if operator_store is not None else get_settings().operator_store
     )
@@ -1603,6 +1604,7 @@ def create_app(
         store=resolved_store,
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
         org_config_store=resolved_org_config_store,
+        gsc_account_store=resolved_gsc_account_store,
         max_concurrent_jobs=(
             max_concurrent_jobs
             if max_concurrent_jobs is not None
@@ -1675,6 +1677,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.api = state
+    install_error_handlers(app)
 
     app.add_middleware(
         CORSMiddleware,
@@ -1705,6 +1708,7 @@ def create_app(
     app.include_router(build_deliverables_router(state), prefix=API_PREFIX)
     app.include_router(build_auth_router(state), prefix=API_PREFIX)
     app.include_router(build_job_import_router(state), prefix=API_PREFIX)
+    app.include_router(build_gsc_account_router(state), prefix=API_PREFIX)
     app.include_router(build_worker_router(state), prefix=API_PREFIX)
     app.include_router(build_crawl_activity_router(state), prefix=API_PREFIX)
     if local_signin_gate is not None:
@@ -1777,10 +1781,10 @@ def create_app(
             HTTPException: `401` if the token is missing or invalid.
         """
         principal = require_principal(authorization, session_secret=state.session_secret)
-        store = state.org_config_store
+        store = state.gsc_account_store
         return GscAccountsView(
             accounts=list(
-                get_settings().gsc_account_names_for_org(principal.org_id, org_store=store)
+                get_settings().gsc_account_names_for_org(principal.org_id, account_store=store)
             )
         )
 
@@ -2285,7 +2289,7 @@ def create_app(
         # able to resolve.
         if payload.gsc_account is not None:
             known = get_settings().gsc_account_names_for_org(
-                org_id, org_store=state.org_config_store
+                org_id, account_store=state.gsc_account_store
             )
             if payload.gsc_account not in known:
                 _logger.warning(
@@ -3878,168 +3882,6 @@ def create_app(
             f"{payload.base_url} (resumed +{len(remaining):,})",
             facet_id=record.facet_id,
             org_id=record.org_id,
-        )
-
-    # --- Organization-level GSC account management ---
-
-    def _require_own_org(path_org_id: str, principal_org_id: str) -> None:
-        """Refuse a path `org_id` that disagrees with the verified principal's own org.
-
-        ADR 0016 condition 1 (the CRITICAL finding): these three routes must
-        derive the org they operate on from the authenticated principal, not
-        from this path parameter alone. The segment stays in the URL — it is
-        what makes the route readable and keeps the existing path shape — but
-        it is a consistency check against ground truth here, never ground
-        truth itself. A caller authenticated as one org cannot read, create,
-        or delete another org's GSC OAuth credentials by editing the URL.
-        """
-        if path_org_id != principal_org_id:
-            _logger.warning(
-                "gsc_account_access_denied_org_mismatch",
-                extra={"path_org": path_org_id, "principal_org": principal_org_id},
-            )
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="access denied")
-
-    @app.get(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts", response_model=OrgGscAccountsView)
-    def list_org_gsc_accounts(
-        org_id: str, authorization: str | None = Header(default=None)
-    ) -> OrgGscAccountsView:
-        """List all GSC accounts configured for an organization.
-
-        Args:
-            org_id: Organization identifier. Must match the caller's own org.
-            authorization: Bearer session token (ADR 0016).
-
-        Returns:
-            List of GSC account names and metadata.
-
-        Raises:
-            HTTPException: `401` if the token is missing or invalid, `403` if
-                `org_id` is not the caller's own org (ADR 0016 condition 1 —
-                this route previously accepted any `org_id` with zero
-                verification), `404` if organization not found.
-        """
-        principal = require_principal(authorization, session_secret=state.session_secret)
-        _require_own_org(org_id, principal.org_id)
-        try:
-            org = state.org_config_store.get(org_id)
-        except KeyError as exc:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
-            ) from exc
-
-        accounts = [
-            OrgGscAccountView(
-                account_name=name,
-                client_id=cred.client_id,
-                has_secret_override=cred.client_secret is not None,
-            )
-            for name, cred in sorted(org.gsc_accounts.items())
-        ]
-        return OrgGscAccountsView(accounts=accounts)
-
-    @app.post(f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts", status_code=status.HTTP_201_CREATED)
-    def create_org_gsc_account(
-        org_id: str, req: OrgGscAccountRequest, authorization: str | None = Header(default=None)
-    ) -> OrgGscAccountView:
-        """Add or replace a GSC account for an organization.
-
-        Validates account name against ^[a-z0-9_-]{1,64}$ before storage.
-
-        Args:
-            org_id: Organization identifier. Must match the caller's own org.
-            req: Account credentials.
-            authorization: Bearer session token (ADR 0016).
-
-        Returns:
-            The created account metadata.
-
-        Raises:
-            HTTPException: `401` if the token is missing or invalid, `403` if
-                `org_id` is not the caller's own org (ADR 0016 condition 1 —
-                the CRITICAL finding: this route previously wrote a third
-                party's Google OAuth refresh token for any `org_id` with zero
-                verification), `400` if account name is invalid, `404` if org
-                not found, `422` if request body is invalid.
-        """
-        principal = require_principal(authorization, session_secret=state.session_secret)
-        _require_own_org(org_id, principal.org_id)
-        # Validate account name
-        if not re.match(r"^[a-z0-9_-]{1,64}$", req.account_name):
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                detail="Account name must match ^[a-z0-9_-]{1,64}$",
-            )
-
-        try:
-            org = state.org_config_store.get(org_id)
-        except KeyError as exc:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
-            ) from exc
-
-        org.gsc_accounts[req.account_name] = GscAccountCredential(
-            refresh_token=req.refresh_token,
-            client_id=req.client_id,
-            client_secret=req.client_secret,
-        )
-
-        updated_org = state.org_config_store.update(org)
-        cred = updated_org.gsc_accounts[req.account_name]
-
-        _logger.info(
-            "org_gsc_account_created",
-            extra={"org": org_id, "account": req.account_name},
-        )
-
-        return OrgGscAccountView(
-            account_name=req.account_name,
-            client_id=cred.client_id,
-            has_secret_override=cred.client_secret is not None,
-        )
-
-    @app.delete(
-        f"{API_PREFIX}/orgs/{{org_id}}/gsc-accounts/{{account_name}}",
-        status_code=status.HTTP_204_NO_CONTENT,
-    )
-    def delete_org_gsc_account(
-        org_id: str, account_name: str, authorization: str | None = Header(default=None)
-    ) -> None:
-        """Delete a GSC account from an organization.
-
-        Args:
-            org_id: Organization identifier. Must match the caller's own org.
-            account_name: Account to delete.
-            authorization: Bearer session token (ADR 0016).
-
-        Raises:
-            HTTPException: `401` if the token is missing or invalid, `403` if
-                `org_id` is not the caller's own org (ADR 0016 condition 1 —
-                the CRITICAL finding: this route previously deleted any
-                org's stored GSC credential with zero verification), `404`
-                if org or account not found.
-        """
-        principal = require_principal(authorization, session_secret=state.session_secret)
-        _require_own_org(org_id, principal.org_id)
-        try:
-            org = state.org_config_store.get(org_id)
-        except KeyError as exc:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found"
-            ) from exc
-
-        if account_name not in org.gsc_accounts:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND,
-                detail=f"Account '{account_name}' not found in organization '{org_id}'",
-            )
-
-        del org.gsc_accounts[account_name]
-        state.org_config_store.update(org)
-
-        _logger.info(
-            "org_gsc_account_deleted",
-            extra={"org": org_id, "account": account_name},
         )
 
     return app

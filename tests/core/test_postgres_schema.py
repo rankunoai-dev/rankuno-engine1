@@ -209,3 +209,82 @@ class TestJobImportProvenanceMigration:
 
         for column in ("import_origin", "source_job_id", "bundle_sha256"):
             assert column in _JOB_COLUMNS
+
+
+def _offline_sql(revisions: str, *, downgrade: bool = False) -> str:
+    """Render a migration range as SQL without contacting any database.
+
+    A `Config` with no file name, so `env.py` skips `fileConfig` and cannot
+    reconfigure the test run's logging.
+    """
+    import io
+
+    from alembic import command
+    from alembic.config import Config
+
+    buffer = io.StringIO()
+    cfg = Config(output_buffer=buffer)
+    cfg.set_main_option("script_location", "alembic")
+    cfg.set_main_option("sqlalchemy.url", "postgresql://offline:offline@offline.invalid/x")
+    if downgrade:
+        command.downgrade(cfg, revisions, sql=True)
+    else:
+        command.upgrade(cfg, revisions, sql=True)
+    return buffer.getvalue()
+
+
+class TestAlembicHistory:
+    def test_there_is_exactly_one_head(self) -> None:
+        """Two heads make the Dockerfile's `alembic upgrade head` fail every boot."""
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+
+        cfg = Config()
+        cfg.set_main_option("script_location", "alembic")
+        heads = ScriptDirectory.from_config(cfg).get_heads()
+        assert len(heads) == 1, heads
+
+
+class TestOrgGscAccountsMigration:
+    """Migration 0010 (ADR 0036): encrypted org GSC accounts."""
+
+    PATH = "alembic/versions/0010_org_gsc_accounts.py"
+
+    def test_follows_009(self) -> None:
+        with open(self.PATH, encoding="utf-8") as f:
+            content = f.read()
+        assert 'revision: str = "010"' in content
+        assert 'down_revision: str | None = "009"' in content
+
+    def test_upgrade_creates_the_table_with_its_constraints(self) -> None:
+        sql = _offline_sql("009:010")
+        assert "CREATE TABLE org_gsc_accounts" in sql
+        assert "CONSTRAINT pk_org_gsc_accounts PRIMARY KEY (org_id, account_name)" in sql
+        assert "FOREIGN KEY(org_id) REFERENCES org_configs (org_id) ON DELETE CASCADE" in sql
+        assert "CHECK (account_name ~ '^[a-z0-9_-]{1,64}$')" in sql
+        assert "CHECK (client_id IS NULL OR length(client_id) <= 256)" in sql
+        assert "refresh_token_ct BYTEA NOT NULL" in sql
+        assert "client_secret_ct BYTEA," in sql
+        for column in ("key_id", "created_by", "updated_by"):
+            assert f"{column} TEXT NOT NULL" in sql
+
+    def test_no_index_on_ciphertext(self) -> None:
+        sql = _offline_sql("009:010")
+        assert "CREATE INDEX" not in sql
+        assert "CREATE UNIQUE INDEX" not in sql
+
+    def test_downgrade_drops_the_table(self) -> None:
+        sql = _offline_sql("010:009", downgrade=True)
+        assert "DROP TABLE org_gsc_accounts" in sql
+
+    def test_the_store_writes_exactly_these_columns(self) -> None:
+        from src.core.postgres_gsc_account_store import _UPSERT_SQL
+
+        for column in (
+            "client_secret_ct",
+            "refresh_token_ct",
+            "key_id",
+            "created_by",
+            "updated_by",
+        ):
+            assert column in _UPSERT_SQL

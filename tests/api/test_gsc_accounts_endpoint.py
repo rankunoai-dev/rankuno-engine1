@@ -334,8 +334,9 @@ class TestOrgLevelGscAccounts:
                 "refresh_token": "rt-token",
             },
         )
-        assert response.status_code == 400
-        assert "Account name must match" in response.json()["detail"]
+        # 422 since ADR 0036: the body model full-matches the name.
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["body", "account_name"]
 
     def test_create_org_gsc_account_invalid_name_too_long(self, org_client):
         """Account name must not exceed 64 characters."""
@@ -346,7 +347,7 @@ class TestOrgLevelGscAccounts:
                 "refresh_token": "rt-token",
             },
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
 
     def test_create_org_gsc_account_for_nonexistent_org(self, org_client):
         """A path `org_id` other than the caller's own is 403 (ADR 0016 condition 1).

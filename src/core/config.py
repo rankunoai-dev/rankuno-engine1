@@ -35,6 +35,7 @@ from src.core.worker_dispatch_keys import DispatchSigningKey, DispatchVerifyKey
 
 if TYPE_CHECKING:
     from src.core.auth import OperatorStore
+    from src.core.gsc_account_store import GscAccountStore
     from src.core.schemas import GscAccountCredential
     from src.core.state_store import OrgConfigStore
     from src.core.worker_auth import WorkerStore
@@ -438,6 +439,25 @@ class Settings(BaseSettings):
             "that is where the API has been writing org GSC accounts since the "
             "feature shipped; one location, or an account added in the UI is "
             "invisible to the crawl that wants to use it."
+        ),
+    )
+
+    # -- Org GSC credential encryption (ADR 0036) ----------------------------
+    gsc_credential_encryption_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "base64url of exactly 32 bytes. AES-256-GCM key for org GSC refresh "
+            "tokens and client secrets stored in Postgres (ADR 0036). Required, in "
+            "every environment, whenever Postgres is configured: the server refuses "
+            "to start without it. Unused when accounts live on local disk."
+        ),
+    )
+    gsc_credential_encryption_key_previous: SecretStr | None = Field(
+        default=None,
+        description=(
+            "During a rotation only: the key the current one replaced. Rows it "
+            "wrote still decrypt; every new write uses the current key. Remove it "
+            "once every account has been re-saved."
         ),
     )
 
@@ -898,6 +918,10 @@ class Settings(BaseSettings):
                 )
                 raise ConfigurationError(msg)
         self._org_config_store: OrgConfigStore | None = None
+        self._gsc_account_store: GscAccountStore | None = None
+        # Parsed eagerly, in every environment: a malformed key must stop the
+        # process at boot, and must never echo its value (ADR 0036).
+        self._gsc_credential_keys = self._parse_gsc_credential_keys()
         self._operator_store: OperatorStore | None = None
         self._worker_store: WorkerStore | None = None
         self._session_secret: SecretStr | None = None
@@ -925,50 +949,50 @@ class Settings(BaseSettings):
         """
         return tuple(sorted(self.gsc_accounts))
 
-    def _org_gsc_accounts(
+    def _account_store_for(
         self,
-        org_id: str | None,
+        account_store: GscAccountStore | None,
         org_store: OrgConfigStore | None,
-    ) -> dict[str, GscAccountCredential]:
-        """The org's stored GSC accounts, or empty if the org or store is absent.
+    ) -> GscAccountStore:
+        """The store a resolution call reads: explicit, a wrapped org store, or the default.
 
-        Fail-soft by design. An unreadable or missing org store means "this
-        deployment has no org-level accounts", which degrades to the `.env.local`
-        profiles that predate them — never to an exception on a path whose real
-        job is to resolve a credential.
-
-        Args:
-            org_id: Organization to read. `None` means `DEFAULT_ORG_ID`.
-            org_store: Store to read. `None` means `self.org_config_store`.
+        `org_store` predates ADR 0036 and is kept so existing callers keep
+        working; it is wrapped in the disk store that reads the same field it
+        always did.
         """
-        try:
-            store = org_store if org_store is not None else self.org_config_store
-            return dict(store.get(org_id or DEFAULT_ORG_ID).gsc_accounts)
-        except (KeyError, OSError, ValueError):
-            # Unknown org, unreadable file, unparseable contents. Named rather
-            # than a bare `except`, so a bug in the store still surfaces. Not
-            # logged: `logger` imports this module, so this one cannot log
-            # without a cycle — the caller reports the outcome instead, as
-            # "Unknown GSC account" or a list that omits the org's entries.
-            return {}
+        if account_store is not None:
+            return account_store
+        if org_store is not None:
+            from src.core.gsc_account_store import DiskGscAccountStore
+
+            return DiskGscAccountStore(org_store)
+        return self.gsc_account_store
 
     def gsc_account_names_for_org(
         self,
         org_id: str | None = None,
         *,
+        account_store: GscAccountStore | None = None,
         org_store: OrgConfigStore | None = None,
     ) -> tuple[str, ...]:
         """Every profile name a crawl in this org may select, sorted.
 
-        The union of the org store and `.env.local`, because both are real
-        sources and a picker that showed only one would hide accounts the engine
-        will happily accept. Names only, as with `gsc_account_names`.
+        The union of the org's stored accounts and `.env.local`, because both
+        are real sources and a picker that showed only one would hide accounts
+        the engine will happily accept. Names only, as with `gsc_account_names`.
 
         Args:
             org_id: Organization to read. `None` means `DEFAULT_ORG_ID`.
-            org_store: Store to read. `None` means `self.org_config_store`.
+            account_store: Store to read. `None` means `self.gsc_account_store`.
+            org_store: Legacy alternative to `account_store`: an org config
+                store, read through `DiskGscAccountStore`.
+
+        Raises:
+            GscAccountStoreUnavailableError: The store cannot answer. Never
+                swallowed: on Postgres an outage is not "no accounts" (ADR 0036).
         """
-        org_names = self._org_gsc_accounts(org_id, org_store)
+        store = self._account_store_for(account_store, org_store)
+        org_names = store.account_names(org_id or DEFAULT_ORG_ID)
         return tuple(sorted(set(org_names) | set(self.gsc_accounts)))
 
     def resolve_gsc_account(
@@ -976,6 +1000,7 @@ class Settings(BaseSettings):
         name: str | None,
         *,
         org_id: str | None = None,
+        account_store: GscAccountStore | None = None,
         org_store: OrgConfigStore | None = None,
     ) -> ResolvedGscCredentials:
         """Produce the credential triple for a profile, or for the default.
@@ -983,12 +1008,17 @@ class Settings(BaseSettings):
         Deliberately the only place the inheritance rule lives, so the token
         manager and any future Google connector agree on what "default" means.
 
-        Two sources hold profiles: the org store, written by the API when an
-        operator adds an account in the UI, and the `.env.local` table that
-        predates it. The org store is consulted first — an operator who re-enters
-        an account in the UI means the credential they just typed, not the stale
-        one in the file — and `.env.local` answers every name the org does not
-        carry, so accounts that only ever existed there keep working untouched.
+        Two sources hold profiles: the org's account store, written by the API
+        when an operator adds an account in the UI, and the `.env.local` table
+        that predates it. The org store is consulted first — an operator who
+        re-enters an account in the UI means the credential they just typed, not
+        the stale one in the file — and `.env.local` answers only a name the org
+        *genuinely* does not store. A store that cannot answer is an error, never
+        a fall-through: on Postgres that would let a same-named `.env.local`
+        profile read another client's Search Console (ADR 0036).
+
+        Resolved lazily, once per crawl, and never snapshotted into the job, so
+        deleting an account in the UI revokes it for every crawl not yet enriched.
 
         Args:
             name: A profile name, or `None` for the flat `GOOGLE_OAUTH_*` triple.
@@ -997,8 +1027,9 @@ class Settings(BaseSettings):
             org_id: Organization whose stored accounts to search. `None` means
                 `DEFAULT_ORG_ID`, which is the org the API uses for a request
                 carrying no `X-Org-Id`.
-            org_store: Store to read, for a caller that holds one already. `None`
-                means `self.org_config_store`.
+            account_store: Store to read. `None` means `self.gsc_account_store`.
+            org_store: Legacy alternative to `account_store`: an org config
+                store, read through `DiskGscAccountStore`.
 
         Returns:
             Complete credentials with the account name attached.
@@ -1008,6 +1039,9 @@ class Settings(BaseSettings):
                 fallback to the default, because silently querying the wrong
                 client's Search Console is worse than a failed crawl — or if
                 whatever is selected is incomplete.
+            GscAccountStoreUnavailableError: The org store cannot answer.
+            GscCredentialDecryptionError: The org stores this account but its
+                ciphertext cannot be decrypted with this server's keys.
         """
         if name is None:
             if (
@@ -1028,18 +1062,20 @@ class Settings(BaseSettings):
             )
 
         key = name.lower()
-        org_accounts = self._org_gsc_accounts(org_id, org_store)
+        store = self._account_store_for(account_store, org_store)
         # Both sources yield the same three optional/required fields, so one
         # inheritance rule covers both: the profile's own OAuth client if it
         # declared one, otherwise the shared GOOGLE_OAUTH_* client.
-        profile: GscAccountCredential | GscAccountProfile | None = org_accounts.get(key)
+        profile: GscAccountCredential | GscAccountProfile | None = store.get_credential(
+            org_id or DEFAULT_ORG_ID, key
+        )
         source = "org"
         if profile is None:
             profile = self.gsc_accounts.get(key)
             source = "env"
         if profile is None:
             known = (
-                ", ".join(self.gsc_account_names_for_org(org_id, org_store=org_store))
+                ", ".join(self.gsc_account_names_for_org(org_id, account_store=store))
                 or "none configured"
             )
             msg = f"Unknown GSC account '{name}'. Configured accounts: {known}."
@@ -1081,6 +1117,71 @@ class Settings(BaseSettings):
 
             self._org_config_store = DiskOrgConfigStore(self.org_config_path)
         return self._org_config_store
+
+    def _parse_gsc_credential_keys(self) -> tuple[bytes, bytes | None] | None:
+        """Decode both credential keys, refusing malformed values without echoing them.
+
+        Raises:
+            ConfigurationError: A key is not base64url of 32 bytes, or a previous
+                key is set with no current key.
+        """
+        from src.core.gsc_credential_crypto import parse_credential_key
+
+        current = self.gsc_credential_encryption_key
+        previous = self.gsc_credential_encryption_key_previous
+        if current is None:
+            if previous is not None:
+                msg = (
+                    "GSC_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS is set without "
+                    "GSC_CREDENTIAL_ENCRYPTION_KEY: new writes need a current key."
+                )
+                raise ConfigurationError(msg)
+            return None
+        return (
+            parse_credential_key(current, var_name="GSC_CREDENTIAL_ENCRYPTION_KEY"),
+            None
+            if previous is None
+            else parse_credential_key(previous, var_name="GSC_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS"),
+        )
+
+    @property
+    def gsc_account_store(self) -> GscAccountStore:
+        """Where this deployment keeps org GSC accounts. The one selection point (ADR 0036).
+
+        Postgres when `get_postgres_settings().is_configured()` — the same
+        predicate `_default_job_store` uses — otherwise the disk store over
+        `org_config_store`. Cached, so the API and crawl-time credential
+        resolution read the same object.
+
+        Raises:
+            ConfigurationError: Postgres is configured and
+                `GSC_CREDENTIAL_ENCRYPTION_KEY` is not set. There is no random
+                per-process key: one would make every stored account unreadable
+                after a restart.
+        """
+        if self._gsc_account_store is None:
+            from src.core.postgres_config import get_postgres_settings
+
+            if get_postgres_settings().is_configured():
+                from src.core.gsc_credential_crypto import GscCredentialCipher
+                from src.core.postgres_gsc_account_store import PostgresGscAccountStore
+
+                if self._gsc_credential_keys is None:
+                    msg = (
+                        "GSC_CREDENTIAL_ENCRYPTION_KEY must be set when DATABASE_URL is "
+                        "configured: org GSC accounts are stored encrypted in Postgres "
+                        "(ADR 0036)."
+                    )
+                    raise ConfigurationError(msg)
+                current, previous = self._gsc_credential_keys
+                self._gsc_account_store = PostgresGscAccountStore(
+                    GscCredentialCipher(current, previous)
+                )
+            else:
+                from src.core.gsc_account_store import DiskGscAccountStore
+
+                self._gsc_account_store = DiskGscAccountStore(self.org_config_store)
+        return self._gsc_account_store
 
     def _check_local_autosignin(self) -> None:
         """Refuse a local sign-in token outside development, or one of the wrong shape.
@@ -1237,7 +1338,7 @@ class Settings(BaseSettings):
 
         Not logged here even on the generated path: `logger.py` imports this
         module (`get_settings`), so logging from here would be an import
-        cycle — the same constraint `_org_gsc_accounts` documents above.
+        cycle.
         """
         if self._session_secret is not None:
             return self._session_secret
