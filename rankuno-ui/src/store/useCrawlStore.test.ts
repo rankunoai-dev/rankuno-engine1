@@ -88,6 +88,75 @@ describe("refreshJobs", () => {
   });
 });
 
+describe("re-attaching to crawls that kept running while the page was closed", () => {
+  const TELEMETRY = {
+    completed: 120,
+    discovered: 400,
+    rate_per_sec: 4.5,
+    eta_seconds: 62,
+    recent_items: ["https://gep.com/a", "https://gep.com/b"],
+    updated_at: "2026-10-09T10:00:00Z",
+  };
+  const RUNNING = {
+    id: "run-1",
+    label: "https://gep.com/",
+    baseUrl: "https://gep.com/",
+    status: "running",
+    pagesClassified: 0,
+    truncated: false,
+    synthetic: false,
+    crawledAt: "2026-10-09T09:00:00Z",
+    hasCheckpoint: false,
+    telemetry: TELEMETRY,
+  };
+  const DONE = { ...RUNNING, id: "done-1", status: "succeeded" };
+
+  let finish: (value: unknown) => void;
+
+  function watching(jobs: unknown[]) {
+    const getProgress = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const listJobs = vi.fn().mockResolvedValue(jobs);
+    const stub = { listJobs, getResult: vi.fn(), getProgress } as unknown as CrawlDataAdapter;
+    return { stub, getProgress };
+  }
+
+  beforeEach(() => {
+    useCrawlStore.setState({ adapter: null, jobs: [], liveJobs: {}, error: null });
+  });
+
+  it("seeds liveJobs from the server's telemetry and polls the job once", async () => {
+    const { stub, getProgress } = watching([RUNNING, DONE]);
+    await useCrawlStore.getState().init(stub);
+
+    const live = useCrawlStore.getState().liveJobs["run-1"];
+    expect(live?.telemetry).toEqual(TELEMETRY);
+    expect(live?.startedAt).toBe(Date.parse("2026-10-09T09:00:00Z"));
+    expect(getProgress).toHaveBeenCalledTimes(1);
+
+    // A second refresh must not add a poller for the same job.
+    await useCrawlStore.getState().refreshJobs();
+    await useCrawlStore.getState().init(stub);
+    expect(getProgress).toHaveBeenCalledTimes(1);
+
+    // Let the poller end so its guard is released for later tests.
+    finish({ status: "succeeded", message: "", fraction: 1, telemetry: TELEMETRY });
+    await vi.waitFor(() => expect(useCrawlStore.getState().liveJobs["run-1"]?.endedAt).not.toBeNull());
+    expect(useCrawlStore.getState().liveJobs["run-1"]?.status).toBe("succeeded");
+  });
+
+  it("never attaches to a job that already finished", async () => {
+    const { stub, getProgress } = watching([DONE]);
+    await useCrawlStore.getState().init(stub);
+    expect(useCrawlStore.getState().liveJobs["done-1"]).toBeUndefined();
+    expect(getProgress).not.toHaveBeenCalled();
+  });
+});
+
 describe("selectJob and the cross-check", () => {
   const result = crawl();
 

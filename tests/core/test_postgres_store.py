@@ -22,7 +22,12 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 from src.core.circuit_breaker import CircuitBreaker
-from src.core.postgres_store import PostgresJobStore
+from src.core.postgres_store import (
+    _JOB_COLUMNS,
+    _PROVENANCE_END,
+    PostgresJobStore,
+    _row_to_job_record,
+)
 from src.core.state_store import JobNotFoundError, JobRecord, JobTelemetry
 
 # --------------------------------------------------------------------------
@@ -42,6 +47,7 @@ class _FakeDB:
         self.payloads: dict[str, dict[str, object]] = {}
         self.org_budgets: dict[str, float] = dict(budgets or {"default": 5.0})
         self.cost_ledger: list[tuple[str, str, float, str]] = []
+        self.statements: list[tuple[str, tuple[object, ...]]] = []
 
     def snapshot(self) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
         return copy.deepcopy(self.jobs), copy.deepcopy(self.payloads)
@@ -77,6 +83,7 @@ _JOB_FIELD_ORDER = (
     "imported_by",
     "imported_at",
     "bundle_sha256",
+    "password_hash",
 )
 
 
@@ -101,6 +108,7 @@ class _FakeCursor:
 
     def execute(self, query: str, params: tuple[object, ...] = ()) -> None:  # noqa: C901, PLR0912
         q = " ".join(query.split())
+        self._db.statements.append((q, params))
         if q == "SELECT llm_credit_limit_usd FROM org_configs WHERE org_id = %s FOR UPDATE":
             (org_id,) = params
             budget = self._db.org_budgets.get(org_id)
@@ -130,9 +138,18 @@ class _FakeCursor:
                 "updated_at": updated,
             }
         elif q.startswith("INSERT INTO jobs"):
-            job_id, org_id, tool_name, label, facet_id, request_json, status, created, updated = (
-                params
-            )
+            (
+                job_id,
+                org_id,
+                tool_name,
+                label,
+                facet_id,
+                request_json,
+                status,
+                created,
+                updated,
+                password_hash,
+            ) = params
             import json
 
             self._db.jobs[job_id] = {
@@ -151,7 +168,15 @@ class _FakeCursor:
                 "has_result": False,
                 "has_checkpoint": False,
                 "telemetry": {},
+                "password_hash": password_hash,
             }
+        elif q == "SELECT id FROM jobs WHERE id = %s":
+            (job_id,) = params
+            self._one = (job_id,) if job_id in self._db.jobs else None
+        elif q == "DELETE FROM job_payloads WHERE job_id = %s":
+            self._db.payloads.pop(str(params[0]), None)
+        elif q == "DELETE FROM jobs WHERE id = %s":
+            self._db.jobs.pop(str(params[0]), None)
         elif q.startswith("INSERT INTO cost_ledger"):
             self._db.cost_ledger.append(params)  # type: ignore[arg-type]
         elif q.startswith("INSERT INTO job_payloads (job_id, result"):
@@ -274,7 +299,8 @@ class _FakeCursor:
         from psycopg import errors as pg_errors
 
         # The INSERT binds every column except the two it writes as literals.
-        names = [f for f in _JOB_FIELD_ORDER if f not in ("has_result", "has_checkpoint")]
+        unbound = ("has_result", "has_checkpoint", "password_hash")
+        names = [f for f in _JOB_FIELD_ORDER if f not in unbound]
         row: dict[str, object] = dict(zip(names, params, strict=True))
         if row["org_id"] not in self._db.org_budgets:
             raise pg_errors.ForeignKeyViolation("jobs_org_id_fkey")
@@ -684,6 +710,73 @@ class TestPostgresJobStoreRealSql:
 # --------------------------------------------------------------------------
 # Circuit breaker: closed circuit hits Postgres, open circuit falls back
 # --------------------------------------------------------------------------
+
+
+class TestPasswordHashPersistence:
+    """Audit F2: `password_hash` must survive the round trip through Postgres."""
+
+    def test_create_persists_password_hash_in_insert(self) -> None:
+        db = _FakeDB()
+        store, _ = _make_store(db)
+        record = store.create("seo_crawl", {"url": "https://a.test"}, password_hash="h$1")
+        insert = next(
+            (q, p)
+            for q, p in db.statements
+            if q.startswith("INSERT INTO jobs") and "password_hash" in q
+        )
+        assert "password_hash" in insert[0]
+        assert insert[1][-1] == "h$1"
+        assert db.jobs[record.id]["password_hash"] == "h$1"
+
+    def test_row_to_job_record_roundtrips_hash(self) -> None:
+        db = _FakeDB()
+        store, _ = _make_store(db)
+        created = store.create("seo_crawl", {"url": "https://a.test"}, password_hash="h$1")
+        assert store.get(created.id).password_hash == "h$1"
+        assert _row_to_job_record(_job_row(db.jobs[created.id])).password_hash == "h$1"
+        assert [j.password_hash for j in store.list_jobs()] == ["h$1"]
+
+    def test_legacy_row_with_null_hash_loads(self) -> None:
+        db = _FakeDB()
+        store, _ = _make_store(db)
+        created = store.create("seo_crawl", {"url": "https://a.test"})
+        del db.jobs[created.id]["password_hash"]  # a row written before migration 010
+        assert store.get(created.id).password_hash is None
+
+    def test_hash_survives_state_transitions(self) -> None:
+        db = _FakeDB()
+        store, _ = _make_store(db)
+        created = store.create("seo_crawl", {"url": "https://a.test"}, password_hash="h$1")
+        assert store.mark_running(created.id).password_hash == "h$1"
+        assert store.mark_failed(created.id, "boom").password_hash == "h$1"
+
+    def test_all_returning_queries_use_same_column_list(self) -> None:
+        db = _FakeDB()
+        store, _ = _make_store(db)
+        created = store.create("seo_crawl", {"url": "https://a.test"}, password_hash="h$1")
+        store.get(created.id)
+        store.list_jobs()
+        store.mark_running(created.id)
+        store.update_telemetry(created.id, JobTelemetry())
+        store.mark_failed(created.id, "boom")
+        column_lists = {
+            q.split(" FROM jobs")[0].removeprefix("SELECT ")
+            for q, _ in db.statements
+            if q.startswith("SELECT id, org_id, tool_name")
+        } | {
+            q.rsplit("RETURNING ", 1)[1]
+            for q, _ in db.statements
+            if q.startswith("UPDATE jobs") and "RETURNING " in q
+        }
+        assert column_lists == {_JOB_COLUMNS}
+        assert len(_JOB_COLUMNS.split(", ")) == _PROVENANCE_END + 1
+        assert _JOB_COLUMNS.split(", ")[-1] == "password_hash"
+
+    def test_hash_is_never_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        store, _ = _make_store(_FakeDB())
+        with caplog.at_level("DEBUG"):
+            store.create("seo_crawl", {"url": "https://a.test"}, password_hash="SECRET-HASH")
+        assert "SECRET-HASH" not in caplog.text
 
 
 class TestPostgresJobStoreCircuitBreakerFallback:

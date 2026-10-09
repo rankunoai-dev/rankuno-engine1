@@ -251,6 +251,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     try {
       const jobs = await adapter.listJobs();
       set({ jobs, status: "idle" });
+      reattachRunningJobs(get, adapter, jobs);
 
       // Restoring the view alone would land the operator back on the visualizer
       // reading "No crawl loaded", which is the same complaint in a different
@@ -383,6 +384,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       const stale = lastPollError !== null && get().error === lastPollError;
       set(stale ? { jobs, error: null } : { jobs });
       lastPollError = null;
+      reattachRunningJobs(get, adapter, jobs);
     } catch (cause) {
       lastPollError = describe(cause);
       set({ error: lastPollError });
@@ -593,6 +595,42 @@ function patchLiveJob(jobId: string, patch: Partial<LiveJob>): void {
   });
 }
 
+/** Ids with a live poller, so a job is never polled twice. */
+const watching = new Set<string>();
+
+/**
+ * Pick up crawls that are running on the server but not in this page's memory.
+ *
+ * Crawls outlive the tab, but `liveJobs` does not: after a reload the list holds
+ * a `running` row with nothing driving its progress. For each queued or running
+ * job this seeds `liveJobs` from the server's own telemetry — real numbers, a
+ * few seconds old, never a client-side guess — and starts the ordinary poller.
+ * The start time comes from the record, so elapsed time continues rather than
+ * restarting at page load. Terminal jobs are ignored.
+ */
+function reattachRunningJobs(
+  get: Getter,
+  adapter: CrawlDataAdapter,
+  jobs: readonly CrawlJobSummary[],
+): void {
+  for (const job of jobs) {
+    if (!LIVE.has(job.status) || watching.has(job.id)) continue;
+    if (!get().liveJobs[job.id]) {
+      const started = job.crawledAt ? Date.parse(job.crawledAt) : Number.NaN;
+      patchLiveJob(job.id, {
+        label: job.label,
+        status: job.status,
+        message: "",
+        telemetry: job.telemetry ?? null,
+        startedAt: Number.isNaN(started) ? Date.now() : started,
+        endedAt: null,
+        error: null,
+      });
+    }
+    void watchJob(get, adapter, job.id);
+  }
+}
+
 /**
  * Poll one crawl to completion, writing progress onto its own entry.
  *
@@ -606,6 +644,11 @@ async function watchJob(
   adapter: CrawlDataAdapter,
   jobId: string,
 ): Promise<void> {
+  // One poller per job. `startCrawl` refreshes the list before it watches, and
+  // that refresh already re-attaches any running job, so without this guard
+  // every crawl started here would be polled twice.
+  if (watching.has(jobId)) return;
+  watching.add(jobId);
   try {
     const progress =
       adapter instanceof HttpAdapter
@@ -633,6 +676,9 @@ async function watchJob(
       error: describe(cause),
     });
   }
+  // Released before the refresh, so the refresh sees a finished job as
+  // finished rather than being blocked by its own poller.
+  watching.delete(jobId);
   // Refreshed whichever way the crawl ended, so the row picks up
   // `recoverable` and the server's own status for a job that failed with a
   // checkpoint on disk.
