@@ -1,4 +1,4 @@
-"""Org GSC account routes: list, add or replace, delete (ADR 0016, ADR 0036).
+"""Org GSC account routes: list, add or replace, delete (ADR 0016, ADR 0037).
 
 Moved out of `server.py` when the accounts gained their own store. The routes
 validate, authorise, rate-limit and audit; persistence is entirely
@@ -144,7 +144,7 @@ def _require_valid_name(account_name: str) -> None:
 
 
 def _org_not_found(org_id: str) -> HTTPException:
-    """The disk store's unknown-org answer, unchanged from before ADR 0036."""
+    """The disk store's unknown-org answer, unchanged from before ADR 0037."""
     return HTTPException(status.HTTP_404_NOT_FOUND, detail=f"Organization '{org_id}' not found")
 
 

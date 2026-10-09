@@ -763,7 +763,7 @@ class TestDefaultJobStoreSelection:
     ) -> None:
         monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost/db")
         # Postgres also selects the encrypted GSC account store, which refuses
-        # to start without its key (ADR 0036). A fixed test key, never a real one.
+        # to start without its key (ADR 0037). A fixed test key, never a real one.
         monkeypatch.setenv("GSC_CREDENTIAL_ENCRYPTION_KEY", TEST_GSC_CREDENTIAL_KEY)
         reset_postgres_settings_cache()
         try:

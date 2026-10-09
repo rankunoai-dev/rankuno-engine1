@@ -72,6 +72,14 @@ export interface CrawlJobSummary {
    * one that is certain to fail.
    */
   importedFrom?: ImportedFrom | null;
+  /**
+   * The server's last progress snapshot for the job, passed through unchanged.
+   *
+   * Lets a freshly loaded page show a running crawl's progress, ETA and URL
+   * stream before its own poller has made a first request. Absent from sources
+   * that keep no telemetry (fixtures).
+   */
+  telemetry?: JobTelemetry;
 }
 
 /** Where an imported crawl came from, as the job list shows it. */

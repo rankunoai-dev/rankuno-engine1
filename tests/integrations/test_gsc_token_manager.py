@@ -487,7 +487,7 @@ class TestCircuitBreaker:
 
 
 class TestStoreFailuresPropagate:
-    """ADR 0036 C4: the manager never treats a store failure as "unknown account"."""
+    """ADR 0037 C4: the manager never treats a store failure as "unknown account"."""
 
     @pytest.mark.parametrize(
         "error",

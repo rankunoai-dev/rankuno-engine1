@@ -1,4 +1,4 @@
-"""At-rest encryption for org GSC credentials held in Postgres (ADR 0036).
+"""At-rest encryption for org GSC credentials held in Postgres (ADR 0037).
 
 A refresh token reads a client's Search Console for as long as Google honours
 it, so the cloud copy is ciphertext: a database dump, a backup, or a stray
@@ -76,7 +76,7 @@ def parse_credential_key(secret: SecretStr, *, var_name: str) -> bytes:
     raw = secret.get_secret_value().strip()
     msg = (
         f"{var_name} must be base64url of exactly {_KEY_BYTES} bytes "
-        "(see docs/adr/0036 for how to generate one)."
+        "(see docs/adr/0037 for how to generate one)."
     )
     try:
         decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))

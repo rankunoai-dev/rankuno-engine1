@@ -211,6 +211,44 @@ class TestJobImportProvenanceMigration:
             assert column in _JOB_COLUMNS
 
 
+class TestJobPasswordHashMigration:
+    """Migration 010 (audit F2): nullable `jobs.password_hash`, idempotent, reversible."""
+
+    PATH = "alembic/versions/0010_job_password_hash.py"
+
+    def _content(self) -> str:
+        with open(self.PATH, encoding="utf-8") as f:
+            return f.read()
+
+    def test_follows_009(self) -> None:
+        content = self._content()
+        assert 'revision: str = "010"' in content
+        assert 'down_revision: str | None = "009"' in content
+
+    def test_single_head_is_011_and_follows_010(self) -> None:
+        """Was `get_heads() == ["010"]`; 011 (ADR 0037) now follows it."""
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+
+        script = ScriptDirectory.from_config(Config("alembic.ini"))
+        assert script.get_heads() == ["011"]
+        assert script.get_revision("011").down_revision == "010"
+        assert script.get_revision("010").down_revision == "009"
+
+    def test_column_is_nullable_text_added_idempotently(self) -> None:
+        content = self._content()
+        assert "ADD COLUMN IF NOT EXISTS password_hash TEXT" in content
+        assert "NOT NULL" not in content
+
+    def test_downgrade_drops_the_column(self) -> None:
+        assert "DROP COLUMN IF EXISTS password_hash" in self._content()
+
+    def test_the_store_reads_the_column(self) -> None:
+        from src.core.postgres_store import _JOB_COLUMNS
+
+        assert _JOB_COLUMNS.endswith("password_hash")
+
+
 def _offline_sql(revisions: str, *, downgrade: bool = False) -> str:
     """Render a migration range as SQL without contacting any database.
 
@@ -246,18 +284,18 @@ class TestAlembicHistory:
 
 
 class TestOrgGscAccountsMigration:
-    """Migration 0010 (ADR 0036): encrypted org GSC accounts."""
+    """Migration 0011 (ADR 0037): encrypted org GSC accounts."""
 
-    PATH = "alembic/versions/0010_org_gsc_accounts.py"
+    PATH = "alembic/versions/0011_org_gsc_accounts.py"
 
-    def test_follows_009(self) -> None:
+    def test_follows_010(self) -> None:
         with open(self.PATH, encoding="utf-8") as f:
             content = f.read()
-        assert 'revision: str = "010"' in content
-        assert 'down_revision: str | None = "009"' in content
+        assert 'revision: str = "011"' in content
+        assert 'down_revision: str | None = "010"' in content
 
     def test_upgrade_creates_the_table_with_its_constraints(self) -> None:
-        sql = _offline_sql("009:010")
+        sql = _offline_sql("010:011")
         assert "CREATE TABLE org_gsc_accounts" in sql
         assert "CONSTRAINT pk_org_gsc_accounts PRIMARY KEY (org_id, account_name)" in sql
         assert "FOREIGN KEY(org_id) REFERENCES org_configs (org_id) ON DELETE CASCADE" in sql
@@ -269,12 +307,12 @@ class TestOrgGscAccountsMigration:
             assert f"{column} TEXT NOT NULL" in sql
 
     def test_no_index_on_ciphertext(self) -> None:
-        sql = _offline_sql("009:010")
+        sql = _offline_sql("010:011")
         assert "CREATE INDEX" not in sql
         assert "CREATE UNIQUE INDEX" not in sql
 
     def test_downgrade_drops_the_table(self) -> None:
-        sql = _offline_sql("010:009", downgrade=True)
+        sql = _offline_sql("011:010", downgrade=True)
         assert "DROP TABLE org_gsc_accounts" in sql
 
     def test_the_store_writes_exactly_these_columns(self) -> None:

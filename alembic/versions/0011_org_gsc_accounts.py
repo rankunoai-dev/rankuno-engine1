@@ -1,10 +1,10 @@
 """Org GSC accounts move to Postgres, encrypted, so they survive a redeploy.
 
-Revision ID: 010
-Revises: 009
+Revision ID: 011
+Revises: 010
 Create Date: 2026-10-09
 
-ADR 0036. The cloud kept each org's GSC accounts in `.orgs/org_configs.json`
+ADR 0037. The cloud kept each org's GSC accounts in `.orgs/org_configs.json`
 on the Railway container disk, which every redeploy wipes. This table is the
 durable home. `refresh_token_ct` and `client_secret_ct` hold AES-256-GCM
 `nonce || ciphertext+tag` (`src/core/gsc_credential_crypto.py`), and `key_id`
@@ -30,8 +30,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "010"
-down_revision: str | None = "009"
+revision: str = "011"
+down_revision: str | None = "010"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

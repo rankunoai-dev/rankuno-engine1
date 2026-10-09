@@ -43,7 +43,7 @@ We must identify every possible scenario where Google could rate-limit, block, f
 * **Engine Safeguard**:
   * All OAuth secrets and refresh tokens are wrapped in Pydantic `SecretStr`.
   * Tokens are saved exclusively in local, gitignored files (`.env.local` or OS keyring), **never** stored in public repositories or `.jobs/` JSON files.
-  * **Amended by [ADR 0036](0036-cloud-gsc-credentials-are-encrypted-in-postgres.md):** when Postgres is configured (the cloud), org GSC accounts added in the UI are stored in the `org_gsc_accounts` table, with the refresh token and client secret encrypted with AES-256-GCM under `GSC_CREDENTIAL_ENCRYPTION_KEY`. They are still never written to a repository or to `.jobs/`. Locally, unchanged.
+  * **Amended by [ADR 0037](0037-cloud-gsc-credentials-are-encrypted-in-postgres.md):** when Postgres is configured (the cloud), org GSC accounts added in the UI are stored in the `org_gsc_accounts` table, with the refresh token and client secret encrypted with AES-256-GCM under `GSC_CREDENTIAL_ENCRYPTION_KEY`. They are still never written to a repository or to `.jobs/`. Locally, unchanged.
 
 ---
 

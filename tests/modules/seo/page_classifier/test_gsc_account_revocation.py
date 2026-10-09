@@ -1,4 +1,4 @@
-"""Enrichment resolves the GSC account lazily, and fails closed (ADR 0036, C4/C6).
+"""Enrichment resolves the GSC account lazily, and fails closed (ADR 0037, C4/C6).
 
 Credentials are resolved when enrichment starts, never snapshotted at intake,
 so deleting an account between intake and enrichment revokes it for that

@@ -2,6 +2,12 @@
   color-scheme: light;
 }
 
+/* Native scrollbars, form controls and the canvas follow the theme. The tokens
+   themselves are in `styles/design-system.css`. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -11,7 +17,9 @@ body,
 #root {
   height: 100%;
   margin: 0;
-  background: var(--bg);
+  /* `--app-backdrop` is `var(--bg)` in light, so this paints what it always did;
+     in dark it is the gradient the glass panels blur. */
+  background: var(--app-backdrop);
   color: var(--ink);
   /* Was a bare system stack, which meant everything rendered outside `.rk-dash`
      — every antd modal, drawer, popconfirm and message — used a different

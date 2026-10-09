@@ -1,8 +1,8 @@
-"""PostgreSQL store for org GSC accounts: they survive a redeploy, encrypted (ADR 0036).
+"""PostgreSQL store for org GSC accounts: they survive a redeploy, encrypted (ADR 0037).
 
 The cloud's org GSC accounts lived in `.orgs/org_configs.json` on the Railway
 container disk and vanished on every redeploy. They now live in the
-`org_gsc_accounts` table (migration 010), with the refresh token and any
+`org_gsc_accounts` table (migration 011), with the refresh token and any
 client secret encrypted by `GscCredentialCipher`.
 
 Design stance, and where it deliberately departs from `PostgresJobStore`:

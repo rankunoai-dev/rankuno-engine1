@@ -9,6 +9,7 @@ import {
   Tooltip,
   message,
 } from "antd";
+import { DeleteOutlined } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useState } from "react";
@@ -68,11 +69,11 @@ const MEMORY_BUDGET_REASON = "memory budget reached";
  *
  * Two sources are merged here rather than in the store. `jobs` is what the
  * server knows — every job that ever ran, surviving a browser reload. `liveJobs`
- * is what this session is watching, and holds the only copy of the telemetry:
- * the job list endpoint returns metadata, not progress. A crawl started in
- * another tab therefore appears with a status and no progress bar, which is
- * honest — this page cannot know its rate, and inventing one would be worse
- * than an empty column.
+ * is what this session is watching and carries the live telemetry. The list
+ * endpoint does return the server's last progress snapshot, and the store seeds
+ * `liveJobs` from it and attaches a poller for every queued or running job, so
+ * a crawl started in another tab, or before a reload, shows its real progress.
+ * Nothing here estimates a rate or ETA; absent telemetry renders as empty.
  */
 export function CrawlJobsView(): JSX.Element {
   const jobs = useCrawlStore((state) => state.jobs);
@@ -571,9 +572,14 @@ function ActionCell({
           job is finished. Password confirmation is required and happens in a modal. */}
       {canDelete && finished && (
         <Tooltip title="Permanently delete this crawl and all associated data. This action cannot be undone.">
-          <Button size="small" type="text" danger onClick={onDelete}>
-            Delete
-          </Button>
+          <Button
+            size="small"
+            type="text"
+            danger
+            onClick={onDelete}
+            aria-label="Delete this crawl"
+            icon={<DeleteOutlined />}
+          />
         </Tooltip>
       )}
     </div>

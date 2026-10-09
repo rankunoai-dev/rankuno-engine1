@@ -1,4 +1,4 @@
-"""The persistence seam for org GSC accounts, and its disk implementation (ADR 0036).
+"""The persistence seam for org GSC accounts, and its disk implementation (ADR 0037).
 
 Org GSC accounts used to be one field of `OrgConfig`, so they lived wherever
 the org config did: the container disk, which Railway wipes on every redeploy.
@@ -136,7 +136,7 @@ class DiskGscAccountStore:
     def _accounts_or_empty(self, org_id: str) -> dict[str, GscAccountCredential]:
         """The org's accounts, or empty when the org or the file cannot be read.
 
-        Fail-soft, exactly as before ADR 0036: an unknown org or an unreadable
+        Fail-soft, exactly as before ADR 0037: an unknown org or an unreadable
         file means "no org-level accounts" locally. Named exceptions rather than
         a bare `except`, so a bug in the store still surfaces.
         """

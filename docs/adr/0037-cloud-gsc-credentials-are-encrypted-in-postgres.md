@@ -1,11 +1,11 @@
-# ADR 0036: Cloud GSC credentials are encrypted in Postgres
+# ADR 0037: Cloud GSC credentials are encrypted in Postgres
 
 - **Status**: Accepted
 - **Date**: 2026-10-09
 - **Deciders**: AI Lead, Lead AI Systems Engineer (user chose "Keep cloud GSC accounts across
   redeploys"; security review PASS WITH CONDITIONS C1–C12; the user approved the design with
   decisions Q1 (invalid names are 422), Q2 (parent org row created with budget 0), Q3 (this
-  migration is 010; the in-flight `0010_job_password_hash` renumbers to 011), Q4 (`updated_by`
+  migration is 011, after `0010_job_password_hash`), Q4 (`updated_by`
   column), Q5 (the key is required in every environment once Postgres is selected))
 - **Amends**: [ADR 0010](0010-gsc-api-security-and-safety-controls.md) §3, "tokens are saved
   exclusively in local, gitignored files"
@@ -101,7 +101,7 @@ The security review found two defects on the existing path:
    `principal:<operator_id>` bucket (429 when exhausted). The audit events are
    `org_gsc_account_created`, `_replaced` and `_deleted`, and they carry org, account and
    operator id only.
-10. **Schema.** Migration 010 creates `org_gsc_accounts`:
+10. **Schema.** Migration 011 creates `org_gsc_accounts`:
     - columns `client_secret_ct`/`refresh_token_ct` (BYTEA), `key_id`, `created_by`, `updated_by`,
       `created_at` and `updated_at`;
     - PK `(org_id, account_name)`;

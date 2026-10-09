@@ -929,7 +929,7 @@ class ApiState:
             store: Job persistence.
             url_policy: SSRF policy used at admission and by the crawl.
             org_config_store: Organization configuration persistence.
-            gsc_account_store: Org GSC account persistence (ADR 0036).
+            gsc_account_store: Org GSC account persistence (ADR 0037).
                 Defaults to the disk store over `org_config_store`.
             max_concurrent_jobs: Simultaneous crawls before requests are refused.
                 (Deprecated in Phase 1: per-facet limits now apply instead.)
@@ -1436,7 +1436,7 @@ def _default_job_store(jobs_root: Path | str | None) -> JobStore:
 def _default_gsc_account_store(
     injected_org_store: OrgConfigStore | None, resolved_org_store: OrgConfigStore
 ) -> GscAccountStore:
-    """Pick the GSC account store `create_app()` uses when none is injected (ADR 0036).
+    """Pick the GSC account store `create_app()` uses when none is injected (ADR 0037).
 
     `Settings.gsc_account_store` is the one selection point, and the store
     crawl-time resolution reads, so it is used whenever it applies: always on
@@ -1533,7 +1533,7 @@ def create_app(
             (cycle 0113).
         dispatch_signing_key: Ed25519 dispatch signing key (ADR 0028).
             Defaults to `Settings.dispatch_ed25519_signing_key`.
-        gsc_account_store: Org GSC account persistence (ADR 0036). Defaults
+        gsc_account_store: Org GSC account persistence (ADR 0037). Defaults
             to `_default_gsc_account_store`, which is the same object
             crawl-time credential resolution reads.
 

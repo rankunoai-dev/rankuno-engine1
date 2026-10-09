@@ -442,12 +442,12 @@ class Settings(BaseSettings):
         ),
     )
 
-    # -- Org GSC credential encryption (ADR 0036) ----------------------------
+    # -- Org GSC credential encryption (ADR 0037) ----------------------------
     gsc_credential_encryption_key: SecretStr | None = Field(
         default=None,
         description=(
             "base64url of exactly 32 bytes. AES-256-GCM key for org GSC refresh "
-            "tokens and client secrets stored in Postgres (ADR 0036). Required, in "
+            "tokens and client secrets stored in Postgres (ADR 0037). Required, in "
             "every environment, whenever Postgres is configured: the server refuses "
             "to start without it. Unused when accounts live on local disk."
         ),
@@ -920,7 +920,7 @@ class Settings(BaseSettings):
         self._org_config_store: OrgConfigStore | None = None
         self._gsc_account_store: GscAccountStore | None = None
         # Parsed eagerly, in every environment: a malformed key must stop the
-        # process at boot, and must never echo its value (ADR 0036).
+        # process at boot, and must never echo its value (ADR 0037).
         self._gsc_credential_keys = self._parse_gsc_credential_keys()
         self._operator_store: OperatorStore | None = None
         self._worker_store: WorkerStore | None = None
@@ -956,7 +956,7 @@ class Settings(BaseSettings):
     ) -> GscAccountStore:
         """The store a resolution call reads: explicit, a wrapped org store, or the default.
 
-        `org_store` predates ADR 0036 and is kept so existing callers keep
+        `org_store` predates ADR 0037 and is kept so existing callers keep
         working; it is wrapped in the disk store that reads the same field it
         always did.
         """
@@ -989,7 +989,7 @@ class Settings(BaseSettings):
 
         Raises:
             GscAccountStoreUnavailableError: The store cannot answer. Never
-                swallowed: on Postgres an outage is not "no accounts" (ADR 0036).
+                swallowed: on Postgres an outage is not "no accounts" (ADR 0037).
         """
         store = self._account_store_for(account_store, org_store)
         org_names = store.account_names(org_id or DEFAULT_ORG_ID)
@@ -1015,7 +1015,7 @@ class Settings(BaseSettings):
         the stale one in the file — and `.env.local` answers only a name the org
         *genuinely* does not store. A store that cannot answer is an error, never
         a fall-through: on Postgres that would let a same-named `.env.local`
-        profile read another client's Search Console (ADR 0036).
+        profile read another client's Search Console (ADR 0037).
 
         Resolved lazily, once per crawl, and never snapshotted into the job, so
         deleting an account in the UI revokes it for every crawl not yet enriched.
@@ -1146,7 +1146,7 @@ class Settings(BaseSettings):
 
     @property
     def gsc_account_store(self) -> GscAccountStore:
-        """Where this deployment keeps org GSC accounts. The one selection point (ADR 0036).
+        """Where this deployment keeps org GSC accounts. The one selection point (ADR 0037).
 
         Postgres when `get_postgres_settings().is_configured()` — the same
         predicate `_default_job_store` uses — otherwise the disk store over
@@ -1170,7 +1170,7 @@ class Settings(BaseSettings):
                     msg = (
                         "GSC_CREDENTIAL_ENCRYPTION_KEY must be set when DATABASE_URL is "
                         "configured: org GSC accounts are stored encrypted in Postgres "
-                        "(ADR 0036)."
+                        "(ADR 0037)."
                     )
                     raise ConfigurationError(msg)
                 current, previous = self._gsc_credential_keys

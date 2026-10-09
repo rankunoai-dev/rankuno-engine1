@@ -1,6 +1,6 @@
 """The GSC account store seam: disk behaviour, selection, and fail-closed resolution.
 
-ADR 0036. Locally nothing changes, so the disk store is pinned to exactly what
+ADR 0037. Locally nothing changes, so the disk store is pinned to exactly what
 the API did before. In the cloud, the store is Postgres and every failure is
 an error, never "no such account", because "no such account" falls through to
 `.env.local`.

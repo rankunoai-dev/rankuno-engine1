@@ -1,4 +1,4 @@
-"""Org GSC accounts through the `GscAccountStore` seam (ADR 0036).
+"""Org GSC accounts through the `GscAccountStore` seam (ADR 0037).
 
 The security conditions from the audit, one class each: canaries never leak,
 cross-org refusals are indistinguishable, a store outage is a 503 and never a

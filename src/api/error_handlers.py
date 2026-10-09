@@ -1,4 +1,4 @@
-"""App-wide exception handlers that keep secrets out of error bodies (ADR 0036).
+"""App-wide exception handlers that keep secrets out of error bodies (ADR 0037).
 
 Two handlers, installed once by `create_app`:
 

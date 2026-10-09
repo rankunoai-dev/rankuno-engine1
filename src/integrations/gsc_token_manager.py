@@ -4,7 +4,7 @@ Handles user-account OAuth token refresh and validation via the Google OAuth 2.0
 flow. Implements proactive refresh to prevent mid-crawl expiration (ADR 0010).
 
 Refresh tokens come from `.env.local` or the org's account store, which in the
-cloud is encrypted Postgres (ADR 0036). They are resolved once per crawl, when
+cloud is encrypted Postgres (ADR 0037). They are resolved once per crawl, when
 enrichment starts, never snapshotted into the job, so deleting an account
 revokes it for every crawl not yet enriched. Access tokens are kept in memory
 only and never persisted (no token-refresh write-back).
@@ -83,7 +83,7 @@ class GscTokenManager:
             ConfigurationError: If the profile is unknown or its credentials
                 are incomplete. Unknown never falls back to the default.
             GscAccountStoreUnavailableError: The org account store cannot
-                answer. Never treated as "unknown" (ADR 0036).
+                answer. Never treated as "unknown" (ADR 0037).
             GscCredentialDecryptionError: The stored account cannot be decrypted.
         """
         self._settings = settings or get_settings()

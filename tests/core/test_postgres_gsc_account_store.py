@@ -1,4 +1,4 @@
-"""`PostgresGscAccountStore`: org-scoped, encrypted, and fail-closed (ADR 0036).
+"""`PostgresGscAccountStore`: org-scoped, encrypted, and fail-closed (ADR 0037).
 
 No live database. `_FakeDB` interprets exactly the statements the store issues
 and records every `(sql, params)` pair, so the org-scoping test can inspect all

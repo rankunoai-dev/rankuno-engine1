@@ -67,14 +67,19 @@ _JOB_COLUMNS = (
     "id, org_id, tool_name, label, facet_id, request, status, created_at, updated_at, "
     "started_at, finished_at, error, has_result, has_checkpoint, telemetry, "
     "import_origin, source_instance_id, source_label, source_job_id, crawl_started_at, "
-    "crawl_finished_at, imported_by, imported_at, bundle_sha256"
+    "crawl_finished_at, imported_by, imported_at, bundle_sha256, password_hash"
 )
 """Column list every `jobs` read/RETURNING clause uses, in the order
 `_row_to_job_record` expects. A fixed module constant, never built from
-caller input. The last nine are migration 009's provenance columns."""
+caller input. The nine before the last are migration 009's provenance columns;
+the last is migration 010's `password_hash`, appended so the provenance block
+keeps its offsets."""
 
 _BASE_COLUMN_COUNT = 15
 """Columns before the provenance block in `_JOB_COLUMNS`."""
+
+_PROVENANCE_END = _BASE_COLUMN_COUNT + 9
+"""Index one past the provenance block; `password_hash` sits at this index."""
 
 
 def _row_to_provenance(values: tuple[object, ...]) -> JobProvenance | None:
@@ -125,7 +130,8 @@ def _row_to_job_record(row: tuple[object, ...]) -> JobRecord:
         telemetry,
     ) = row[:_BASE_COLUMN_COUNT]
     return JobRecord(
-        provenance=_row_to_provenance(row[_BASE_COLUMN_COUNT:]),
+        provenance=_row_to_provenance(row[_BASE_COLUMN_COUNT:_PROVENANCE_END]),
+        password_hash=None if row[_PROVENANCE_END] is None else str(row[_PROVENANCE_END]),
         id=str(job_id),
         org_id=str(org_id),
         tool_name=str(tool_name),
@@ -304,8 +310,8 @@ class PostgresJobStore(JobStore):
                     cur.execute(
                         "INSERT INTO jobs "
                         "(id, org_id, tool_name, label, facet_id, request, status, "
-                        "created_at, updated_at) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        "created_at, updated_at, password_hash) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (
                             job_id,
                             org_id,
@@ -316,6 +322,7 @@ class PostgresJobStore(JobStore):
                             "queued",
                             now,
                             now,
+                            password_hash,
                         ),
                     )
 

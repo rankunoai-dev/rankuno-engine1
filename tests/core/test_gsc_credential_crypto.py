@@ -1,4 +1,4 @@
-"""AES-256-GCM for stored GSC credentials (ADR 0036).
+"""AES-256-GCM for stored GSC credentials (ADR 0037).
 
 Each property here is one the cloud relies on: a stolen row is useless without
 the key, a row cannot be moved to another org, account or column, and a

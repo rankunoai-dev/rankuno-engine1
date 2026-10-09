@@ -58,7 +58,7 @@ class GscAccountStoreUnavailableError(RankunoError):
     Deliberately not an `OSError`, `ValueError` or `KeyError`. Those are what
     the disk store's fail-soft read path swallows, and a Postgres outage must
     never be mistaken for "this org has no accounts": that would let a
-    same-named `.env.local` profile answer in its place (ADR 0036). The
+    same-named `.env.local` profile answer in its place (ADR 0037). The
     message is fixed and carries no database detail, which can quote a row.
     """
 
@@ -71,7 +71,7 @@ class GscCredentialDecryptionError(RankunoError):
     """One stored GSC account's ciphertext cannot be decrypted with this server's keys.
 
     Names the account and nothing else: never the ciphertext, the key or any
-    plaintext. Other accounts in the org are unaffected (ADR 0036).
+    plaintext. Other accounts in the org are unaffected (ADR 0037).
 
     Attributes:
         account_name: The account whose stored credential failed.

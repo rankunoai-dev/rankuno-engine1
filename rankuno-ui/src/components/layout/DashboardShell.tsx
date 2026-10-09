@@ -24,7 +24,7 @@ import { NavigationRail } from "./NavigationRail";
 import { NoticeStack } from "./NoticeStack";
 import { useAuthStore } from "../../store/useAuthStore";
 import { useUiStore } from "../../store/useUiStore";
-import { useState } from "react";
+import { useState, useRef } from "react";
 
 /**
  * The dashboard shell.
@@ -75,8 +75,12 @@ export function DashboardShell(): JSX.Element {
   const loadCheckpoint = useCrawlStore((state) => state.loadCheckpoint);
   const setModel = useDashboardStore((state) => state.setModel);
   const filtersOpen = useDashboardStore((state) => state.filtersOpen);
+  const leftPanelWidth = useDashboardStore((state) => state.leftPanelWidth);
+  const setLeftPanelWidth = useDashboardStore((state) => state.setLeftPanelWidth);
   const [crawlOpen, setCrawlOpen] = useState(false);
   const [printedAt, setPrintedAt] = useState<Date | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const splitRef = useRef<HTMLDivElement>(null);
 
   // Rebuilt only when the crawl, the grouping, the loaded cross-check or the
   // defaulter toggle changes. At 20,000 pages this walk is the single most
@@ -90,6 +94,33 @@ export function DashboardShell(): JSX.Element {
   useEffect(() => {
     if (model.nodes.length > 0) setModel(model);
   }, [model, setModel]);
+
+  const handleDividerMouseDown = () => {
+    setIsDragging(true);
+  };
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!splitRef.current) return;
+      const rect = splitRef.current.getBoundingClientRect();
+      const newWidth = Math.max(320, Math.min(e.clientX - rect.left, rect.width - 320));
+      setLeftPanelWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isDragging, setLeftPanelWidth]);
 
   const active = jobs.find((job) => job.id === activeJobId);
   const navParsed = (result?.navigation?.roots.length ?? 0) > 0;
@@ -222,7 +253,11 @@ export function DashboardShell(): JSX.Element {
               <>
                 <KpiMetricStrip result={result} />
 
-                <div className="split">
+                <div
+                  className="split"
+                  ref={splitRef}
+                  style={{ "--left-panel-width": `${leftPanelWidth}px` } as React.CSSProperties}
+                >
                   <section className="card">
                     <div className="ch">
                       <h2>DirectoryTree</h2>
@@ -239,6 +274,13 @@ export function DashboardShell(): JSX.Element {
                         drift. */}
                     <VirtualizedTree model={model} />
                   </section>
+
+                  <div
+                    className={`split-divider ${isDragging ? "dragging" : ""}`}
+                    onMouseDown={handleDividerMouseDown}
+                    role="separator"
+                    aria-label="Resize panels"
+                  />
 
                   <section className="card graphwrap">
                     <div className="ch">

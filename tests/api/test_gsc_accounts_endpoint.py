@@ -334,7 +334,7 @@ class TestOrgLevelGscAccounts:
                 "refresh_token": "rt-token",
             },
         )
-        # 422 since ADR 0036: the body model full-matches the name.
+        # 422 since ADR 0037: the body model full-matches the name.
         assert response.status_code == 422
         assert response.json()["detail"][0]["loc"] == ["body", "account_name"]
 

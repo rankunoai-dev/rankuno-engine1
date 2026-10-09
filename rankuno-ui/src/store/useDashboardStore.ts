@@ -52,9 +52,12 @@ interface DashboardState {
   filtersOpen: boolean;
   /** The KPI metrics grid is expanded. Open by default. */
   kpisExpanded: boolean;
+  /** Left panel (DirectoryTree) width in pixels. */
+  leftPanelWidth: number;
 
   setFiltersOpen: (open: boolean) => void;
   toggleKpisExpanded: () => void;
+  setLeftPanelWidth: (width: number) => void;
   setModel: (model: DashModel) => void;
   setOverlay: (overlay: TreeOverlay | null, model: DashModel) => void;
   toggleCrossCheck: (model: DashModel) => void;
@@ -166,6 +169,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   fullScreen: false,
   filtersOpen: false,
   kpisExpanded: true,
+  leftPanelWidth: 400,
 
   setFiltersOpen(filtersOpen) {
     set({ filtersOpen });
@@ -173,6 +177,10 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
   toggleKpisExpanded() {
     set({ kpisExpanded: !get().kpisExpanded });
+  },
+
+  setLeftPanelWidth(width) {
+    set({ leftPanelWidth: width });
   },
 
   setOverlay(overlay, model) {
