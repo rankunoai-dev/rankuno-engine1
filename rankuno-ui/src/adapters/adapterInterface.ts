@@ -324,6 +324,8 @@ export interface PerformanceSummary {
 export interface SavedPerformance {
   summary: PerformanceSummary;
   created_at: string;
+  matched_rows?: Array<{ url: string; clicks: number; impressions: number; ctr: number; position: number | string; [key: string]: unknown }>;
+  unmatched_rows?: Array<Record<string, unknown>>;
 }
 
 /*

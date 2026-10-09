@@ -5,6 +5,7 @@ import type {
   PerformanceSummary,
   ReconciliationSummary,
   SavedReconciliation,
+  SavedPerformance,
   JobStatus,
 } from "../adapters/adapterInterface";
 import { HttpAdapter } from "../adapters/httpAdapter";
@@ -324,6 +325,8 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     // After the result, not alongside it: the tree is the page, and the
     // cross-check decorates it. A slow sidecar read must not hold the tree.
     await loadReconciliation(get, adapter, jobId);
+    // Load GSC performance data and enrich pages with metrics (clicks, impressions, etc.)
+    await loadPerformance(get, adapter, jobId);
   },
 
   async uploadGscExport(jobId, export_) {
@@ -562,6 +565,42 @@ async function loadReconciliation(
     reconciliation = null;
   }
   if (get().activeJobId === jobId) useCrawlStore.setState({ reconciliation });
+}
+
+async function loadPerformance(
+  get: Getter,
+  adapter: CrawlDataAdapter,
+  jobId: string,
+): Promise<void> {
+  if (!adapter.getPerformance) return;
+  let performance: SavedPerformance | null;
+  try {
+    performance = await adapter.getPerformance(jobId);
+  } catch {
+    performance = null;
+  }
+  if (!performance?.matched_rows || get().activeJobId !== jobId) return;
+
+  // Enrich result pages with GSC metrics from matched_rows
+  const state = get();
+  if (!state.result) return;
+
+  const enrichedPages = state.result.pages.map((page) => {
+    const matched = performance.matched_rows?.find((row: Record<string, unknown>) => row.url === page.url);
+    if (!matched) return page;
+
+    return {
+      ...page,
+      gsc_clicks: matched.clicks as number,
+      gsc_impressions: matched.impressions as number,
+      gsc_ctr: matched.ctr as number,
+      gsc_avg_position: typeof matched.position === 'number' ? matched.position : null,
+    };
+  });
+
+  useCrawlStore.setState({
+    result: { ...state.result, pages: enrichedPages },
+  });
 }
 
 /**
