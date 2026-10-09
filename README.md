@@ -662,7 +662,7 @@ and host are matched to its pages. The job result's GSC enrichment status is
 access this property"; 404: "property not found in Search Console"). A
 `succeeded` status with 0 matched pages does not prove access: a quota or
 deprecation error still returns an empty response
-([build-log 0152](docs/build-log/0152-a-refusal-that-read-as-success.md)).
+([build-log 0153](docs/build-log/0153-a-refusal-that-read-as-success.md)).
 
 > **Validated against a live site.**
 > [build-log/0007](docs/build-log/0007-first-live-run.md) records the first real

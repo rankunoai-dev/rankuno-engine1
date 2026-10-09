@@ -1,4 +1,4 @@
-# Cycle 0152: A refusal that read as success
+# Cycle 0153: A refusal that read as success
 
 - **Date**: 2026-10-09
 - **Scope**: Bug fix inside existing contracts. A Search Console 403 or 404 now ends GSC enrichment as `failed` with an engine-written reason instead of `succeeded` with 0 matched pages; Domain properties (`sc-domain:example.com`) can be entered, are sent to Google as typed, validated, and matched without folding other hosts' rows into the crawled site.
