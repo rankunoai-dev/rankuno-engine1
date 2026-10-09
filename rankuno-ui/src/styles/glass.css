@@ -1,0 +1,49 @@
+/*
+ * Glass treatment for antd's own surfaces, dark theme only.
+ *
+ * The app's panels take their glass from the tokens in `design-system.css`
+ * (`--glass-bg`, `--glass-filter`, ...), declared in each component's own rule.
+ * antd renders its overlays and table chrome itself, so they are reached here by
+ * selector. Every rule is scoped to `:root[data-theme="dark"]`: this file adds
+ * nothing to the light theme, which is how that theme stays as it was.
+ *
+ * `backdrop-filter` is applied to overlays only (dialog, drawer, popover,
+ * dropdown, and the mask behind them). Table rows get none: a table can hold
+ * hundreds, and a blurred layer per row is the cost this file exists to avoid.
+ */
+
+:root[data-theme="dark"] .ant-modal .ant-modal-content,
+:root[data-theme="dark"] .ant-drawer .ant-drawer-content,
+:root[data-theme="dark"] .ant-popover .ant-popover-inner,
+:root[data-theme="dark"] .ant-select-dropdown,
+:root[data-theme="dark"] .ant-dropdown .ant-dropdown-menu {
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
+}
+
+:root[data-theme="dark"] .ant-modal-mask,
+:root[data-theme="dark"] .ant-drawer-mask {
+  backdrop-filter: var(--glass-mask-filter);
+  -webkit-backdrop-filter: var(--glass-mask-filter);
+}
+
+/* The table sits on a glass card; an opaque body would hide it. Cells keep the
+   text colour antd derives, and the header gets a faint lift so it still reads
+   as a header without a per-row layer. */
+:root[data-theme="dark"] .ant-table-wrapper .ant-table {
+  background: transparent;
+}
+:root[data-theme="dark"] .ant-table-wrapper .ant-table-thead > tr > th {
+  background: var(--surface-hover);
+}
+
+/* A filled destructive control carries white text, so it needs a mid red;
+   antd's `colorError` here is the light red chosen for error TEXT. */
+:root[data-theme="dark"] .ant-btn-primary.ant-btn-dangerous:not(:disabled) {
+  background: var(--danger-fill);
+  border-color: var(--danger-fill);
+  color: var(--on-fill);
+}

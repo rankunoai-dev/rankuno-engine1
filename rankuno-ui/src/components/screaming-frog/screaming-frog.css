@@ -43,9 +43,11 @@
   flex-direction: column;
   gap: 10px;
   padding: 18px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius);
-  background: var(--panel);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
   transition:
     border-color 0.15s ease,
     box-shadow 0.15s ease;
@@ -164,9 +166,11 @@
 
 .sfd-card {
   padding: 16px 18px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius);
-  background: var(--panel);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-filter);
+  -webkit-backdrop-filter: var(--glass-filter);
   margin-bottom: 18px;
   max-width: 720px;
 }
@@ -523,7 +527,7 @@
   grid-column: 1 / -1;
   padding-bottom: 8px;
   margin-bottom: 4px;
-  border-bottom: 1px solid var(--border, #e8e8e8);
+  border-bottom: 1px solid var(--line-soft);
 }
 
 /* A service that cannot measure anything: listed, disabled, and explained.
@@ -658,5 +662,5 @@
   align-items: center;
   gap: 12px;
   padding: 6px 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid var(--row-divider);
 }

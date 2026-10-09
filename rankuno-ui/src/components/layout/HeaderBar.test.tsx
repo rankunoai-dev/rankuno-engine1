@@ -1,6 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { useThemeStore } from "../../store/useThemeStore";
 import { useUiStore } from "../../store/useUiStore";
 import { crawl, discovery, page } from "../../test/factories";
 import { HeaderBar } from "./HeaderBar";
@@ -44,6 +45,7 @@ beforeEach(() => {
   // An engine view, not `launch`: the engine controls are keyed on the view, and
   // `launch` belongs to neither product.
   useUiStore.setState({ view: "visualizer", lastEngineView: "visualizer" });
+  useThemeStore.setState({ theme: "light" });
 });
 
 describe("HeaderBar", () => {
@@ -189,5 +191,27 @@ describe("HeaderBar", () => {
     });
     mount();
     expect(screen.getByText("New crawl")).toBeInTheDocument();
+  });
+
+  it.each(["visualizer", "launch", "screaming-frog"] as const)(
+    "offers the theme toggle in the %s view",
+    (view) => {
+      /* The theme belongs to the app, not to a product, so it is on every header. */
+      mount();
+      useUiStore.setState({ view });
+      expect(screen.getByRole("button", { name: "Dark theme" })).toBeInTheDocument();
+    },
+  );
+
+  it("switches the theme from the header", () => {
+    mount();
+    const toggle = screen.getByRole("button", { name: "Dark theme" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(toggle);
+
+    expect(useThemeStore.getState().theme).toBe("dark");
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
   });
 });

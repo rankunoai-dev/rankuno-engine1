@@ -54,9 +54,10 @@
 }
 
 .au-card {
-  border: 1px solid var(--line);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius);
-  background: var(--panel);
+  /* Translucent but not blurred: these repeat down the list. */
+  background: var(--glass-bg);
   padding: 12px 14px;
 }
 

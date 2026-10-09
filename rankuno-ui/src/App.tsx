@@ -1,6 +1,7 @@
 import { Alert, Spin } from "antd";
 import { useEffect, useState } from "react";
 import "./styles/design-system.css";
+import "./styles/glass.css";
 import type { CrawlDataAdapter } from "./adapters/adapterInterface";
 import { API_BASE, HttpAdapter } from "./adapters/httpAdapter";
 import { MockAdapter } from "./adapters/mockAdapter";
@@ -70,7 +71,7 @@ export default function App(): JSX.Element {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          background: "var(--bg)",
+          background: "var(--app-backdrop)",
         }}
       >
         <Spin size="large" tip="Connecting…" />

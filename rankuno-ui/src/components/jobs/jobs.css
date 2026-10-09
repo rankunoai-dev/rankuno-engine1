@@ -386,7 +386,7 @@
   border: 1px solid var(--primary);
   border-radius: var(--radius);
   background: var(--primary);
-  color: #fff;
+  color: var(--on-fill);
   font-family: inherit;
   font-size: 12px;
   font-weight: 600;
@@ -397,7 +397,7 @@
 .perf-download:hover {
   background: var(--btn-primary-bg-hover);
   border-color: var(--btn-primary-bg-hover);
-  color: #fff;
+  color: var(--on-fill);
 }
 .perf-download:disabled {
   cursor: default;
