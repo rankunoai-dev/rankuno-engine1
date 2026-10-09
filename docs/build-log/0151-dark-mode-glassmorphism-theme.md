@@ -125,7 +125,13 @@ MOD  docs/build-log/README.md, docs/ARCHITECTURE.md, README.md
 Drift check, scribe's run:
 
 ```
-DRIFT_PLACEHOLDER
+Running Architecture & Documentation Drift Audit...
+
+--- Drift Audit Results ---
+PASSED: no drift detected across 251 markdown files.
+  - all relative links resolve
+  - all domain modules documented
+  - all skill directories populated
 ```
 
 ## 8. Follow-ups
