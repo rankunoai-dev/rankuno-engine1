@@ -606,3 +606,87 @@ class TestEnrichedPageMetadata:
         enriched = result.matched_pages[0]
         assert len(enriched.matched_gsc_urls) == 2
         assert "https://example.com/products/shoes" in enriched.matched_gsc_urls
+
+
+class TestDomainPropertyRows:
+    """A domain property's rows are absolute page URLs across every host it covers.
+
+    Fixture shape: `searchanalytics.query` with `dimensions=["page"]` returns
+    one row per page, `keys[0]` being the absolute page URL, with sibling hosts
+    (http://, blog.) in the same response. The rows go through the real
+    `GscApiClient` parser with only Google's transport mocked.
+    """
+
+    @staticmethod
+    def _page(url: str) -> FullPageIntelligenceProfile:
+        return FullPageIntelligenceProfile(
+            url=url,
+            canonical_url=url,
+            normalized_path="/",
+            hierarchy_level=HierarchyLevel.L3_LEAF_PAGE,
+            primary_page_type=PrimaryPageType.PRODUCT_DETAIL_PAGE,
+            depth_from_l0=1,
+            search_intent=SearchIntent.COMMERCIAL_INVESTIGATION,
+            signals_evaluated=(
+                SignalScore(
+                    source=SignalSource.SCHEMA_JSONLD,
+                    suggested_level=HierarchyLevel.L3_LEAF_PAGE,
+                    suggested_page_type=PrimaryPageType.PRODUCT_DETAIL_PAGE,
+                    confidence=0.9,
+                ),
+            ),
+            final_confidence_score=0.9,
+            consensus_method=ConsensusMethod.LAYER1_STRUCTURAL,
+        )
+
+    @staticmethod
+    def _row(url: str, clicks: int, impressions: int, position: float) -> dict:
+        return {
+            "keys": [url],
+            "clicks": clicks,
+            "impressions": impressions,
+            "ctr": clicks / impressions,
+            "position": position,
+        }
+
+    def test_domain_property_rows_match_crawled_pages(self, aggregator):
+        from src.integrations.gsc_client import GscApiClient
+
+        google_response = {
+            "rows": [
+                self._row("https://www.example.com/", 30, 300, 2.0),
+                self._row("https://www.example.com/pricing", 5, 50, 4.0),
+                self._row("http://www.example.com/pricing", 1, 10, 9.0),
+                self._row("https://blog.example.com/", 99, 999, 1.0),
+            ],
+            "responseAggregationType": "byPage",
+        }
+        token_manager = Mock()
+        token_manager.get_or_refresh_token.return_value = "ya29.test"
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            query = mock_build.return_value.searchanalytics.return_value.query
+            query.return_value.execute.return_value = google_response
+            response = GscApiClient().fetch_analytics(
+                "sc-domain:example.com", "2026-01-01", "2026-12-31"
+            )
+
+        home = self._page("https://www.example.com/")
+        pricing = self._page("https://www.example.com/pricing")
+        result = aggregator.aggregate(
+            gsc_property_url="sc-domain:example.com",
+            crawl_base_url="https://www.example.com/",
+            gsc_response=response,
+            crawled_pages=[home, pricing],
+        )
+
+        assert result.validation_error is None
+        by_url = {p.page.url: p for p in result.matched_pages}
+        assert by_url["https://www.example.com/"].gsc_signals.clicks == 30
+        assert by_url["https://www.example.com/pricing"].gsc_signals.clicks == 5
+        # Another host's homepage, and the http:// twin, are other URLs to
+        # Search Console. The path-only fallback used to fold both in.
+        assert "https://blog.example.com/" in result.unmatched_gsc_urls
+        assert "http://www.example.com/pricing" in result.unmatched_gsc_urls

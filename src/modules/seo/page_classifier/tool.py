@@ -41,7 +41,11 @@ from pydantic import Field
 
 from src.core.base_tool import BaseTool
 from src.core.config import get_settings
-from src.core.errors import CrawlBlockedError
+from src.core.errors import (
+    CrawlBlockedError,
+    GscAuthorizationError,
+    GscPropertyNotFoundError,
+)
 from src.core.logger import get_logger
 from src.core.memory_budget import MemoryAccount
 from src.core.rate_limiter import CostLedger
@@ -103,6 +107,15 @@ __all__ = [
 ]
 
 _logger = get_logger("modules.seo.page_classifier.tool")
+
+_GSC_FAILURE_EXPLANATIONS: Mapping[type[Exception], str] = {
+    GscAuthorizationError: "this Google account cannot access this property",
+    GscPropertyNotFoundError: "property not found in Search Console",
+}
+"""Engine-written explanations for the failures an operator can act on.
+
+Fixed strings rather than the exception's text: `GscAuthorizationError` quotes
+Google's reason phrase, and nothing Google sent back may reach a browser."""
 
 
 @runtime_checkable
@@ -338,6 +351,13 @@ GscEnrichmentStatus = Literal["not_requested", "succeeded", "property_mismatch",
 `TrailSource`: it is a closed set read by the UI, not a governance enum."""
 
 
+def _gsc_failure_reason(exc: Exception) -> str:
+    """The class name, and the engine's own explanation when it has one."""
+    explanation = _GSC_FAILURE_EXPLANATIONS.get(type(exc))
+    name = type(exc).__name__
+    return f"{name}: {explanation}" if explanation else name
+
+
 class GscEnrichmentReport(StrictModel):
     """Whether Search Console metrics were fetched, and why they were not.
 
@@ -368,7 +388,8 @@ class GscEnrichmentReport(StrictModel):
             A name, never a credential (see `PageClassificationInput`).
         property_url: The property queried, as the operator entered it.
         reason: Safe-to-render detail, or empty. The validator's explanation for
-            `property_mismatch`, the exception class name for `failed`.
+            `property_mismatch`, the exception class name for `failed` — with
+            a fixed explanation appended for a 403 or 404.
     """
 
     status: GscEnrichmentStatus = "not_requested"
@@ -751,9 +772,10 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 pages_crawled=crawled,
                 account=payload.gsc_account,
                 property_url=payload.gsc_property_url,
-                # The class name only, for the same reason the log line carries
-                # nothing more. This string reaches a browser.
-                reason=type(exc).__name__,
+                # The class name, plus a fixed explanation for the refusals an
+                # operator can act on. Never the exception's text: this string
+                # reaches a browser.
+                reason=_gsc_failure_reason(exc),
             )
 
     def _enrich_with_navigation_context(

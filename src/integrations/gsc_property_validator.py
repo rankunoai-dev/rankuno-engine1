@@ -15,12 +15,20 @@ __all__ = ["GscPropertyValidator"]
 
 _logger = get_logger("integrations.gsc_property_validator")
 
+_DOMAIN_PREFIX = "sc-domain:"
+"""How Search Console names a Domain property: `sc-domain:example.com`."""
+
 
 class GscPropertyValidator:
     """Validates GSC property URLs against crawl base URLs.
 
-    GSC properties can be domain-level (example.com) or path-scoped (example.com/path/).
-    A property is valid for a crawl if:
+    GSC properties are either Domain properties (`sc-domain:example.com`) or
+    URL-prefix properties (`https://example.com/path/`).
+
+    A Domain property is valid for a crawl on that domain or any subdomain of
+    it, on either protocol — Google's own definition of what it covers.
+
+    A URL-prefix property is valid for a crawl if:
     1. Exact match: both URLs refer to the same domain and path
     2. Subdomain match: property is the base domain, crawl is a subdomain
     3. Prefix match: property and crawl share the same base, crawl path extends property path
@@ -43,6 +51,9 @@ class GscPropertyValidator:
         Raises:
             ValueError: If either URL cannot be parsed
         """
+        if property_url.lower().startswith(_DOMAIN_PREFIX):
+            return self._validate_domain_property(property_url, crawl_base_url)
+
         try:
             prop_parsed = urlparse(property_url.lower())
             crawl_parsed = urlparse(crawl_base_url.lower())
@@ -104,10 +115,46 @@ class GscPropertyValidator:
             ),
         )
 
+    def _validate_domain_property(
+        self,
+        property_url: str,
+        crawl_base_url: str,
+    ) -> GscPropertyValidationResult:
+        """Validate a `sc-domain:` property, which covers a domain and its subdomains.
+
+        Matched on whole DNS labels, so `example.com.evil.net` and
+        `notexample.com` are not covered by `sc-domain:example.com`.
+        """
+        domain = property_url[len(_DOMAIN_PREFIX) :].strip().rstrip("/").lower()
+        crawl_host = self._normalize_netloc(urlparse(crawl_base_url.lower()).netloc)
+
+        if not domain or not crawl_host:
+            return GscPropertyValidationResult(
+                is_valid=False,
+                match_type="",
+                reason="Property or crawl URL missing domain",
+            )
+
+        if crawl_host == domain or self._is_subdomain(crawl_host, domain):
+            return GscPropertyValidationResult(
+                is_valid=True,
+                match_type="domain",
+                reason=f"Domain match: {crawl_host} is covered by {_DOMAIN_PREFIX}{domain}",
+            )
+
+        return GscPropertyValidationResult(
+            is_valid=False,
+            match_type="",
+            reason=f"No match: {_DOMAIN_PREFIX}{domain} does not cover crawl {crawl_host}",
+        )
+
     def _normalize_netloc(self, netloc: str) -> str:
         """Normalize network location (domain).
 
-        Removes port numbers and www prefix (canonicalize to base domain).
+        Removes the port only. `www.` is deliberately kept: a URL-prefix
+        property covers exactly the host it names, so `https://www.example.com/`
+        does not cover `https://example.com/`. A Domain property is the
+        Search Console construct that spans both.
         """
         if not netloc:
             return ""

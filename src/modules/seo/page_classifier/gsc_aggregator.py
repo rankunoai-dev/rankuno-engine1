@@ -197,7 +197,7 @@ class GscMetricsAggregator:
 
         Matching strategy (in order):
         1. Exact match — GSC URL == page URL (after normalization)
-        2. Prefix match — GSC URL is path prefix of page URL
+        2. Prefix match — GSC URL is a prefix of page URL (same scheme and host)
         3. No match
 
         Args:
@@ -217,11 +217,12 @@ class GscMetricsAggregator:
             if self._normalize_url(page_url) == normalized_gsc:
                 return page
 
-        # Try prefix match: GSC URL could be a parent path of crawled page
-        gsc_normalized = self._normalize_path(normalized_gsc)
+        # Try prefix match: GSC URL could be a parent path of crawled page.
+        # Compared as whole normalized URLs, so scheme and host must agree. A
+        # Domain property returns rows for every host it covers, and a
+        # path-only comparison filed blog.example.com/ under www's homepage.
         for page_url, page in page_by_url.items():
-            page_normalized = self._normalize_path(self._normalize_url(page_url))
-            if page_normalized.startswith(gsc_normalized):
+            if self._normalize_url(page_url).startswith(normalized_gsc):
                 return page
 
         return None
@@ -246,15 +247,3 @@ class GscMetricsAggregator:
             path = f"{path}/"
 
         return f"{parsed.scheme}://{parsed.netloc}{path}"
-
-    @staticmethod
-    def _normalize_path(url: str) -> str:
-        """Extract and normalize path from URL."""
-        try:
-            parsed = urlparse(url)
-            path = parsed.path or "/"
-            if not path.endswith("/"):
-                path = f"{path}/"
-            return path
-        except Exception:
-            return "/"
