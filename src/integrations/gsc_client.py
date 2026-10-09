@@ -29,6 +29,9 @@ __all__ = ["GscApiClient"]
 
 _logger = get_logger("integrations.gsc_client")
 
+_DOMAIN_PROPERTY_PREFIX = "sc-domain:"
+"""How Search Console names a Domain property: `sc-domain:example.com`."""
+
 
 class GscApiClient(BaseAPIClient):
     """Google Search Console API connector.
@@ -209,8 +212,10 @@ class GscApiClient(BaseAPIClient):
 
                 # A URL-prefix property is listed with a trailing slash. A domain
                 # property is not, and `sc-domain:example.com/` names nothing.
-                if property_url.startswith("sc-domain:"):
-                    api_property_url = property_url.rstrip("/")
+                # Matched case-insensitively, as the form and the validator do,
+                # and sent in the lowercase form Search Console lists it under.
+                if property_url.lower().startswith(_DOMAIN_PROPERTY_PREFIX):
+                    api_property_url = property_url.rstrip("/").lower()
                 elif property_url.endswith("/"):
                     api_property_url = property_url
                 else:

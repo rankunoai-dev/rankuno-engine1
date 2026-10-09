@@ -472,3 +472,19 @@ class TestDomainProperty:
             client.fetch_analytics("sc-domain:example.com/", "2026-08-01", "2026-08-31")
 
         assert analytics.query.call_args[1]["siteUrl"] == "sc-domain:example.com"
+
+    def test_a_domain_property_is_recognised_whatever_its_case(
+        self, mock_settings, mock_token_manager
+    ):
+        # The form and the validator accept `SC-DOMAIN:` case-insensitively, so the
+        # client must too, or it would append "/" and name no property at all.
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            analytics = mock_build.return_value.searchanalytics.return_value
+            analytics.query.return_value.execute.return_value = {"rows": []}
+            client = GscApiClient(settings=mock_settings)
+            client.fetch_analytics("SC-Domain:Example.com/", "2026-08-01", "2026-08-31")
+
+        assert analytics.query.call_args[1]["siteUrl"] == "sc-domain:example.com"
