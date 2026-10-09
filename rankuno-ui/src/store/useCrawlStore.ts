@@ -615,7 +615,12 @@ function reattachRunningJobs(
 ): void {
   for (const job of jobs) {
     if (!LIVE.has(job.status) || watching.has(job.id)) continue;
-    if (!get().liveJobs[job.id]) {
+    const known = get().liveJobs[job.id];
+    // A poll that already ended this job here (progress unreachable) must not
+    // be restarted by the refresh that follows it, or the two would loop with
+    // no pause while the list still says "running".
+    if (known && !LIVE.has(known.status)) continue;
+    if (!known) {
       const started = job.crawledAt ? Date.parse(job.crawledAt) : Number.NaN;
       patchLiveJob(job.id, {
         label: job.label,

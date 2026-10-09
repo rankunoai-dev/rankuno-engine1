@@ -149,6 +149,23 @@ describe("re-attaching to crawls that kept running while the page was closed", (
     expect(useCrawlStore.getState().liveJobs["run-1"]?.status).toBe("succeeded");
   });
 
+  it("does not hammer a job whose progress cannot be read", async () => {
+    /* The list keeps saying "running" while every progress call fails. The
+       failed poll refreshes the list, which must not start the same poll again
+       in a loop with no pause. */
+    const getProgress = vi.fn().mockRejectedValue(new Error("progress unreachable"));
+    const listJobs = vi.fn().mockResolvedValue([RUNNING]);
+    const stub = { listJobs, getResult: vi.fn(), getProgress } as unknown as CrawlDataAdapter;
+
+    await useCrawlStore.getState().init(stub);
+    await vi.waitFor(() =>
+      expect(useCrawlStore.getState().liveJobs["run-1"]?.status).toBe("failed"),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(getProgress).toHaveBeenCalledTimes(1);
+  });
+
   it("never attaches to a job that already finished", async () => {
     const { stub, getProgress } = watching([DONE]);
     await useCrawlStore.getState().init(stub);
