@@ -78,6 +78,7 @@ Procedural skills in `skills/` equipping subagents and review agents with domain
 * 🏗️ **System Architecture**: [ARCHITECTURE.md](docs/ARCHITECTURE.md)
 * 📚 **Architecture Decision Records**: [docs/adr/](docs/adr/)
 * 📓 **Build Log** — what shipped each cycle, why, and what broke: [docs/build-log/](docs/build-log/README.md)
+* **User guide for a support assistant** — every screen, status, limit and message, written to be loaded as context by a bot that helps non-technical users: [docs/guides/rankuno-user-guide-for-assistant.md](docs/guides/rankuno-user-guide-for-assistant.md)
 * ⚡ **Tech Stack & Cost-Optimization**: [TECH_STACK_SPECIFICATION.md](docs/TECH_STACK_SPECIFICATION.md)
 * 📐 **Phase 1 Page Classification Blueprint**: [PHASE1_PAGE_CLASSIFICATION_BLUEPRINT.md](docs/PHASE1_PAGE_CLASSIFICATION_BLUEPRINT.md)
 * 🛒 **Amazon-Scale E-Commerce Crawling Strategy**: [AMAZON_SCALE_ECOMMERCE_CRAWL_SPECIFICATION.md](docs/AMAZON_SCALE_ECOMMERCE_CRAWL_SPECIFICATION.md)
