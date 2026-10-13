@@ -3,11 +3,23 @@
 - **Date**: 2026-10-10
 - **Scope**: Test fixture only. `tests/fixtures/golden/extract_at_fetch_500.json.gz` regenerated for the signal weights changed in `5176418`. No source change.
 - **Commit**: `cfad234` on branch `fix-golden-after-weights`, then merged with `origin/main` `45268e1` (`6afa603`). This entry uncommitted at time of writing.
-- **Quality gate**: LEAD GATE: pending. Bug-fixer's gate on `0861f05` + fix: pytest exit 0, 93.50% (§1).
+- **Quality gate**: GREEN — lead's run on the branch merged with origin/main `2cd8ea6`: 4509 passed, 2 skipped, 93.65% (§1).
 
 ## 1. Gate results
 
-**LEAD GATE: pending.** The lead's full `verify.ps1` on the merged branch was running when this entry was written. Nothing in this section is that run.
+**LEAD GATE** (run by the lead on `5713e46` = this fix + build-logs 0154/0155 merged with origin/main `2cd8ea6`; main venv; `import src` resolved to the worktree; verify.ps1's steps run directly because the worktree has no `.venv`):
+
+```
+ruff format --check .            -> 684 files already formatted
+ruff check .                     -> All checks passed!
+mypy src                         -> Success: no issues found in 181 source files
+export_ui_contract.py --check    -> UI contract is up to date.
+drift_check.py                   -> PASSED: no drift detected across 256 markdown files.
+pytest --cov=src                 -> Required test coverage of 85.0% reached. Total coverage: 93.65%
+                                    4509 passed, 2 skipped, 2 warnings in 594.29s (0:09:54)
+```
+
+Earlier figures below are the bug-fixer's and the scribe's, kept for the record.
 
 Bug-fixer's gate on `0861f05` plus the regenerated snapshot (reported, not re-executed by the scribe):
 
