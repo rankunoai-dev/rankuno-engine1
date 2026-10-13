@@ -30,6 +30,24 @@ describe("LoginScreen", () => {
     expect(screen.getByRole("button", { name: /sign in/i })).toBeInTheDocument();
   });
 
+  it("starts empty and opts both fields out of the browser's saved-login autofill", () => {
+    render(<LoginScreen />);
+
+    const operator = screen.getByLabelText(/operator id/i);
+    const password = screen.getByLabelText(/^password$/i);
+    // A shared engine URL must never arrive with someone's saved login filled in.
+    expect(operator).toHaveValue("");
+    expect(password).toHaveValue("");
+    expect(operator).toHaveAttribute("autocomplete", "off");
+    expect(password).toHaveAttribute("autocomplete", "new-password");
+    for (const field of [operator, password]) {
+      expect(field).toHaveAttribute("data-lpignore", "true");
+      expect(field).toHaveAttribute("data-1p-ignore", "true");
+      expect(field).toHaveAttribute("data-bwignore", "true");
+    }
+    expect(operator.closest("form")).toHaveAttribute("autocomplete", "off");
+  });
+
   it("requires both fields before submitting", async () => {
     render(<LoginScreen />);
 

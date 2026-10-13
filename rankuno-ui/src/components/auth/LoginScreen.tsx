@@ -57,11 +57,21 @@ export function LoginScreen(): JSX.Element {
           <Alert type="error" showIcon message={loginError} className="login-alert" />
         )}
 
+        {/*
+          The fields deliberately opt out of the browser's saved-login autofill.
+          The engine URL is shared between people, often on borrowed or shared
+          machines: with `username` / `current-password` a browser that once
+          saved an operator's password filled it into the form for whoever
+          opened the link next. `new-password` is the value browsers honour by
+          not filling a saved password; the `data-*-ignore` attributes do the
+          same for the common password-manager extensions.
+        */}
         <Form<LoginFormValues>
           form={form}
           layout="vertical"
           requiredMark={false}
           disabled={loggingIn}
+          autoComplete="off"
           onFinish={(values) => void submit(values)}
         >
           <Form.Item
@@ -72,7 +82,10 @@ export function LoginScreen(): JSX.Element {
             <Input
               prefix={<UserOutlined />}
               placeholder="operator id"
-              autoComplete="username"
+              autoComplete="off"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              data-bwignore="true"
               autoFocus
             />
           </Form.Item>
@@ -85,7 +98,10 @@ export function LoginScreen(): JSX.Element {
             <Input.Password
               prefix={<LockOutlined />}
               placeholder="password"
-              autoComplete="current-password"
+              autoComplete="new-password"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              data-bwignore="true"
             />
           </Form.Item>
 
