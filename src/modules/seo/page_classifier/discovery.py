@@ -279,6 +279,13 @@ class DiscoveredNode(StrictModel):
         h1_text: Text of the page's first `<h1>` element, `""` if none or
             never fetched.
         h1_count: Every `<h1>` occurrence seen, independent of text.
+        http_status: Status of the last attempt (interned, so a node holds a
+            pointer rather than its own int). `None` until a response is
+            recorded.
+        first_redirect_status: Status of the first redirect hop, if any.
+        fetch_outcome: One `OUTCOME_*` constant for the last attempt (a shared
+            module-level string, pointer-sized). `None` until a fetch is
+            attempted; "never requested" is therefore the absence of a value.
     """
 
     url: str = Field(min_length=1)
@@ -302,6 +309,9 @@ class DiscoveredNode(StrictModel):
     meta_description_outside_head: bool = False
     h1_text: str = ""
     h1_count: int = Field(default=0, ge=0)
+    http_status: int | None = None
+    first_redirect_status: int | None = None
+    fetch_outcome: str | None = None
 
     @property
     def is_orphan(self) -> bool:
@@ -875,6 +885,15 @@ class SiteGraph:
             return
         node.final_url = result.final_url
         node.redirect_chain = result.redirect_chain
+        # Last attempt wins: a retry that finally answered overwrites an earlier
+        # attempt's marker. The literal code is kept for 204, 304 and a non-HTML
+        # 200 alike; interpretation is the renderer's job, not the sink's.
+        _set_fetch_facts(
+            node,
+            _interned_status(result.status_code),
+            _interned_status(result.redirect_statuses[0]) if result.redirect_statuses else None,
+            page_outcome_for(result),
+        )
         if result.is_html and result.body:
             node.canonical_url = extract_canonical_url(result.body, result.final_url or url)
             signals = extract_content_signals(result.body)
@@ -894,6 +913,18 @@ class SiteGraph:
             is_html=result.is_html,
             redirected_to=result.final_url,
         )
+
+    def record_attempt_failure(self, url: str, outcome: str) -> None:
+        """Mark a node whose request produced no HTTP response.
+
+        The exception-path twin of `record_fetch`, and equally record-only. Any
+        earlier status is cleared: the last attempt wins, and the last attempt
+        had no response, so a stale code would claim one.
+        """
+        node = self._nodes.get(normalize_url(url))
+        if node is None:
+            return
+        _set_fetch_facts(node, None, None, outcome)
 
     def store_html(self, url: str, html: str) -> bool:
         """Read what is needed from a fetched page, mark it fetched, keep or release it.
@@ -1108,6 +1139,11 @@ class SiteGraph:
                     meta_description_outside_head=node.meta_description_outside_head,
                     h1_text=node.h1_text,
                     h1_count=node.h1_count,
+                    http_status=node.http_status,
+                    first_redirect_status=node.first_redirect_status,
+                    # A crawl that ran can say "never requested"; only a
+                    # result that predates the capture leaves this `None`.
+                    fetch_outcome=node.fetch_outcome or OUTCOME_NOT_FETCHED,
                 )
             )
         return tuple(evidence)
@@ -1594,6 +1630,54 @@ OUTCOME_TRANSPORT_TIMEOUT = "transport_timeout"
 OUTCOME_TRANSPORT_REFUSED = "transport_refused"
 OUTCOME_TRANSPORT_DEADLINE = "transport_deadline"
 OUTCOME_ROBOTS_DISALLOWED = "robots_disallowed"
+# A node state, not a counted attempt outcome, so deliberately absent from
+# `OUTCOME_MEANINGS` (which describes `fetch_outcomes` keys): nothing was
+# requested, therefore nothing was counted.
+OUTCOME_NOT_FETCHED = "not_fetched"
+
+_INTERNED_STATUSES: tuple[int, ...] = tuple(range(600))
+
+
+def _interned_status(code: int) -> int:
+    """Return a shared int object for an HTTP status.
+
+    CPython caches only -5..256, so 301/404/503 would each allocate a fresh
+    28-byte int per node. Indexing a table built once makes every node hold a
+    pointer to the same object (ADR 0001 per-node budget).
+    """
+    return _INTERNED_STATUSES[code]
+
+
+def _set_fetch_facts(
+    node: DiscoveredNode, status: int | None, first_redirect: int | None, outcome: str
+) -> None:
+    """Write the three fetch fields without growing the node's `model_fields_set`.
+
+    Measured at 20,000 nodes: assigning the three fields through pydantic's
+    `validate_assignment` pushed each node's `model_fields_set` over a set-resize
+    threshold, 728 -> 2,264 bytes (+1.5 KB per fetched page) for a set nothing
+    reads on a node (it matters only for `exclude_unset` dumps). Writing to the
+    instance dict skips that. The values are typed by construction -- an interned
+    status, an `OUTCOME_*` constant -- so validation would only re-check them.
+    """
+    node.__dict__.update(
+        http_status=status, first_redirect_status=first_redirect, fetch_outcome=outcome
+    )
+
+
+def page_outcome_for(result: FetchResult) -> str:
+    """Outcome of one completed page fetch, matching what the crawl paths count.
+
+    Mirrors the ladder in `_safe_fetch_html` / `_ahtml` (non-2xx -> `outcome_for`,
+    non-HTML -> `not_html`, else `ok`) so the per-node marker and the
+    `fetch_outcomes` counter can never disagree about the same fetch.
+    """
+    if not result.ok:
+        return outcome_for(result.status_code)
+    if not result.is_html:
+        return OUTCOME_NOT_HTML
+    return OUTCOME_OK
+
 
 OUTCOME_MEANINGS: Mapping[str, str] = {
     OUTCOME_OK: "Fetched and read as HTML.",
@@ -1704,7 +1788,12 @@ def _transport_outcome_for(exc: BaseException) -> str:
 
 
 def record_fetch_exception(
-    graph: SiteGraph, url: str, exc: BaseException, *, classify_transport: bool
+    graph: SiteGraph,
+    url: str,
+    exc: BaseException,
+    *,
+    classify_transport: bool,
+    mark_node: bool = False,
 ) -> None:
     """Book one failed fetch attempt on the graph, whatever raised it.
 
@@ -1723,8 +1812,16 @@ def record_fetch_exception(
             from a refused connection from its own deadline; `False` on the
             serial path, which keeps the single `transport_error` bucket it
             has always had.
+        mark_node: `True` at the two page-fetch sites, where `url` is a graph
+            node. Sitemap and CMS endpoints are not pages and must not mark one.
     """
     graph.fetch_failures += 1
+    if mark_node:
+        # Always classified, whatever `classify_transport` says: that flag keeps
+        # the serial path's legacy single `transport_error` *counter* bucket, but
+        # the node marker is new data with no legacy to preserve, and sync/async
+        # must record the same fact about the same page.
+        graph.record_attempt_failure(url, _exception_outcome(exc))
     if isinstance(exc, RobotsDisallowedError):
         # Info, not debug, and one line per URL: a disallowed path is a rule
         # the site owner wrote, and the operator asking "why was this folder
@@ -1740,6 +1837,15 @@ def record_fetch_exception(
         graph.record_outcome(_transport_outcome_for(exc))
     else:
         graph.record_outcome(OUTCOME_TRANSPORT)
+
+
+def _exception_outcome(exc: BaseException) -> str:
+    """The outcome a fetch exception books; one ladder, kept beside its caller."""
+    if isinstance(exc, RobotsDisallowedError):
+        return OUTCOME_ROBOTS_DISALLOWED
+    if isinstance(exc, UnsafeUrlError):
+        return OUTCOME_GUARDRAIL_REFUSED
+    return _transport_outcome_for(exc)
 
 
 def is_refusal(status_code: int) -> bool:
@@ -1796,7 +1902,7 @@ def _safe_fetch_html(fetcher: HttpFetcher, url: str, graph: SiteGraph) -> str | 
     try:
         result = fetcher.fetch(url)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
-        record_fetch_exception(graph, url, exc, classify_transport=False)
+        record_fetch_exception(graph, url, exc, classify_transport=False, mark_node=True)
         graph.pages_not_retrieved += 1
         return None
     # Recorded before any bail, because this is where the fetcher's own answer

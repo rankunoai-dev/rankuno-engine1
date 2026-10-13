@@ -187,6 +187,9 @@ class FetchResult(StrictModel):
         body: Decoded response body, truncated at the size ceiling.
         elapsed_ms: Wall-clock duration.
         redirect_chain: Intermediate URLs traversed, in order.
+        redirect_statuses: HTTP status of each hop in `redirect_chain`, same
+            order and length (301, 302, 307...). A parallel tuple rather than a
+            change to `redirect_chain`'s type, which other modules consume.
         peer_address: Address actually connected to, when the transport
             reported it. `None` under a mock transport or when unavailable.
         truncated: Whether the body hit the size ceiling.
@@ -204,6 +207,7 @@ class FetchResult(StrictModel):
     headers: dict[str, str] = Field(default_factory=dict)
     elapsed_ms: float = Field(default=0.0, ge=0.0)
     redirect_chain: tuple[str, ...] = ()
+    redirect_statuses: tuple[int, ...] = ()
     peer_address: str | None = None
     truncated: bool = False
 
@@ -615,6 +619,7 @@ class HttpFetcher(BaseAPIClient):
     def _fetch_chain(self, url: str, *, is_robots: bool = False) -> FetchResult:
         """Follow redirects synchronously, re-validating every hop."""
         chain: list[str] = []
+        statuses: list[int] = []
         current = url
 
         for _ in range(self._max_redirects + 1):
@@ -629,9 +634,12 @@ class HttpFetcher(BaseAPIClient):
 
             location = self._redirect_target(response, safe)
             if location is None:
-                return self._build_result(url, safe, response, tuple(chain), elapsed_ms)
+                return self._build_result(
+                    url, safe, response, tuple(chain), elapsed_ms, tuple(statuses)
+                )
 
             chain.append(safe.url)
+            statuses.append(response.status_code)
             current = location
 
         raise IntegrationError(type(self).service_name, f"too many redirects from '{url}'")
@@ -639,6 +647,7 @@ class HttpFetcher(BaseAPIClient):
     async def _afetch_chain(self, url: str, *, is_robots: bool = False) -> FetchResult:
         """Follow redirects asynchronously, re-validating every hop."""
         chain: list[str] = []
+        statuses: list[int] = []
         current = url
 
         for _ in range(self._max_redirects + 1):
@@ -658,9 +667,12 @@ class HttpFetcher(BaseAPIClient):
 
             location = self._redirect_target(response, safe)
             if location is None:
-                return self._build_result(url, safe, response, tuple(chain), elapsed_ms)
+                return self._build_result(
+                    url, safe, response, tuple(chain), elapsed_ms, tuple(statuses)
+                )
 
             chain.append(safe.url)
+            statuses.append(response.status_code)
             current = location
 
         raise IntegrationError(type(self).service_name, f"too many redirects from '{url}'")
@@ -773,6 +785,7 @@ class HttpFetcher(BaseAPIClient):
         response: httpx.Response,
         chain: tuple[str, ...],
         elapsed_ms: float,
+        statuses: tuple[int, ...] = (),
     ) -> FetchResult:
         """Assemble a validated result, enforcing the body size ceiling."""
         raw = response.content
@@ -795,6 +808,7 @@ class HttpFetcher(BaseAPIClient):
             headers={key.lower(): value for key, value in response.headers.items()},
             elapsed_ms=elapsed_ms,
             redirect_chain=chain,
+            redirect_statuses=statuses,
             peer_address=self._peer_address(response),
             truncated=truncated,
         )

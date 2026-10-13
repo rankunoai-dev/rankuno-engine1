@@ -51,6 +51,11 @@ SNAPSHOT = (
     Path(__file__).resolve().parents[2] / "fixtures" / "golden" / "extract_at_fetch_500.json.gz"
 )
 SEEDS = (1, 2, 3)
+# Added after the snapshot (cycle: HTTP status capture). Left out of the pinned
+# projection, as `jsonld_types` was, so the snapshot keeps proving that every
+# other field -- indexability included -- is byte-identical. The new fields are
+# pinned by `test_http_status_capture`.
+STATUS_FIELDS = ("http_status", "first_redirect_status", "fetch_outcome")
 
 
 def canonical(value: object) -> str:
@@ -93,7 +98,7 @@ def project_graph(graph: SiteGraph) -> dict[str, Any]:
         # the projection rather than written into it: the snapshot keeps
         # pinning the evidence contract as it stood. The new field has its own
         # equality test against the body (`test_fetch_time_extraction`).
-        dumped = item.model_dump(mode="json", exclude={"jsonld_types"})
+        dumped = item.model_dump(mode="json", exclude={"jsonld_types", *STATUS_FIELDS})
         dumped["html"] = _sha(item.html)
         evidence.append(dumped)
     return {
@@ -109,7 +114,9 @@ def run_tool(settings: Settings, site: dict[str, Route], *, seed: int | None) ->
     result = tool.run(PageClassificationInput(base_url=BASE, use_async_crawl=seed is not None))
     assert result.ok, result.error
     assert result.data is not None
-    data: dict[str, Any] = result.data.model_dump(mode="json")
+    data: dict[str, Any] = result.data.model_dump(
+        mode="json", exclude={"pages": {"__all__": set(STATUS_FIELDS)}}
+    )
     return data
 
 

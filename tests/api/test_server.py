@@ -656,11 +656,11 @@ class TestUrlsPdfDownload(TestUrlsWorkbookDownload):
         assert response.content.startswith(b"%PDF")
         text = _pdf_text_bytes(response.content)
         assert b"https://e.com/a/" in text
-        # `FullPageIntelligenceProfile` carries no HTTP status field (see
-        # `MasterURLReport._extract_status_code`), so the column must show an
-        # honest "not tracked" marker, matching the `.xlsx` sibling exactly —
-        # never a fabricated code, and never the URL reused in its place.
-        assert b"Unknown" in text
+        # The fixture's profiles carry no status fields (a stored result that
+        # predates the capture), so the column must show the honest legacy
+        # marker, matching the `.xlsx` sibling exactly -- never a fabricated
+        # code, and never the URL reused in its place.
+        assert b"Not recorded" in text
 
     def test_a_result_predating_the_output_contract_is_409(self, client, store):
         record = store.create(server_module.TOOL_NAME, {"base_url": SAFE_URL})

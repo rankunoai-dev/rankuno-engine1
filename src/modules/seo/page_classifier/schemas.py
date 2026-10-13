@@ -609,6 +609,23 @@ class FullPageIntelligenceProfile(StrictModel):
     h1_text: str = Field(default="", max_length=1000)
     h1_count: int = Field(default=0, ge=0)
 
+    # HTTP fetch facts (ADR 0002 addition). `None` everywhere means "this
+    # result predates the capture, or the profile was not built by a crawl"
+    # (imported bundles, Screaming Frog rows); it must never be read as "the
+    # page was not fetched". A crawl that did run always sets `fetch_outcome`,
+    # including `not_fetched` for URLs it never requested.
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    """Status of the last attempt, i.e. the response of the page the fetch
+    landed on (`final_url`). `None` when no response was received."""
+
+    first_redirect_status: int | None = Field(default=None, ge=300, le=399)
+    """Status of the first redirect hop (301, 302, 307, 308...), `None` when
+    the page did not redirect or was not fetched."""
+
+    fetch_outcome: str | None = Field(default=None, max_length=40)
+    """One `discovery.OUTCOME_*` value for the last attempt, or `not_fetched`.
+    Tells "no response" (timeout, transport, guardrail) from "never requested"."""
+
     @model_validator(mode="after")
     def _check_taxonomy_pair(self) -> FullPageIntelligenceProfile:
         """Reject incoherent level/type combinations at construction time.

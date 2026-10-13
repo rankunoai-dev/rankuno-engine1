@@ -483,6 +483,8 @@ src/
 │   ├── base_client.py           # Quota, retry, credential handling for all connectors
 │   ├── http_fetcher.py          # The ONLY outbound web fetcher. Enforces SSRF,
 │   │                            # robots, per-host throttling. Sync + async.
+│   │                            # FetchResult.redirect_statuses: each hop's
+│   │                            # status, parallel to redirect_chain (0156)
 │   ├── gsc_client.py            # Search Console API (read-only scope, ADR 0010).
 │   │                            # Takes `account=` to pick a named profile (ADR 0012)
 │   │                            # 403/404 propagate (not an empty response);
@@ -587,9 +589,12 @@ src/
     │       │                         # generate_pdf() (cycle 0124, ADR 0024)
     │       │                         # is the flat "All URLs" PDF twin, via
     │       │                         # GET /jobs/{id}/urls.pdf. "HTTP Status"
-    │       │                         # reads "Unknown" in both — no per-page
-    │       │                         # status code is ever carried this far
-    │       │                         # (cycle 0123; was page.final_url before)
+    │       │                         # shows final status + First Redirect;
+    │       │                         # "Not fetched" / "No response" /
+    │       │                         # "Not recorded (older crawl)" (cycle 0156;
+    │       │                         # read "Unknown" before, cycle 0123)
+    │       ├── fetch_status.py       # Labels + legend for those columns,
+    │       │                         # shared by xlsx and PDF (cycle 0156)
     │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
     │       │                         # crawl job, RiskClass.READ (ADR 0003).
     │       │                         # Input carries gsc_account: the named

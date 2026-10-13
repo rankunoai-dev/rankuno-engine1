@@ -171,6 +171,51 @@ class TestRedirectSafety:
             make_fetcher(transport, settings, max_redirects=2).fetch("https://e.com/loop")
 
 
+class TestRedirectStatuses:
+    """`redirect_statuses` is parallel to `redirect_chain` (first-hop code)."""
+
+    def _transport(self) -> httpx.MockTransport:
+        return route_map(
+            {
+                "/robots.txt": httpx.Response(200, text=ROBOTS_ALLOW_ALL),
+                "/a": httpx.Response(301, headers={"location": "https://e.com/b"}),
+                "/b": httpx.Response(302, headers={"location": "https://e.com/c"}),
+                "/c": httpx.Response(200, text="arrived"),
+                "/one": httpx.Response(302, headers={"location": "https://e.com/c"}),
+            }
+        )
+
+    def test_301_then_200(self, settings):
+        transport = route_map(
+            {
+                "/robots.txt": httpx.Response(200, text=ROBOTS_ALLOW_ALL),
+                "/old": httpx.Response(301, headers={"location": "https://e.com/new"}),
+                "/new": httpx.Response(200, text="x"),
+            }
+        )
+        result = make_fetcher(transport, settings).fetch("https://e.com/old")
+        assert result.redirect_statuses == (301,)
+        assert result.status_code == 200
+
+    def test_302(self, settings):
+        result = make_fetcher(self._transport(), settings).fetch("https://e.com/one")
+        assert result.redirect_statuses == (302,)
+
+    def test_multi_hop_is_parallel_to_the_chain(self, settings):
+        result = make_fetcher(self._transport(), settings).fetch("https://e.com/a")
+        assert result.redirect_statuses == (301, 302)
+        assert len(result.redirect_statuses) == len(result.redirect_chain)
+
+    def test_no_redirect_is_empty(self, settings):
+        result = make_fetcher(self._transport(), settings).fetch("https://e.com/c")
+        assert result.redirect_statuses == ()
+
+    def test_async_path_matches(self, settings):
+        fetcher = make_async_fetcher(self._transport(), settings)
+        result = asyncio.run(fetcher.afetch("https://e.com/a"))
+        assert result.redirect_statuses == (301, 302)
+
+
 class TestRobotsEnforcement:
     def test_refuses_a_disallowed_path(self, settings):
         transport = route_map(

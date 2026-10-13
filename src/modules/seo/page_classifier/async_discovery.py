@@ -476,7 +476,7 @@ async def _ahtml(
         # worker never returns.
         result = await asyncio.wait_for(fetcher.afetch(url), timeout=REQUEST_DEADLINE_S)
     except Exception as exc:  # noqa: BLE001 - one bad URL must not stop discovery
-        record_fetch_exception(graph, url, exc, classify_transport=True)
+        record_fetch_exception(graph, url, exc, classify_transport=True, mark_node=True)
         graph.pages_not_retrieved += 1
         return None
     # Both crawl paths must record the same facts. Behavioural equivalence

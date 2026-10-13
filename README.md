@@ -112,6 +112,7 @@ Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap re
 | `modules/seo/page_classifier/schemas.py` — Phase 1 taxonomy | ✅ Implemented & tested |
 | `page_classifier/url_rules.py` — Layer 0 normalisation & pre-fetch rules | ✅ Implemented & tested. **Path case is significant** ([ADR 0027](docs/adr/0027-url-path-case-is-significant.md), [build-log 0129](docs/build-log/0129-two-pages-that-differed-only-by-case.md)): `/A` and `/a` are two pages, as they are to Google and Screaming Frog. Only scheme and host are lowercased; kept percent-escapes are upper-cased so `%2f`/`%2F` stay one key. Search Console/GA4 matching folds path case only as an explicit `MatchTier.CASE_FOLDED` fallback after an exact miss, and resolves `AMBIGUOUS` when two crawled pages differ only by case. Until this change the whole path was lowercased; new crawls of mixed-case sites count more pages than old ones |
 | URL provenance reported from evidence ([ADR 0026](docs/adr/0026-url-provenance-reports-evidence-or-says-unknown.md), [build-log 0127](docs/build-log/0127-a-reason-the-crawl-never-recorded.md)) — `DiscoverySource` flags (`sitemap`, `dom_link`, `cms_api`) drive the Screaming Frog engine-only reason, the navigation "Discovery Method" and checkpoint recovery | ✅ Phase 1 only. Where the flags are absent the engine says the source is unknown, never guesses. Navigation: `SITEMAP_ONLY` requires the sitemap flag; an unlinked page without it (including CMS-only) is `ORPHANED`. Fetch ledger: a robots.txt refusal is `robots_disallowed`, not `transport_error`. Checkpoints store per-URL source letters (`sources`, aligned with `urls`); an older checkpoint loads and states that how each URL was found is unknown. Page links resolve against the URL the fetch landed on and the first same-site `<base href>` ([build-log 0128](docs/build-log/0128-a-link-resolved-against-the-address-that-was-asked-for.md)), so a `dom_link` flag is no longer set for a URL built from the pre-redirect address. **Not done**: referrer URL, sitemap path, link depth, CMS record, per-URL refusal list (Phase 2); provenance export columns and UI (Phase 3); canonical/hreflang/`rel=next`/iframe discovery (Phase 4). Stored results are not rewritten |
+| `page_classifier/fetch_status.py` — labels and legend for the HTTP Status and First Redirect columns, shared by the xlsx and PDF exports | ✅ Implemented & tested ([build-log 0156](docs/build-log/0156-every-row-said-unknown.md)). `FullPageIntelligenceProfile` gained optional `http_status`, `first_redirect_status`, `fetch_outcome` (additive, default `None`; old stored results still validate). `FetchResult.redirect_statuses` carries each hop's code |
 | `page_classifier/signal_parsers.py` — 5 structural consensus signals | ✅ Implemented & tested |
 | `page_classifier/cascading_pipeline.py` — Layer 0–3 cascade & consensus | ✅ Implemented & tested |
 | `page_classifier/weights.py` — weight profiles & site-profile seam | ✅ Seam live; adaptive selection off pending corpus |
@@ -427,10 +428,12 @@ the same "All URLs" columns as a flat, printable table (landscape A4, via
 `MasterURLReport.generate_pdf`), for a client deliverable or an email
 attachment rather than a spreadsheet ([ADR 0024](docs/adr/0024-pdf-url-export-uses-reportlab-in-core-dependencies.md);
 [build-log 0124](docs/build-log/0124-a-pdf-beside-the-workbook.md)). The
-"HTTP Status" column both exports show is a genuine absence, not a code —
-no per-page HTTP status reaches either report anywhere in the pipeline, so
-the column reads `Unknown` rather than substitute the URL
-([build-log 0123](docs/build-log/0123-a-status-cell-that-was-a-url-cell.md)).
+"HTTP Status" column shows the page's final status code, with a second
+"First Redirect" column for the first hop of a redirect (a 301 to a 200 reads
+200 / 301). Pages never fetched read `Not fetched`, fetches that got no answer
+read `No response`, and results stored before the status was captured read
+`Not recorded (older crawl)` ([build-log 0156](docs/build-log/0156-every-row-said-unknown.md);
+earlier, build-log 0123 had it read `Unknown` because no status reached the report).
 Until cycle 0130 neither item actually downloaded: the UI called the adapter's
 download methods detached from the adapter, so they threw before sending a
 request ([build-log 0131](docs/build-log/0131-a-method-called-without-its-object.md)).

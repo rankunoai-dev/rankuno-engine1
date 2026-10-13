@@ -214,3 +214,13 @@ class TestDatetimeMapping:
 
         assert exporter.ts_type(datetime) == "string"
         assert exporter.ts_type(datetime | None) == "string | null"
+
+
+class TestFetchStatusFields:
+    def test_the_profile_and_node_carry_the_optional_status_fields(self):
+        """Nullable on both, so a result stored before the capture still types."""
+        schema = exporter.SCHEMA_PATH.read_text(encoding="utf-8")
+        for name in ("http_status", "first_redirect_status", "fetch_outcome"):
+            assert schema.count(f"  {name}: ") == 2, name
+        assert schema.count("  http_status: number | null;") == 2
+        assert schema.count("  fetch_outcome: string | null;") == 2

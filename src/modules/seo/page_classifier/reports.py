@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape as _xml_escape
 
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
@@ -29,17 +30,30 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
 
+from .fetch_status import (
+    LABEL_NO_RESPONSE,
+    LABEL_NOT_FETCHED,
+    LABEL_NOT_RECORDED,
+    STATUS_LEGEND,
+    first_redirect_label,
+    http_status_label,
+)
+
 if TYPE_CHECKING:
     from .schemas import FullPageIntelligenceProfile
     from .tool import PageClassificationOutput
 
 __all__ = ["MasterURLReport"]
 
-# Points, not inches — reportlab's native unit. Widths favour the two
-# free-text columns (URL, Discovery Method); the rest hold short enums or
-# numbers. Sums to 795pt, inside a landscape A4 page's ~806pt usable width
-# after the 18pt margins `generate_pdf` sets.
-_PDF_COLUMN_WIDTHS = [170, 70, 70, 55, 50, 60, 50, 60, 40, 90, 80]
+# Points, not inches — reportlab's native unit. Widths favour the free-text
+# columns (URL, Discovery Method) and give HTTP Status room for the wrapped
+# "Not recorded (older crawl)" label; the rest hold short enums or numbers.
+# Sums to 774pt, inside a landscape A4 page's ~806pt usable width after the
+# 18pt margins `generate_pdf` sets.
+_PDF_COLUMN_WIDTHS = [150, 66, 66, 62, 48, 42, 56, 40, 52, 34, 88, 70]
+
+# The no-status labels sort after the numeric codes on "By HTTP Status".
+_LABEL_ORDER = (LABEL_NOT_FETCHED, LABEL_NO_RESPONSE, LABEL_NOT_RECORDED)
 
 
 class MasterURLReport:
@@ -65,13 +79,13 @@ class MasterURLReport:
     def generate_pdf(self) -> BytesIO:
         """Generate a flat, one-row-per-page PDF and return it as bytes.
 
-        Same eleven columns and row order as the "All URLs" sheet — no
+        Same twelve columns and row order as the "All URLs" sheet — no
         grouping. "Every URL this crawl found" is the promise the job-row
         menu's "Download URLs" entry makes; the by-indexability and
         by-HTTP-status sheets above are workbook-specific navigational aids
         layered on top of that list, not part of it.
 
-        Landscape A4: eleven columns do not fit a portrait page at a
+        Landscape A4: twelve columns do not fit a portrait page at a
         readable size. Every cell is a `Paragraph`, not a bare string —
         `Table` does not wrap plain text, so a long URL would overflow into
         its neighbour column instead of wrapping onto a second line.
@@ -81,6 +95,7 @@ class MasterURLReport:
             "Hierarchy Level",
             "Page Type",
             "HTTP Status",
+            "First Redirect",
             "GSC Clicks",
             "GSC Impressions",
             "GSC CTR %",
@@ -128,12 +143,15 @@ class MasterURLReport:
             topMargin=18,
             bottomMargin=18,
         )
-        doc.build([table])
+        legend_style = ParagraphStyle(
+            "pdf-legend", fontName="Helvetica-Oblique", fontSize=6.5, leading=8, spaceBefore=6
+        )
+        doc.build([table, Paragraph(_xml_escape(STATUS_LEGEND), legend_style)])
         output.seek(0)
         return output
 
     def _pdf_row(self, page: FullPageIntelligenceProfile) -> list[str]:
-        """The eleven "All URLs" cell values for one page, as plain strings.
+        """The twelve "All URLs" cell values for one page, as plain strings.
 
         Shared with nothing else in this file: openpyxl accepts the typed
         values (enums, ints, floats) directly and applies its own cell
@@ -141,12 +159,12 @@ class MasterURLReport:
         column-for-column match to `_sheet_all_urls` regardless, so the two
         exports never drift into reporting different data for the same job.
         """
-        status_code = self._extract_status_code(page)
         return [
             page.url,
             str(page.hierarchy_level),
             str(page.primary_page_type),
-            str(status_code) if status_code is not None else "Unknown",
+            http_status_label(page),
+            first_redirect_label(page),
             str(page.gsc_clicks or 0),
             str(page.gsc_impressions or 0),
             f"{(page.gsc_ctr * 100):.2f}" if page.gsc_ctr else "0.00",
@@ -165,6 +183,7 @@ class MasterURLReport:
             "Hierarchy Level",
             "Page Type",
             "HTTP Status",
+            "First Redirect",
             "GSC Clicks",
             "GSC Impressions",
             "GSC CTR %",
@@ -175,14 +194,15 @@ class MasterURLReport:
         ]
         ws.append(headers)
         self._style_header_row(ws)
+        ws["D1"].comment = Comment(STATUS_LEGEND, "Rankuno", width=420, height=180)
 
         for page in self.result.pages:
-            status_code = self._extract_status_code(page)
             row = [
                 page.url,
                 page.hierarchy_level,
                 page.primary_page_type,
-                str(status_code) if status_code is not None else "Unknown",
+                http_status_label(page),
+                first_redirect_label(page),
                 page.gsc_clicks or 0,
                 page.gsc_impressions or 0,
                 (page.gsc_ctr * 100) if page.gsc_ctr else 0,
@@ -203,7 +223,7 @@ class MasterURLReport:
         - 3xx: Redirect (indexable)
         - 4xx: Blocked
         - 5xx: Server error (treat as blocked)
-        - Other: Unknown
+        - No status (not fetched, no response, older crawl): Unknown
         """
         ws = self.workbook.create_sheet("By Indexability", 1)
 
@@ -283,12 +303,11 @@ class MasterURLReport:
         # Group by status code
         by_status: dict[str, list[FullPageIntelligenceProfile]] = defaultdict(list)
         for page in self.result.pages:
-            status = self._extract_status_code(page)
-            status_str = str(status) if status else "Unknown"
-            by_status[status_str].append(page)
+            by_status[http_status_label(page)].append(page)
 
         headers = [
             "HTTP Status",
+            "First Redirect",
             "URL",
             "Page Type",
             "Hierarchy Level",
@@ -300,20 +319,16 @@ class MasterURLReport:
         ws.append(headers)
         self._style_header_row(ws)
 
-        # Sort status codes numerically - separate unknown from numeric statuses
-        numeric_statuses: list[str] = sorted(
-            [s for s in by_status if s != "Unknown"],
-            key=lambda x: int(x),
-        )
-        all_statuses: list[str] = list(numeric_statuses)
-        if "Unknown" in by_status:
-            all_statuses.append("Unknown")
+        # Numeric codes first, ascending; the three no-status labels after them.
+        all_statuses: list[str] = sorted((s for s in by_status if s.isdigit()), key=int)
+        all_statuses += [label for label in _LABEL_ORDER if label in by_status]
 
-        for status in all_statuses:  # type: ignore[assignment]
-            pages = by_status[status]  # type: ignore[index]
+        for status in all_statuses:
+            pages = by_status[status]
             for page in pages:
                 row = [
                     status,
+                    first_redirect_label(page),
                     page.url,
                     page.primary_page_type,
                     page.hierarchy_level,
@@ -328,19 +343,14 @@ class MasterURLReport:
 
     @staticmethod
     def _extract_status_code(page: FullPageIntelligenceProfile) -> int | None:
-        """Extract HTTP status code from page, if one was ever recorded.
+        """The page's recorded HTTP status, or `None` if there is none.
 
-        Always `None`. This is not a placeholder awaiting a future field: the
-        raw status is deliberately discarded after the fetcher derives
-        `indexability` from it (see `discovery.py::SiteGraph.record_fetch`,
-        "raw inputs are dropped") to avoid holding response headers for every
-        page in a crawl that already keeps its whole graph in RAM.
-        `FullPageIntelligenceProfile` has no field to carry it even for the
-        cases (4xx, 3xx) where `indexability_reason` happens to mention the
-        code in prose. Callers must treat `None` as "not tracked", never
-        substitute another field (e.g. a URL) in its place.
+        `None` covers three different facts (never requested, no response,
+        result predates the capture); `fetch_status.http_status_label` tells
+        them apart. Callers must never substitute another field (e.g. a URL)
+        in its place.
         """
-        return None
+        return page.http_status
 
     @staticmethod
     def _style_header_row(ws: Worksheet) -> None:

@@ -188,6 +188,9 @@ export interface FullPageIntelligenceProfile {
   meta_description_outside_head: boolean;
   h1_text: string;
   h1_count: number;
+  http_status: number | null;
+  first_redirect_status: number | null;
+  fetch_outcome: string | null;
 }
 
 /** A content record retrieved from a CMS API. */
@@ -228,6 +231,9 @@ export interface DiscoveredNode {
   meta_description_outside_head: boolean;
   h1_text: string;
   h1_count: number;
+  http_status: number | null;
+  first_redirect_status: number | null;
+  fetch_outcome: string | null;
 }
 
 /** Summary of one discovery pass. */

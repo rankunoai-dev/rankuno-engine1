@@ -76,6 +76,9 @@ export function page(
     meta_description_outside_head: false,
     h1_text: "",
     h1_count: 0,
+    http_status: null,
+    first_redirect_status: null,
+    fetch_outcome: null,
     ...overrides,
   };
 }

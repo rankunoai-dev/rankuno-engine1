@@ -82,12 +82,11 @@ class TestAllUrlsSheetHttpStatusColumn:
 
         assert row[status_col] != row[url_col]
 
-    def test_http_status_column_is_an_honest_unknown_marker(self) -> None:
-        """No per-page status code is captured anywhere in the pipeline.
+    def test_http_status_column_is_an_honest_legacy_marker(self) -> None:
+        """A profile with no status fields predates the capture.
 
-        `FullPageIntelligenceProfile` has no such field — see
-        `reports.py::MasterURLReport._extract_status_code`), so the column
-        must say so rather than guess or substitute another field.
+        The column must say so rather than guess or substitute another field,
+        and must not claim the page was "not fetched".
         """
         page = _page("https://e.com/blog/")
         report = MasterURLReport(_result(page))
@@ -98,13 +97,13 @@ class TestAllUrlsSheetHttpStatusColumn:
         rows = list(ws.iter_rows(min_row=2, values_only=True))
 
         status_col = headers.index("HTTP Status")
-        assert rows[0][status_col] == "Unknown"
+        assert rows[0][status_col] == "Not recorded (older crawl)"
 
     def test_matches_the_by_http_status_sheet_convention(self) -> None:
-        """Sheet 3 already marks an unrecorded status as "Unknown".
+        """Sheet 3 groups a status-less page under the same label.
 
-        Sheet 1 must use the same word for the same absence, not a
-        different one.
+        Sheet 1 must use the same words for the same absence, not different
+        ones.
         """
         page = _page("https://e.com/blog/")
         report = MasterURLReport(_result(page))
@@ -113,8 +112,8 @@ class TestAllUrlsSheetHttpStatusColumn:
         all_urls_status = [cell.value for cell in ws_col(book["All URLs"], "HTTP Status")]
         by_status_status = [cell.value for cell in ws_col(book["By HTTP Status"], "HTTP Status")]
 
-        assert all_urls_status == ["Unknown"]
-        assert by_status_status == ["Unknown"]
+        assert all_urls_status == ["Not recorded (older crawl)"]
+        assert by_status_status == ["Not recorded (older crawl)"]
 
 
 def ws_col(ws: Worksheet, header: str) -> list[Cell]:
@@ -144,7 +143,7 @@ class TestGeneratePdf:
     def test_row_matches_the_all_urls_sheet_column_for_column(self) -> None:
         """`_pdf_row` must report what `_sheet_all_urls` reports for the page.
 
-        Including the "Unknown" HTTP Status marker, so the PDF cannot drift
+        Including the legacy HTTP Status marker, so the PDF cannot drift
         back into the fixed defect this module's other tests guard (a URL
         where a status code belongs).
         """
@@ -156,12 +155,13 @@ class TestGeneratePdf:
         pdf_row = report._pdf_row(page)
 
         assert pdf_row[0] == sheet_row[0]  # URL
-        assert pdf_row[3] == "Unknown"
-        assert sheet_row[3] == "Unknown"
+        assert pdf_row[3] == "Not recorded (older crawl)"
+        assert sheet_row[3] == "Not recorded (older crawl)"
+        assert pdf_row[4] == sheet_row[4] == "—"  # First Redirect
 
-    def test_row_has_eleven_columns(self) -> None:
+    def test_row_has_twelve_columns(self) -> None:
         """Same column count as the "All URLs" sheet's header row."""
         page = _page("https://e.com/blog/")
         report = MasterURLReport(_result(page))
 
-        assert len(report._pdf_row(page)) == 11
+        assert len(report._pdf_row(page)) == 12

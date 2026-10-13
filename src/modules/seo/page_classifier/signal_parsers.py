@@ -302,6 +302,11 @@ class PageEvidence(StrictModel):
         h1_text: Text of the page's first `<h1>` element, `""` if none or
             never fetched.
         h1_count: Every `<h1>` occurrence seen, independent of text.
+        http_status: Status of the last fetch attempt, `None` if no response
+            was received or the page was never fetched.
+        first_redirect_status: Status of the first redirect hop, if any.
+        fetch_outcome: `discovery.OUTCOME_*` of the last attempt, or
+            `not_fetched` for a URL the crawl never requested.
         jsonld_types: Every **recognised** schema.org `@type` the page declares,
             in document order, read when the page was fetched
             (`extract_schema_types`). Lets Signal 4 run on evidence that no
@@ -334,6 +339,9 @@ class PageEvidence(StrictModel):
     h1_text: str = ""
     h1_count: int = Field(default=0, ge=0)
     jsonld_types: tuple[str, ...] = ()
+    http_status: int | None = None
+    first_redirect_status: int | None = None
+    fetch_outcome: str | None = None
 
 
 class _NavLinkExtractor(HTMLParser):
