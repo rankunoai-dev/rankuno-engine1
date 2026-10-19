@@ -348,6 +348,14 @@ login ([ADR 0008](docs/adr/0008-local-api-layer-and-job-store.md)). Started
 without it, the UI falls back to bundled fixtures and says so on screen —
 fixture data is indistinguishable from crawl output otherwise.
 
+Each category row in the directory tree has a "Download URLs for <category>"
+button showing how many URLs sit under it. It saves those URLs, nested
+descendants included, as a UTF-8 CSV built in the browser from the loaded tree
+(URL, Path, Hierarchy level, Page type); no server call is made. Cells that a
+spreadsheet would read as formulas are prefixed with an apostrophe in this export
+only. The other client-side CSV exports are not yet changed, and the server-side
+CSV routes still lack this ([build-log 0158](docs/build-log/0158-a-download-for-each-tree-category.md)).
+
 Almost every route now requires a bearer session token
 ([ADR 0016](docs/adr/0016-cloud-api-authentication.md)):
 
