@@ -46,10 +46,14 @@ from src.core.errors import IntegrationError, RobotsDisallowedError, UnsafeUrlEr
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.integrations.http_fetcher import FetchResult, HttpFetcher
-from src.modules.seo.page_classifier.breadcrumb_parser import extract_breadcrumb
+from src.modules.seo.page_classifier.breadcrumb_parser import (
+    breadcrumb_parent_url,
+    extract_breadcrumb,
+)
 from src.modules.seo.page_classifier.content_signals import extract_content_signals
 from src.modules.seo.page_classifier.discovery_parsers import (
-    extract_page_links,
+    LinkReading,
+    read_page_links,
     extract_sitemap_links,
     parse_link_header,
     parse_shopify_records,
@@ -63,7 +67,7 @@ from src.modules.seo.page_classifier.schemas import DiscoverySource, Indexabilit
 from src.modules.seo.page_classifier.signal_parsers import (
     CmsRecord,
     PageEvidence,
-    extract_canonical_url,
+    extract_canonical_declarations,
     extract_robots_directives,
     extract_schema_types,
     indexability_of,
@@ -286,6 +290,19 @@ class DiscoveredNode(StrictModel):
         fetch_outcome: One `OUTCOME_*` constant for the last attempt (a shared
             module-level string, pointer-sized). `None` until a fetch is
             attempted; "never requested" is therefore the absence of a value.
+        canonical_declared: Whether the body declares a usable canonical tag;
+            `None` until an HTML body is read (ADR 0039).
+        canonical_link_count: Canonical tags with a non-empty `href`; `None`
+            until an HTML body is read.
+        body_link_count: Outbound links inside the body region; `None` until a
+            body is read. A page whose links were recorded has a value here.
+        breadcrumb_parent_url: URL of the breadcrumb step before the page.
+            `""` when the body was read and there is no usable parent; `None`
+            when no body was read (never fetched, or not HTML).
+        unique_content_inlinks: Distinct source pages whose body region links
+            here. Starts at `0` when the node is created, and is incremented
+            once per linking page by `record_links`. Never a set: the links a
+            page contributes are already de-duplicated, so a counter is exact.
     """
 
     url: str = Field(min_length=1)
@@ -312,6 +329,11 @@ class DiscoveredNode(StrictModel):
     http_status: int | None = None
     first_redirect_status: int | None = None
     fetch_outcome: str | None = None
+    canonical_declared: bool | None = None
+    canonical_link_count: int | None = Field(default=None, ge=0)
+    body_link_count: int | None = Field(default=None, ge=0)
+    breadcrumb_parent_url: str | None = None
+    unique_content_inlinks: int | None = Field(default=None, ge=0)
 
     @property
     def is_orphan(self) -> bool:
@@ -784,7 +806,7 @@ class SiteGraph:
                 # Per call, so per link occurrence — see the report field.
                 self.ceiling_refused += 1
                 return None
-            existing = DiscoveredNode(url=url, normalized=key)
+            existing = DiscoveredNode(url=url, normalized=key, unique_content_inlinks=0)
             self._nodes[key] = existing
 
         merged = existing.sources
@@ -801,7 +823,13 @@ class SiteGraph:
             existing.depth = depth
         return existing
 
-    def record_links(self, from_url: str, to_urls: tuple[str, ...], depth: int) -> list[str]:
+    def record_links(
+        self,
+        from_url: str,
+        to_urls: tuple[str, ...],
+        depth: int,
+        body_urls: tuple[str, ...] = (),
+    ) -> list[str]:
         """Record outbound links and return every target that entered the graph.
 
         Returns targets regardless of whether the node already existed. A URL
@@ -811,10 +839,19 @@ class SiteGraph:
         almost no captured HTML. Crawl-visited bookkeeping belongs to the
         caller's frontier, not to the graph.
 
+        `body_urls` is the subset of `to_urls` whose anchor sits in the body
+        region. It is counted in two places and nowhere else. The source keeps
+        its size (`body_link_count`). Each target that is in it gains one
+        `unique_content_inlinks`. That is exact, not approximate: `to_urls` is
+        de-duplicated per page, so a page that links a target twice still adds
+        one, and no set of sources has to be held for the crawl (ADR 0039).
+
         Args:
             from_url: The linking page.
             to_urls: Absolute link targets.
             depth: Link distance of the linking page.
+            body_urls: The members of `to_urls` inside the body region, in
+                document order. Empty by default, which counts no body links.
 
         Returns:
             Targets successfully recorded, for the caller's frontier to filter.
@@ -822,15 +859,43 @@ class SiteGraph:
         source = self._nodes.get(normalize_url(from_url))
         if source is not None:
             source.outbound_links += len(to_urls)
+            source.body_link_count = len(body_urls)
 
+        in_body = frozenset(body_urls)
         recorded: list[str] = []
         for target in to_urls:
             node = self.add(target, dom_link=True, depth=depth + 1)
             if node is None:
                 continue  # Ceiling reached; the graph refused a new node.
             node.inbound_links += 1
+            if target in in_body:
+                node.unique_content_inlinks = (node.unique_content_inlinks or 0) + 1
             recorded.append(target)
         return recorded
+
+    def cap_reading(
+        self, url: str, reading: LinkReading, *, count: bool = True
+    ) -> LinkReading:
+        """Bound one page's links with `cap_links`, and keep the body subset to match.
+
+        The body subset is filtered to the links that survive the cap, in the
+        same order. Otherwise a body link beyond the cap would be counted as an
+        inlink to its target with no matching outbound link on the source, and
+        `unique_content_inlinks` could exceed `inbound_internal_links_count`.
+
+        Args:
+            url: The page the links were read from.
+            reading: Its links and body-region subset.
+            count: As for `cap_links`.
+
+        Returns:
+            The capped links and the body subset that falls within them.
+        """
+        links = self.cap_links(url, reading.links, count=count)
+        if len(links) == len(reading.links):
+            return reading
+        kept = frozenset(links)
+        return LinkReading(links, tuple(link for link in reading.body_links if link in kept))
 
     def record_outcome(self, outcome: str) -> None:
         """Note what became of one fetch attempt.
@@ -894,8 +959,19 @@ class SiteGraph:
             _interned_status(result.redirect_statuses[0]) if result.redirect_statuses else None,
             page_outcome_for(result),
         )
+        if result.is_html:
+            # Declarations are counted in the same scan that yields the value,
+            # so "declared", "how many" and "which" come from one reading of
+            # the body and cannot disagree (ADR 0039).
+            declared = extract_canonical_declarations(result.body or "", result.final_url or url)
+            # "Declared" means the first tag names a usable URL, the same tag the value
+            # is read from. A tag that names nothing usable is counted but not declared:
+            # the profile cannot hold an empty canonical, so it would otherwise be read
+            # back as the page naming itself.
+            node.canonical_declared = bool(declared) and bool(declared[0])
+            node.canonical_link_count = len(declared)
+            node.canonical_url = declared[0] if declared else ""
         if result.is_html and result.body:
-            node.canonical_url = extract_canonical_url(result.body, result.final_url or url)
             signals = extract_content_signals(result.body)
             node.page_title = signals.page_title
             node.page_title_count = signals.page_title_count
@@ -962,11 +1038,21 @@ class SiteGraph:
         self._breadcrumbs.pop(key, None)
         self._jsonld_types.pop(key, None)
         node = self._nodes.get(key)
-        if not html or node is None:
+        if node is None:
             return released
-        labels = extract_breadcrumb(html, node.url).section_labels(self.base_url, node.url)
+        # `""` is "read, and no parent", as distinct from `None`, which is "never
+        # read". Set before the empty-body return: an empty HTML page was read and
+        # has no breadcrumb, and the report must be able to say so (ADR 0039).
+        node.breadcrumb_parent_url = ""
+        if not html:
+            return released
+        trail = extract_breadcrumb(html, node.url)
+        labels = trail.section_labels(self.base_url, node.url)
         if labels:
             self._breadcrumbs[key] = tuple(label[:MAX_BREADCRUMB_LABEL_CHARS] for label in labels)
+        # The same trail, read for the page's parent rather than its section.
+        # Stored as the URL alone: a label is already kept above.
+        node.breadcrumb_parent_url = breadcrumb_parent_url(trail, node.url) or ""
         types = extract_schema_types(html)
         if types:
             self._jsonld_types[key] = types
@@ -993,6 +1079,7 @@ class SiteGraph:
         for text in (
             node.final_url,
             node.canonical_url,
+            node.breadcrumb_parent_url or "",
             node.indexability_reason,
             node.page_title,
             node.meta_description,
@@ -1144,6 +1231,11 @@ class SiteGraph:
                     # A crawl that ran can say "never requested"; only a
                     # result that predates the capture leaves this `None`.
                     fetch_outcome=node.fetch_outcome or OUTCOME_NOT_FETCHED,
+                    canonical_declared=node.canonical_declared,
+                    canonical_link_count=node.canonical_link_count,
+                    body_link_count=node.body_link_count,
+                    breadcrumb_parent_url=node.breadcrumb_parent_url,
+                    unique_content_inlinks=node.unique_content_inlinks,
                 )
             )
         return tuple(evidence)
@@ -1606,10 +1698,10 @@ def _crawl_dom(
         _notify(on_progress, graph, fetched, recent)
         _checkpoint(on_checkpoint, graph)
 
-        links = graph.cap_links(
-            url, extract_page_links(result, url, document_url=graph.landed_url(url))
+        reading = graph.cap_reading(
+            url, read_page_links(result, url, document_url=graph.landed_url(url))
         )
-        for target in graph.record_links(url, links, depth):
+        for target in graph.record_links(url, reading.links, depth, reading.body_links):
             key = normalize_url(target)
             if key not in seen:
                 seen.add(key)

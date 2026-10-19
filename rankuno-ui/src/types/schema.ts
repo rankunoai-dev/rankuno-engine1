@@ -191,6 +191,11 @@ export interface FullPageIntelligenceProfile {
   http_status: number | null;
   first_redirect_status: number | null;
   fetch_outcome: string | null;
+  canonical_declared: boolean | null;
+  canonical_link_count: number | null;
+  body_link_count: number | null;
+  breadcrumb_parent_url: string | null;
+  unique_content_inlinks: number | null;
 }
 
 /** A content record retrieved from a CMS API. */
@@ -234,6 +239,11 @@ export interface DiscoveredNode {
   http_status: number | null;
   first_redirect_status: number | null;
   fetch_outcome: string | null;
+  canonical_declared: boolean | null;
+  canonical_link_count: number | null;
+  body_link_count: number | null;
+  breadcrumb_parent_url: string | null;
+  unique_content_inlinks: number | null;
 }
 
 /** Summary of one discovery pass. */

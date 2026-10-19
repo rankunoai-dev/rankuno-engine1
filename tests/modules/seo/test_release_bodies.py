@@ -195,14 +195,14 @@ def test_4_seeds_that_normalise_to_the_homepage_are_fetched_and_credited_once(tm
 
 
 def test_5_an_extraction_error_never_credits_and_aborts_as_before(tmp_path, monkeypatch, ledger):
-    real = async_discovery.extract_page_links
+    real = async_discovery.read_page_links
 
-    def failing(html: str, base_url: str, **kwargs: Any) -> tuple[str, ...]:
+    def failing(html: str, base_url: str, **kwargs: Any) -> Any:
         if base_url.endswith("/b/"):
             raise RuntimeError("boom")
         return real(html, base_url, **kwargs)
 
-    monkeypatch.setattr(async_discovery, "extract_page_links", failing)
+    monkeypatch.setattr(async_discovery, "read_page_links", failing)
     site = small_site()
     account = MemoryBudget(10**12, 5).open("job")
     graph, report = crawl(tmp_path, site, release=True, account=account)

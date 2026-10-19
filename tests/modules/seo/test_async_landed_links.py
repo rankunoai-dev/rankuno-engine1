@@ -26,6 +26,7 @@ from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier import async_discovery
 from src.modules.seo.page_classifier.async_discovery import adiscover_site
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph, discover_site
+from src.modules.seo.page_classifier.discovery_parsers import LinkReading
 
 from tests.modules.seo.golden_site_factory import (
     BASE,
@@ -73,15 +74,17 @@ class TestAnExtractionErrorAbortsWhereItAlwaysDid:
     def test_earlier_pages_record_links_and_the_crawl_stops_at_the_failing_one(
         self, tmp_path, monkeypatch, seed
     ):
-        real = async_discovery.extract_page_links
+        # Patched at the primitive the landed page now calls. Failing there is the
+        # same failure point the test always meant: link extraction for one page.
+        real = async_discovery.read_page_links
 
-        def failing(html: str, base_url: str, **kwargs: object) -> tuple[str, ...]:
+        def failing(html: str, base_url: str, **kwargs: object) -> LinkReading:
             if base_url.endswith("/b/"):
                 msg = "boom"
                 raise RuntimeError(msg)
             return real(html, base_url, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(async_discovery, "extract_page_links", failing)
+        monkeypatch.setattr(async_discovery, "read_page_links", failing)
         graph, report = run_async(tmp_path, self.SITE, seed)
 
         assert report.stopped_reason == "RuntimeError: boom"

@@ -56,6 +56,17 @@ SEEDS = (1, 2, 3)
 # other field -- indexability included -- is byte-identical. The new fields are
 # pinned by `test_http_status_capture`.
 STATUS_FIELDS = ("http_status", "first_redirect_status", "fetch_outcome")
+# Added with the link and breadcrumb facts (ADR 0039). Excluded from the pinned
+# projection for the same reason as `STATUS_FIELDS`: the snapshot keeps proving
+# every field that existed before is byte-identical. These are pinned by
+# `test_link_field_capture`, `test_body_region_links` and the sync/async parity test.
+LINK_FIELDS = (
+    "canonical_declared",
+    "canonical_link_count",
+    "body_link_count",
+    "breadcrumb_parent_url",
+    "unique_content_inlinks",
+)
 
 
 def canonical(value: object) -> str:
@@ -98,7 +109,9 @@ def project_graph(graph: SiteGraph) -> dict[str, Any]:
         # the projection rather than written into it: the snapshot keeps
         # pinning the evidence contract as it stood. The new field has its own
         # equality test against the body (`test_fetch_time_extraction`).
-        dumped = item.model_dump(mode="json", exclude={"jsonld_types", *STATUS_FIELDS})
+        dumped = item.model_dump(
+            mode="json", exclude={"jsonld_types", *STATUS_FIELDS, *LINK_FIELDS}
+        )
         dumped["html"] = _sha(item.html)
         evidence.append(dumped)
     return {
@@ -115,7 +128,8 @@ def run_tool(settings: Settings, site: dict[str, Route], *, seed: int | None) ->
     assert result.ok, result.error
     assert result.data is not None
     data: dict[str, Any] = result.data.model_dump(
-        mode="json", exclude={"pages": {"__all__": set(STATUS_FIELDS)}}
+        mode="json",
+        exclude={"pages": {"__all__": {*STATUS_FIELDS, *LINK_FIELDS}}},
     )
     return data
 

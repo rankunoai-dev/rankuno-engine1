@@ -33,7 +33,7 @@ import re
 from collections.abc import Mapping
 from enum import StrEnum
 from html.parser import HTMLParser
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qsl, urlencode, urljoin, urlunsplit
 from xml.etree import ElementTree
 
@@ -47,9 +47,11 @@ from src.modules.seo.page_classifier.url_rules import is_crawlable_url, safe_spl
 
 __all__ = [
     "MAX_SITEMAP_ENTRIES",
+    "LinkReading",
     "SitemapDocument",
     "SitemapKind",
     "extract_page_links",
+    "read_page_links",
     "extract_sitemap_links",
     "parse_link_header",
     "parse_shopify_records",
@@ -243,16 +245,28 @@ def parse_sitemap(xml_text: str, source_name: str = "") -> SitemapDocument:
 
 
 class _AnchorCollector(HTMLParser):
-    """Collect every `<a href>` in a document, and the first `<base href>`."""
+    """Collect every `<a href>` in a document, and the first `<base href>`.
+
+    Also records where the first `<main>` and the first `<article>` open and
+    close, as indices into `hrefs`. Links are kept in document order, so a span
+    of indices is exactly the set of links inside that element. This is how the
+    body region is read without a second parse or a second link list.
+    """
 
     def __init__(self) -> None:
         """Start with no links collected."""
         super().__init__(convert_charrefs=True)
         self.hrefs: list[str] = []
         self.base_href: str | None = None
+        self._main: list[int] | None = None
+        self._article: list[int] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        """Record anchor targets and the document's base URL."""
+        """Record anchor targets, the document's base URL and region openings."""
+        if tag == "main" and self._main is None:
+            self._main = [len(self.hrefs), -1]
+        elif tag == "article" and self._article is None:
+            self._article = [len(self.hrefs), -1]
         if tag == "base" and self.base_href is None:
             # Only the first `<base>` carrying an href counts, as in a browser.
             for name, value in attrs:
@@ -266,6 +280,27 @@ class _AnchorCollector(HTMLParser):
             if name.lower() == "href" and value:
                 self.hrefs.append(value.strip())
                 return
+
+    def handle_endtag(self, tag: str) -> None:
+        """Close the first `<main>` or `<article>` at the links seen so far."""
+        if tag == "main" and self._main is not None and self._main[1] < 0:
+            self._main[1] = len(self.hrefs)
+        elif tag == "article" and self._article is not None and self._article[1] < 0:
+            self._article[1] = len(self.hrefs)
+
+    def body_region(self) -> tuple[int, int] | None:
+        """The `hrefs` index span of the body region, or `None` for the whole body.
+
+        The region is the first `<main>`, else the first `<article>`, else
+        nothing: a page with neither has no marked content, and every link it
+        carries is counted as body. A region never closed by its end tag runs to
+        the last link, which is what a browser would render for it.
+        """
+        for span in (self._main, self._article):
+            if span is not None:
+                end = span[1] if span[1] >= 0 else len(self.hrefs)
+                return (span[0], end)
+        return None
 
 
 def _resolution_base(base_href: str | None, landed_url: str, site: str) -> str:
@@ -288,6 +323,22 @@ def _resolution_base(base_href: str | None, landed_url: str, site: str) -> str:
         _logger.debug("base_href_ignored", extra={"url": landed_url, "base_href": base_href})
         return landed_url
     return resolved
+
+
+class LinkReading(NamedTuple):
+    """The links one document carries, and the subset inside its body region.
+
+    Attributes:
+        links: Every outbound page link, de-duplicated and in document order.
+            Identical to what `extract_page_links` returns.
+        body_links: The links in `links` whose anchor sits inside the body
+            region (first `<main>`, else first `<article>`, else the whole
+            document). Header, footer and navigation links are outside a
+            `<main>` and so are not here. Always a subset of `links`.
+    """
+
+    links: tuple[str, ...]
+    body_links: tuple[str, ...]
 
 
 def extract_page_links(
@@ -321,8 +372,41 @@ def extract_page_links(
     Returns:
         Absolute URLs, de-duplicated and order-preserved.
     """
+    return read_page_links(
+        html, base_url, same_host_only=same_host_only, document_url=document_url
+    ).links
+
+
+def read_page_links(
+    html: str,
+    base_url: str,
+    *,
+    same_host_only: bool = True,
+    document_url: str = "",
+) -> LinkReading:
+    """Read a document's links, and which of them sit in its body region.
+
+    One parse serves both answers. `extract_page_links` is defined as this
+    function's `links`, so the flat link list cannot drift from the region-aware
+    one: there is a single resolution and filtering path, and a link is either
+    kept by it or dropped by it for both readers.
+
+    Why a region at all: a link to a page from the site's header menu is on
+    every page, so counting it as an inlink says nothing about the page that
+    links. Counting only links inside `<main>` (or `<article>`) reads what the
+    author placed in the content.
+
+    Args:
+        html: Raw page HTML.
+        base_url: As for `extract_page_links`.
+        same_host_only: As for `extract_page_links`.
+        document_url: As for `extract_page_links`.
+
+    Returns:
+        The links and the body-region subset, both in document order.
+    """
     if not html:
-        return ()
+        return LinkReading((), ())
 
     collector = _AnchorCollector()
     try:
@@ -336,9 +420,11 @@ def extract_page_links(
     base_split = safe_split(base_url)
     base_host = site_host(base_split.netloc) if base_split else ""
     resolve_against = _resolution_base(collector.base_href, document_url or base_url, base_host)
+    region = collector.body_region()
     found: dict[str, None] = {}
+    in_body: dict[str, None] = {}
 
-    for href in collector.hrefs:
+    for index, href in enumerate(collector.hrefs):
         if href.startswith(_SKIP_LINK_PREFIXES):
             continue
         try:
@@ -366,9 +452,12 @@ def extract_page_links(
             continue
         if not is_crawlable_url(absolute):
             continue
-        found[absolute.split("#", 1)[0]] = None
+        link = absolute.split("#", 1)[0]
+        found[link] = None
+        if region is None or region[0] <= index < region[1]:
+            in_body[link] = None
 
-    return tuple(found)
+    return LinkReading(tuple(found), tuple(in_body))
 
 
 class _SitemapLinkCollector(HTMLParser):

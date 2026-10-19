@@ -3,6 +3,9 @@
 - **Status**: Accepted
 - **Date**: 2026-08-06
 - **Deciders**: AI Lead, Lead AI Systems Engineer
+- **Amended by**: [ADR 0039](0039-the-page-records-its-link-and-breadcrumb-facts-at-fetch.md)
+  (2026-10-19): five optional fields for the page's declared canonical, body-region link
+  counts and breadcrumb parent. The contract above is otherwise unchanged.
 
 ---
 

@@ -626,6 +626,31 @@ class FullPageIntelligenceProfile(StrictModel):
     """One `discovery.OUTCOME_*` value for the last attempt, or `not_fetched`.
     Tells "no response" (timeout, transport, guardrail) from "never requested"."""
 
+    # Link and breadcrumb facts (ADR 0039, amending ADR 0002). Each defaults to
+    # `None`, which reads as "not recorded": a profile stored before these were
+    # captured must render "Not recorded (older crawl)", never a measured zero.
+    canonical_declared: bool | None = None
+    """`True` when the page declares at least one usable canonical tag, `False`
+    when it declares none, `None` when no HTML was read. `canonical_url` is the
+    page's own URL in the `False` case, so this is what tells the two apart."""
+
+    canonical_link_count: int | None = Field(default=None, ge=0)
+    """Canonical tags with a non-empty `href` in the head window. Above one is
+    a defect in its own right, and the count is what reports it."""
+
+    body_link_count: int | None = Field(default=None, ge=0)
+    """Outbound links whose anchor sits in the body region. Never more than
+    `outbound_internal_links_count`, which counts the whole document."""
+
+    breadcrumb_parent_url: str | None = Field(default=None, max_length=2048)
+    """URL of the last breadcrumb step before the page itself. `""` when the body
+    was read and there is no usable parent (no breadcrumb, or an unlinked one);
+    `None` when no body was read. The report reads the two differently."""
+
+    unique_content_inlinks: int | None = Field(default=None, ge=0)
+    """Distinct source pages whose body region links to this URL. Unlike
+    `inbound_internal_links_count` it ignores header, footer and navigation."""
+
     @model_validator(mode="after")
     def _check_taxonomy_pair(self) -> FullPageIntelligenceProfile:
         """Reject incoherent level/type combinations at construction time.

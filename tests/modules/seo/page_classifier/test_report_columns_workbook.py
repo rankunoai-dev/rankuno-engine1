@@ -1,6 +1,6 @@
 """The trailing "All URLs" columns as a client receives them, in the xlsx and PDF.
 
-Pins the column contract (A-L byte-stable, nine columns appended in order),
+Pins the column contract (A-L byte-stable, fourteen columns appended in order),
 checks the new cells for the edge cases through the real workbook, and shows
 the PDF still carries exactly its original twelve columns. The per-column rules
 are in `test_report_columns.py`.
@@ -53,6 +53,11 @@ NEW_HEADERS = [
     "Final URL",
     "Indexability",
     "Indexability Reason",
+    "Canonical Status",
+    "Canonical URL",
+    "Canonical Links (count)",
+    "Unique Content Inlinks",
+    "Breadcrumb Parent URL",
 ]
 
 
@@ -68,7 +73,7 @@ def _all_urls(
 
 
 class TestHeaders:
-    """The column contract: A-L untouched, nine columns appended in order."""
+    """The column contract: A-L untouched, fourteen columns appended in order."""
 
     def test_trailing_headers_are_pinned_in_order(self) -> None:
         assert list(TRAILING_HEADERS) == NEW_HEADERS
@@ -80,7 +85,7 @@ class TestHeaders:
     def test_the_twelve_legacy_headers_are_unchanged(self) -> None:
         headers, _ = _all_urls((make_page(),))
         assert headers[:12] == LEGACY_HEADERS
-        assert len(headers) == 21
+        assert len(headers) == 26
 
     def test_other_sheets_keep_their_headers(self) -> None:
         book = load_workbook(MasterURLReport(make_result(make_page())).generate())
@@ -183,7 +188,7 @@ class TestWorkbookRows:
         assert row[0] == "https://e.com/p/"
         assert row[headers.index("GSC Clicks")] == 4
         assert row[headers.index("GSC Impressions")] == 80
-        assert len(row) == 21
+        assert len(row) == 26
 
 
 class TestPdfUnchanged:

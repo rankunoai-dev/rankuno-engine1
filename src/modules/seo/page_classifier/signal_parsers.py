@@ -56,6 +56,7 @@ __all__ = [
     "Indexability",
     "NavLink",
     "PageEvidence",
+    "extract_canonical_declarations",
     "extract_canonical_url",
     "extract_robots_directives",
     "extract_schema_types",
@@ -217,6 +218,30 @@ def extract_canonical_url(html: str, base_url: str) -> str:
     Returns:
         The absolute canonical URL, or `""`.
     """
+    declared = extract_canonical_declarations(html, base_url)
+    return declared[0] if declared else ""
+
+
+def extract_canonical_declarations(html: str, base_url: str) -> tuple[str, ...]:
+    """Every canonical declaration in the head window, in document order.
+
+    The count of canonical tags is needed beside the value: a page naming two
+    canonicals is a defect the client must see, and the first tag alone hides
+    it. Both are taken from this one scan, so they cannot disagree.
+
+    Each entry is one declaration as `extract_canonical_url` reads it: the
+    absolute URL, or `""` when the declaration is malformed or over-long. A tag
+    with an empty `href`, or one whose `href` will not resolve at all, is not a
+    declaration and is not listed.
+
+    Args:
+        html: Raw page HTML.
+        base_url: The page's own URL, for resolving a relative `href`.
+
+    Returns:
+        One entry per declaration, `""` where the declared URL was screened out.
+    """
+    declared: list[str] = []
     for tag in _LINK_TAG.finditer(html[:_HEAD_SCAN_BYTES]):
         attrs = {
             name.lower(): (double or single or bare)
@@ -238,15 +263,17 @@ def extract_canonical_url(html: str, base_url: str) -> str:
         # a site that emits `<a href=` into an address emits it into a canonical
         # too, and 91 such URLs were measured on one crawl.
         if safe_split(absolute) is None or is_malformed_url(absolute):
-            return ""
+            declared.append("")
+            continue
         # Dropped rather than truncated: a truncated URL is one the site never
         # named. `MAX_URL_LENGTH` is the audit contract's own limit, so an
         # over-long canonical could never have been exported anyway — and it
         # outlives the body, so its length is memory the crawl holds per page.
         if len(absolute) > MAX_URL_LENGTH:
-            return ""
-        return str(absolute)
-    return ""
+            declared.append("")
+            continue
+        declared.append(absolute)
+    return tuple(declared)
 
 
 class PageEvidence(StrictModel):
@@ -312,6 +339,19 @@ class PageEvidence(StrictModel):
             (`extract_schema_types`). Lets Signal 4 run on evidence that no
             longer carries the body; when `html` is present it is read instead,
             so a corpus or test fixture holding only HTML is unaffected.
+        canonical_declared: Whether the page declares at least one usable
+            canonical tag. `None` when the fetch was never recorded or the
+            response was not HTML; `False` is a measured "none declared".
+        canonical_link_count: Canonical tags with a non-empty `href` in the
+            head window. Counted in the same scan as `canonical_url`.
+        body_link_count: Outbound links whose anchor sits inside the body
+            region (first `<main>`, else first `<article>`, else the whole
+            document). `None` when the body was not read.
+        breadcrumb_parent_url: URL of the last breadcrumb step before the page
+            itself. `""` when the body was read and there is no usable parent;
+            `None` when no body was read.
+        unique_content_inlinks: Distinct source pages whose body region links
+            here. Counted at discovery, never stored as a set.
     """
 
     url: str = Field(min_length=1)
@@ -342,6 +382,11 @@ class PageEvidence(StrictModel):
     http_status: int | None = None
     first_redirect_status: int | None = None
     fetch_outcome: str | None = None
+    canonical_declared: bool | None = None
+    canonical_link_count: int | None = Field(default=None, ge=0)
+    body_link_count: int | None = Field(default=None, ge=0)
+    breadcrumb_parent_url: str | None = None
+    unique_content_inlinks: int | None = Field(default=None, ge=0)
 
 
 class _NavLinkExtractor(HTMLParser):

@@ -212,7 +212,7 @@ class TestIndexability:
 
 class TestTrailingCells:
     def test_returns_one_value_per_trailing_header(self) -> None:
-        assert len(trailing_cells(make_page())) == len(TRAILING_HEADERS) == 9
+        assert len(trailing_cells(make_page())) == len(TRAILING_HEADERS) == 14
 
     def test_workbook_cell_for_a_not_fetched_page_is_empty(self) -> None:
         """A blank cell is `None` in the workbook, not the text "None"."""

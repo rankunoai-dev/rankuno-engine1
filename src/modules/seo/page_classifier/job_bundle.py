@@ -86,11 +86,12 @@ STRICT_URL_FIELDS = frozenset(
 """Fields that must be http/https with a host. Each is a URL the crawler fetched,
 was redirected to or was told to use, so anything else is not a real crawl."""
 
-CANONICAL_URL_FIELDS = frozenset({"result.pages.canonical_url"})
-"""A site's *claim* about itself, recorded verbatim. Real crawls carry malformed
-values (`www.http://example.com/...` in 10 of 1,333 local results), so only a
-real non-http scheme is refused: no scheme, or a dotted prefix that is a broken
-host rather than a scheme, is accepted as text."""
+CANONICAL_URL_FIELDS = frozenset({"result.pages.canonical_url", "result.pages.breadcrumb_parent_url"})
+"""A site's *claim* about itself, recorded verbatim: its canonical, and the parent
+its breadcrumb names (ADR 0039). Real crawls carry malformed values
+(`www.http://example.com/...` in 10 of 1,333 local results), so only a real
+non-http scheme is refused: no scheme, or a dotted prefix that is a broken host
+rather than a scheme, is accepted as text."""
 
 NOT_A_LINK_URL_FIELDS = frozenset({"result.gsc.property_url", "request.gsc_property_url"})
 """URL-named fields not walked: a Search Console property is legitimately
@@ -222,6 +223,8 @@ def _url_values(bundle: JobImportBundle) -> Iterator[tuple[str, str, _Check]]:
         at = f"result.pages[{i}]"
         yield f"{at}.url", page.url, _strict_ok
         yield f"{at}.canonical_url", page.canonical_url, _canonical_ok
+        if page.breadcrumb_parent_url:
+            yield f"{at}.breadcrumb_parent_url", page.breadcrumb_parent_url, _canonical_ok
         if page.final_url:
             yield f"{at}.final_url", page.final_url, _strict_ok
         for j, hop in enumerate(page.redirect_chain):
