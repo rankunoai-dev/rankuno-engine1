@@ -40,12 +40,13 @@ from typing import Annotated, ClassVar, Literal, Protocol, runtime_checkable
 from pydantic import Field
 
 from src.core.base_tool import BaseTool
-from src.core.config import get_settings
+from src.core.config import DEFAULT_ORG_ID, get_settings
 from src.core.errors import (
     CrawlBlockedError,
     GscAuthorizationError,
     GscPropertyNotFoundError,
 )
+from src.core.ga4_access_store import GA4_PROPERTY_ID_PATTERN, Ga4AccessStore
 from src.core.logger import get_logger
 from src.core.memory_budget import MemoryAccount
 from src.core.rate_limiter import CostLedger
@@ -73,6 +74,7 @@ from src.modules.seo.page_classifier.discovery import (
     SiteGraph,
     discover_site,
 )
+from src.modules.seo.page_classifier.ga4_enrichment import Ga4EnrichmentReport, run_ga4_enrichment
 from src.modules.seo.page_classifier.gsc_aggregator import GscMetricsAggregator
 from src.modules.seo.page_classifier.logical_hierarchy import (
     OTHERS_LABEL,
@@ -97,6 +99,7 @@ from src.modules.seo.url_filter import URLFilter
 
 __all__ = [
     "CrawlSummary",
+    "Ga4EnrichmentReport",
     "GscEnrichmentReport",
     "GscEnrichmentStatus",
     "LlmPageClassifier",
@@ -277,6 +280,13 @@ class PageClassificationInput(StrictModel):
     unknown name is refused, not defaulted — querying the wrong client's
     property is worse than no enrichment."""
 
+    ga4_property_id: Annotated[str, Field(pattern=GA4_PROPERTY_ID_PATTERN)] | None = None
+    """The GA4 property to join page metrics from, or `None` for no GA4 (ADR 0038).
+
+    A numeric id, not a credential, so it is safe to persist and replay. It must
+    equal the organisation's mapped property at intake and again at the crawl:
+    the request never chooses a property on its own."""
+
     include_patterns: list[str] | None = Field(
         default=None,
         description="Optional URL whitelist patterns (wildcard or regex). "
@@ -436,6 +446,9 @@ class PageClassificationOutput(StrictModel):
     navigation: NavigationTree = NavigationTree()
     nav_coverage: NavCoverageReport = NavCoverageReport()
     gsc: GscEnrichmentReport | None = None
+    ga4: Ga4EnrichmentReport | None = None
+    """What GA4 enrichment did (ADR 0038). `None` on a result stored before GA4
+    existed, which is not the same claim as `not_requested`."""
 
 
 class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificationOutput]):
@@ -474,6 +487,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         org_id: str | None = None,
         cancel_event: threading.Event | None = None,
         memory_account: MemoryAccount | None = None,
+        ga4_access_store: Ga4AccessStore | None = None,
         **kwargs: object,
     ) -> None:
         """Build the tool.
@@ -522,6 +536,10 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 caller, and a request must never be able to name or size its
                 own budget. Honoured by the async path only; `None` means no
                 budget applies.
+            ga4_access_store: Org GA4 access persistence (ADR 0038). Constructor-
+                injected for the same tenancy reason as `org_id`: the org's
+                mapping decides which property may be read. `None` means GA4
+                is unavailable and a requested property is reported as unmapped.
             **kwargs: Forwarded to `BaseTool`.
         """
         super().__init__(**kwargs)  # type: ignore[arg-type]
@@ -536,6 +554,9 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
         self._org_id = org_id
         self._cancel_event = cancel_event
         self._memory_account = memory_account
+        # Constructor-injected like the GSC accounts' org: the org's GA4 mapping
+        # decides what a request may read, and a request cannot nominate it.
+        self._ga4_access_store = ga4_access_store
 
     def describe_invocation(self, payload: PageClassificationInput) -> str:
         """Operator-facing summary. Names the site, not the object graph."""
@@ -591,6 +612,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             pages = self._classify_all(evidence, site_profile, payload)
             navigation, nav_coverage, pages = self._apply_navigation(graph, payload.base_url, pages)
             pages, gsc = self._enrich_with_gsc(pages, payload)
+            pages, ga4 = self._enrich_with_ga4(pages, payload)
             pages = self._enrich_with_navigation_context(pages)
         finally:
             if owns_fetcher:
@@ -620,6 +642,31 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
             navigation=navigation,
             nav_coverage=nav_coverage,
             gsc=gsc,
+            ga4=ga4,
+        )
+
+    def _enrich_with_ga4(
+        self,
+        pages: tuple[FullPageIntelligenceProfile, ...],
+        payload: PageClassificationInput,
+    ) -> tuple[tuple[FullPageIntelligenceProfile, ...], Ga4EnrichmentReport]:
+        """Attach GA4 path totals when the crawl asked for them (ADR 0038).
+
+        Delegates to `run_ga4_enrichment`, which never raises for a GA4 failure:
+        the crawl completes either way, and the report says which outcome applied.
+
+        A crawl that did not ask for GA4 returns before reading `Settings`, so the
+        operator configuration is read exactly as often as it was before ADR 0038.
+        """
+        if payload.ga4_property_id is None:
+            return pages, Ga4EnrichmentReport(status="not_requested", pages_crawled=len(pages))
+        return run_ga4_enrichment(
+            pages,
+            base_url=payload.base_url,
+            ga4_property_id=payload.ga4_property_id,
+            org_id=self._org_id or DEFAULT_ORG_ID,
+            store=self._ga4_access_store,
+            settings=get_settings(),
         )
 
     def _apply_navigation(

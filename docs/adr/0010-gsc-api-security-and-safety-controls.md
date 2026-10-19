@@ -85,7 +85,10 @@ We must identify every possible scenario where Google could rate-limit, block, f
 
 ## ✅ Safety Checklist Before Code Execution
 
-1. [x] **Scope**: Set to `webmasters.readonly` ONLY.
+1. [x] **Scope**: Set to `webmasters.readonly` ONLY for Search Console. *Amended by [ADR 0038](0038-ga4-access-is-a-separate-read-only-credential-per-org.md):
+   GA4 is a separate API. It uses its own credential, stored separately, and the read-only
+   `analytics.readonly` scope (an assumption to confirm). A Search Console token is never used for
+   GA4, and a GA4 call refuses any grant that lacks the GA4 scope.*
 2. [x] **Rate Limiter**: Token bucket enforced in `base_client.py` (60 QPM).
 3. [x] **Credentials**: Stored in `SecretStr` / `.env.local` (gitignored).
 4. [x] **OAuth Type**: Configured as "Internal" in Google Cloud Console.

@@ -11,6 +11,7 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 import { CRAWL_SPEEDS, DEFAULT_CRAWL_REQUEST } from "../../adapters/adapterInterface";
+import type { Ga4Mapping } from "../../adapters/adapterInterface";
 import { gscPropertyError } from "../../lib/gscEnrichment";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import type { PageClassificationInput } from "../../types/schema";
@@ -33,6 +34,32 @@ const MAX_CONCURRENCY = 200;
 /** Polite's concurrency, reused as the custom field's seed value. */
 const POLITE_CONCURRENCY = CRAWL_SPEEDS.find((option) => option.key === "polite")?.concurrency ?? 5;
 
+/** A GA4 mapping, `"error"` when it could not be read, or `null` while it is being read. */
+type Ga4State = Ga4Mapping | "error" | null;
+
+/** Whether the organisation has a mapped property a crawl may read. */
+function ga4IsMapped(state: Ga4State): boolean {
+  return state !== null && state !== "error" && state.status === "mapped" && state.property_id !== null;
+}
+
+/** Off first, which is the default, then the mapped property when there is one. */
+function ga4Options(state: Ga4State): { value: string; label: string }[] {
+  const off = { value: "", label: "Off (not requested)" };
+  if (!ga4IsMapped(state) || state === null || state === "error") return [off];
+  return [off, { value: state.property_id as string, label: `GA4 property ${state.property_id}` }];
+}
+
+/** The reason beside the control: why GA4 is on offer, or why it is not. Fixed text. */
+function ga4Extra(state: Ga4State): string {
+  if (state === null) return "Checking GA4 access for this organisation…";
+  if (state === "error") return "GA4 status could not be loaded, so GA4 is not requested for this crawl.";
+  if (state.status === "mapped") return "Adds GA4 sessions and views for this site's paths. Off by default.";
+  if (state.status === "unmapped") {
+    return "Not requested: a GA4 credential is stored but no property is mapped. Choose one under GSC Accounts → GA4 access.";
+  }
+  return "Not requested: GA4 access is not set up for this organisation. Add it under GSC Accounts → GA4 access.";
+}
+
 /** Form fields the operator controls. The rest of the payload uses defaults. */
 interface FormValues {
   base_url: string;
@@ -41,6 +68,9 @@ interface FormValues {
    *  "nothing chosen", so the default option needs a real value. Mapped to
    *  `null` on submit. */
   gsc_account: string;
+  /** A mapped GA4 property id, or `""` for off. Off is the default, and the
+   *  only value the form offers when the organisation has no mapping (ADR 0038). */
+  ga4_property_id: string;
   max_pages: number | null;
   max_depth: number | null;
   speed: SpeedChoice;
@@ -72,6 +102,11 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
   const [speed, setSpeed] = useState<SpeedChoice>("polite");
   const [accounts, setAccounts] = useState<string[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
+  // `null` until the mapping is read; `"error"` when reading it failed. Both
+  // leave GA4 off, and the control says which (ADR 0038).
+  const [ga4Mapping, setGa4Mapping] = useState<Ga4Mapping | "error" | null>(null);
+  const ga4Offered = adapter?.getGa4Mapping !== undefined;
+  const mappedGa4Property = ga4IsMapped(ga4Mapping) ? (ga4Mapping as Ga4Mapping).property_id : null;
   // Drive the soft custom-rate warning below without duplicating the
   // engine's own live ETA (`JobTelemetry.eta_seconds`) — this is a rough,
   // single-host lower bound to flag an obviously slow combination, not an
@@ -108,6 +143,30 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
     };
   }, [open, adapter]);
 
+  // Read on every open, like the account list: a mapping changed on the
+  // accounts screen must show here without a reload. Off until it is read.
+  useEffect(() => {
+    if (!open) return;
+    const read = adapter?.getGa4Mapping;
+    if (!read) {
+      setGa4Mapping(null);
+      return;
+    }
+    let cancelled = false;
+    setGa4Mapping(null);
+    read
+      .call(adapter)
+      .then((mapping) => {
+        if (!cancelled) setGa4Mapping(mapping);
+      })
+      .catch(() => {
+        if (!cancelled) setGa4Mapping("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, adapter]);
+
   async function submit(): Promise<void> {
     const values = await form.validateFields();
     const { speed: _speed, custom_rate: _customRate, custom_concurrency: _customConcurrency, ...rest } = values;
@@ -134,6 +193,12 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
       // `""` is the default option, and an absent field (no picker rendered)
       // is `undefined`; both mean the engine's default credentials.
       gsc_account: values.gsc_account || null,
+      // Only the mapped property is ever sent. Off, unmapped and unreadable
+      // all send null, which the engine reads as "GA4 not requested" (ADR 0038).
+      ga4_property_id:
+        mappedGa4Property !== null && values.ga4_property_id === mappedGa4Property
+          ? mappedGa4Property
+          : null,
     };
 
     setSubmitting(true);
@@ -173,6 +238,7 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           base_url: "",
           gsc_property_url: null,
           gsc_account: "",
+          ga4_property_id: "",
           max_pages: DEFAULT_CRAWL_REQUEST.max_pages,
           max_depth: null,
           speed: "polite",
@@ -249,6 +315,21 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
                 { value: "", label: "Default (.env.local)" },
                 ...accounts.map((name) => ({ value: name, label: name })),
               ]}
+            />
+          </Form.Item>
+        )}
+
+        {ga4Offered && (
+          <Form.Item
+            name="ga4_property_id"
+            label="GA4 property"
+            extra={ga4Extra(ga4Mapping)}
+          >
+            <Select
+              disabled={!ga4IsMapped(ga4Mapping)}
+              loading={ga4Mapping === null}
+              virtual={false}
+              options={ga4Options(ga4Mapping)}
             />
           </Form.Item>
         )}

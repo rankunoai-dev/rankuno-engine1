@@ -137,3 +137,12 @@ The security review found two defects on the existing path:
   made durable by this ADR.
 - The rate limiter and circuit breaker are per process (CLAUDE.md §8). This is acceptable at
   `numReplicas = 1`.
+
+## Note (2026-10-19, ADR 0038): a GA4 credential is encrypted by the same cipher, under its own label
+
+GA4 access is a second credential, held per organisation in `org_ga4_access` (migration 012). It
+is encrypted with this ADR's key and cipher, but under a **different AAD label**
+(`rankuno-ga4-cred-v1`, field `ga4_refresh_token`, bound to the org). A ciphertext from
+`org_gsc_accounts` therefore fails authentication in the GA4 table, and the reverse, even under
+the same key. The rotation procedure above covers both: re-saving rows under the current key is
+needed for GA4 rows too. No GSC row, column or key format changed. See ADR 0038.

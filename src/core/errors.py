@@ -11,6 +11,10 @@ __all__ = [
     "BudgetExceededError",
     "ConfigurationError",
     "CrawlBlockedError",
+    "Ga4AccessStoreUnavailableError",
+    "Ga4CredentialDecryptionError",
+    "Ga4NotAuthorizedError",
+    "Ga4UnavailableError",
     "GscAccountStoreUnavailableError",
     "GscAuthenticationError",
     "GscAuthorizationError",
@@ -84,6 +88,54 @@ class GscCredentialDecryptionError(RankunoError):
             f"Stored credentials for GSC account '{account_name}' cannot be decrypted "
             "with this server's key; re-add the account."
         )
+
+
+class Ga4AccessStoreUnavailableError(RankunoError):
+    """The org GA4 access store cannot answer, so no GA4 credential may be used.
+
+    The GA4 twin of `GscAccountStoreUnavailableError` (ADR 0038). Fixed message:
+    a database error can quote a row, and that row holds ciphertext.
+    """
+
+    def __init__(self) -> None:
+        """Build the one fixed, safe-to-render message."""
+        super().__init__("GA4 access storage is temporarily unavailable; try again shortly.")
+
+
+class Ga4CredentialDecryptionError(RankunoError):
+    """The stored GA4 credential cannot be decrypted with this server's keys.
+
+    Carries no organisation, token or ciphertext. The remedy is the same as for
+    GSC: the operator re-authorises GA4 for the organisation (ADR 0038).
+    """
+
+    def __init__(self) -> None:
+        """Build the one fixed, safe-to-render message."""
+        super().__init__("Stored GA4 credentials cannot be decrypted; re-add the GA4 access.")
+
+
+class Ga4NotAuthorizedError(RankunoError):
+    """The GA4 credential lacks the granted scope, or Google refuses it or the property.
+
+    Fail-closed: raised before any report is requested. The message is the fixed
+    operator-facing reason the UI shows, never a response body (ADR 0038).
+    """
+
+    def __init__(self) -> None:
+        """Build the one fixed, safe-to-render message."""
+        super().__init__("not authorized, re-add the account")
+
+
+class Ga4UnavailableError(RankunoError):
+    """Google's GA4 endpoints could not be reached or refused for a transient reason.
+
+    Distinct from `Ga4NotAuthorizedError` so an outage is never reported as a
+    permission problem, and never as "no data".
+    """
+
+    def __init__(self) -> None:
+        """Build the one fixed, safe-to-render message."""
+        super().__init__("GA4 is unavailable right now; the crawl continues without GA4 data")
 
 
 class GuardrailViolationError(RankunoError):

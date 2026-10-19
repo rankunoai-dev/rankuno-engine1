@@ -21,7 +21,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from src.core.errors import GscAccountStoreUnavailableError
+from src.core.errors import Ga4AccessStoreUnavailableError, GscAccountStoreUnavailableError
 from src.core.logger import get_logger
 
 __all__ = ["install_error_handlers", "redact_validation_errors"]
@@ -50,6 +50,17 @@ def install_error_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"detail": jsonable_encoder(redact_validation_errors(exc.errors()))},
+        )
+
+    @app.exception_handler(Ga4AccessStoreUnavailableError)
+    async def _ga4_store_unavailable(
+        request: Request, exc: Ga4AccessStoreUnavailableError
+    ) -> JSONResponse:
+        """GA4 access store outage: 503 with the fixed message, as for GSC (ADR 0038)."""
+        _logger.warning("ga4_access_store_unavailable", extra={"path": request.url.path})
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": str(exc)},
         )
 
     @app.exception_handler(GscAccountStoreUnavailableError)

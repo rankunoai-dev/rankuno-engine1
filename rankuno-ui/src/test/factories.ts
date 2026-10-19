@@ -63,6 +63,8 @@ export function page(
     gsc_clicks: null,
     gsc_impressions: null,
     gsc_ctr: null,
+    ga4_screen_page_views: null,
+    ga4_sessions: null,
     gsc_avg_position: null,
     navigation_discovery_method: null,
     navigation_reachability_tier: null,
@@ -162,6 +164,7 @@ export function crawl(
     // Search Console, which is also the shape of every result stored before the
     // engine recorded an outcome. A test that wants an outcome states it.
     gsc: null,
+    ga4: null,
     ...overrides,
     pages,
   };

@@ -35,6 +35,7 @@ from src.core.worker_dispatch_keys import DispatchSigningKey, DispatchVerifyKey
 
 if TYPE_CHECKING:
     from src.core.auth import OperatorStore
+    from src.core.ga4_access_store import Ga4AccessStore
     from src.core.gsc_account_store import GscAccountStore
     from src.core.schemas import GscAccountCredential
     from src.core.state_store import OrgConfigStore
@@ -459,6 +460,58 @@ class Settings(BaseSettings):
             "wrote still decrypt; every new write uses the current key. Remove it "
             "once every account has been re-saved."
         ),
+    )
+
+    # -- GA4 caps (ADR 0038). Operator settings, not facts: every value below is
+    # UNVERIFIED against Google's current documented quotas and must be confirmed
+    # before a hosted deployment relies on it.
+    ga4_requests_per_minute: int = Field(
+        default=60,
+        ge=1,
+        le=10_000,
+        description="UNVERIFIED. Sustained GA4 requests per minute this process allows.",
+    )
+    ga4_max_pages_per_crawl: int = Field(
+        default=50_000,
+        ge=1,
+        le=500_000,
+        description=(
+            "UNVERIFIED. A crawl with more pages than this skips GA4 enrichment "
+            "(status over_cap) rather than attaching a partial, unlabelled join."
+        ),
+    )
+    ga4_max_rows_per_request: int = Field(
+        default=10_000,
+        ge=1,
+        le=100_000,
+        description="UNVERIFIED. Row limit sent on each GA4 report request.",
+    )
+    ga4_max_list_pages: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="UNVERIFIED. Account-summary pages read when listing properties.",
+    )
+    ga4_daily_calls_per_org: int = Field(
+        default=200,
+        ge=0,
+        le=100_000,
+        description=(
+            "UNVERIFIED. GA4 calls one organisation may make per UTC day, counted "
+            "in-process. Multi-worker deployments multiply it (CLAUDE.md §8)."
+        ),
+    )
+    ga4_breaker_failure_threshold: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description="Consecutive GA4 transport failures before the service breaker opens.",
+    )
+    ga4_breaker_recovery_s: float = Field(
+        default=60.0,
+        gt=0.0,
+        le=3_600.0,
+        description="Seconds the GA4 service breaker stays open before a probe.",
     )
 
     # -- API authentication (ADR 0016) ---------------------------------------
@@ -919,6 +972,10 @@ class Settings(BaseSettings):
                 raise ConfigurationError(msg)
         self._org_config_store: OrgConfigStore | None = None
         self._gsc_account_store: GscAccountStore | None = None
+        # A flag as well as the cache: a deployment with no GA4 store is a
+        # legitimate answer and must not be rebuilt on every access (ADR 0038).
+        self._ga4_access_store: Ga4AccessStore | None = None
+        self._ga4_access_store_built = False
         # Parsed eagerly, in every environment: a malformed key must stop the
         # process at boot, and must never echo its value (ADR 0037).
         self._gsc_credential_keys = self._parse_gsc_credential_keys()
@@ -1182,6 +1239,42 @@ class Settings(BaseSettings):
 
                 self._gsc_account_store = DiskGscAccountStore(self.org_config_store)
         return self._gsc_account_store
+
+    @property
+    def ga4_access_store(self) -> Ga4AccessStore | None:
+        """Where GA4 access lives, or `None` when this deployment has no GA4 store (ADR 0038).
+
+        Postgres only, on the same selection predicate and the same encryption
+        key as the GSC store. There is deliberately no disk variant: a GA4
+        credential on the container disk is the failure ADR 0037 removed, and a
+        workstation without Postgres reports GA4 as not configured instead.
+
+        Cached, so the breaker state is shared by the API and the crawl.
+
+        Raises:
+            ConfigurationError: Postgres is configured and the credential key is
+                not set. Same rule as the GSC store.
+        """
+        if not self._ga4_access_store_built:
+            from src.core.postgres_config import get_postgres_settings
+
+            if get_postgres_settings().is_configured():
+                from src.core.gsc_credential_crypto import GscCredentialCipher
+                from src.core.postgres_ga4_access_store import PostgresGa4AccessStore
+
+                if self._gsc_credential_keys is None:
+                    msg = (
+                        "GSC_CREDENTIAL_ENCRYPTION_KEY must be set when DATABASE_URL is "
+                        "configured: GA4 access tokens are stored encrypted in Postgres "
+                        "(ADR 0038)."
+                    )
+                    raise ConfigurationError(msg)
+                current, previous = self._gsc_credential_keys
+                self._ga4_access_store = PostgresGa4AccessStore(
+                    GscCredentialCipher(current, previous)
+                )
+            self._ga4_access_store_built = True
+        return self._ga4_access_store
 
     def _check_local_autosignin(self) -> None:
         """Refuse a local sign-in token outside development, or one of the wrong shape.

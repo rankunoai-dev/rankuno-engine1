@@ -225,15 +225,15 @@ class TestJobPasswordHashMigration:
         assert 'revision: str = "010"' in content
         assert 'down_revision: str | None = "009"' in content
 
-    def test_single_head_is_011_and_follows_010(self) -> None:
-        """Was `get_heads() == ["010"]`; 011 (ADR 0037) now follows it."""
+    def test_single_head_is_012_and_follows_011(self) -> None:
+        """Was `get_heads() == ["011"]`; 012 (ADR 0038) now follows it."""
         from alembic.config import Config
         from alembic.script import ScriptDirectory
 
         script = ScriptDirectory.from_config(Config("alembic.ini"))
-        assert script.get_heads() == ["011"]
+        assert script.get_heads() == ["012"]
+        assert script.get_revision("012").down_revision == "011"
         assert script.get_revision("011").down_revision == "010"
-        assert script.get_revision("010").down_revision == "009"
 
     def test_column_is_nullable_text_added_idempotently(self) -> None:
         content = self._content()

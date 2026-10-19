@@ -172,6 +172,10 @@ export interface FullPageIntelligenceProfile {
   gsc_avg_position: number | null;
   /** Click-through rate from GSC */
   gsc_ctr: number | null;
+  /** Screen/page views for this path in GA4 */
+  ga4_screen_page_views: number | null;
+  /** Sessions for this path in GA4 */
+  ga4_sessions: number | null;
   /** WHERE was this page discovered (header, footer, body link, etc) */
   navigation_discovery_method: NavigationDiscoveryMethod | null;
   /** HOW MANY HOPS from homepage (TIER_0_HERO, TIER_1_STANDARD, etc) */
@@ -372,6 +376,18 @@ export interface GscEnrichmentReport {
   reason: string;
 }
 
+/** Whether GA4 metrics were attached, and why they were not. */
+export interface Ga4EnrichmentReport {
+  status: "not_requested" | "succeeded" | "unmapped" | "not_authorized" | "over_cap" | "over_budget" | "failed";
+  property_id: string | null;
+  pages_crawled: number;
+  pages_matched: number;
+  rows_available: number;
+  rows_used: number;
+  truncated: boolean;
+  reason: string;
+}
+
 /** What to crawl, and the limits that apply to it. */
 export interface PageClassificationInput {
   base_url: string;
@@ -392,6 +408,7 @@ export interface PageClassificationInput {
   gsc_property_url: string | null;
   /** Named GSC account profile from GSC_ACCOUNTS__<name>__* in .env.local; None uses the default credentials */
   gsc_account: string | null;
+  ga4_property_id: string | null;
   /** Optional URL whitelist patterns (wildcard or regex). If provided, only URLs matching at least one pattern are included. */
   include_patterns: string[] | null;
   /** Optional URL blacklist patterns (wildcard or regex). If provided, URLs matching any pattern are excluded. */
@@ -411,6 +428,7 @@ export interface PageClassificationOutput {
   navigation: NavigationTree;
   nav_coverage: NavCoverageReport;
   gsc: GscEnrichmentReport | null;
+  ga4: Ga4EnrichmentReport | null;
 }
 
 /** Integers only: nothing here identifies a job, a URL, or another org. */

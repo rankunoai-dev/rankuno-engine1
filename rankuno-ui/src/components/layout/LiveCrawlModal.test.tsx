@@ -246,3 +246,88 @@ describe("LiveCrawlModal GSC property field", () => {
     expect(screen.getByText(/exactly as Search Console lists it/)).toBeInTheDocument();
   });
 });
+
+/**
+ * The GA4 dropdown (ADR 0038).
+ *
+ * Rules under test: GA4 is off by default and is the only choice when the org
+ * has no mapping; the mapped property is the only value ever sent; and each
+ * unmapped or unreadable state carries its own fixed reason beside the control.
+ */
+describe("LiveCrawlModal GA4 dropdown", () => {
+  const GA4_LABEL = "GA4 property";
+  const PROPERTY = "123456789";
+
+  function withGa4(mapping: () => Promise<unknown>): CrawlDataAdapter {
+    return { ...adapter(), getGa4Mapping: mapping } as CrawlDataAdapter;
+  }
+
+  it("is absent when the data source cannot report GA4 access", () => {
+    mount(adapter());
+    expect(screen.queryByText(GA4_LABEL)).not.toBeInTheDocument();
+  });
+
+  it("is off by default and submits null even with a property mapped", async () => {
+    const mapping = vi.fn().mockResolvedValue({ status: "mapped", property_id: PROPERTY });
+    const startCrawl = mount(withGa4(mapping));
+    expect(await screen.findByText("Off (not requested)")).toBeInTheDocument();
+    await waitFor(() => expect(mapping).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Adds GA4 sessions and views for this site's paths. Off by default.")).toBeInTheDocument();
+
+    const request = await submit(startCrawl);
+    expect(request.ga4_property_id).toBeNull();
+  });
+
+  it(
+    "submits the mapped property when the operator turns GA4 on",
+    async () => {
+      const mapping = vi.fn().mockResolvedValue({ status: "mapped", property_id: PROPERTY });
+      const startCrawl = mount(withGa4(mapping));
+      await waitFor(() => expect(mapping).toHaveBeenCalledTimes(1));
+      fireEvent.mouseDown(await screen.findByRole("combobox", { name: GA4_LABEL }));
+      const dropdown = await waitFor(
+        () => {
+          const node = document.querySelector<HTMLElement>(".ant-select-dropdown");
+          if (!node) throw new Error("dropdown not open yet");
+          return node;
+        },
+        { timeout: 15_000 },
+      );
+      fireEvent.click(within(dropdown).getByTitle(`GA4 property ${PROPERTY}`));
+
+      const request = await submit(startCrawl);
+      expect(request.ga4_property_id).toBe(PROPERTY);
+    },
+    30_000,
+  );
+
+  it("says GA4 is not requested when the credential exists but nothing is mapped", async () => {
+    const mapping = vi.fn().mockResolvedValue({ status: "unmapped", property_id: null });
+    const startCrawl = mount(withGa4(mapping));
+    expect(
+      await screen.findByText(/Not requested: a GA4 credential is stored but no property is mapped/),
+    ).toBeInTheDocument();
+
+    const request = await submit(startCrawl);
+    expect(request.ga4_property_id).toBeNull();
+  });
+
+  it("says GA4 access is not set up when the organisation has no credential", async () => {
+    const mapping = vi.fn().mockResolvedValue({ status: "not_configured", property_id: null });
+    mount(withGa4(mapping));
+    expect(
+      await screen.findByText("Not requested: GA4 access is not set up for this organisation. Add it under GSC Accounts → GA4 access."),
+    ).toBeInTheDocument();
+  });
+
+  it("says GA4 status could not be loaded, and still submits nothing", async () => {
+    const mapping = vi.fn().mockRejectedValue(new Error("500"));
+    const startCrawl = mount(withGa4(mapping));
+    expect(
+      await screen.findByText("GA4 status could not be loaded, so GA4 is not requested for this crawl."),
+    ).toBeInTheDocument();
+
+    const request = await submit(startCrawl);
+    expect(request.ga4_property_id).toBeNull();
+  });
+});

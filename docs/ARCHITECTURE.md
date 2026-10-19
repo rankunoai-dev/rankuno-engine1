@@ -119,6 +119,13 @@ src/
 │   │                            # 011). No disk fallback: breaker/DB error ->
 │   │                            # GscAccountStoreUnavailableError (503). Listing
 │   │                            # never decrypts. Logs class + SQLSTATE only
+│   ├── ga4_access_store.py      # ADR 0038: Ga4AccessStore protocol (status, token,
+│   │                            # set credential/property, delete), each org-scoped;
+│   │                            # GA4_PROPERTY_ID_PATTERN; a separate credential from
+│   │                            # GscAccountStore, with no environment fallback
+│   ├── postgres_ga4_access_store.py # ADR 0038: org_ga4_access (migration 012). Fail
+│   │                            # closed like the GSC store; status never reads
+│   │                            # ciphertext; set_property refuses malformed ids
 │   ├── postgres_store.py        # PostgresJobStore (ADR 0022): the same JobStore
 │   │                            # Protocol as state_store.py's DiskJobStore, over
 │   │                            # real Postgres (jobs + job_payloads, migration
@@ -359,6 +366,10 @@ src/
 │   │                            # any lookup for another org; full-match names;
 │   │                            # bounded secrets; principal bucket (429); audit
 │   │                            # events carry org/account/operator_id only
+│   ├── ga4_account_routes.py    # ADR 0038: /orgs/{org}/ga4 status, credential (verified
+│   │                            # before it is stored), /properties (the live list),
+│   │                            # /property (must be in the list), DELETE; /ga4/mapping
+│   │                            # for the crawl form. 403 before lookup; fixed reasons
 │   ├── job_import_routes.py     # ADR 0034: POST /jobs/import. Session -> per-
 │   │                            # operator hourly bucket (import:{operator}, 6/h,
 │   │                            # burst 2) -> application/gzip (415) -> process-
@@ -485,6 +496,14 @@ src/
 │   │                            # robots, per-host throttling. Sync + async.
 │   │                            # FetchResult.redirect_statuses: each hop's
 │   │                            # status, parallel to redirect_chain (0156)
+│   ├── ga4_client.py            # ADR 0038: GA4 BaseAPIClient. Refresh + analytics.readonly
+│   │                            # scope gate (fail closed), property list, one host-
+│   │                            # scoped report over allowlisted fields. 429 retried
+│   │                            # once, 401/403/404 never; service breaker; Settings caps
+│   ├── ga4_budget.py            # ADR 0038: per-org, per-UTC-day GA4 call allowance,
+│   │                            # in process
+│   ├── ga4_schemas.py           # ADR 0038: typed boundary models (no token in a model
+│   │                            # except a SecretStr access token inside one call)
 │   ├── gsc_client.py            # Search Console API (read-only scope, ADR 0010).
 │   │                            # Takes `account=` to pick a named profile (ADR 0012)
 │   │                            # 403/404 propagate (not an empty response);
@@ -601,6 +620,8 @@ src/
     │       │                         # Search Console profile, or None (ADR 0012)
     │       │                         # GSC 403/404 -> enrichment "failed" with a
     │       │                         # fixed reason, never Google's text (0152)
+    │       ├── ga4_enrichment.py     # ADR 0038: one host-scoped GA4 report per crawl,
+    │       │                         # joined by path; fixed statuses and reasons
     │       ├── gsc_aggregator.py     # GSC rows -> crawled pages: exact, then
     │       │                         # whole-URL prefix (scheme + host must agree)
     │       ├── nav_tree_parser.py    # Header menu -> tree (footer excluded)
@@ -882,7 +903,7 @@ src/
 | Audit-log rotation | `setup_logging` attaches a plain `FileHandler`, never a `RotatingFileHandler`, in production as well as under test. `logs/audit.jsonl` reached 510 MB. The test suite no longer feeds it (cycle 0113 redirects `AUDIT_LOG_PATH` in `tests/conftest.py`), which removes the largest contributor but not the growth |
 | A masterfile that names which issue put a URL in the sheet | **Populated is done; shaped is not.** 12 of 21 services produce rows against a real 24,000-page export, up from 4, and `overview_report` no longer crashes ([build-log 0116 §2.1](build-log/0116-three-causes-for-one-empty-workbook.md)). What remains is the output shape: every service emits a **flat URL list with no column naming which issue applied**, and nothing deduplicates across source files, so a URL in both `page_titles_missing.csv` and `page_titles_duplicate.csv` yields two identical, indistinguishable rows. RAE's equivalent is 18 columns of per-issue flags. `test_one_url_in_several_issue_files_yields_one_row_per_file` pins the current behaviour so the reshape starts from an assertion. This also blocks `pagination`, whose fix needs per-issue rather than per-service indexability (ADR 0020 condition 5), and four services remain unreachable until `Custom Extraction:All` and `Internal Success (2xx) Inlinks` are added to the export manifest — an ADR 0018 allow-list decision ([build-log 0116 §6](build-log/0116-three-causes-for-one-empty-workbook.md)) |
 | A UI for URL include/exclude patterns | `url_filter.py`, the two `PageClassificationInput` fields and their `schema.ts` entries all shipped (build-log 0106). No component sets them, so the feature is reachable only by posting to `/api/v1/jobs` by hand |
-| Any UI or backend for proxy, HTTP auth, custom headers, an SSL-verification opt-out or a GA4 property id | The 4-stage crawl wizard collected all five in `AdvancedStage.tsx`, and nothing accepted them: no `PageClassificationInput` field exists for any of them, and posting them returned `422` on every crawl start until build-log 0109. The wizard was **removed** in cycle 0112 and `DashboardShell` renders `LiveCrawlModal` again, so the fields are no longer collected either. They cannot simply be moved to the Screaming Frog path: `ScreamingFrogJobInput` and `WorkerJobEnvelope` carry only `seed_url` and `template_name` (ADR 0015 condition 8), and `template_registry.py` records that none of these settings has a Screaming Frog CLI flag — they exist only inside an opaque `.seospiderconfig` ([build-log 0112 §3.1](build-log/0112-a-wizard-wired-to-the-wrong-crawler.md)) |
+| Any UI or backend for proxy, HTTP auth, custom headers or an SSL-verification opt-out (a GA4 property id has been accepted since ADR 0038, as a reference to the organisation's mapped property only) | The 4-stage crawl wizard collected all five in `AdvancedStage.tsx`, and nothing accepted them: no `PageClassificationInput` field exists for any of them, and posting them returned `422` on every crawl start until build-log 0109. The wizard was **removed** in cycle 0112 and `DashboardShell` renders `LiveCrawlModal` again, so the fields are no longer collected either. They cannot simply be moved to the Screaming Frog path: `ScreamingFrogJobInput` and `WorkerJobEnvelope` carry only `seed_url` and `template_name` (ADR 0015 condition 8), and `template_registry.py` records that none of these settings has a Screaming Frog CLI flag — they exist only inside an opaque `.seospiderconfig` ([build-log 0112 §3.1](build-log/0112-a-wizard-wired-to-the-wrong-crawler.md)) |
 | A UI that consumes `rankuno-ui/src/lib/validation.ts` | Retained with **zero importers** except its own test. `validateProxyUrl`, `validateRate`, `validateConcurrency`, `validateCustomHeaders`, `validateGA4PropertyId`, `estimateCrawlSeconds`, `formatCrawlTimeEstimate` and `normalizeDomain` are all unconsumed. This row named `lib/urlParser.ts` alongside it until cycle 0120; that file is **deleted** (`2dceae1`). Both were kept in cycle 0112 §6.1 on the reasoning that a Screaming Frog dispatch form would want them. That form shipped in `52532ba` ([build-log 0120](build-log/0120-an-action-beside-the-download.md)) and used **none** of either: the URLs come from a finished crawl the server already holds, so nothing is uploaded to parse, and a second browser-side domain filter would produce a second count that could disagree with the approved one — which is the exact failure ADR 0023's digest exists to prevent. The retention argument is therefore falsified, not merely overtaken, and `validation.ts` survives only because `normalizeDomain`/`parseDomain` were repaired in cycle 0112 for a real defect and discarding that work should be a deliberate decision |
 | ~~The React UI for `modules/seo/screaming_frog_control/` (ADR 0013)~~ | **Closed.** `ScreamingFrogView.tsx` consumes the preview/confirm/templates surface, and `WorkerJobsPanel.tsx` renders dispatched jobs, their progress and their masterfile builds. Row kept rather than deleted so a reader who remembers it can see it was closed and not merely dropped |
 | ~~A cloud dashboard or worker-management screen for ADR 0015's worker dispatch~~ | **Closed.** `ScreamingFrogView.tsx` (worker picker, liveness, template dropdown with each template's description and a count of skipped files — [build-log 0117](build-log/0117-a-sentence-beside-a-binary.md)) and `WorkerJobsPanel.tsx` (job list, progress bar, bundle and masterfile downloads). Row kept rather than deleted so the closure is visible |
@@ -898,7 +919,7 @@ src/
 | Crawl memory, after step 2 ([ADR 0035](adr/0035-a-crawl-releases-each-page-body-once-read.md)) | **Step 2 is done**: bodies are released once read except the homepage's (`CRAWL_RELEASE_PAGE_HTML`, default true), measured 0.0247 MiB/page against 1.45 on ~1 MB pages. What remains: the graph itself is in RAM until the job ends; the budget still does not count sitemap/CMS bodies, the serial fallback, `/result` reads, deliverables, Screaming Frog jobs, imports, or discovered-but-unfetched nodes; links in flight are capped (5,000/page, each ≤ 8,192 chars) and charged until their level is recorded; `links_capped` is not in `DiscoveryReport`; a crawl of small pages now reaches its fair share at ~19k pages (32 KiB floor) where it used to reach ~60k. Not an OOM guarantee |
 | A Layer 2 `ZeroShotClassifier` implementation | Protocol exists; local ONNX model does not |
 | An `LlmPageClassifier` implementation | Protocol exists; no concrete provider (ADR 0005) |
-| `integrations/google_analytics.py` | GA4 has no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
+| `integrations/google_analytics.py` | No such file. The GA4 connector is `integrations/ga4_client.py` ([ADR 0038](adr/0038-ga4-access-is-a-separate-read-only-credential-per-org.md)), which supplies page-level GA4 totals to a crawl. Before ADR 0038, GA4 had no ingestion at all — see build-log 0042. (A Search Console connector **does** exist: `integrations/gsc_client.py` and siblings, cycles 0055–0064; manual upload via `POST /jobs/{id}/performance/gsc` remains as an alternative. This row wrongly said "no connector exists" until cycle 0075.) |
 | `modules/answer_visibility/` | Phase 7 AI Answer Visibility Engine (AEO & GEO) |
 
 > Two rows were removed from this table in cycle 0039 because they were false.
@@ -1034,6 +1055,7 @@ Consequential decisions are recorded in [adr/](adr/):
 | [0035](adr/0035-a-crawl-releases-each-page-body-once-read.md) | **A crawl releases each page body once it has been read.** Links, content signals, canonical, robots, breadcrumb labels and recognised schema types are read at fetch time; `SiteGraph.store_html` keeps only the homepage's body (`normalize_url` match) and returns whether it released. The budget charges body + `LEAN_PAGE_BYTES` (32 KiB) + measured derived bytes on land and credits the body in the same frame (no `await` between); credits clamp to outstanding body bytes, never pick a victim, and an over-credit fails the test suite. Caps: breadcrumb label 256, schema types 8 distinct ≤ 256 chars, canonical 2,048, fetched and extracted URLs 8,192 (one constant in `core.url_safety`), links 5,000/page, link bytes charged at land and credited when the level records them (an abandoned level keeps its charge). The flag rolls back body release only. Fair share holds structurally; projected ≤ ADR 0031's + pages × LEAN + retained, so small-page crawls reach a share at ~19k pages. `CRAWL_RELEASE_PAGE_HTML=false` is the rollback. Measured 0.0247 vs 1.4504 MiB/page (2,001 × ~1 MB pages) |
 | [0036](adr/0036-the-ui-is-themed-by-overriding-tokens-on-the-root-element.md) | **The UI is themed by overriding the same custom properties on the root element.** `:root[data-theme="dark"]` reassigns the tokens components already use; a neutral `--glass-*` seam resolves to the old values in light; `tokens.ts` mirrors both blocks under test; `backdrop-filter` only on panels and overlays, never repeated rows (20k-node tree); print forced light; a pre-paint script avoids a light flash |
 | [0037](adr/0037-cloud-gsc-credentials-are-encrypted-in-postgres.md) | **Cloud GSC credentials are encrypted in Postgres.** Amends ADR 0010 §3. With Postgres configured, org GSC accounts live in `org_gsc_accounts` (migration 011), not on the container disk Railway wipes. The refresh token and client secret are AES-256-GCM encrypted under `GSC_CREDENTIAL_ENCRYPTION_KEY` (AAD binds key id, org, account and field), required at boot in every environment once Postgres is selected; `..._PREVIOUS` keeps rotated rows readable. `Settings.gsc_account_store` is the one selection point, shared by the API and crawl-time resolution. Fail closed: store errors propagate as 503 (routes, picker, intake) or `failed` enrichment; only a genuine not-found falls through to `.env.local`. An app-wide 422 handler strips `input`/`ctx`. Invalid names are 422. Writes are rate-limited and audited. Local disk behaviour unchanged |
+| [0038](adr/0038-ga4-access-is-a-separate-read-only-credential-per-org.md) | **GA4 access is a separate read-only credential per organisation.** Amends ADR 0010 §1 (GA4 is a second API with its own scope, `analytics.readonly`, an assumption to confirm). One encrypted refresh token and one mapped property per org in `org_ga4_access` (migration 012), under its own AAD label. The scope is read from the refresh response and required before any call; a missing or wrong scope is `not authorized, re-add the account`. Property ids are picked from a live list. Unmapped means not requested, never an environment or default property. One host-scoped report per crawl, joined by path. Caps are Settings fields, all unverified. 429 is retried once; 401/403/404 never. No CostLedger charge. Postgres only. The OAuth consent is operator-run. Unverified against Google and a live Postgres |
 
 ---
 

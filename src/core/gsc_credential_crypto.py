@@ -38,7 +38,11 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import SecretStr
 
-from src.core.errors import ConfigurationError, GscCredentialDecryptionError
+from src.core.errors import (
+    ConfigurationError,
+    Ga4CredentialDecryptionError,
+    GscCredentialDecryptionError,
+)
 
 __all__ = [
     "CredentialField",
@@ -54,6 +58,10 @@ _KEY_BYTES = 32
 _NONCE_BYTES = 12
 _TAG_BYTES = 16
 _AAD_LABEL = b"rankuno-gsc-cred-v1"
+_GA4_AAD_LABEL = b"rankuno-ga4-cred-v1"
+"""A distinct label, so a GSC ciphertext copied into the GA4 table (or the
+reverse) fails authentication even under the same key (ADR 0038)."""
+_GA4_FIELD = b"ga4_refresh_token"
 _KEY_ID_LABEL = b"rankuno-gsc-cred-key-id-v1"
 
 
@@ -110,6 +118,11 @@ def _aad(key_id: str, org_id: str, account_name: str, field: CredentialField) ->
     )
 
 
+def _ga4_aad(key_id: str, org_id: str) -> bytes:
+    """Associated data binding a GA4 token to exactly one (key, org, field)."""
+    return b"|".join((_GA4_AAD_LABEL, key_id.encode("ascii"), org_id.encode("utf-8"), _GA4_FIELD))
+
+
 class GscCredentialCipher:
     """Encrypts with the current key; decrypts with whichever key wrote the row."""
 
@@ -144,6 +157,38 @@ class GscCredentialCipher:
     def __repr__(self) -> str:
         """Key ids only; the key bytes never appear in a repr or a log."""
         return f"GscCredentialCipher(key_ids={sorted(self._keys)})"
+
+    def encrypt_ga4_refresh_token(self, plaintext: str, *, org_id: str) -> bytes:
+        """Encrypt an organisation's GA4 refresh token under the current key.
+
+        A separate AAD label and field from the GSC columns (ADR 0038), bound
+        to the org alone because GA4 access is one credential per organisation.
+
+        Returns:
+            `nonce || ciphertext+tag`, to store beside `self.key_id`.
+        """
+        nonce = os.urandom(_NONCE_BYTES)
+        aad = _ga4_aad(self.key_id, org_id)
+        return nonce + AESGCM(self._keys[self.key_id]).encrypt(
+            nonce, plaintext.encode("utf-8"), aad
+        )
+
+    def decrypt_ga4_refresh_token(self, blob: bytes, *, key_id: str, org_id: str) -> str:
+        """Decrypt an organisation's GA4 refresh token written under `key_id`.
+
+        Raises:
+            Ga4CredentialDecryptionError: The key is not held, the blob is
+                malformed or tampered with, or it belongs to another org.
+        """
+        key = self._keys.get(key_id)
+        if key is None or len(blob) < _NONCE_BYTES + _TAG_BYTES:
+            raise Ga4CredentialDecryptionError
+        nonce, body = blob[:_NONCE_BYTES], blob[_NONCE_BYTES:]
+        try:
+            plaintext = AESGCM(key).decrypt(nonce, body, _ga4_aad(key_id, org_id))
+            return plaintext.decode("utf-8")
+        except (InvalidTag, UnicodeDecodeError):
+            raise Ga4CredentialDecryptionError from None
 
     def encrypt(
         self, plaintext: str, *, org_id: str, account_name: str, field: CredentialField

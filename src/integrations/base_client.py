@@ -59,8 +59,17 @@ class BaseAPIClient(ABC):
 
         self._settings = settings or get_settings()
         self._bucket: TokenBucket = _SHARED_LIMITERS.get_or_create(
-            type(self).rate_limit_key, type(self).requests_per_minute
+            type(self).rate_limit_key, self._quota_per_minute()
         )
+
+    def _quota_per_minute(self) -> int:
+        """The sustained request rate this client's bucket enforces.
+
+        Defaults to the class variable. A connector whose vendor quota is an
+        operator setting, not a fact the code can state, overrides this to read
+        `Settings` (ADR 0038 does, for GA4).
+        """
+        return type(self).requests_per_minute
 
     @abstractmethod
     def authenticate(self) -> None:
@@ -71,7 +80,13 @@ class BaseAPIClient(ABC):
         """
         raise NotImplementedError
 
-    def call(self, operation: str, func: Callable[[], ResultT]) -> ResultT:
+    def call(
+        self,
+        operation: str,
+        func: Callable[[], ResultT],
+        *,
+        max_attempts: int | None = None,
+    ) -> ResultT:
         """Run one outbound request under the platform's standard protections.
 
         Order matters: the rate limiter runs *before* the retry wrapper, so a
@@ -81,6 +96,9 @@ class BaseAPIClient(ABC):
             operation: Short label for the audit log, e.g. `"query_analytics"`.
             func: Zero-argument callable performing the actual request. Bind
                 arguments with a lambda or `functools.partial`.
+            max_attempts: Total attempts including the first. `None` keeps the
+                configured default. A connector with a stricter quota contract
+                (GA4 retries a 429 once, ADR 0038) lowers it per call.
 
         Returns:
             Whatever `func` returns.
@@ -100,7 +118,7 @@ class BaseAPIClient(ABC):
             return func()
 
         try:
-            result = with_retries(attempt)
+            result = with_retries(attempt, max_attempts=max_attempts)
         except (GuardrailViolationError, IntegrationError):
             raise
         except Exception as exc:

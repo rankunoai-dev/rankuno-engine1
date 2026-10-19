@@ -74,15 +74,17 @@ from src.api.auth import build_auth_router, org_scoped_or_404, require_principal
 from src.api.crawl_activity import CrawlActivityCounter, build_crawl_activity_router
 from src.api.deliverables_routes import build_deliverables_router
 from src.api.error_handlers import install_error_handlers
+from src.api.ga4_account_routes import build_ga4_account_router
 from src.api.gsc_account_routes import build_gsc_account_router
 from src.api.job_import_routes import build_job_import_router
 from src.api.job_view import JobView, job_views
 from src.api.local_signin import build_local_signin_router, ensure_local_operator
 from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password, verify_password
-from src.core.config import ProcessRole, Settings, get_settings
+from src.core.config import DEFAULT_ORG_ID, ProcessRole, Settings, get_settings
 from src.core.errors import ConfigurationError, UnsafeUrlError
 from src.core.facet_router import FacetRouter
+from src.core.ga4_access_store import Ga4AccessStore
 from src.core.gsc_account_store import DiskGscAccountStore, GscAccountStore
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
 from src.core.local_signin import DEFAULT_LINK_TTL_S, LocalSigninGate
@@ -922,6 +924,7 @@ class ApiState:
         dispatch_signing_key: DispatchSigningKey | None = None,
         memory_budget: MemoryBudget | None = None,
         gsc_account_store: GscAccountStore | None = None,
+        ga4_access_store: Ga4AccessStore | None = None,
     ) -> None:
         """Build the shared state.
 
@@ -931,6 +934,8 @@ class ApiState:
             org_config_store: Organization configuration persistence.
             gsc_account_store: Org GSC account persistence (ADR 0037).
                 Defaults to the disk store over `org_config_store`.
+            ga4_access_store: Org GA4 access persistence (ADR 0038). `None`
+                means this deployment has no GA4 store, reported as not configured.
             max_concurrent_jobs: Simultaneous crawls before requests are refused.
                 (Deprecated in Phase 1: per-facet limits now apply instead.)
             deliverable_store: Persistence for workbook build jobs. A
@@ -991,6 +996,7 @@ class ApiState:
             if gsc_account_store is not None
             else DiskGscAccountStore(org_config_store)
         )
+        self.ga4_access_store: Ga4AccessStore | None = ga4_access_store
         self.max_concurrent_jobs = max_concurrent_jobs
         self.facet_router = FacetRouter(max_concurrent=max_concurrent_jobs)
         self.memory_budget = memory_budget or MemoryBudget(
@@ -1471,6 +1477,7 @@ def create_app(
     process_ledger_path: Path | None = None,
     dispatch_signing_key: DispatchSigningKey | None = None,
     gsc_account_store: GscAccountStore | None = None,
+    ga4_access_store: Ga4AccessStore | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -1536,6 +1543,9 @@ def create_app(
         gsc_account_store: Org GSC account persistence (ADR 0037). Defaults
             to `_default_gsc_account_store`, which is the same object
             crawl-time credential resolution reads.
+        ga4_access_store: Org GA4 access persistence (ADR 0038). Defaults to
+            `Settings.ga4_access_store`, which is Postgres-only, so a workstation
+            without a database has no GA4 store and reports GA4 as not configured.
 
     Returns:
         The configured application.
@@ -1582,6 +1592,11 @@ def create_app(
         if gsc_account_store is not None
         else _default_gsc_account_store(org_config_store, resolved_org_config_store)
     )
+    # GA4 (ADR 0038): the Settings selection point, which is Postgres-only. An
+    # injected store wins, and a test that injects none gets None, not a store.
+    resolved_ga4_access_store: Ga4AccessStore | None = (
+        ga4_access_store if ga4_access_store is not None else get_settings().ga4_access_store
+    )
     resolved_operator_store: OperatorStore = (
         operator_store if operator_store is not None else get_settings().operator_store
     )
@@ -1605,6 +1620,7 @@ def create_app(
         url_policy=url_policy if url_policy is not None else UrlSafetyPolicy(),
         org_config_store=resolved_org_config_store,
         gsc_account_store=resolved_gsc_account_store,
+        ga4_access_store=resolved_ga4_access_store,
         max_concurrent_jobs=(
             max_concurrent_jobs
             if max_concurrent_jobs is not None
@@ -1709,6 +1725,7 @@ def create_app(
     app.include_router(build_auth_router(state), prefix=API_PREFIX)
     app.include_router(build_job_import_router(state), prefix=API_PREFIX)
     app.include_router(build_gsc_account_router(state), prefix=API_PREFIX)
+    app.include_router(build_ga4_account_router(state), prefix=API_PREFIX)
     app.include_router(build_worker_router(state), prefix=API_PREFIX)
     app.include_router(build_crawl_activity_router(state), prefix=API_PREFIX)
     if local_signin_gate is not None:
@@ -2298,6 +2315,22 @@ def create_app(
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
                     detail=f"unknown GSC account '{payload.gsc_account}'",
+                )
+
+        # GA4 (ADR 0038). Checked against the org's own mapping, because a crawl
+        # may only read the property the org mapped, and a request cannot choose
+        # one. A refusal here is a fixed message; no GA4 call is made at intake.
+        if payload.ga4_property_id is not None:
+            ga4_store = state.ga4_access_store
+            if ga4_store is None:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, detail="GA4 is not configured on this server"
+                )
+            if ga4_store.status(org_id or DEFAULT_ORG_ID).property_id != payload.ga4_property_id:
+                _logger.warning("job_rejected_unmapped_ga4_property", extra={"org": org_id})
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail="the requested GA4 property is not mapped for this organisation",
                 )
 
         # Capacity is claimed *before* the record exists. The other order

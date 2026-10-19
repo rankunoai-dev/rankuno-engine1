@@ -728,6 +728,18 @@ export interface WorkerJobView {
 }
 
 /**
+ * An organisation's GA4 access, as `GET /ga4/mapping` returns it (ADR 0038).
+ *
+ * `not_configured` means no GA4 credential is stored. `unmapped` means one is
+ * stored but no property is chosen, so GA4 is not requested. `mapped` carries
+ * the numeric property id crawls may read. Never a credential.
+ */
+export interface Ga4Mapping {
+  status: "not_configured" | "unmapped" | "mapped";
+  property_id: string | null;
+}
+
+/**
  * How the UI reaches crawl data.
  *
  * One interface, two implementations: `MockAdapter` today, an HTTP adapter when
@@ -821,6 +833,15 @@ export interface CrawlDataAdapter {
    * the modal shows no picker and the default credentials apply.
    */
   listGscAccounts?(): Promise<string[]>;
+
+  /**
+   * The caller's organisation's GA4 access: whether a credential is stored and
+   * which property, if any, crawls may read (ADR 0038). Never a credential.
+   *
+   * Optional for the same reason as `listGscAccounts`: when it is absent the
+   * crawl form shows no GA4 control at all and GA4 is simply not requested.
+   */
+  getGa4Mapping?(): Promise<Ga4Mapping>;
 
   /**
    * Desktop workers registered to the caller's org, with the server's own
@@ -1077,6 +1098,7 @@ export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   // `null` is the flat default credentials, not "no account". A name here
   // must be one the engine lists, or the crawl is refused at admission.
   gsc_account: null,
+  ga4_property_id: null,
   // Empty for an operator-started crawl. Only a resume supplies these, and the
   // engine builds that request itself from the original job's checkpoint —
   // there is no UI control for it, and there should not be: a hand-typed seed

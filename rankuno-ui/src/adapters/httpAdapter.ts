@@ -13,6 +13,7 @@ import type {
   DispatchConfirmRequest,
   DispatchPreview,
   DispatchPreviewRequest,
+  Ga4Mapping,
   MasterfileService,
   PerformanceSummary,
   ReconciliationSummary,
@@ -645,6 +646,14 @@ export class HttpAdapter implements CrawlDataAdapter {
   async listGscAccounts(): Promise<string[]> {
     const view = await this.request<{ accounts: string[] }>("/gsc/accounts");
     return view.accounts;
+  }
+
+  /**
+   * The caller's organisation's GA4 mapping (ADR 0038). Not cached: a mapping
+   * changed on the accounts screen must show on the next crawl form opened.
+   */
+  async getGa4Mapping(): Promise<Ga4Mapping> {
+    return this.request<Ga4Mapping>("/ga4/mapping");
   }
 
   async startJob(request: PageClassificationInput): Promise<string> {

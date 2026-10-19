@@ -48,6 +48,7 @@ from src.modules.seo.page_classifier.discovery import (  # noqa: E402
     DiscoveryReport,
     DiscoverySource,
 )
+from src.modules.seo.page_classifier.ga4_enrichment import Ga4EnrichmentReport  # noqa: E402
 from src.modules.seo.page_classifier.logical_hierarchy import (  # noqa: E402
     NavCoverageReport,
 )
@@ -124,6 +125,7 @@ MODELS: tuple[type[BaseModel], ...] = (
     JobProvenance,
     CrawlSummary,
     GscEnrichmentReport,
+    Ga4EnrichmentReport,
     PageClassificationInput,
     PageClassificationOutput,
     CrawlActivityView,

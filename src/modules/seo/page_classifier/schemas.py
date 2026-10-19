@@ -580,6 +580,15 @@ class FullPageIntelligenceProfile(StrictModel):
         default=None, ge=0.0, le=1.0, description="Click-through rate from GSC"
     )
 
+    # GA4 enrichment (ADR 0038). Path-level totals: every URL sharing a path
+    # carries the same values, because GA4 reports the path without its query.
+    ga4_screen_page_views: int | None = Field(
+        default=None, ge=0, description="Screen/page views for this path in GA4"
+    )
+    ga4_sessions: int | None = Field(
+        default=None, ge=0, description="Sessions for this path in GA4"
+    )
+
     # Navigation Context (Phase 8a: provides analyst context about discoverability)
     navigation_discovery_method: NavigationDiscoveryMethod | None = Field(
         default=None, description="WHERE was this page discovered (header, footer, body link, etc)"

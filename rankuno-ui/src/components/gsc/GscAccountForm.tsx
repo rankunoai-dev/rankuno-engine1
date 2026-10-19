@@ -2,6 +2,7 @@ import { Form, Input, Modal, Spin, message } from "antd";
 import type { FormInstance } from "antd";
 import { useRef, useState } from "react";
 import { API_BASE, ApiError, authorizedFetch } from "../../adapters/httpAdapter";
+import { Ga4Section } from "./Ga4Section";
 
 interface Props {
   open: boolean;
@@ -149,6 +150,10 @@ export function GscAccountForm({ open, orgId, onClose, onSuccess }: Props): JSX.
           </Form.Item>
         </Form>
       </Spin>
+      {/* A separate credential and endpoint set, so it is not part of the
+          submit above. Collapsed until opened, so the account form makes no
+          GA4 request on open (ADR 0038). */}
+      <Ga4Section orgId={orgId} />
     </Modal>
   );
 }
