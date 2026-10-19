@@ -12,10 +12,11 @@ interface Props {
 
 /**
  * Width reserved on the right of a category row so its count and branch
- * control are not drawn under this button. Must match the button's width in
- * `.vspacer .tdl` (tree-overlay.css).
+ * control are not drawn under this button. Equals the control's inset from the
+ * right edge (10px) plus its width (24px) plus 10px of clear space. Must match
+ * `right` and `width` in `.vspacer .tdl` (tree-overlay.css).
  */
-export const CATEGORY_DOWNLOAD_GUTTER = 84;
+export const CATEGORY_DOWNLOAD_GUTTER = 44;
 
 /**
  * The per-category "download these URLs" control.
@@ -50,7 +51,6 @@ export function CategoryDownload({ model, node, top }: Props): JSX.Element {
       <span aria-hidden="true">
         <DownloadOutlined />
       </span>
-      {empty ? "No URLs" : count.toLocaleString()}
     </button>
   );
 }
