@@ -2,9 +2,10 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { SavedReconciliation } from "../../adapters/adapterInterface";
 import { buildDashModel, QUARANTINE_ROOT_LABEL } from "../../lib/dashboardModel";
+import { buildTreeOverlay } from "../../lib/treeOverlay";
 import { useDashboardStore } from "../../store/useDashboardStore";
 import { crawl, page } from "../../test/factories";
-import { VirtualizedTree } from "./VirtualizedTree";
+import { TreeList, VirtualizedTree } from "./VirtualizedTree";
 
 /**
  * The windowed directory tree.
@@ -447,5 +448,47 @@ describe("defaulter leaves", () => {
     const model = quarantined();
     render(<VirtualizedTree model={model} />);
     expect(screen.getByText(QUARANTINE_ROOT_LABEL)).toBeInTheDocument();
+  });
+});
+
+describe("Search Console clicks column", () => {
+  /**
+   * A section row and a leaf both carry a clicks figure, and it must land in
+   * the same right-hand column. The layout is CSS, which jsdom does not apply,
+   * so the assertion is on the structure the CSS depends on: the figure is the
+   * row's last item in both cases, and on a section the branch control comes
+   * before it rather than after.
+   */
+  function withClicks() {
+    const pages = [
+      page("https://e.com/docs/guides/a/", { gsc_clicks: 31, gsc_impressions: 900 }),
+      page("https://e.com/docs/guides/b/", { gsc_clicks: 4, gsc_impressions: 120 }),
+    ];
+    const model = buildDashModel(crawl({ pages }), "path");
+    useDashboardStore.getState().setModel(model);
+    useDashboardStore.getState().expandAll(model, 99);
+    useDashboardStore.getState().setOverlay(buildTreeOverlay(model, null), model);
+    return model;
+  }
+
+  it("places the clicks figure last on a leaf and on a section row", () => {
+    const model = withClicks();
+    const { container } = render(<TreeList model={model} wide />);
+
+    const rows = [...container.querySelectorAll(".vrow")];
+    const leaf = rows.find((row) => row.querySelector("a.tlbl")?.textContent === "a")!;
+    const section = rows.find((row) => row.querySelector(".tbranch"))!;
+    expect(leaf).toBeDefined();
+    expect(section).toBeDefined();
+
+    for (const row of [leaf, section]) {
+      const figure = row.querySelector(".tgsc");
+      expect(figure).not.toBeNull();
+      expect(row.lastElementChild).toBe(figure);
+    }
+    expect(leaf.querySelector(".tgsc")?.textContent).toBe("31 clicks");
+    expect(section.querySelector(".tbranch")!.compareDocumentPosition(section.querySelector(".tgsc")!)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
   });
 });

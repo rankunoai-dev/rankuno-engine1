@@ -132,6 +132,14 @@
   flex: none;
   margin-left: 8px;
 }
+/* A section row's branch control already takes the free space (`.tbranch` in
+   design-system.css), which pushes the whole meta group right. A leaf has no
+   such control, so its clicks take the space instead; otherwise they sit
+   against the title and land in a different column. Two auto margins on one
+   row would split the space between them, hence the `:has` guard. */
+.vrow:not(:has(> .tbranch)) > .tgsc {
+  margin-left: auto;
+}
 
 /* ===== full screen ===== */
 .xfs {
