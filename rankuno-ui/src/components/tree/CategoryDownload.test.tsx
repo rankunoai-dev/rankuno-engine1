@@ -41,8 +41,8 @@ describe("CategoryDownload", () => {
     const blog = model.nodes.find((node) => node.label === "blog")!;
     render(<CategoryDownload model={model} node={blog} top={0} />);
     const button = screen.getByRole("button", { name: "Download URLs for blog" });
-    expect(button).toHaveTextContent("3");
     expect(button).toBeEnabled();
+    expect(button).toHaveAttribute("title", "Download URLs for blog (3 URLs, CSV)");
   });
 
   it("downloads exactly the URLs under the category, as urls-<slug>.csv", () => {
@@ -83,7 +83,6 @@ describe("CategoryDownload", () => {
     render(<CategoryDownload model={model} node={empty} top={0} />);
     const button = screen.getByRole("button", { name: "Download URLs for empty" });
     expect(button).toBeDisabled();
-    expect(button).toHaveTextContent("No URLs");
     expect(button).toHaveAttribute("title", "No URLs under empty to download");
     fireEvent.click(button);
     expect(downloadCsv).not.toHaveBeenCalled();

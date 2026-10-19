@@ -349,35 +349,35 @@
 /* ===== per-category download ===== */
 /* `.vspacer .tdl` (0,2,0), not `.tdl`: the row sits inside `.rk-dash`, where the
    (0,1,1) button reset would strip the chrome from a single-class rule. Same
-   reasoning as `.xctl .xbtn` above. Absolutely placed at the row's own `top`,
-   and the row reserves CATEGORY_DOWNLOAD_GUTTER (84px) so its count is never
-   under this control. */
+   reasoning as `.xctl .xbtn` above. Absolutely placed at the row's own `top`
+   inside `.vspacer`, which is the scroller's content box, so it never sits
+   under the scrollbar. Icon only: no box, border or count text; the count is
+   in the accessible name's title. The row reserves CATEGORY_DOWNLOAD_GUTTER
+   (44px = 10 inset + 24 width + 10 clearance) so its text stays clear. */
 .vspacer .tdl {
   position: absolute;
-  right: 6px;
+  right: 10px;
+  width: 24px;
   height: 24px;
-  width: 78px;
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  border: 1px solid var(--line2);
-  background: var(--panel);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
   border-radius: var(--radius);
-  padding: 0 6px;
-  font-family: var(--mono);
-  font-size: 10px;
+  font-size: 13px;
+  line-height: 1;
   color: var(--dim);
   cursor: pointer;
-  white-space: nowrap;
 }
-.vspacer .tdl:hover { color: var(--ink); border-color: var(--faint); }
+.vspacer .tdl:hover { color: var(--ink); }
 .vspacer .tdl:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .vspacer .tdl:disabled {
   color: var(--faint);
-  border-style: dashed;
   cursor: not-allowed;
-  opacity: 0.7;
+  opacity: 0.5;
 }
-.vspacer .tdl:disabled:hover { color: var(--faint); border-color: var(--line2); }
+.vspacer .tdl:disabled:hover { color: var(--faint); }

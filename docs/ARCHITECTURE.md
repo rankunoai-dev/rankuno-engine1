@@ -614,6 +614,12 @@ src/
     │       │                         # read "Unknown" before, cycle 0123)
     │       ├── fetch_status.py       # Labels + legend for those columns,
     │       │                         # shared by xlsx and PDF (cycle 0156)
+    │       ├── report_columns.py     # Derivation of the nine trailing "All URLs"
+    │       │                         # xlsx columns (Found Via, In Sitemap, Unique
+    │       │                         # Inlinks/Outlinks, Orphan, GSC CTR decimal,
+    │       │                         # Final URL, Indexability, Reason). Derived at
+    │       │                         # export, nothing stored; PDF does not use it
+    │       │                         # (cycle 0159)
     │       ├── tool.py               # GOVERNED ENTRY POINT. One run() = one
     │       │                         # crawl job, RiskClass.READ (ADR 0003).
     │       │                         # Input carries gsc_account: the named
