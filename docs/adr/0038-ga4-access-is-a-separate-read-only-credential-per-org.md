@@ -119,7 +119,7 @@ ciphertext, no CostLedger charge, and a fixed reason for every refusal.
   built `PageClassificationTool` without `ga4_access_store`, so every crawl that named a property
   reported `unmapped`. `src/api/server.py` now passes `state.ga4_access_store`, and
   `tests/api/test_crawl_ga4_wiring.py` drives `POST /jobs` through the real runner to prove it
-  (build-log 0160 §4.3, build-log 0161 §4.1). The tool's `ga4_access_store` still defaults to
+  (build-log 0162 §4.3, build-log 0161 §4.1). The tool's `ga4_access_store` still defaults to
   `None` and does not fall back to `Settings`, so an omitted argument can recur silently (build-log
   0161 §6.5).
 - **Unverified against Google.** The endpoint paths (`accountSummaries`, `runReport`), the field

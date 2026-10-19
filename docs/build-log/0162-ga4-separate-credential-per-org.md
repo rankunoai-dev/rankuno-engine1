@@ -1,4 +1,4 @@
-# Cycle 0160: A second Google credential for GA4, per organisation
+# Cycle 0162: A second Google credential for GA4, per organisation
 
 - **Date**: 2026-10-19
 - **Scope**: GA4 page metrics for a crawl, read with a separate read-only Google credential held per organisation, entered in the GSC account form, with a GA4 dropdown on the new-crawl form (off by default). ADR 0038; ADR 0010 amended; ADR 0037 noted.
@@ -204,8 +204,8 @@ Implementation, commit `6d9d6f3` (44 files, 4,769 insertions, 14 deletions, from
 
 Docs, this change (uncommitted):
 
-- `docs/build-log/0160-ga4-separate-credential-per-org.md` (new, this entry).
-- `docs/build-log/README.md`: index row for 0160.
+- `docs/build-log/0162-ga4-separate-credential-per-org.md` (new, this entry).
+- `docs/build-log/README.md`: index row for 0162.
 - `docs/adr/0038-ga4-access-is-a-separate-read-only-credential-per-org.md`: route set (§4.4), decision 9 (refresh exception), decision 10 (breaker trigger), decision 11 (budget unit), new Known gap for the unwired store.
 - `docs/ARCHITECTURE.md`: `ga4_budget.py` description; ADR 0038 index row (not wired).
 - `README.md`: GA4 row status (not wired).
