@@ -224,3 +224,25 @@ class TestFetchStatusFields:
             assert schema.count(f"  {name}: ") == 2, name
         assert schema.count("  http_status: number | null;") == 2
         assert schema.count("  fetch_outcome: string | null;") == 2
+
+
+class TestLinkFieldsReachTheClient:
+    """ADR 0039: the stored link and breadcrumb facts are typed on both interfaces.
+
+    Nullable, because a result stored before the capture must still type. The
+    profile and the node carry the same five names, so a value cannot be read off
+    the node under one name and rendered off the profile under another.
+    """
+
+    FIELDS = (
+        ("canonical_declared", "boolean | null"),
+        ("canonical_link_count", "number | null"),
+        ("body_link_count", "number | null"),
+        ("breadcrumb_parent_url", "string | null"),
+        ("unique_content_inlinks", "number | null"),
+    )
+
+    def test_each_field_is_typed_on_the_profile_and_the_node(self):
+        schema = exporter.SCHEMA_PATH.read_text(encoding="utf-8")
+        for name, ts_type in self.FIELDS:
+            assert schema.count(f"  {name}: {ts_type};") == 2, name

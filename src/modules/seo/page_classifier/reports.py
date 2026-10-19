@@ -39,9 +39,11 @@ from .fetch_status import (
     http_status_label,
 )
 from .report_columns import (
+    CONTENT_INLINKS_NOTE,
     CTR_DECIMAL_FORMAT,
     CTR_DECIMAL_HEADER,
     TRAILING_HEADERS,
+    UNIQUE_CONTENT_INLINKS_HEADER,
     trailing_cells,
 )
 
@@ -204,6 +206,10 @@ class MasterURLReport:
         ws.append(headers)
         self._style_header_row(ws)
         ws["D1"].comment = Comment(STATUS_LEGEND, "Rankuno", width=420, height=180)
+        content_inlinks_header = headers.index(UNIQUE_CONTENT_INLINKS_HEADER) + 1
+        ws.cell(row=1, column=content_inlinks_header).comment = Comment(
+            CONTENT_INLINKS_NOTE, "Rankuno", width=420, height=140
+        )
         ctr_decimal_column = headers.index(CTR_DECIMAL_HEADER) + 1
 
         for page in self.result.pages:

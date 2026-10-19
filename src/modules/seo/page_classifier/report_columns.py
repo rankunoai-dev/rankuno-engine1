@@ -1,9 +1,11 @@
 """Derived cells for the columns appended to the "All URLs" workbook sheet.
 
-`reports.py` already carries twelve columns. These nine answer the questions an
-analyst asks next: how a URL was found, whether the sitemap listed it, how many
+`reports.py` already carries twelve columns. The first nine answer the questions
+an analyst asks next: how a URL was found, whether the sitemap listed it, how many
 pages link to it, whether nothing links to it, what Search Console's CTR is as a
-decimal, where the fetch landed, and whether the page may be indexed.
+decimal, where the fetch landed, and whether the page may be indexed. The last
+five (ADR 0039) are the canonical the page declares, how many it declares, how
+many pages link to it from their content, and the breadcrumb parent.
 
 Every value is derived at export time from fields the profile already stores.
 Nothing here is persisted, requested, or fetched, so the export can never
@@ -26,26 +28,41 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.modules.seo.page_classifier.discovery import OUTCOME_OK
+
 from .fetch_status import (
     LABEL_NO_RESPONSE,
     LABEL_NOT_FETCHED,
     LABEL_NOT_RECORDED,
     http_status_label,
 )
+from .url_rules import normalize_url
 
 if TYPE_CHECKING:
     from .schemas import FullPageIntelligenceProfile
 
 __all__ = [
+    "BREADCRUMB_PARENT_HEADER",
+    "CANONICAL_LINKS_HEADER",
+    "CANONICAL_STATUS_HEADER",
+    "CANONICAL_URL_HEADER",
+    "CONTENT_INLINKS_NOTE",
     "CTR_DECIMAL_FORMAT",
     "CTR_DECIMAL_HEADER",
     "TRAILING_HEADERS",
+    "UNIQUE_CONTENT_INLINKS_HEADER",
     "trailing_cells",
 ]
 
 CTR_DECIMAL_HEADER = "GSC CTR (decimal)"
 CTR_DECIMAL_FORMAT = "0.000"
 """Shown as 0.023, not 2.3. The existing "GSC CTR %" column is left as it is."""
+
+CANONICAL_STATUS_HEADER = "Canonical Status"
+CANONICAL_URL_HEADER = "Canonical URL"
+CANONICAL_LINKS_HEADER = "Canonical Links (count)"
+UNIQUE_CONTENT_INLINKS_HEADER = "Unique Content Inlinks"
+BREADCRUMB_PARENT_HEADER = "Breadcrumb Parent URL"
 
 TRAILING_HEADERS: tuple[str, ...] = (
     "Found Via",
@@ -57,8 +74,27 @@ TRAILING_HEADERS: tuple[str, ...] = (
     "Final URL",
     "Indexability",
     "Indexability Reason",
+    CANONICAL_STATUS_HEADER,
+    CANONICAL_URL_HEADER,
+    CANONICAL_LINKS_HEADER,
+    UNIQUE_CONTENT_INLINKS_HEADER,
+    BREADCRUMB_PARENT_HEADER,
 )
 """Appended after the twelve legacy columns, in this order. Order is part of the contract."""
+
+CONTENT_INLINKS_NOTE = (
+    "Distinct pages whose main content (the first <main>, else the first <article>) "
+    "links to this URL. A page with neither tag counts links from its whole body, so "
+    "header and footer links are included and that page's contribution is inflated. "
+    "Blank when this URL's own fetch was not ok."
+)
+"""Shown as the header comment. It says where the count is inflated, because a number
+that looks precise but counts the site footer would otherwise be read as content."""
+
+LABEL_CANONICAL_SELF = "Self"
+LABEL_CANONICAL_ELSEWHERE = "Elsewhere"
+LABEL_CANONICAL_MISSING = "Missing"
+LABEL_CANONICAL_MULTIPLE = "Multiple"
 
 _YES = "Yes"
 _NO = "No"
@@ -207,8 +243,93 @@ def indexability_reason(page: FullPageIntelligenceProfile) -> str | None:
     return page.indexability_reason or None
 
 
+def _unrecorded(page: FullPageIntelligenceProfile) -> bool:
+    """Whether an absent value means "predates the capture", not "not measured".
+
+    A profile stored before the link and breadcrumb facts existed can still carry
+    a fetch outcome. Its missing values are unknown, so a fetched page that has
+    one gets the older-crawl label. A URL never fetched, or fetched but not read
+    as HTML, has nothing to measure, and its cell is blank.
+    """
+    return _is_legacy(page) or page.fetch_outcome == OUTCOME_OK
+
+
+def canonical_status(page: FullPageIntelligenceProfile) -> str | None:
+    """What the page's own canonical declaration says about where it should index.
+
+    The order of the checks is load-bearing. "Multiple" comes first: a page
+    naming two canonicals has declared one, so "Self" or "Elsewhere" would hide
+    the defect. "Missing" comes before "Self": the classifier fills an undeclared
+    page's `canonical_url` with the page's own URL, and comparing that would read
+    as a self-declared canonical.
+
+    Returns:
+        One of the labels above, `Not recorded (older crawl)`, or `None` (blank)
+        where the page was not fetched as HTML.
+    """
+    if page.canonical_declared is None:
+        return LABEL_NOT_RECORDED if _unrecorded(page) else None
+    if (page.canonical_link_count or 0) > 1:
+        return LABEL_CANONICAL_MULTIPLE
+    if not page.canonical_declared:
+        return LABEL_CANONICAL_MISSING
+    if normalize_url(page.canonical_url) == normalize_url(page.url):
+        return LABEL_CANONICAL_SELF
+    return LABEL_CANONICAL_ELSEWHERE
+
+
+def canonical_url_cell(page: FullPageIntelligenceProfile) -> str | None:
+    """The canonical the page declared, blank when it declared none.
+
+    The stored `canonical_url` cannot be printed as-is: the classifier fills it
+    with the page's own URL when nothing is declared, and a client reading that
+    would take the page to name itself. `canonical_declared` decides.
+    """
+    if page.canonical_declared is None:
+        return LABEL_NOT_RECORDED if _unrecorded(page) else None
+    if not page.canonical_declared:
+        return None
+    return page.canonical_url or None
+
+
+def canonical_links(page: FullPageIntelligenceProfile) -> int | str | None:
+    """How many canonical tags the page carries, blank where no HTML was read.
+
+    A zero is written only when the body was read and holds none. Every other
+    case is `None`, so a count the crawl never took cannot appear as a zero.
+    """
+    if page.canonical_link_count is None:
+        return LABEL_NOT_RECORDED if _unrecorded(page) else None
+    return page.canonical_link_count
+
+
+def unique_content_inlinks(page: FullPageIntelligenceProfile) -> int | str | None:
+    """Distinct pages whose main content links here, blank unless the fetch was ok.
+
+    The blank for a page whose own fetch failed is the approved rule, and it has
+    a cost: a 404 linked from ten content areas shows nothing, although those ten
+    links are real and are the finding. That trade is stated here so it is not
+    mistaken for a count of zero.
+    """
+    if page.unique_content_inlinks is None:
+        return LABEL_NOT_RECORDED if _unrecorded(page) else None
+    return page.unique_content_inlinks if page.fetch_outcome == OUTCOME_OK else None
+
+
+def breadcrumb_parent(page: FullPageIntelligenceProfile) -> str | None:
+    """The page's breadcrumb parent, blank when it has no breadcrumb.
+
+    The stored value is `""` for a page that was read and has no parent, and
+    `None` for one that was never read. Those are different facts, and only the
+    first is a statement about the site.
+    """
+    if page.breadcrumb_parent_url is None:
+        return LABEL_NOT_RECORDED if _unrecorded(page) else None
+    return page.breadcrumb_parent_url or None
+
+
 def trailing_cells(page: FullPageIntelligenceProfile) -> list[str | int | float | None]:
-    """The nine appended cell values for one page, in `TRAILING_HEADERS` order.
+    """The fourteen appended cell values for one page, in `TRAILING_HEADERS` order.
 
     Returns:
         Values ready for openpyxl. `None` is an empty cell, not the text "None".
@@ -223,4 +344,9 @@ def trailing_cells(page: FullPageIntelligenceProfile) -> list[str | int | float 
         final_url(page),
         indexability(page),
         indexability_reason(page),
+        canonical_status(page),
+        canonical_url_cell(page),
+        canonical_links(page),
+        unique_content_inlinks(page),
+        breadcrumb_parent(page),
     ]

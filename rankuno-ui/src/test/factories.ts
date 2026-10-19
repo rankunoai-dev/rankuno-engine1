@@ -81,6 +81,12 @@ export function page(
     http_status: null,
     first_redirect_status: null,
     fetch_outcome: null,
+    // Not recorded: a fixture describes a page nothing was read from (ADR 0039).
+    canonical_declared: null,
+    canonical_link_count: null,
+    body_link_count: null,
+    breadcrumb_parent_url: null,
+    unique_content_inlinks: null,
     ...overrides,
   };
 }

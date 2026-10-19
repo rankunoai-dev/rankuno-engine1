@@ -77,7 +77,8 @@ from src.modules.seo.page_classifier.discovery import (
     record_fetch_exception,
 )
 from src.modules.seo.page_classifier.discovery_parsers import (
-    extract_page_links,
+    LinkReading,
+    read_page_links,
     extract_sitemap_links,
     parse_link_header,
     parse_shopify_records,
@@ -423,6 +424,11 @@ class _LandedPage:
         links_bytes: What `links` and `links_if_evicted` were charged to the
             memory budget as the page landed, credited back by the level loop
             once it has recorded them. `0` when no budget applies.
+        body_links: The body-region subset of `links`, resolved the same way
+            (`read_page_links`). Carried with the links so the level loop records
+            both from one reading.
+        body_links_if_evicted: The body subset of `links_if_evicted`, set
+            exactly when `links_if_evicted` is.
     """
 
     url: str
@@ -431,19 +437,29 @@ class _LandedPage:
     links_if_evicted: tuple[str, ...] | None = None
     error: Exception | None = None
     links_bytes: int = 0
+    body_links: tuple[str, ...] = ()
+    body_links_if_evicted: tuple[str, ...] | None = None
 
-    def links_for(self, document_url: str) -> tuple[str, ...]:
-        """The links as resolved against `document_url`, which must be one of the two known."""
+    def reading_for(self, document_url: str) -> LinkReading:
+        """The links and body subset as resolved against `document_url`.
+
+        `document_url` must be one of the two addresses this page was resolved
+        against; any other is a bug, and raises rather than guessing.
+        """
         if document_url == self.document_url:
-            return self.links
+            return LinkReading(self.links, self.body_links)
         if self.links_if_evicted is not None and document_url == self.url:
-            return self.links_if_evicted
+            return LinkReading(self.links_if_evicted, self.body_links_if_evicted or ())
         # `final_url` is written only by `record_fetch`, once per URL per crawl,
         # and eviction only ever makes `landed_url` answer `url`. Anything else
         # is a bug in that reasoning, and must not be papered over with links
         # resolved against an address nobody asked about.
         msg = f"{self.url} landed at {self.document_url}, now reported at {document_url}"
         raise AssertionError(msg)
+
+    def links_for(self, document_url: str) -> tuple[str, ...]:
+        """The links as resolved against `document_url`, which must be one of the two known."""
+        return self.reading_for(document_url).links
 
 
 async def _ahtml(
@@ -513,12 +529,12 @@ async def _ahtml(
         memory_account.charge(body_bytes, overhead_bytes=overhead)
     document_url = graph.landed_url(url)
     try:
-        links = graph.cap_links(
-            url, extract_page_links(result.body, url, document_url=document_url)
+        reading = graph.cap_reading(
+            url, read_page_links(result.body, url, document_url=document_url)
         )
         fallback = (
-            graph.cap_links(
-                url, extract_page_links(result.body, url, document_url=url), count=False
+            graph.cap_reading(
+                url, read_page_links(result.body, url, document_url=url), count=False
             )
             if document_url != url
             else None
@@ -534,22 +550,35 @@ async def _ahtml(
     # two. Still no `await` since the body was charged above.
     links_bytes = 0
     if memory_account is not None:
-        links_bytes = _sizeof_links(links) + (_sizeof_links(fallback) if fallback else 0)
+        links_bytes = _sizeof_reading(reading) + (
+            _sizeof_reading(fallback) if fallback is not None else 0
+        )
         memory_account.charge_links(links_bytes)
     if released and memory_account is not None:
         memory_account.credit(body_bytes)
     return _LandedPage(
         url=url,
         document_url=document_url,
-        links=links,
-        links_if_evicted=fallback,
+        links=reading.links,
+        links_if_evicted=fallback.links if fallback is not None else None,
         links_bytes=links_bytes,
+        body_links=reading.body_links,
+        body_links_if_evicted=fallback.body_links if fallback is not None else None,
     )
 
 
 def _sizeof_links(links: tuple[str, ...]) -> int:
     """`getsizeof` of a link tuple and every string in it. O(links), at most 5,000."""
     return sys.getsizeof(links) + sum(sys.getsizeof(link) for link in links)
+
+
+def _sizeof_reading(reading: LinkReading) -> int:
+    """`_sizeof_links` for the links, plus the body subset's own pointer array.
+
+    The body subset holds the same string objects as `links`, so only its tuple
+    is new memory. Counting its strings again would charge the same bytes twice.
+    """
+    return _sizeof_links(reading.links) + sys.getsizeof(reading.body_links)
 
 
 async def adiscover_site(
@@ -992,8 +1021,10 @@ async def _acrawl(
                 continue
             if item.error is not None:
                 raise item.error
-            links = item.links_for(graph.landed_url(item.url))
-            for target in graph.record_links(item.url, links, depth):
+            reading = item.reading_for(graph.landed_url(item.url))
+            for target in graph.record_links(
+                item.url, reading.links, depth, reading.body_links
+            ):
                 key = normalize_url(target)
                 if key not in seen:
                     seen.add(key)

@@ -51,12 +51,18 @@ from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
-from src.modules.seo.page_classifier.url_rules import normalize_url, safe_split
+from src.modules.seo.contracts.audit import MAX_URL_LENGTH
+from src.modules.seo.page_classifier.url_rules import (
+    is_malformed_url,
+    normalize_url,
+    safe_split,
+)
 
 __all__ = [
     "MAX_BREADCRUMB_STEPS",
     "BreadcrumbStep",
     "BreadcrumbTrail",
+    "breadcrumb_parent_url",
     "extract_breadcrumb",
     "is_breadcrumb_container",
 ]
@@ -486,3 +492,39 @@ def extract_breadcrumb(html: str, base_url: str) -> BreadcrumbTrail:
         return BreadcrumbTrail(steps=tuple(steps), source="dom")
 
     return BreadcrumbTrail()
+
+
+def breadcrumb_parent_url(trail: BreadcrumbTrail, page_url: str) -> str | None:
+    """The URL of the crumb a visitor came down from to reach this page.
+
+    The parent is the last step **before** the page. The page is not its own
+    parent, so crumbs naming it are removed wherever they sit, and an unlinked
+    crumb in final position is removed too: that is the conventional "you are
+    here" marker, the same proof `section_labels` relies on. Removing any other
+    unlinked crumb would be a guess, so a parent with no URL yields `None` rather
+    than the nearest linked ancestor.
+
+    Args:
+        trail: The page's breadcrumb trail, as extracted (not reduced by
+            `section_labels`, which would drop the root this rule may need).
+        page_url: The page's own URL.
+
+    Returns:
+        The parent's absolute URL, screened the same way a canonical is, or
+        `None` when there is no breadcrumb or its parent has no usable URL.
+    """
+    steps = trail.steps
+    if not steps:
+        return None
+    target = normalize_url(page_url)
+    kept = [step for step in steps if not (step.url and normalize_url(step.url) == target)]
+    if kept and kept[-1] is steps[-1] and steps[-1].url is None:
+        kept = kept[:-1]
+    if not kept:
+        return None
+    candidate = kept[-1].url
+    if not candidate or safe_split(candidate) is None or is_malformed_url(candidate):
+        return None
+    if len(candidate) > MAX_URL_LENGTH:
+        return None
+    return candidate

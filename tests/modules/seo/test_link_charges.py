@@ -24,7 +24,7 @@ from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier import async_discovery
 from src.modules.seo.page_classifier.async_discovery import adiscover_site
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
-from src.modules.seo.page_classifier.discovery_parsers import extract_page_links
+from src.modules.seo.page_classifier.discovery_parsers import LinkReading, read_page_links
 
 from tests.modules.seo.golden_site_factory import (
     BASE,
@@ -37,6 +37,15 @@ from tests.modules.seo.golden_site_factory import (
 )
 
 ROBOTS = Route(200, "text/plain", "User-agent: *\nDisallow:\n")
+
+
+def sizeof_reading(reading: LinkReading) -> int:
+    """What the landed page charges for its links: the strings, plus the body subset's tuple.
+
+    The body subset holds the same strings as `links`, so only its pointer array is
+    new memory (ADR 0039). It is charged so the budget counts what is actually held.
+    """
+    return sizeof_links(reading.links) + sys.getsizeof(reading.body_links)
 
 
 def sizeof_links(links: tuple[str, ...]) -> int:
@@ -86,10 +95,10 @@ def test_a_redirected_page_is_charged_for_both_readings_of_its_links(tmp_path, l
     }
     account = MemoryBudget(10**12, 5).open("job")
     crawl(tmp_path, site, account)
-    landed = extract_page_links(body, f"{BASE}/moved/", document_url=f"{BASE}/deep/landing/")
-    requested = extract_page_links(body, f"{BASE}/moved/", document_url=f"{BASE}/moved/")
-    assert landed != requested
-    assert sizeof_links(landed) + sizeof_links(requested) in link_charges
+    landed = read_page_links(body, f"{BASE}/moved/", document_url=f"{BASE}/deep/landing/")
+    requested = read_page_links(body, f"{BASE}/moved/", document_url=f"{BASE}/moved/")
+    assert landed.links != requested.links
+    assert sizeof_reading(landed) + sizeof_reading(requested) in link_charges
 
 
 def test_an_abandoned_level_keeps_its_link_charge(tmp_path, monkeypatch, link_charges):
