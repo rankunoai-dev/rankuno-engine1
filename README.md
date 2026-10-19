@@ -433,8 +433,8 @@ panel, fetching `GET /jobs/{id}/urls.xlsx` — every URL the crawl found, as a
 3-sheet workbook (All URLs, By Indexability, By HTTP Status) built by
 `MasterURLReport` (`modules/seo/page_classifier/reports.py`). A "Download URLs
 (PDF)" entry sits directly below it, fetching `GET /jobs/{id}/urls.pdf` —
-the same "All URLs" columns as a flat, printable table (landscape A4, via
-`MasterURLReport.generate_pdf`), for a client deliverable or an email
+the first twelve "All URLs" columns as a flat, printable table (landscape A4, via
+`MasterURLReport.generate_pdf`; the PDF does not carry the nine trailing columns below), for a client deliverable or an email
 attachment rather than a spreadsheet ([ADR 0024](docs/adr/0024-pdf-url-export-uses-reportlab-in-core-dependencies.md);
 [build-log 0124](docs/build-log/0124-a-pdf-beside-the-workbook.md)). The
 "HTTP Status" column shows the page's final status code, with a second
@@ -443,6 +443,13 @@ attachment rather than a spreadsheet ([ADR 0024](docs/adr/0024-pdf-url-export-us
 read `No response`, and results stored before the status was captured read
 `Not recorded (older crawl)` ([build-log 0156](docs/build-log/0156-every-row-said-unknown.md);
 earlier, build-log 0123 had it read `Unknown` because no status reached the report).
+The xlsx "All URLs" sheet then carries nine trailing columns after those twelve:
+Found Via, In Sitemap, Unique Inlinks, Unique Outlinks, Orphan, GSC CTR (decimal,
+format `0.000`), Final URL, Indexability and Indexability Reason. Each is derived
+at export from fields the profile already stores, and is blank where the crawl did
+not measure it. "Orphan" here is a plain discovery-graph count (sitemap-listed, no
+crawled link, no CMS record, no inbound link), not the navigation `ORPHANED`
+status ([build-log 0159](docs/build-log/0159-nine-columns-the-export-did-not-have.md)).
 Until cycle 0130 neither item actually downloaded: the UI called the adapter's
 download methods detached from the adapter, so they threw before sending a
 request ([build-log 0131](docs/build-log/0131-a-method-called-without-its-object.md)).

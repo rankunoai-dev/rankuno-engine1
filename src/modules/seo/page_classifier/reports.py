@@ -38,6 +38,12 @@ from .fetch_status import (
     first_redirect_label,
     http_status_label,
 )
+from .report_columns import (
+    CTR_DECIMAL_FORMAT,
+    CTR_DECIMAL_HEADER,
+    TRAILING_HEADERS,
+    trailing_cells,
+)
 
 if TYPE_CHECKING:
     from .schemas import FullPageIntelligenceProfile
@@ -178,6 +184,8 @@ class MasterURLReport:
         """Sheet 1: All URLs with complete data."""
         ws = self.workbook.create_sheet("All URLs", 0)
 
+        # Columns A-L are the original contract and keep their order. The
+        # trailing columns are appended and must never move an existing one.
         headers = [
             "URL",
             "Hierarchy Level",
@@ -191,13 +199,15 @@ class MasterURLReport:
             "Depth",
             "Discovery Method",
             "Reachability Tier",
+            *TRAILING_HEADERS,
         ]
         ws.append(headers)
         self._style_header_row(ws)
         ws["D1"].comment = Comment(STATUS_LEGEND, "Rankuno", width=420, height=180)
+        ctr_decimal_column = headers.index(CTR_DECIMAL_HEADER) + 1
 
         for page in self.result.pages:
-            row = [
+            row: list[object] = [
                 page.url,
                 page.hierarchy_level,
                 page.primary_page_type,
@@ -211,7 +221,9 @@ class MasterURLReport:
                 page.navigation_discovery_method or "—",
                 page.navigation_reachability_tier or "—",
             ]
+            row.extend(trailing_cells(page))
             ws.append(row)
+            ws.cell(row=ws.max_row, column=ctr_decimal_column).number_format = CTR_DECIMAL_FORMAT
 
         self._auto_fit_columns(ws)
 
