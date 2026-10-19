@@ -497,8 +497,9 @@ class Settings(BaseSettings):
         ge=0,
         le=100_000,
         description=(
-            "UNVERIFIED. GA4 calls one organisation may make per UTC day, counted "
-            "in-process. Multi-worker deployments multiply it (CLAUDE.md §8)."
+            "UNVERIFIED. Crawls per UTC day that one organisation may send to GA4, "
+            "counted in-process (one crawl is one charge). Multi-worker deployments "
+            "multiply it (CLAUDE.md §8)."
         ),
     )
     ga4_breaker_failure_threshold: int = Field(

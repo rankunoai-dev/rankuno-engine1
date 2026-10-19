@@ -1259,6 +1259,9 @@ def _run_job(
             homepage_sink=lambda html: store.write_homepage(job_id, html),
             cancel_event=cancel_event,
             memory_account=account,
+            # The org's GA4 mapping is read from this store at the crawl, not at
+            # intake (ADR 0038). Omitting it made every live crawl report "unmapped".
+            ga4_access_store=state.ga4_access_store,
         ).run(payload)
 
         if not result.ok or result.data is None:

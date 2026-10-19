@@ -62,16 +62,19 @@ ciphertext, no CostLedger charge, and a fixed reason for every refusal.
    `ga4_max_rows_per_request`, `ga4_max_list_pages`, `ga4_daily_calls_per_org`, and the breaker
    pair `ga4_breaker_failure_threshold` and `ga4_breaker_recovery_s`. No quota, price or limit is
    stated as a fact in code or docs.
-9. **Retries are capped per operation.** Every GA4 call runs inside `BaseAPIClient.call()` with
+9. **Retries are capped per operation.** Every GA4 request except the refresh runs inside `BaseAPIClient.call()` with
    `max_attempts=2`, so a 429 or transient failure is retried exactly once. A 401, 403 or 404 is a
    refusal and is never retried. The refresh uses `max_attempts=1`, so a revoked token is tried
    once. `BaseAPIClient.call` gained the optional `max_attempts` argument for this; its default is
    unchanged, so no other connector moves.
-10. **A service-level breaker** (process-wide, tuned from Settings) opens after consecutive transport
-    failures and then refuses without a request. Refusals (401, 403, 404) do not trip it: the
-    service answered.
-11. **A per-org daily budget**, in process, counts GA4 calls per organisation per UTC day
-    (`Ga4DailyBudget`). Exhausting it gives `over_budget` for that crawl.
+10. **A service-level breaker** (process-wide, tuned from Settings) opens after consecutive upstream
+    failures (a transport error, a 429 that survives its retry, a 5xx, or any other status that is
+    not a refusal) and then refuses without a request. Refusals (401, 403, 404, and an OAuth
+    `invalid_grant` or `unauthorized_client`) do not trip it: the service answered.
+11. **A per-org daily budget**, in process, counts crawls per organisation per UTC day that reach
+    the GA4 step (`Ga4DailyBudget`): one unit per crawl, spent before the token refresh, so a crawl
+    that then fails still spends it. Exhausting it gives `over_budget` for that crawl. The unit is
+    a crawl, not a request: a crawl makes at least two GA4 requests (refresh and report).
 12. **No CostLedger charge.** GA4 is `READ` with zero recorded spend (C10). The budget is a
     request-volume guard, not a spend guard.
 13. **Nothing secret reaches a response, a log or an exception.** Refusals are fixed reasons.
@@ -106,11 +109,18 @@ ciphertext, no CostLedger charge, and a fixed reason for every refusal.
 - GA4 values appear only in the JSON result. No CSV writer emits them in this cycle. The
   formula-trigger guard therefore has no GA4 string to guard; the only GA4 strings (property
   display names) render as text in the picker and are never written to a file.
-- The GA4 route set is `GET/PUT/DELETE /orgs/{org}/ga4`, `GET /orgs/{org}/ga4/properties`,
-  `PUT /orgs/{org}/ga4/property`, and `GET /ga4/mapping` for the crawl form's own organisation.
+- The GA4 route set is `GET` and `DELETE /orgs/{org}/ga4`, `PUT /orgs/{org}/ga4/credential`,
+  `GET /orgs/{org}/ga4/properties`, `PUT /orgs/{org}/ga4/property`, and `GET /ga4/mapping` for the
+  crawl form's own organisation.
 
 ## Known gaps (not done, not hidden)
 
+- **The live crawl does not receive the GA4 store.** `src/api/server.py` builds
+  `PageClassificationTool` for each crawl without `ga4_access_store`, so the tool holds `None`
+  and `run_ga4_enrichment` reports `unmapped` with "not requested: GA4 is not configured on this
+  server" for every crawl that names a property. Intake still checks the mapping, so a crawl
+  that passes intake is the one that loses its GA4 data. No test injects the store into the
+  tool. Found on review after the build and not fixed in this cycle (build-log 0160 §4).
 - **Unverified against Google.** The endpoint paths (`accountSummaries`, `runReport`), the field
   names and the `analytics.readonly` scope string are written from the documented shapes and have
   not been exercised against a live property. No live credential is available to this repository.

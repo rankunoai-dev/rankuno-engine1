@@ -1,6 +1,6 @@
-"""Per-organisation daily GA4 call budget, counted in process (ADR 0038).
+"""Per-organisation daily GA4 crawl budget, counted in process (ADR 0038).
 
-GA4 calls are free of CostLedger charges (CLAUDE.md §8, C10: READ, zero recorded
+GA4 requests are free of CostLedger charges (CLAUDE.md §8, C10: READ, zero recorded
 spend), so this budget is a request-volume guard, not a spend guard. It stops
 one organisation's crawls from consuming the shared GA4 quota every day.
 
@@ -21,7 +21,11 @@ __all__ = ["DAILY_BUDGET", "Ga4DailyBudget"]
 
 
 class Ga4DailyBudget:
-    """Counts GA4 calls per (organisation, UTC day) and refuses past a limit."""
+    """Counts crawls that reach GA4, per (organisation, UTC day), and refuses past a limit.
+
+    One crawl is one charge, whatever its page count: the GA4 request is one host
+    report per crawl (ADR 0038), so the crawl is the unit a daily allowance means.
+    """
 
     def __init__(self) -> None:
         """Start with no recorded calls."""
@@ -29,15 +33,15 @@ class Ga4DailyBudget:
         self._counts: dict[tuple[str, date], int] = {}
 
     def try_spend(self, org_id: str, *, limit: int, today: date | None = None) -> bool:
-        """Record one call if the organisation is under `limit` for the day.
+        """Record one crawl if the organisation is under `limit` for the day.
 
         Args:
-            org_id: The organisation making the call.
-            limit: Calls permitted per UTC day. Zero refuses every call.
+            org_id: The organisation whose crawl is asking.
+            limit: Crawls permitted per UTC day. Zero refuses every crawl.
             today: The day to count against. `None` means the current UTC day.
 
         Returns:
-            `True` if the call is recorded and may proceed, `False` if the
+            `True` if the crawl is recorded and may reach GA4, `False` if the
             organisation has used its allowance for the day.
         """
         day = today or datetime.now(UTC).date()
@@ -50,7 +54,7 @@ class Ga4DailyBudget:
             return True
 
     def spent(self, org_id: str, *, today: date | None = None) -> int:
-        """Calls recorded for the organisation on the day."""
+        """Crawls recorded for the organisation on the day."""
         day = today or datetime.now(UTC).date()
         with self._lock:
             return self._counts.get((org_id, day), 0)
