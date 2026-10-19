@@ -86,7 +86,9 @@ STRICT_URL_FIELDS = frozenset(
 """Fields that must be http/https with a host. Each is a URL the crawler fetched,
 was redirected to or was told to use, so anything else is not a real crawl."""
 
-CANONICAL_URL_FIELDS = frozenset({"result.pages.canonical_url", "result.pages.breadcrumb_parent_url"})
+CANONICAL_URL_FIELDS = frozenset(
+    {"result.pages.canonical_url", "result.pages.breadcrumb_parent_url"}
+)
 """A site's *claim* about itself, recorded verbatim: its canonical, and the parent
 its breadcrumb names (ADR 0039). Real crawls carry malformed values
 (`www.http://example.com/...` in 10 of 1,333 local results), so only a real

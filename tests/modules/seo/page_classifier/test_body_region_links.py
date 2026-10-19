@@ -21,8 +21,7 @@ from src.modules.seo.page_classifier.discovery_parsers import (
 BASE = "https://e.com/"
 
 SITE_CHROME = (
-    '<header><a href="/home-link/">Home</a></header>'
-    '<nav><a href="/nav-link/">Nav</a></nav>'
+    '<header><a href="/home-link/">Home</a></header><nav><a href="/nav-link/">Nav</a></nav>'
 )
 CONTENT = '<a href="/content-a/">A</a> <a href="/content-b/">B</a>'
 FOOTER = '<footer><a href="/footer-link/">Footer</a></footer>'

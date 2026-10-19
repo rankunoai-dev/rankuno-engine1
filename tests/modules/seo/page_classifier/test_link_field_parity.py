@@ -86,8 +86,7 @@ FIELDS = (
 
 def _facts(graph: SiteGraph) -> dict[str, tuple[object, ...]]:
     return {
-        node.normalized: tuple(getattr(node, field) for field in FIELDS)
-        for node in graph.nodes
+        node.normalized: tuple(getattr(node, field) for field in FIELDS) for node in graph.nodes
     }
 
 
@@ -116,11 +115,15 @@ def by_path(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict[str, obj
 class TestConcreteValuesOnTheStubSite:
     """Pinned on the serial path. The values are worked out by hand from the page markup."""
 
-    def test_a_declared_self_canonical_is_declared_once(self, by_path: dict[str, dict[str, object]]) -> None:
+    def test_a_declared_self_canonical_is_declared_once(
+        self, by_path: dict[str, dict[str, object]]
+    ) -> None:
         assert by_path["/"]["canonical_declared"] is True
         assert by_path["/"]["canonical_link_count"] == 1
 
-    def test_two_canonical_tags_are_counted_as_two(self, by_path: dict[str, dict[str, object]]) -> None:
+    def test_two_canonical_tags_are_counted_as_two(
+        self, by_path: dict[str, dict[str, object]]
+    ) -> None:
         assert by_path["/b/"]["canonical_link_count"] == 2
 
     def test_a_page_with_no_canonical_is_undeclared_with_a_zero_count(
@@ -129,12 +132,16 @@ class TestConcreteValuesOnTheStubSite:
         assert by_path["/c/"]["canonical_declared"] is False
         assert by_path["/c/"]["canonical_link_count"] == 0
 
-    def test_the_body_region_excludes_the_header_and_footer(self, by_path: dict[str, dict[str, object]]) -> None:
+    def test_the_body_region_excludes_the_header_and_footer(
+        self, by_path: dict[str, dict[str, object]]
+    ) -> None:
         # The homepage's <main> holds /b/ (twice, so once) and /c/. The header /a/
         # and the footer /b/ are outside it.
         assert by_path["/"]["body_link_count"] == 2
 
-    def test_a_page_without_main_counts_its_whole_body(self, by_path: dict[str, dict[str, object]]) -> None:
+    def test_a_page_without_main_counts_its_whole_body(
+        self, by_path: dict[str, dict[str, object]]
+    ) -> None:
         # /b/ has no <main> or <article>, so its header link to /a/ counts.
         assert by_path["/b/"]["body_link_count"] == 1
 
@@ -144,7 +151,9 @@ class TestConcreteValuesOnTheStubSite:
         # /b/ is linked from the content of /, /a/ and /c/ (article), each once.
         assert by_path["/b/"]["unique_content_inlinks"] == 3
 
-    def test_the_breadcrumb_parent_is_the_homepage_for_a(self, by_path: dict[str, dict[str, object]]) -> None:
+    def test_the_breadcrumb_parent_is_the_homepage_for_a(
+        self, by_path: dict[str, dict[str, object]]
+    ) -> None:
         assert by_path["/a/"]["breadcrumb_parent_url"] == "https://e.com/"
 
     def test_a_page_read_with_no_breadcrumb_stores_the_empty_string(

@@ -66,8 +66,10 @@ class TestBlankWhereTheParentIsNotKnown:
         assert _parent("<html><body>plain</body></html>", "https://e.com/a/") is None
 
     def test_an_unlinked_middle_crumb_is_not_guessed_at(self):
-        """`Agents` has no href because it has no page of its own. The nearest linked
-        ancestor is not put in its place: that would be a guess."""
+        """`Agents` has no href because it has no page of its own.
+
+        The nearest linked ancestor is not put in its place: that would be a guess.
+        """
         html = _jsonld(
             HOME,
             {"name": "Agents"},

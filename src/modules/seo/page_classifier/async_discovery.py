@@ -78,12 +78,12 @@ from src.modules.seo.page_classifier.discovery import (
 )
 from src.modules.seo.page_classifier.discovery_parsers import (
     LinkReading,
-    read_page_links,
     extract_sitemap_links,
     parse_link_header,
     parse_shopify_records,
     parse_sitemap,
     parse_wordpress_records,
+    read_page_links,
     with_page_param,
     wordpress_total_pages,
 )
@@ -533,9 +533,7 @@ async def _ahtml(
             url, read_page_links(result.body, url, document_url=document_url)
         )
         fallback = (
-            graph.cap_reading(
-                url, read_page_links(result.body, url, document_url=url), count=False
-            )
+            graph.cap_reading(url, read_page_links(result.body, url, document_url=url), count=False)
             if document_url != url
             else None
         )
@@ -1022,9 +1020,7 @@ async def _acrawl(
             if item.error is not None:
                 raise item.error
             reading = item.reading_for(graph.landed_url(item.url))
-            for target in graph.record_links(
-                item.url, reading.links, depth, reading.body_links
-            ):
+            for target in graph.record_links(item.url, reading.links, depth, reading.body_links):
                 key = normalize_url(target)
                 if key not in seen:
                     seen.add(key)

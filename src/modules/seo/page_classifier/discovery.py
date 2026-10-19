@@ -53,12 +53,12 @@ from src.modules.seo.page_classifier.breadcrumb_parser import (
 from src.modules.seo.page_classifier.content_signals import extract_content_signals
 from src.modules.seo.page_classifier.discovery_parsers import (
     LinkReading,
-    read_page_links,
     extract_sitemap_links,
     parse_link_header,
     parse_shopify_records,
     parse_sitemap,
     parse_wordpress_records,
+    read_page_links,
     with_page_param,
     wordpress_total_pages,
 )
@@ -873,9 +873,7 @@ class SiteGraph:
             recorded.append(target)
         return recorded
 
-    def cap_reading(
-        self, url: str, reading: LinkReading, *, count: bool = True
-    ) -> LinkReading:
+    def cap_reading(self, url: str, reading: LinkReading, *, count: bool = True) -> LinkReading:
         """Bound one page's links with `cap_links`, and keep the body subset to match.
 
         The body subset is filtered to the links that survive the cap, in the

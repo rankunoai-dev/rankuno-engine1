@@ -10,8 +10,8 @@ canonicals that reads as one, and a page the crawl never read that reads as
 from __future__ import annotations
 
 from src.modules.seo.page_classifier.discovery import (
-    OUTCOME_NOT_FOUND,
     OUTCOME_NOT_FETCHED,
+    OUTCOME_NOT_FOUND,
     OUTCOME_NOT_HTML,
     OUTCOME_OK,
 )
@@ -53,8 +53,10 @@ def _declared(**fields: object) -> FullPageIntelligenceProfile:
 
 class TestCanonicalStatus:
     def test_an_undeclared_page_is_missing_and_never_self(self):
-        """The classifier writes the page's own URL into `canonical_url` when none is
-        declared. Read naively, that is "Self". `canonical_declared` says it is not."""
+        """The classifier writes the page's own URL into `canonical_url` when none is declared.
+
+        Read naively, that is "Self". `canonical_declared` says it is not.
+        """
         page = _declared(canonical_declared=False, canonical_link_count=0)
         assert page.canonical_url == URL, "the stored value really is the page itself"
         assert canonical_status(page) == "Missing"
@@ -75,7 +77,9 @@ class TestCanonicalStatus:
 
     def test_a_tag_naming_nothing_usable_reads_missing_with_its_count_kept(self):
         """Stored as undeclared, because the profile cannot hold an empty canonical.
-        The count still records that a tag was there."""
+
+        The count still records that a tag was there.
+        """
         page = _declared(canonical_declared=False, canonical_link_count=1, canonical_url=URL)
         assert canonical_status(page) == "Missing"
         assert canonical_links(page) == 1
@@ -144,7 +148,9 @@ class TestUniqueContentInlinks:
 
     def test_a_page_whose_fetch_was_not_ok_is_blank(self):
         """The approved rule, and its known cost: a 404 with content links shows blank."""
-        page = make_page(URL, fetch_outcome=OUTCOME_NOT_FOUND, http_status=404, unique_content_inlinks=3)
+        page = make_page(
+            URL, fetch_outcome=OUTCOME_NOT_FOUND, http_status=404, unique_content_inlinks=3
+        )
         assert unique_content_inlinks(page) is None
 
     def test_a_legacy_profile_is_not_recorded(self):

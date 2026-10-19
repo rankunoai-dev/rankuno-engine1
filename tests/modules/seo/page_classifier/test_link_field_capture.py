@@ -82,11 +82,15 @@ class TestDeclarationsAreCountedInTheSameScanAsTheValue:
         assert extract_canonical_declarations('<link rel="canonical" href="">', PAGE) == ()
 
     def test_an_over_long_declaration_is_counted_but_not_declared(self):
-        """Counted, because the tag is there; not declared, because nothing usable names
-        the page's canonical. The profile cannot hold an empty canonical, so the
-        declared flag is what stops it being read as a self-declaration."""
+        """Counted, because the tag is there; not declared, because nothing usable names the page.
+
+        The profile cannot hold an empty canonical, so the declared flag is what stops it
+        being read as a self-declaration.
+        """
         long_href = "https://e.com/" + "a" * 2100
-        declared = extract_canonical_declarations(f'<link rel="canonical" href="{long_href}">', PAGE)
+        declared = extract_canonical_declarations(
+            f'<link rel="canonical" href="{long_href}">', PAGE
+        )
         assert declared == ("",)
         graph = _graph_with()
         graph.record_fetch(PAGE, _result(f'<head><link rel="canonical" href="{long_href}"></head>'))
