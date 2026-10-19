@@ -115,12 +115,13 @@ ciphertext, no CostLedger charge, and a fixed reason for every refusal.
 
 ## Known gaps (not done, not hidden)
 
-- **The live crawl does not receive the GA4 store.** `src/api/server.py` builds
-  `PageClassificationTool` for each crawl without `ga4_access_store`, so the tool holds `None`
-  and `run_ga4_enrichment` reports `unmapped` with "not requested: GA4 is not configured on this
-  server" for every crawl that names a property. Intake still checks the mapping, so a crawl
-  that passes intake is the one that loses its GA4 data. No test injects the store into the
-  tool. Found on review after the build and not fixed in this cycle (build-log 0160 §4).
+- **Closed in cycle 0161: the live crawl did not receive the GA4 store.** The crawl runner
+  built `PageClassificationTool` without `ga4_access_store`, so every crawl that named a property
+  reported `unmapped`. `src/api/server.py` now passes `state.ga4_access_store`, and
+  `tests/api/test_crawl_ga4_wiring.py` drives `POST /jobs` through the real runner to prove it
+  (build-log 0160 §4.3, build-log 0161 §4.1). The tool's `ga4_access_store` still defaults to
+  `None` and does not fall back to `Settings`, so an omitted argument can recur silently (build-log
+  0161 §6.5).
 - **Unverified against Google.** The endpoint paths (`accountSummaries`, `runReport`), the field
   names and the `analytics.readonly` scope string are written from the documented shapes and have
   not been exercised against a live property. No live credential is available to this repository.
