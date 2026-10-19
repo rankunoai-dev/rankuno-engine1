@@ -9,6 +9,7 @@ import {
 import { safeHref } from "../../lib/safeHref";
 import { reasonLabel } from "../../lib/treeOverlay";
 import { useDashboardStore } from "../../store/useDashboardStore";
+import { CategoryDownload, CATEGORY_DOWNLOAD_GUTTER } from "./CategoryDownload";
 import { FullScreenTree } from "./FullScreenTree";
 import { TreeControls } from "./TreeControls";
 import { useActiveOverlay, useTreeOverlay } from "./useTreeOverlay";
@@ -164,7 +165,12 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
         role="button"
         tabIndex={0}
         className={`vrow${focus === node.i ? " sel" : ""}${mark === "none" ? "" : ` x${mark}`}`}
-        style={{ top: position * ROW, paddingLeft: 10 + row.depth * 16 }}
+        style={{
+          top: position * ROW,
+          paddingLeft: 10 + row.depth * 16,
+          // Reserved for the download control, which sits over this gutter.
+          ...(hasChildren ? { paddingRight: CATEGORY_DOWNLOAD_GUTTER } : null),
+        }}
         onClick={() => setFocus(node.i, model)}
         onKeyDown={(event) => {
           // Only when the row itself has focus. The same keys on the link
@@ -319,6 +325,13 @@ export function TreeList({ model, wide = false }: ListProps): JSX.Element {
         )}
       </div>,
     );
+    // A category row gets its download control beside it, not inside it (see
+    // CategoryDownload for why). Pushed after the row so it paints above it.
+    if (hasChildren) {
+      rows.push(
+        <CategoryDownload key={`dl-${node.i}`} model={model} node={node} top={position * ROW} />,
+      );
+    }
   }
 
   return (

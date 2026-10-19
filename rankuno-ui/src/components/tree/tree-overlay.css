@@ -345,3 +345,39 @@
   padding: 0 4px;
 }
 .dim { color: var(--faint); }
+
+/* ===== per-category download ===== */
+/* `.vspacer .tdl` (0,2,0), not `.tdl`: the row sits inside `.rk-dash`, where the
+   (0,1,1) button reset would strip the chrome from a single-class rule. Same
+   reasoning as `.xctl .xbtn` above. Absolutely placed at the row's own `top`,
+   and the row reserves CATEGORY_DOWNLOAD_GUTTER (84px) so its count is never
+   under this control. */
+.vspacer .tdl {
+  position: absolute;
+  right: 6px;
+  height: 24px;
+  width: 78px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 0 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.vspacer .tdl:hover { color: var(--ink); border-color: var(--faint); }
+.vspacer .tdl:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.vspacer .tdl:disabled {
+  color: var(--faint);
+  border-style: dashed;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.vspacer .tdl:disabled:hover { color: var(--faint); border-color: var(--line2); }
