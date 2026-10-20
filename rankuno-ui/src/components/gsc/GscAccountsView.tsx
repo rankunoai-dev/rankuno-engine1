@@ -1,8 +1,8 @@
 import { Button, Empty, Popconfirm, Spin, message } from "antd";
-import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, PlusOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
 import { API_BASE, ApiError, authorizedFetch } from "../../adapters/httpAdapter";
-import { GscAccountForm } from "./GscAccountForm";
+import { GscAccountForm, type EditableGscAccount } from "./GscAccountForm";
 import "./gsc-accounts.css";
 
 interface GscAccount {
@@ -18,7 +18,7 @@ interface Props {
 /**
  * View for managing GSC accounts at the organization level.
  *
- * Displays a list of configured accounts with add/delete controls.
+ * Displays a list of configured accounts with add, edit and delete controls.
  * Uses "default" org if none specified.
  */
 export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
@@ -26,6 +26,8 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  // The account being edited, or null when the form adds a new one.
+  const [editing, setEditing] = useState<EditableGscAccount | null>(null);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -62,6 +64,16 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
     } finally {
       setLoading(false);
     }
+  }
+
+  function openAdd(): void {
+    setEditing(null);
+    setFormOpen(true);
+  }
+
+  function openEdit(account: GscAccount): void {
+    setEditing({ account_name: account.account_name, client_id: account.client_id });
+    setFormOpen(true);
   }
 
   async function handleDelete(accountName: string): Promise<void> {
@@ -120,7 +132,7 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
     <div className="gsa-wrap">
       <div className="gsa-header">
         <h2>GSC Accounts</h2>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setFormOpen(true)}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
           Add Account
         </Button>
       </div>
@@ -129,7 +141,7 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
         {accounts.length === 0 ? (
           <div style={{ textAlign: "center", marginTop: 48 }}>
             <Empty description="No accounts configured" />
-            <Button type="primary" onClick={() => setFormOpen(true)} style={{ marginTop: 16 }}>
+            <Button type="primary" onClick={openAdd} style={{ marginTop: 16 }}>
               Add First Account
             </Button>
           </div>
@@ -158,24 +170,35 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
                     </div>
                   )}
                 </div>
-                <Popconfirm
-                  title="Delete account?"
-                  description={`Are you sure you want to delete "${account.account_name}"? This cannot be undone.`}
-                  okText="Delete"
-                  okType="danger"
-                  cancelText="Cancel"
-                  onConfirm={() => void handleDelete(account.account_name)}
-                >
+                <div className="gsa-card-actions">
                   <Button
                     type="text"
-                    danger
-                    icon={<DeleteOutlined />}
-                    loading={deleting.has(account.account_name)}
+                    icon={<EditOutlined />}
+                    aria-label={`Edit account ${account.account_name}`}
+                    onClick={() => openEdit(account)}
                     disabled={deleting.size > 0}
                   >
-                    Delete
+                    Edit
                   </Button>
-                </Popconfirm>
+                  <Popconfirm
+                    title="Delete account?"
+                    description={`Are you sure you want to delete "${account.account_name}"? This cannot be undone.`}
+                    okText="Delete"
+                    okType="danger"
+                    cancelText="Cancel"
+                    onConfirm={() => void handleDelete(account.account_name)}
+                  >
+                    <Button
+                      type="text"
+                      danger
+                      icon={<DeleteOutlined />}
+                      loading={deleting.has(account.account_name)}
+                      disabled={deleting.size > 0}
+                    >
+                      Delete
+                    </Button>
+                  </Popconfirm>
+                </div>
               </div>
             ))}
           </div>
@@ -185,6 +208,7 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
       <GscAccountForm
         open={formOpen}
         orgId={orgId}
+        account={editing}
         onClose={() => setFormOpen(false)}
         onSuccess={() => void fetchAccounts()}
       />

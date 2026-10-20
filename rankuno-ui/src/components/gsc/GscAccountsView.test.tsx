@@ -90,7 +90,9 @@ describe("GscAccountsView", () => {
       expect(screen.getByText("to-delete")).toBeInTheDocument();
     });
 
-    const deleteButton = screen.getByRole("button", { name: /delete/i });
+    // Whole-name match: the Delete button's name is "delete Delete" (antd icon label plus text),
+    // and the Edit button's label carries the account name, which here ends in "delete".
+    const deleteButton = screen.getByRole("button", { name: /^(delete\s+)?delete$/i });
     fireEvent.click(deleteButton);
 
     // Confirm deletion
@@ -164,6 +166,96 @@ describe("GscAccountsView", () => {
     await waitFor(() => {
       expect(screen.getByText("no-secret")).toBeInTheDocument();
       expect(screen.getByText("with-secret")).toBeInTheDocument();
+    });
+  });
+
+  describe("edit", () => {
+    const saved = [
+      { account_name: "agency-main", client_id: "client-111", has_secret_override: true },
+    ];
+
+    it("gives every card an Edit button labelled with the account name", async () => {
+      (fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify({ accounts: saved }), { status: 200 }),
+      );
+
+      render(<GscAccountsView orgId="test-org" />);
+
+      expect(
+        await screen.findByRole("button", { name: "Edit account agency-main" }),
+      ).toBeInTheDocument();
+    });
+
+    it("opens the form pre-filled with the saved name and client ID, name locked", async () => {
+      (fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify({ accounts: saved }), { status: 200 }),
+      );
+
+      render(<GscAccountsView orgId="test-org" />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Edit account agency-main" }));
+
+      expect(await screen.findByText("Edit GSC Account")).toBeInTheDocument();
+      expect(screen.getByLabelText(/account name/i)).toHaveValue("agency-main");
+      expect(screen.getByLabelText(/account name/i)).toBeDisabled();
+      expect(screen.getByLabelText(/oauth client id/i)).toHaveValue("client-111");
+      expect(screen.getByLabelText(/oauth 2.0 refresh token/i)).toHaveValue("");
+      expect(screen.getByLabelText(/oauth client secret/i)).toHaveValue("");
+    });
+
+    it("saves the replacement under the same name and shows the updated client ID", async () => {
+      (fetch as any)
+        .mockResolvedValueOnce(new Response(JSON.stringify({ accounts: saved }), { status: 200 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 201 }))
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              accounts: [
+                { account_name: "agency-main", client_id: "client-222", has_secret_override: true },
+              ],
+            }),
+            { status: 200 },
+          ),
+        );
+
+      render(<GscAccountsView orgId="test-org" />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Edit account agency-main" }));
+      fireEvent.change(await screen.findByLabelText(/oauth 2.0 refresh token/i), {
+        target: { value: "new-refresh" },
+      });
+      fireEvent.change(screen.getByLabelText(/oauth client id/i), {
+        target: { value: "client-222" },
+      });
+      fireEvent.change(screen.getByLabelText(/oauth client secret/i), {
+        target: { value: "new-secret" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+      expect(await screen.findByText("client-222")).toBeInTheDocument();
+      const post = (fetch as any).mock.calls.find(
+        (call: [string, RequestInit]) => call[1]?.method === "POST",
+      );
+      expect(post[0]).toContain("/orgs/test-org/gsc-accounts");
+      expect(JSON.parse(post[1].body)).toEqual({
+        account_name: "agency-main",
+        client_id: "client-222",
+        refresh_token: "new-refresh",
+        client_secret: "new-secret",
+      });
+    });
+
+    it("keeps Delete working alongside Edit", async () => {
+      (fetch as any).mockResolvedValueOnce(
+        new Response(JSON.stringify({ accounts: saved }), { status: 200 }),
+      );
+
+      render(<GscAccountsView orgId="test-org" />);
+
+      expect(
+        await screen.findByRole("button", { name: /^(delete\s+)?delete$/i }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Edit account agency-main" })).toBeInTheDocument();
     });
   });
 });
