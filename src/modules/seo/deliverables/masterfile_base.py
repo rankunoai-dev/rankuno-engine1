@@ -41,6 +41,7 @@ from pydantic import Field
 
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
+from src.modules.seo.contracts.cell_guard import safe_cell
 from src.modules.seo.deliverables.masterfile_enrichment import (
     NOT_MEASURED,
     URL_COLUMN,
@@ -66,12 +67,10 @@ __all__ = [
     "MasterfileSource",
     "gc",
     "read_csv_safe",
+    "safe_cell",
 ]
 
 _logger = get_logger(__name__)
-
-_FORMULA_TRIGGER_CHARS: Final[frozenset[str]] = frozenset({"=", "+", "-", "@", "\t", "\r"})
-"""OWASP formula injection triggers. Guard every cell value."""
 
 _SHEET_NAME_FORBIDDEN_CHARS: Final[re.Pattern[str]] = re.compile(r"[\\/?*:\[\]]")
 """Excel sheet name forbidden characters."""
@@ -131,20 +130,6 @@ class EnrichedURLRecord(StrictModel):
     ga4_sessions: int | None = None
     theme_1: str = OTHERS_THEME
     theme_2: str | None = None
-
-
-def safe_cell(value: object) -> object:
-    """Neutralise formula-injection trigger characters.
-
-    Args:
-        value: Cell value (any type)
-
-    Returns:
-        Safe value (string values starting with trigger chars are prefixed with ')
-    """
-    if isinstance(value, str) and value and value[0] in _FORMULA_TRIGGER_CHARS:
-        return f"'{value}"
-    return value
 
 
 def truncate_cell(value: str, max_length: int = _MAX_CELL_LENGTH) -> str:
