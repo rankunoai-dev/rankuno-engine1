@@ -56,7 +56,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from uuid import uuid4
@@ -82,7 +82,13 @@ from src.api.local_signin import build_local_signin_router, ensure_local_operato
 from src.api.worker_routes import build_worker_router
 from src.core.auth import Operator, OperatorStore, hash_password, verify_password
 from src.core.config import DEFAULT_ORG_ID, ProcessRole, Settings, get_settings
-from src.core.errors import ConfigurationError, UnsafeUrlError
+from src.core.errors import (
+    ConfigurationError,
+    GscAuthenticationError,
+    GscAuthorizationError,
+    GscPropertyNotFoundError,
+    UnsafeUrlError,
+)
 from src.core.facet_router import FacetRouter
 from src.core.ga4_access_store import Ga4AccessStore
 from src.core.gsc_account_store import DiskGscAccountStore, GscAccountStore
@@ -103,6 +109,7 @@ from src.core.state_store import (
     JobRecord,
     JobStatus,
     JobStore,
+    JobStoreUnavailableError,
     JobTelemetry,
     OrgConfigStore,
 )
@@ -110,6 +117,8 @@ from src.core.url_safety import UrlSafetyPolicy
 from src.core.worker_auth import WorkerStore
 from src.core.worker_dispatch_keys import DispatchSigningKey
 from src.core.worker_dispatch_store import WorkerDispatchStore
+from src.integrations.gsc_client import GscApiClient
+from src.integrations.gsc_schemas import GscPageQueries
 from src.modules.seo.deliverables.rulebook_store import RulebookStore
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.reports import MasterURLReport
@@ -2722,6 +2731,29 @@ def create_app(
         org_scoped_or_404(record=record, record_id=job_id, org_id=org_id, kind=kind)
         return record
 
+    def _saved_gsc_queries(job_id: str) -> GscPageQueries | None:
+        """The job's saved query-by-page fetch, or `None` when none was taken.
+
+        Called only after `_owned_job` has passed for this job, so the sidecar is
+        read under the same ownership check as the record it belongs to.
+
+        Raises:
+            HTTPException: `409` if the saved fetch predates the current schema.
+        """
+        stored = state.store.read_gsc_queries(job_id)
+        if stored is None:
+            return None
+        try:
+            return GscPageQueries.model_validate(dict(stored))
+        except ValidationError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    "the saved Search Console query data predates the current format; "
+                    "fetch it again"
+                ),
+            ) from exc
+
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/urls.xlsx")
     def download_urls_workbook(
         job_id: str, authorization: str | None = Header(default=None)
@@ -2768,7 +2800,7 @@ def create_app(
                 detail="this job's result predates the current output contract",
             ) from exc
 
-        workbook = MasterURLReport(crawl).generate()
+        workbook = MasterURLReport(crawl, _saved_gsc_queries(job_id)).generate()
         stamp = record.finished_at.date().isoformat() if record.finished_at else "undated"
         return Response(
             content=workbook.getvalue(),
@@ -2816,7 +2848,7 @@ def create_app(
                 detail="this job's result predates the current output contract",
             ) from exc
 
-        pdf = MasterURLReport(crawl).generate_pdf()
+        pdf = MasterURLReport(crawl, _saved_gsc_queries(job_id)).generate_pdf()
         stamp = record.finished_at.date().isoformat() if record.finished_at else "undated"
         return Response(
             content=pdf.getvalue(),
@@ -2825,6 +2857,100 @@ def create_app(
                 "Content-Disposition": f'attachment; filename="urls-{job_id[:8]}-{stamp}.pdf"'
             },
         )
+
+    @app.post(f"{API_PREFIX}/jobs/{{job_id}}/gsc/top-queries")
+    def fetch_top_queries(
+        job_id: str, authorization: str | None = Header(default=None)
+    ) -> Mapping[str, object]:
+        """Fetch every (page, query) row this crawl's property has, and keep it on the job.
+
+        The property and the account come from the crawl's own request, so the
+        caller names nothing. The window is the trailing year. The fetch is
+        synchronous: each 25,000-row page takes one slot in the 60-a-minute Search
+        Console quota, so a large property holds the request for about a minute per
+        page. A new fetch replaces the saved one.
+
+        A fetch that received no rows and failed is not saved. A failed refetch
+        must not replace a good result with an empty one; the 502 says nothing was
+        kept, and the earlier result stands.
+
+        Args:
+            job_id: The finished crawl whose property to query.
+            authorization: Bearer session token (ADR 0016). `org_id` comes
+                from its verified claim.
+
+        Returns:
+            Counts and the stop reason only. The query text stays server-side and
+            is read through the export.
+
+        Raises:
+            HTTPException: `401` if the token is missing or invalid, `404` if the
+                job does not exist, `403` if another org owns it (ADR 0016) or
+                Search Console refuses the property, `409` if the job has not
+                finished, was run without a property, or its account needs
+                connecting again, `502` if Search Console answered nothing, `503`
+                if the result could not be saved.
+        """
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        record = _owned_job(job_id, principal.org_id, "result")
+        if not record.has_result:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"job {job_id} is {record.status.value} and has no result",
+            )
+        property_url = record.request.get("gsc_property_url")
+        if not isinstance(property_url, str) or not property_url:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=(
+                    "this crawl was run without a Search Console property, "
+                    "so there is nothing to query"
+                ),
+            )
+        account = record.request.get("gsc_account")
+        end = datetime.now(UTC).date()
+        start = end - timedelta(days=365)
+        try:
+            client = GscApiClient(
+                account=account if isinstance(account, str) else None,
+                org_id=principal.org_id,
+            )
+            fetched = client.fetch_top_queries(property_url, start.isoformat(), end.isoformat())
+        except (GscAuthenticationError, ConfigurationError) as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="the Search Console account needs to be connected again",
+            ) from exc
+        except GscAuthorizationError as exc:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="this Search Console account cannot access the property",
+            ) from exc
+        except GscPropertyNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="Search Console has no such property for this account",
+            ) from exc
+
+        if fetched.stop_reason == "fetch_failed" and not fetched.rows:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                detail="Search Console did not answer; the saved query data was kept",
+            )
+        try:
+            state.store.write_gsc_queries(job_id, fetched.model_dump(mode="json"))
+        except (OSError, JobStoreUnavailableError) as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="the query data could not be saved; try again",
+            ) from exc
+        return {
+            "rows": len(fetched.rows),
+            "complete": fetched.complete,
+            "stop_reason": fetched.stop_reason,
+            "start_date": fetched.start_date,
+            "end_date": fetched.end_date,
+        }
 
     @app.get(f"{API_PREFIX}/jobs/{{job_id}}/reconciliation")
     def get_reconciliation(
@@ -3710,8 +3836,9 @@ def create_app(
         """Delete a crawl permanently using the password set at creation.
 
         Deletion is irreversible and removes all associated data: the job record,
-        result, checkpoint, homepage snapshot, reconciliation, and performance
-        reports. Once deleted, no trace of the job remains.
+        result, checkpoint, homepage snapshot, reconciliation, performance
+        reports, and the saved Search Console query data. Once deleted, no trace
+        of the job remains.
 
         This endpoint is idempotent: calling it on an already-deleted job returns
         404 (not 204), making it safe to retry.

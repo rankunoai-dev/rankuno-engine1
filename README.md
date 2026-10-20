@@ -431,7 +431,8 @@ as a whole is not bounded by it.
 A finished crawl's job-row `...` menu offers "Download URLs" alongside
 "Search Console", "Cross-check" and "Run again": one click, no intermediate
 panel, fetching `GET /jobs/{id}/urls.xlsx` — every URL the crawl found, as a
-3-sheet workbook (All URLs, By Indexability, By HTTP Status) built by
+workbook (All URLs, By Indexability, By HTTP Status, and a Top Queries sheet once a
+query fetch is saved) built by
 `MasterURLReport` (`modules/seo/page_classifier/reports.py`). A "Download URLs
 (PDF)" entry sits directly below it, fetching `GET /jobs/{id}/urls.pdf` —
 the first twelve "All URLs" columns as a flat, printable table (landscape A4, via
@@ -444,6 +445,18 @@ attachment rather than a spreadsheet ([ADR 0024](docs/adr/0024-pdf-url-export-us
 read `No response`, and results stored before the status was captured read
 `Not recorded (older crawl)` ([build-log 0156](docs/build-log/0156-every-row-said-unknown.md);
 earlier, build-log 0123 had it read `Unknown` because no status reached the report).
+
+Search Console queries are added to the export with `POST /jobs/{id}/gsc/top-queries`.
+It fetches every (page, query) row the crawl's property has for the trailing year,
+paging 25,000 rows at a time through the shared `gsc_quota` bucket, and saves them on
+the job (migration 013; a Postgres job keeps them in `job_payloads`, a local job in a
+sidecar file). "All URLs" then gains a "Top Queries" cell (the top five queries as
+`query (clicks)`) and a "Category" column (the URL's first path segment). The
+long-format "Top Queries" sheet lists one row per URL and rank. A fetch that stopped
+early keeps the rows it received and says so with a "GSC data partial" banner, on
+the sheets and in the PDF. Every text cell passes the formula guard. **Unverified
+against a live Search Console property**: the paging and the 25,000-row page size
+are written from the documented API and have not been run against a real account.
 The xlsx "All URLs" sheet then carries nine trailing columns after those twelve:
 Found Via, In Sitemap, Unique Inlinks, Unique Outlinks, Orphan, GSC CTR (decimal,
 format `0.000`), Final URL, Indexability and Indexability Reason. Each is derived

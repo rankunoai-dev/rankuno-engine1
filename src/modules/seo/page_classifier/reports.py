@@ -1,14 +1,17 @@
 """Master URL Report generation for crawl results.
 
-Exports crawl results to Excel with 3 sheets:
-1. All URLs — Complete data (GSC metrics, hierarchy, type, etc.)
+Exports crawl results to Excel with up to 4 sheets:
+1. All URLs — Complete data (GSC metrics, hierarchy, type, top queries, category)
 2. By Indexability — URLs grouped by indexable/non-indexable/blocked status
 3. By HTTP Status — URLs grouped by HTTP response code
+4. Top Queries — long format, one row per URL and rank; only when a query fetch exists
 
-`generate_pdf` produces a fourth format from the same "All URLs" columns, as
-a flat table with no grouping — the by-indexability and by-HTTP-status views
-are workbook-specific navigational aids, not part of "every URL this crawl
-found".
+Every sheet lists pages in path-category order (see `contracts.url_category`),
+and the two grouped sheets keep that order inside each group. `generate_pdf`
+renders the same rows as a flat table with no grouping, in the same order.
+
+Every text cell passes through `safe_cell`, so a URL or query that a spreadsheet
+would run as a formula is written inert. The PDF and the sheets share that rule.
 
 Uses openpyxl for Excel generation and reportlab for PDF (ADR 0024).
 """
@@ -18,17 +21,25 @@ from __future__ import annotations
 from collections import defaultdict
 from io import BytesIO
 from typing import TYPE_CHECKING
-from xml.sax.saxutils import escape as _xml_escape
 
 from openpyxl import Workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
+
+from src.integrations.gsc_schemas import GscPageQueries
+from src.modules.seo.contracts.cell_guard import safe_cell
+from src.modules.seo.contracts.url_category import category_key, category_sort_key
+from src.modules.seo.performance.query_by_url import top_queries_by_crawl_url
+from src.modules.seo.performance.query_sheet import (
+    CATEGORY_HEADER,
+    TOP_QUERIES_HEADER,
+    TOP_QUERIES_SHEET,
+    partial_banner,
+    top_queries_cell,
+    write_top_queries_sheet,
+)
 
 from .fetch_status import (
     LABEL_NO_RESPONSE,
@@ -46,6 +57,8 @@ from .report_columns import (
     UNIQUE_CONTENT_INLINKS_HEADER,
     trailing_cells,
 )
+from .report_pdf import pdf_row as _pdf_cells
+from .report_pdf import render_url_pdf
 
 if TYPE_CHECKING:
     from .schemas import FullPageIntelligenceProfile
@@ -53,23 +66,30 @@ if TYPE_CHECKING:
 
 __all__ = ["MasterURLReport"]
 
-# Points, not inches — reportlab's native unit. Widths favour the free-text
-# columns (URL, Discovery Method) and give HTTP Status room for the wrapped
-# "Not recorded (older crawl)" label; the rest hold short enums or numbers.
-# Sums to 774pt, inside a landscape A4 page's ~806pt usable width after the
-# 18pt margins `generate_pdf` sets.
-_PDF_COLUMN_WIDTHS = [150, 66, 66, 62, 48, 42, 56, 40, 52, 34, 88, 70]
-
 # The no-status labels sort after the numeric codes on "By HTTP Status".
 _LABEL_ORDER = (LABEL_NOT_FETCHED, LABEL_NO_RESPONSE, LABEL_NOT_RECORDED)
 
 
 class MasterURLReport:
-    """Generate Excel report with all URLs and GSC metrics."""
+    """Generate the Excel and PDF URL reports for one finished crawl."""
 
-    def __init__(self, result: PageClassificationOutput) -> None:
-        """Build report from crawl result."""
+    def __init__(
+        self,
+        result: PageClassificationOutput,
+        queries: GscPageQueries | None = None,
+    ) -> None:
+        """Build the report from a crawl result and, optionally, a query fetch.
+
+        Args:
+            result: The finished crawl.
+            queries: The query-by-page fetch saved against the job, or `None`.
+                With `None` the Top Queries column is blank and no Top Queries
+                sheet is written, so an export made before any fetch is unchanged
+                apart from the appended Category column.
+        """
         self.result = result
+        self._queries = queries
+        self._top_by_url = top_queries_by_crawl_url(result.pages, queries)
         self.workbook = Workbook()
         self.workbook.remove(self.workbook.active)  # Remove default sheet
 
@@ -78,6 +98,8 @@ class MasterURLReport:
         self._sheet_all_urls()
         self._sheet_by_indexability()
         self._sheet_by_http_status()
+        if self._queries is not None:
+            self._sheet_top_queries()
 
         output = BytesIO()
         self.workbook.save(output)
@@ -87,100 +109,36 @@ class MasterURLReport:
     def generate_pdf(self) -> BytesIO:
         """Generate a flat, one-row-per-page PDF and return it as bytes.
 
-        Same twelve columns and row order as the "All URLs" sheet — no
-        grouping. "Every URL this crawl found" is the promise the job-row
-        menu's "Download URLs" entry makes; the by-indexability and
-        by-HTTP-status sheets above are workbook-specific navigational aids
-        layered on top of that list, not part of it.
-
-        Landscape A4: twelve columns do not fit a portrait page at a
-        readable size. Every cell is a `Paragraph`, not a bare string —
-        `Table` does not wrap plain text, so a long URL would overflow into
-        its neighbour column instead of wrapping onto a second line.
+        Same twelve columns as the "All URLs" sheet, in the same category order,
+        with no grouping. "Every URL this crawl found" is the promise the job-row
+        menu's "Download URLs" entry makes; the by-indexability and by-HTTP-status
+        sheets are workbook-specific navigational aids layered on top of that list.
         """
-        headers = [
-            "URL",
-            "Hierarchy Level",
-            "Page Type",
-            "HTTP Status",
-            "First Redirect",
-            "GSC Clicks",
-            "GSC Impressions",
-            "GSC CTR %",
-            "GSC Avg Position",
-            "Depth",
-            "Discovery Method",
-            "Reachability Tier",
-        ]
-        header_style = ParagraphStyle(
-            "pdf-header", fontName="Helvetica-Bold", fontSize=7, leading=9, textColor=colors.white
-        )
-        body_style = ParagraphStyle("pdf-cell", fontName="Helvetica", fontSize=7, leading=9)
+        return render_url_pdf(self._ordered_pages(), self._banner())
 
-        rows: list[list[Paragraph]] = [
-            [Paragraph(_xml_escape(text), header_style) for text in headers]
-        ]
-        for page in self.result.pages:
-            rows.append(
-                [Paragraph(_xml_escape(value), body_style) for value in self._pdf_row(page)]
-            )
+    def _ordered_pages(self) -> list[FullPageIntelligenceProfile]:
+        """Every page in category order: the order all four exports share.
 
-        table = Table(rows, colWidths=_PDF_COLUMN_WIDTHS, repeatRows=1)
-        table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#366092")),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    (
-                        "ROWBACKGROUNDS",
-                        (0, 1),
-                        (-1, -1),
-                        [colors.white, colors.HexColor("#F2F2F2")],
-                    ),
-                ]
-            )
-        )
+        Sorted on the raw URL, before any cell is guarded, so the order is the one
+        the URLs themselves imply and not the one a formula guard happens to leave.
+        """
+        return sorted(self.result.pages, key=lambda page: category_sort_key(page.url))
 
-        output = BytesIO()
-        doc = SimpleDocTemplate(
-            output,
-            pagesize=landscape(A4),
-            leftMargin=18,
-            rightMargin=18,
-            topMargin=18,
-            bottomMargin=18,
+    def _banner(self) -> str | None:
+        """The partial-data banner for this report, or `None` when everything arrived."""
+        gsc = self.result.gsc
+        return partial_banner(
+            page_metrics_complete=gsc.complete if gsc is not None else True,
+            queries=self._queries,
         )
-        legend_style = ParagraphStyle(
-            "pdf-legend", fontName="Helvetica-Oblique", fontSize=6.5, leading=8, spaceBefore=6
-        )
-        doc.build([table, Paragraph(_xml_escape(STATUS_LEGEND), legend_style)])
-        output.seek(0)
-        return output
 
     def _pdf_row(self, page: FullPageIntelligenceProfile) -> list[str]:
         """The twelve "All URLs" cell values for one page, as plain strings.
 
-        Shared with nothing else in this file: openpyxl accepts the typed
-        values (enums, ints, floats) directly and applies its own cell
-        formatting, where `Paragraph` needs pre-formatted text. Kept as a
-        column-for-column match to `_sheet_all_urls` regardless, so the two
-        exports never drift into reporting different data for the same job.
+        Delegates to `report_pdf.pdf_row`. Kept as a method so the parity test
+        that compares it with the sheet's cells reads the same as it always has.
         """
-        return [
-            page.url,
-            str(page.hierarchy_level),
-            str(page.primary_page_type),
-            http_status_label(page),
-            first_redirect_label(page),
-            str(page.gsc_clicks or 0),
-            str(page.gsc_impressions or 0),
-            f"{(page.gsc_ctr * 100):.2f}" if page.gsc_ctr else "0.00",
-            str(page.gsc_avg_position or 0),
-            str(page.depth_from_l0),
-            str(page.navigation_discovery_method) if page.navigation_discovery_method else "—",
-            str(page.navigation_reachability_tier) if page.navigation_reachability_tier else "—",
-        ]
+        return _pdf_cells(page)
 
     def _sheet_all_urls(self) -> None:
         """Sheet 1: All URLs with complete data."""
@@ -202,6 +160,8 @@ class MasterURLReport:
             "Discovery Method",
             "Reachability Tier",
             *TRAILING_HEADERS,
+            TOP_QUERIES_HEADER,
+            CATEGORY_HEADER,
         ]
         ws.append(headers)
         self._style_header_row(ws)
@@ -210,9 +170,17 @@ class MasterURLReport:
         ws.cell(row=1, column=content_inlinks_header).comment = Comment(
             CONTENT_INLINKS_NOTE, "Rankuno", width=420, height=140
         )
+        top_header = headers.index(TOP_QUERIES_HEADER) + 1
+        banner = self._banner()
+        if banner is not None:
+            # A comment, not a row: a note row under the data would be read as a
+            # page by anyone who sorts or filters the table.
+            ws.cell(row=1, column=top_header).comment = Comment(
+                banner, "Rankuno", width=420, height=120
+            )
         ctr_decimal_column = headers.index(CTR_DECIMAL_HEADER) + 1
 
-        for page in self.result.pages:
+        for page in self._ordered_pages():
             row: list[object] = [
                 page.url,
                 page.hierarchy_level,
@@ -228,7 +196,9 @@ class MasterURLReport:
                 page.navigation_reachability_tier or "—",
             ]
             row.extend(trailing_cells(page))
-            ws.append(row)
+            row.append(top_queries_cell(self._top_by_url.get(page.url, ())))
+            row.append(category_key(page.url))
+            ws.append([safe_cell(value) for value in row])
             ws.cell(row=ws.max_row, column=ctr_decimal_column).number_format = CTR_DECIMAL_FORMAT
 
         self._auto_fit_columns(ws)
@@ -242,6 +212,9 @@ class MasterURLReport:
         - 4xx: Blocked
         - 5xx: Server error (treat as blocked)
         - No status (not fetched, no response, older crawl): Unknown
+
+        Category order is kept inside each group, because the pages are already
+        category-sorted and the grouping below is a stable partition.
         """
         ws = self.workbook.create_sheet("By Indexability", 1)
 
@@ -250,7 +223,7 @@ class MasterURLReport:
         blocked = []
         unknown = []
 
-        for page in self.result.pages:
+        for page in self._ordered_pages():
             status_code = self._extract_status_code(page)
             if status_code is None:
                 unknown.append(page)
@@ -273,54 +246,28 @@ class MasterURLReport:
         ws.append(headers)
         self._style_header_row(ws)
 
-        # Indexable section
-        for page in indexable:
-            row = [
-                "Indexable",
-                page.url,
-                page.primary_page_type,
-                page.gsc_clicks or 0,
-                page.gsc_impressions or 0,
-                (page.gsc_ctr * 100) if page.gsc_ctr else 0,
-                page.gsc_avg_position or 0,
-            ]
-            ws.append(row)
-
-        # Blocked section
-        for page in blocked:
-            row = [
-                "Blocked",
-                page.url,
-                page.primary_page_type,
-                page.gsc_clicks or 0,
-                page.gsc_impressions or 0,
-                (page.gsc_ctr * 100) if page.gsc_ctr else 0,
-                page.gsc_avg_position or 0,
-            ]
-            ws.append(row)
-
-        # Unknown section
-        for page in unknown:
-            row = [
-                "Unknown",
-                page.url,
-                page.primary_page_type,
-                page.gsc_clicks or 0,
-                page.gsc_impressions or 0,
-                (page.gsc_ctr * 100) if page.gsc_ctr else 0,
-                page.gsc_avg_position or 0,
-            ]
-            ws.append(row)
+        for label, pages in (("Indexable", indexable), ("Blocked", blocked), ("Unknown", unknown)):
+            for page in pages:
+                row = [
+                    label,
+                    page.url,
+                    page.primary_page_type,
+                    page.gsc_clicks or 0,
+                    page.gsc_impressions or 0,
+                    (page.gsc_ctr * 100) if page.gsc_ctr else 0,
+                    page.gsc_avg_position or 0,
+                ]
+                ws.append([safe_cell(value) for value in row])
 
         self._auto_fit_columns(ws)
 
     def _sheet_by_http_status(self) -> None:
-        """Sheet 3: URLs grouped by HTTP status code."""
+        """Sheet 3: URLs grouped by HTTP status code, category order inside each group."""
         ws = self.workbook.create_sheet("By HTTP Status", 2)
 
-        # Group by status code
+        # Group by status code, keeping the category order within each group.
         by_status: dict[str, list[FullPageIntelligenceProfile]] = defaultdict(list)
-        for page in self.result.pages:
+        for page in self._ordered_pages():
             by_status[http_status_label(page)].append(page)
 
         headers = [
@@ -342,8 +289,7 @@ class MasterURLReport:
         all_statuses += [label for label in _LABEL_ORDER if label in by_status]
 
         for status in all_statuses:
-            pages = by_status[status]
-            for page in pages:
+            for page in by_status[status]:
                 row = [
                     status,
                     first_redirect_label(page),
@@ -355,8 +301,23 @@ class MasterURLReport:
                     (page.gsc_ctr * 100) if page.gsc_ctr else 0,
                     page.gsc_avg_position or 0,
                 ]
-                ws.append(row)
+                ws.append([safe_cell(value) for value in row])
 
+        self._auto_fit_columns(ws)
+
+    def _sheet_top_queries(self) -> None:
+        """Sheet 4: the long-format top-queries table, in category order.
+
+        Only written when a query fetch exists, so an export made without one keeps
+        the three sheets it always had.
+        """
+        ws = self.workbook.create_sheet(TOP_QUERIES_SHEET)
+        urls = list(
+            dict.fromkeys(
+                page.url for page in self._ordered_pages() if page.url in self._top_by_url
+            )
+        )
+        write_top_queries_sheet(ws, urls, self._top_by_url, self._banner())
         self._auto_fit_columns(ws)
 
     @staticmethod

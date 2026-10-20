@@ -144,6 +144,10 @@ src/
 │   │                            # create_app() picks this store automatically
 │   │                            # whenever PostgresSettings.is_configured() is
 │   │                            # true; DiskJobStore otherwise (build-log 0118)
+│   │                            # write_gsc_queries/read_gsc_queries: the saved
+│   │                            # top-queries fetch in job_payloads.gsc_queries
+│   │                            # (migration 013). The write raises rather than
+│   │                            # degrading, because the fetch spent quota
 │   │                            # import_terminal (ADR 0034, migration 0009): one
 │   │                            # transaction inserts an already-terminal jobs
 │   │                            # row plus its job_payloads row. Never create()/
@@ -307,6 +311,13 @@ src/
 │   │                            # MasterURLReport, generate_pdf() instead of
 │   │                            # generate() — same eleven columns, flat,
 │   │                            # landscape A4, via reportlab (ADR 0024)
+│   │                            # POST /jobs/{id}/gsc/top-queries: fetches every
+│   │                            # (page, query) row for the trailing year and saves
+│   │                            # it on the job, replacing any earlier fetch. Returns
+│   │                            # counts and stop_reason only. Refused with 502 when
+│   │                            # nothing arrived, so a failed refetch never blanks a
+│   │                            # good result. Read back only through _owned_job
+│   │                            # (a 409 if the saved format predates the schema)
 │   │                            # POST /jobs/{id}/cancel (cycle 0126, ADR 0025):
 │   │                            # sets a per-job ApiState._cancel_flags Event
 │   │                            # BEFORE state.release() — release() drops the
@@ -508,13 +519,23 @@ src/
 │   │                            # Takes `account=` to pick a named profile (ADR 0012)
 │   │                            # 403/404 propagate (not an empty response);
 │   │                            # sc-domain: sent without a trailing "/" (0152)
+│   │                            # fetch_analytics pages rowLimit 10,000 by startRow
+│   │                            # until a short page (cap MAX_PAGES=40, row_cap).
+│   │                            # fetch_top_queries: dimensions page+query, 25,000
+│   │                            # per page, one call() per page through the shared
+│   │                            # gsc_quota bucket. A failed page keeps the rows
+│   │                            # before it (fetch_failed); never discards them
 │   ├── gsc_token_manager.py     # OAuth refresh per profile; identity logged as
 │   │                            # oauth2://profile/<name>. Refresh is outside the
 │   │                            # retry loop so a revoked token fails once
 │   ├── gsc_property_validator.py# Property URL validation before any query.
 │   │                            # sc-domain: covers domain + subdomains on
 │   │                            # whole DNS labels; URL prefix never strips www
-│   ├── gsc_schemas.py           # GscOAuthToken (SecretStr), metrics rows, errors
+│   ├── gsc_schemas.py           # GscOAuthToken (SecretStr), metrics rows, errors,
+│   │                            # GscPageQueries (the saved top-queries fetch)
+│   ├── gsc_requests.py          # Pure request/response helpers shared by the page
+│   │                            # and query fetches: property naming, 403/404/429
+│   │                            # mapping, row parsing, MAX_PAGES and the 25,000 cap
 │   ├── llm_client.py            # Provider-agnostic LLM interface + spend metering
 │   ├── worker_registration_client.py  # ADR 0030: the operator calls behind
 │   │                            # `rankuno-worker setup` (login, verify key,
@@ -599,7 +620,7 @@ src/
     │       │                         # .record_fetch, the one method both
     │       │                         # sync and async discovery call (ADR 0014)
     │       ├── tree_visualizer.py    # Standalone interactive HTML site tree
-    │       ├── reports.py            # MasterURLReport: 3-sheet .xlsx (All URLs
+    │       ├── reports.py            # MasterURLReport: up to 4-sheet .xlsx (All URLs
     │       │                         # w/ GSC metrics+hierarchy+type+depth+
     │       │                         # discovery-method, By Indexability, By
     │       │                         # HTTP Status). Shipped with zero callers
@@ -612,6 +633,22 @@ src/
     │       │                         # "Not fetched" / "No response" /
     │       │                         # "Not recorded (older crawl)" (cycle 0156;
     │       │                         # read "Unknown" before, cycle 0123)
+    │       │                         # Top Queries (cycle 0163 series): "All URLs"
+    │       │                         # gains a "Top Queries" cell and a "Category"
+    │       │                         # column, both appended after the legacy
+    │       │                         # columns. A fourth sheet, long-format
+    │       │                         # "Top Queries", exists only when a query
+    │       │                         # fetch is saved. "By Indexability" and
+    │       │                         # "By HTTP Status" group by status first and
+    │       │                         # keep category order inside each group.
+    │       │                         # Every text cell passes contracts/cell_guard
+    │       ├── report_pdf.py         # The flat PDF renderer, split out of
+    │       │                         # reports.py at its line ceiling. Same twelve
+    │       │                         # legacy columns, category order, no separator
+    │       │                         # rows; the partial banner sits above the table
+    │       ├── query_by_url.py       # Ranks each crawled URL's top five queries
+    │       │                         # (performance/), resolved through
+    │       │                         # UrlResolutionIndex; ties broken by query text
     │       ├── fetch_status.py       # Labels + legend for those columns,
     │       │                         # shared by xlsx and PDF (cycle 0156)
     │       ├── report_columns.py     # Derivation of the nine trailing "All URLs"
@@ -687,6 +724,13 @@ src/
     │   │   │                         # FILENAMES derives from (ADR 0018).
     │   │   │                         # 37 of 49 previously-requested names
     │   │   │                         # existed in no export (build-log 0116)
+    │   │   ├── cell_guard.py         # safe_cell: the one formula-injection guard
+    │   │   │                         # every exported text cell passes through
+    │   │   │                         # (sheets, PDF, deliverables). ADR 0011 seam
+    │   │   ├── url_category.py       # category_key: first path segment, lowercased,
+    │   │   │                         # "/" for the homepage. Parity with
+    │   │   │                         # rankuno-ui/src/lib/urlCategory.ts via
+    │   │   │                         # tests/fixtures/url_category/parity.json
     │   │   ├── url_normalizer.py     # UrlNormalizer Protocol: the key function
     │   │   │                         # every adapter is handed, never imports
     │   │   └── audit.py              # AuditDataset / AuditPage / AuditLink /
@@ -893,7 +937,12 @@ src/
     │       ├── opportunity_scorer.py  # Ranked recommendations. Refuses a kind
     │       │                          # whose signal the crawl never collected,
     │       │                          # and names the reason
-    │       └── gsc_export.py          # Reads the ZIP/xlsx/CSV Search Console
+    │       ├── query_by_url.py        # Top five queries per crawled URL, from a saved
+       │                          # query-by-page fetch. Pure: no I/O. Rows for one
+       │                          # query split across addresses are summed first
+       ├── query_sheet.py         # Presentation of those queries: the "query (clicks)"
+       │                          # cell, the long-format sheet, the partial banner
+       └── gsc_export.py          # Reads the ZIP/xlsx/CSV Search Console
     │                                  # actually produces. Picks the pages tab
     │                                  # by content — the names are localised
     ├── ppc/                     # Reserved namespace, no implementation

@@ -18,7 +18,8 @@ from src.modules.seo.page_classifier.report_columns import (
     CTR_DECIMAL_HEADER,
     TRAILING_HEADERS,
 )
-from src.modules.seo.page_classifier.reports import _PDF_COLUMN_WIDTHS, MasterURLReport
+from src.modules.seo.page_classifier.report_pdf import _PDF_COLUMN_WIDTHS
+from src.modules.seo.page_classifier.reports import MasterURLReport
 from src.modules.seo.page_classifier.schemas import DiscoverySource, FullPageIntelligenceProfile
 from tests.modules.seo.page_classifier.report_profile_factory import (
     legacy_page,
@@ -43,6 +44,9 @@ LEGACY_HEADERS = [
     "Discovery Method",
     "Reachability Tier",
 ]
+# Appended after the trailing columns by the GSC query work: the top queries
+# per URL in one cell, then the path category. Order is part of the contract.
+SEARCH_HEADERS = ["Top Queries", "Category"]
 NEW_HEADERS = [
     "Found Via",
     "In Sitemap",
@@ -80,12 +84,12 @@ class TestHeaders:
 
     def test_all_urls_header_row_is_legacy_then_trailing(self) -> None:
         headers, _ = _all_urls((make_page(),))
-        assert headers == LEGACY_HEADERS + NEW_HEADERS
+        assert headers == LEGACY_HEADERS + NEW_HEADERS + SEARCH_HEADERS
 
     def test_the_twelve_legacy_headers_are_unchanged(self) -> None:
         headers, _ = _all_urls((make_page(),))
         assert headers[:12] == LEGACY_HEADERS
-        assert len(headers) == 26
+        assert len(headers) == 28
 
     def test_other_sheets_keep_their_headers(self) -> None:
         book = load_workbook(MasterURLReport(make_result(make_page())).generate())
@@ -188,7 +192,7 @@ class TestWorkbookRows:
         assert row[0] == "https://e.com/p/"
         assert row[headers.index("GSC Clicks")] == 4
         assert row[headers.index("GSC Impressions")] == 80
-        assert len(row) == 26
+        assert len(row) == 28
 
 
 class TestPdfUnchanged:
