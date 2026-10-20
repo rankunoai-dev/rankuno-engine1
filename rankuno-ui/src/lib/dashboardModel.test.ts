@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SavedReconciliation } from "../adapters/adapterInterface";
 import { crawl, page } from "../test/factories";
 import { buildDashModel, DEFAULTER_LANE, QUARANTINE_ROOT_LABEL } from "./dashboardModel";
-import parityFixture from "../../../tests/fixtures/url_category/parity.json";
+import parityFixture from "../test/fixtures/url_category/parity.json";
 import { categoryKey } from "./urlCategory";
 
 /**
@@ -132,7 +132,8 @@ describe("buildDashModel — includeDefaulters on", () => {
 });
 
 // The Python export and this helper must group an address identically. The
-// same fixture is read by tests/modules/seo/contracts/test_url_category.py.
+// same fixture (rankuno-ui/src/test/fixtures/url_category/parity.json) is read
+// by tests/modules/seo/contracts/test_url_category.py.
 describe("categoryKey agrees with the engine's url_category", () => {
   it.each(parityFixture)("$url -> $category", ({ url, category }) => {
     expect(categoryKey(url)).toBe(category);

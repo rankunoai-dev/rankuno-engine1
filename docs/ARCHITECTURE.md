@@ -730,7 +730,9 @@ src/
     │   │   ├── url_category.py       # category_key: first path segment, lowercased,
     │   │   │                         # "/" for the homepage. Parity with
     │   │   │                         # rankuno-ui/src/lib/urlCategory.ts via
-    │   │   │                         # tests/fixtures/url_category/parity.json
+    │   │   │                         # rankuno-ui/src/test/fixtures/url_category/
+    │   │   │                         # parity.json (inside the UI so the Docker
+    │   │   │                         # ui stage can build its tests)
     │   │   ├── url_normalizer.py     # UrlNormalizer Protocol: the key function
     │   │   │                         # every adapter is handed, never imports
     │   │   └── audit.py              # AuditDataset / AuditPage / AuditLink /

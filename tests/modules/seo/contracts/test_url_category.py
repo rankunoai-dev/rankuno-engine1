@@ -17,7 +17,15 @@ from src.modules.seo.contracts.url_category import (
     category_sort_key,
 )
 
-PARITY = Path(__file__).resolve().parents[3] / "fixtures" / "url_category" / "parity.json"
+PARITY = (
+    Path(__file__).resolve().parents[4]
+    / "rankuno-ui"
+    / "src"
+    / "test"
+    / "fixtures"
+    / "url_category"
+    / "parity.json"
+)
 CASES: list[dict[str, str]] = json.loads(PARITY.read_text(encoding="utf-8"))
 
 

@@ -5,7 +5,7 @@
  * exists so the UI can group the same way. It is not wired into the tree: the
  * tree groups by the profile's normalised path, and that behaviour is unchanged.
  *
- * Parity is enforced by `tests/fixtures/url_category/parity.json`, which both
+ * Parity is enforced by `rankuno-ui/src/test/fixtures/url_category/parity.json`, which both
  * this file and the Python module are tested against. The address is split with
  * the same regular expression as the Python side, not with `new URL()`. The two
  * parsers disagree about percent-encoding (`new URL` encodes a space in the path;
