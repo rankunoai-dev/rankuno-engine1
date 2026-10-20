@@ -2,6 +2,7 @@ import { Button, Empty, Popconfirm, Spin, message } from "antd";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
 import { API_BASE, ApiError, authorizedFetch } from "../../adapters/httpAdapter";
+import { CredentialSetupGuide } from "./CredentialSetupGuide";
 import { GscAccountForm } from "./GscAccountForm";
 import "./gsc-accounts.css";
 
@@ -112,6 +113,7 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
             Try Again
           </Button>
         </div>
+        <CredentialSetupGuide />
       </div>
     );
   }
@@ -124,6 +126,8 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
           Add Account
         </Button>
       </div>
+
+      <CredentialSetupGuide />
 
       <Spin spinning={loading}>
         {accounts.length === 0 ? (

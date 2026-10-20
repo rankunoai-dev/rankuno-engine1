@@ -149,6 +149,22 @@ describe("GscAccountsView", () => {
     });
   });
 
+  it("carries the Search Console and GA4 setup guide on this tab", async () => {
+    (fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify({ accounts: [] }), { status: 200 }),
+    );
+
+    render(<GscAccountsView orgId="test-org" />);
+
+    const toggle = screen.getByText("Setup guide: Search Console and GA4 credentials");
+    fireEvent.click(toggle);
+    expect(screen.getByRole("heading", { name: "Search Console (GSC) credential" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "GA4 credential" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/no accounts configured/i)).toBeInTheDocument();
+    });
+  });
+
   it("displays secret override status correctly", async () => {
     const mockAccounts = [
       { account_name: "no-secret", client_id: "123", has_secret_override: false },

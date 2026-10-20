@@ -125,4 +125,11 @@ describe("LaunchView", () => {
       screen.queryByRole("button", { name: /^open screaming frog$/i }),
     ).not.toBeInTheDocument();
   });
+
+  it("does not carry the GSC credential setup guide, which belongs to the GSC Accounts tab", () => {
+    renderView();
+
+    expect(screen.queryByText(/setup guide: search console and ga4/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/oauth refresh token/i)).not.toBeInTheDocument();
+  });
 });
