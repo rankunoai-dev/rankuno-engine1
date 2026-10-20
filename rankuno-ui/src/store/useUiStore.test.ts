@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useAuthStore } from "./useAuthStore";
 import { modeOfView, useUiStore, type RailView } from "./useUiStore";
 
 /**
@@ -112,6 +113,23 @@ describe("useUiStore", () => {
 });
 
 /**
+ * Both stores, freshly loaded into one module registry.
+ *
+ * The restore runs at module load, and the sign-in subscription needs the auth
+ * store to be the same instance the UI store imported, so both are reset and
+ * imported together rather than one of them from the static import above.
+ */
+async function bootBoth(): Promise<{
+  ui: typeof useUiStore;
+  auth: typeof useAuthStore;
+}> {
+  vi.resetModules();
+  const ui = await import("./useUiStore");
+  const auth = await import("./useAuthStore");
+  return { ui: ui.useUiStore, auth: auth.useAuthStore };
+}
+
+/**
  * Restoring the view across a reload.
  *
  * The reported bug: a reload dropped the operator back on the Launch chooser
@@ -127,9 +145,8 @@ describe("useUiStore — restoring the view", () => {
   const STORAGE_KEY = "rankuno.ui";
 
   async function boot(): Promise<typeof useUiStore> {
-    vi.resetModules();
-    const module = await import("./useUiStore");
-    return module.useUiStore;
+    const { ui } = await bootBoth();
+    return ui;
   }
 
   beforeEach(() => {
@@ -225,6 +242,22 @@ describe("useUiStore — restoring the view", () => {
     expect(raw).not.toMatch(/token|org|mode/i);
   });
 
+  it("reopens the stored view on a reload while still signed in", async () => {
+    /* A reload inside one session is the case the restore exists for. The
+       session is restored from its own key, and no sign-in happens, so the
+       view must survive the module load untouched. */
+    window.localStorage.setItem(
+      "rankuno.auth",
+      JSON.stringify({ token: "restored", orgId: "acme", expiresAt: "2099-01-01T00:00:00Z" }),
+    );
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ view: "audit" }));
+
+    const { ui, auth } = await bootBoth();
+
+    expect(auth.getState().token).toBe("restored");
+    expect(ui.getState().view).toBe("audit");
+  });
+
   it("survives storage being unavailable entirely", async () => {
     /* Private mode, or a full quota. Failing to remember the view is a far
        smaller loss than a rail button that throws. */
@@ -248,5 +281,81 @@ describe("useUiStore — restoring the view", () => {
       getItem.mockRestore();
       setItem.mockRestore();
     }
+  });
+});
+
+/**
+ * The view across sign-in and sign-out.
+ *
+ * A reload keeps the view; a new sign-in does not. Both are driven through the
+ * real `login` and `logout` actions, with `fetch` stubbed, so the subscription
+ * is exercised on the transitions it actually sees rather than on a state write.
+ */
+describe("useUiStore — the view across sign-in and sign-out", () => {
+  const UI_KEY = "rankuno.ui";
+  const fetchMock = vi.fn();
+
+  function loginResponse(): Response {
+    return new Response(
+      JSON.stringify({
+        token: "session-token",
+        token_type: "bearer",
+        org_id: "acme",
+        expires_at: "2099-01-01T00:00:00Z",
+      }),
+      { status: 200 },
+    );
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("lands on Launch after a fresh sign-in, whatever view was stored", async () => {
+    window.localStorage.setItem(UI_KEY, JSON.stringify({ view: "visualizer" }));
+    const { ui, auth } = await bootBoth();
+    // The restore still happens at load: the reload behaviour is unchanged.
+    expect(ui.getState().view).toBe("visualizer");
+
+    fetchMock.mockResolvedValueOnce(loginResponse());
+    await expect(auth.getState().login("op-1", "correct-horse")).resolves.toBe(true);
+
+    expect(ui.getState().view).toBe("launch");
+    expect(modeOfView(ui.getState().view)).toBeNull();
+    expect(JSON.parse(window.localStorage.getItem(UI_KEY) ?? "null")).toEqual({ view: "launch" });
+  });
+
+  it("lands on Launch after sign-out then sign-in in the same tab", async () => {
+    const { ui, auth } = await bootBoth();
+    fetchMock.mockResolvedValueOnce(loginResponse());
+    await auth.getState().login("op-1", "correct-horse");
+    ui.getState().setView("audit");
+    expect(JSON.parse(window.localStorage.getItem(UI_KEY) ?? "null")).toEqual({ view: "audit" });
+
+    auth.getState().logout();
+    expect(window.localStorage.getItem(UI_KEY)).toBeNull();
+
+    fetchMock.mockResolvedValueOnce(loginResponse());
+    await auth.getState().login("op-1", "correct-horse");
+    expect(ui.getState().view).toBe("launch");
+    expect(ui.getState().lastEngineView).toBe("visualizer");
+  });
+
+  it("does not reset the view when a token is written directly", async () => {
+    /* The reason a sign-in is keyed on `signedInAt` and not on `token`: a
+       direct write is not a new start, and the rail must not jump under the
+       operator while a test or a restore sets the session. */
+    const { ui, auth } = await bootBoth();
+    ui.getState().setView("jobs");
+
+    auth.setState({ token: "t", orgId: "acme", expiresAt: "2099-01-01T00:00:00Z" });
+
+    expect(ui.getState().view).toBe("jobs");
   });
 });

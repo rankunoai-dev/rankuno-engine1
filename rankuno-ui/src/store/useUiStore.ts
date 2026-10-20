@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useAuthStore } from "./useAuthStore";
 
 /**
  * Every rail destination, as a value and not a type alone.
@@ -131,6 +132,14 @@ function writeStoredView(view: RailView): void {
   }
 }
 
+function clearStoredView(): void {
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Same as `writeStoredView`: an unavailable store leaves nothing to clear.
+  }
+}
+
 /*
  * Rail navigation, kept out of the other two stores on purpose.
  *
@@ -198,4 +207,26 @@ export const useUiStore = create<UiState>((set) => ({
  */
 useUiStore.subscribe((state, previous) => {
   if (state.view !== previous.view) writeStoredView(state.view);
+});
+
+/*
+ * Sign-in starts on the chooser, and sign-out forgets the view.
+ *
+ * The restore above is for a reload inside one session. A view left open by a
+ * previous sign-in must not carry into the next one, so the auth store is
+ * watched for the two session boundaries. This is the rail store depending on
+ * the session, not the reverse: `useAuthStore` knows nothing about navigation.
+ *
+ * A sign-in is keyed on `signedInAt`, not on `token`, because a token also
+ * changes when a reload restores one, or a test writes one directly, and
+ * neither of those is a new start.
+ */
+useAuthStore.subscribe((state, previous) => {
+  if (state.signedInAt !== null && state.signedInAt !== previous.signedInAt) {
+    useUiStore.setState({ view: "launch" });
+  }
+  if (state.token === null && previous.token !== null) {
+    clearStoredView();
+    useUiStore.setState({ lastEngineView: "visualizer" });
+  }
 });

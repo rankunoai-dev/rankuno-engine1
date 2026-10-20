@@ -76,6 +76,15 @@ interface AuthState {
   token: string | null;
   orgId: string | null;
   expiresAt: string | null;
+  /**
+   * When this tab signed in (epoch milliseconds), or `null` for a session
+   * restored from storage and for no session at all.
+   *
+   * The rail store needs this to tell a fresh sign-in from a reload. A token
+   * change cannot do it: a reload restores a token, and so does any direct
+   * write to the store.
+   */
+  signedInAt: number | null;
   /** True while a login request is in flight — the form disables submit on this. */
   loggingIn: boolean;
   /**
@@ -152,6 +161,7 @@ export const useAuthStore = create<AuthState>((set) => {
       token: session.token,
       orgId: session.orgId,
       expiresAt: session.expiresAt,
+      signedInAt: Date.now(),
       loggingIn: false,
       loginError: null,
     });
@@ -161,6 +171,7 @@ export const useAuthStore = create<AuthState>((set) => {
   token: restoredValid?.token ?? null,
   orgId: restoredValid?.orgId ?? null,
   expiresAt: restoredValid?.expiresAt ?? null,
+  signedInAt: null,
   loggingIn: false,
   loginError: null,
 
@@ -236,7 +247,7 @@ export const useAuthStore = create<AuthState>((set) => {
   logout() {
     writeStoredSession(null);
     setAuthToken(null);
-    set({ token: null, orgId: null, expiresAt: null, loginError: null });
+    set({ token: null, orgId: null, expiresAt: null, signedInAt: null, loginError: null });
   },
   };
 });

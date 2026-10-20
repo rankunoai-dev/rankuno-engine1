@@ -116,6 +116,37 @@ describe("DashboardShell — entering the engine from Launch", () => {
     expect(useUiStore.getState().view).toBe("launch");
     expect(railItems()).toEqual(["Launch"]);
   });
+
+  it("shows the chooser after a sign-in, whatever view was open before it", async () => {
+    /* The operator's first screen after login. A view left open by the last
+       session must not decide it: the store resets to Launch on sign-in, and
+       this renders the shell to prove the chooser is what is on screen. */
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          token: "session-token",
+          token_type: "bearer",
+          org_id: "acme",
+          expires_at: "2099-01-01T00:00:00Z",
+        }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      useUiStore.setState({ view: "visualizer", lastEngineView: "visualizer" });
+      await useAuthStore.getState().login("op-1", "correct-horse");
+
+      render(<DashboardShell />);
+
+      expect(useUiStore.getState().view).toBe("launch");
+      expect(screen.getByRole("heading", { name: /rankuno engine crawl/i })).toBeInTheDocument();
+      // Signed in, so the rail also carries log out; no engine destination does.
+      expect(railItems()).toEqual(["Launch", "Log out"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 /**

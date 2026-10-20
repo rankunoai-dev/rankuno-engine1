@@ -78,8 +78,8 @@ describe("App", () => {
     /* Edge case in the reload brief: the view is restored at module load, but
        `App` still gates on the session, so an expired one shows the login
        screen and no crawl is fetched until it is replaced. Signing in then
-       lands on the restored view with its crawl, rather than the two fighting
-       over what is on screen. */
+       lands on Launch, not on the stored view: a sign-in is a new start, and
+       the store resets the view on it (see `useUiStore.test.ts`). */
     (fetch as any).mockResolvedValue(new Response("", { status: 200 })); // /health
     window.localStorage.setItem("rankuno.ui", JSON.stringify({ view: "visualizer" }));
 
