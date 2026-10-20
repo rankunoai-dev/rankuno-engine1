@@ -65,6 +65,13 @@
   border-color: var(--hairline-strong);
 }
 
+.gsa-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
 .gsa-card-content {
   flex: 1;
   display: flex;
