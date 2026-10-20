@@ -24,6 +24,7 @@ function report(overrides: Partial<GscEnrichmentReport> = {}): GscEnrichmentRepo
     account: null,
     property_url: null,
     reason: "",
+    complete: true,
     ...overrides,
   };
 }

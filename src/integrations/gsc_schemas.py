@@ -6,21 +6,46 @@ ensures no unexpected fields slip through, preventing silent data loss.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 
 from src.core.schemas import StrictModel
 
 __all__ = [
-    "GscPageMetrics",
-    "GscQueryMetrics",
     "GscAnalyticsRequest",
     "GscAnalyticsResponse",
     "GscOAuthToken",
-    "GscProperty",
+    "GscPageMetrics",
+    "GscPageQueries",
     "GscPropertyValidationResult",
+    "GscProperty",
+    "GscQueryMetrics",
+    "GscQueryRow",
+    "GscStopReason",
 ]
+
+GscStopReason = Literal["exhausted", "row_cap", "fetch_failed"]
+"""Why a paged Search Console fetch stopped.
+
+`exhausted` is the only answer that means every row was read: the last page came
+back short. `row_cap` means the page limit was reached while full pages were still
+arriving, so rows past it exist and were never asked for. `fetch_failed` means a
+page request failed after retries; the rows received before it are kept, never
+discarded, and the result is marked incomplete.
+"""
+
+
+def _complete_matches_reason(complete: bool, stop_reason: GscStopReason) -> None:
+    """Reject a result that says it is complete while stopping for any other reason.
+
+    The flag and the reason are two fields for one fact. Letting them disagree
+    would let a consumer show "complete" over a fetch that stopped at its cap.
+    """
+    if complete != (stop_reason == "exhausted"):
+        msg = f"complete={complete} contradicts stop_reason={stop_reason!r}"
+        raise ValueError(msg)
 
 
 class GscPageMetrics(StrictModel):
@@ -109,8 +134,67 @@ class GscAnalyticsResponse(StrictModel):
     rows_available: int = Field(
         default=0,
         ge=0,
-        description="Total rows available from GSC (may exceed len(rows) if row_limit was hit)",
+        description="Rows received across every page fetched (len(rows) before parsing)",
     )
+    complete: bool = Field(
+        default=True,
+        description="False when paging stopped before the last short page; rows are partial",
+    )
+    stop_reason: GscStopReason = Field(
+        default="exhausted",
+        description="Why paging stopped; see GscStopReason",
+    )
+
+    @model_validator(mode="after")
+    def _flag_matches_reason(self) -> GscAnalyticsResponse:
+        """Keep `complete` and `stop_reason` from disagreeing."""
+        _complete_matches_reason(self.complete, self.stop_reason)
+        return self
+
+
+class GscQueryRow(StrictModel):
+    """One (page, query) pair from a Search Console query-by-page fetch."""
+
+    page: str = Field(
+        ..., description="Absolute URL the query led to, as Search Console reports it"
+    )
+    query: str = Field(..., description="Search query text, as Search Console reports it")
+    clicks: int = Field(ge=0, description="Clicks for this query on this page")
+    impressions: int = Field(ge=0, description="Impressions for this query on this page")
+    avg_position: float = Field(
+        ge=0.0,
+        description="Average position for this query on this page. Not clamped to 1.0: a "
+        "malformed row must reach the export as-is rather than be quietly corrected.",
+    )
+
+
+class GscPageQueries(StrictModel):
+    """Every (page, query) row a Search Console fetch received, with how it ended.
+
+    Stored on the job sidecar and read by the URL exports. The rows are kept as
+    received; ranking the top queries per URL happens at export, so this model
+    is a record of what was fetched, not a view of it.
+    """
+
+    property_url: str = Field(..., description="The property queried, as sent to the API")
+    start_date: str = Field(..., description="Date range start (YYYY-MM-DD), inclusive")
+    end_date: str = Field(..., description="Date range end (YYYY-MM-DD), inclusive")
+    rows: list[GscQueryRow] = Field(
+        default_factory=list,
+        description="Every row received, across all pages, in the order received",
+    )
+    complete: bool = Field(..., description="True only when the last page came back short")
+    stop_reason: GscStopReason = Field(..., description="Why paging stopped")
+    fetched_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="When the fetch finished (UTC)",
+    )
+
+    @model_validator(mode="after")
+    def _flag_matches_reason(self) -> GscPageQueries:
+        """Keep `complete` and `stop_reason` from disagreeing."""
+        _complete_matches_reason(self.complete, self.stop_reason)
+        return self
 
 
 class GscOAuthToken(StrictModel):

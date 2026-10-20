@@ -6,8 +6,8 @@ audit logging. All calls are protected by the BaseAPIClient framework.
 
 from __future__ import annotations
 
-from contextlib import suppress
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
@@ -15,22 +15,32 @@ from googleapiclient.errors import HttpError  # type: ignore[import-untyped]
 
 from src.core.config import Settings
 from src.core.errors import (
-    GscApiDeprecatedError,
     GscAuthorizationError,
     GscPropertyNotFoundError,
-    GscQuotaExceededError,
+    GuardrailViolationError,
 )
 from src.core.logger import get_logger
 from src.integrations.base_client import BaseAPIClient
-from src.integrations.gsc_schemas import GscAnalyticsResponse, GscPageMetrics, GscProperty
+from src.integrations.gsc_requests import (
+    MAX_PAGES,
+    ROW_LIMIT_MAX,
+    api_property_url,
+    check_row_limit,
+    page_metrics,
+    query_rows,
+    raise_mapped_http_error,
+)
+from src.integrations.gsc_schemas import (
+    GscAnalyticsResponse,
+    GscPageQueries,
+    GscProperty,
+    GscStopReason,
+)
 from src.integrations.gsc_token_manager import GscTokenManager
 
 __all__ = ["GscApiClient"]
 
 _logger = get_logger("integrations.gsc_client")
-
-_DOMAIN_PROPERTY_PREFIX = "sc-domain:"
-"""How Search Console names a Domain property: `sc-domain:example.com`."""
 
 
 class GscApiClient(BaseAPIClient):
@@ -47,12 +57,16 @@ class GscApiClient(BaseAPIClient):
       never inside it. `GscAuthenticationError` is an `IntegrationError`, which
       the retry policy treats as transient, so a refresh inside the loop turned
       one revoked token into four `invalid_grant` POSTs.
+    - Paged fetches make one `call()` per page, so every page takes a rate-limit
+      slot and a page that fails after its retries does not discard the pages
+      before it. The result says it is incomplete and why.
     - Errors are mapped to specific exception types for upstream handling
-    - Graceful degradation: transient fetch errors return empty data, not
-      exceptions. Authentication, authorization (403) and property-not-found
-      (404) errors are the exception to that: an empty result would read as
-      "no search data" rather than "re-authorise this account" or "this
-      account cannot see this property", so they propagate to the caller.
+    - Graceful degradation: a transient fetch error keeps the rows already
+      received and reports `fetch_failed`, rather than raising. Authentication,
+      authorization (403) and property-not-found (404) errors are the exception
+      to that: an empty result would read as "no search data" rather than
+      "re-authorise this account" or "this account cannot see this property", so
+      they propagate to the caller.
     """
 
     service_name = "google.search_console"
@@ -175,6 +189,90 @@ class GscApiClient(BaseAPIClient):
             # Return empty list on error (graceful degradation)
             return []
 
+    def _query_page(
+        self, token: str, api_url: str, body: dict[str, object]
+    ) -> list[dict[str, Any]]:
+        """Run one `searchAnalytics.query` request and return its raw rows.
+
+        The retry wrapper calls this again with the same body on a transient
+        failure, so `startRow` is fixed by the caller and a retry cannot skip or
+        repeat a row.
+
+        Raises:
+            GscPropertyNotFoundError: On a 404.
+            GscAuthorizationError: On a 403.
+            GscQuotaExceededError: On a 429.
+        """
+        try:
+            service = self._get_service(token)
+            request = service.searchanalytics().query(siteUrl=api_url, body=body)
+            response = request.execute()
+        except HttpError as exc:
+            raise_mapped_http_error(exc, api_url)
+        return list(response.get("rows", []))
+
+    def _page_through(
+        self,
+        operation: str,
+        token: str,
+        api_url: str,
+        body: dict[str, object],
+        row_limit: int,
+    ) -> tuple[list[dict[str, Any]], GscStopReason]:
+        """Read pages of `searchAnalytics.query` until one comes back short.
+
+        Each page is one `self.call()`, so each takes a rate-limit slot. The
+        cursor advances by the rows *received*, not the rows parsed, because a
+        row skipped at parse time still occupies a position in the API's
+        ordering. A short page is the end of the data; a full page at the cap is
+        `row_cap`.
+
+        Args:
+            operation: Audit-log label for each page request.
+            token: Bearer token, fetched once by the caller before this loop.
+            api_url: The `siteUrl` to query.
+            body: Request body shared by every page (dates and dimensions).
+            row_limit: Rows requested per page.
+
+        Returns:
+            The raw rows received, in order, and why paging stopped. Rows
+            received before a failed page are returned, never dropped.
+
+        Raises:
+            GscPropertyNotFoundError: On a 404 on any page; refusals propagate.
+            GscAuthorizationError: On a 403 on any page; refusals propagate.
+            GuardrailViolationError: Propagated unchanged, as `call()` does.
+        """
+        collected: list[dict[str, Any]] = []
+        for _ in range(MAX_PAGES):
+            page_body = {**body, "rowLimit": row_limit, "startRow": len(collected)}
+            try:
+                page = self.call(operation, partial(self._query_page, token, api_url, page_body))
+            except (GscPropertyNotFoundError, GscAuthorizationError, GuardrailViolationError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - a failed page keeps the rows before it
+                # Class name only. The exception text can quote the request, and
+                # the request names a property and a search phrase.
+                _logger.warning(
+                    "gsc_page_fetch_failed",
+                    extra={
+                        "operation": operation,
+                        "error": type(exc).__name__,
+                        "rows_kept": len(collected),
+                    },
+                )
+                return collected, "fetch_failed"
+
+            collected.extend(page)
+            if len(page) < row_limit:
+                return collected, "exhausted"
+
+        _logger.warning(
+            "gsc_row_cap_reached",
+            extra={"operation": operation, "pages": MAX_PAGES, "rows": len(collected)},
+        )
+        return collected, "row_cap"
+
     def fetch_analytics(
         self,
         property_url: str,
@@ -182,147 +280,107 @@ class GscApiClient(BaseAPIClient):
         end_date: str,
         row_limit: int = 10000,
     ) -> GscAnalyticsResponse:
-        """Fetch search analytics for a GSC property.
+        """Fetch page-level search analytics for a GSC property, across every page.
 
-        Queries the GSC API for page-level analytics (impressions, clicks, position, CTR)
-        for the specified date range.
+        Reads `dimensions=["page"]` one `row_limit` page at a time until a page
+        comes back short. Without paging, a property with more pages than one
+        request returns is silently truncated, and every total built from it is
+        wrong for exactly the sites with the most pages.
 
         Args:
             property_url: GSC property, either a URL prefix
                 ("https://example.com/") or a domain ("sc-domain:example.com").
             start_date: Start date (YYYY-MM-DD)
             end_date: End date (YYYY-MM-DD)
-            row_limit: Max rows to return (GSC max is 25,000 per request)
+            row_limit: Rows requested per page (1 to 25,000; GSC's maximum).
 
         Returns:
-            GscAnalyticsResponse with page metrics, or empty response on error.
+            GscAnalyticsResponse with page metrics. `complete` is False and
+            `stop_reason` says why when the rows are partial.
 
         Raises:
+            ValueError: If `row_limit` is outside 1 to 25,000. Raised before any
+                network call.
             GscAuthenticationError: If the refresh token is revoked or invalid.
                 Raised once, before any analytics request; never retried.
             GscAuthorizationError: On a 403 — this account cannot access the
                 property.
             GscPropertyNotFoundError: On a 404 — no such property.
         """
+        check_row_limit(row_limit)
         token = self._token_manager.get_or_refresh_token()
+        api_url = api_property_url(property_url)
+        body: dict[str, object] = {
+            "startDate": start_date,
+            "endDate": end_date,
+            "dimensions": ["page"],
+        }
 
-        def attempt() -> GscAnalyticsResponse:
-            try:
-                service = self._get_service(token)
+        raw, stop_reason = self._page_through("fetch_analytics", token, api_url, body, row_limit)
+        rows = page_metrics(raw)
+        return GscAnalyticsResponse(
+            property_url=api_url,
+            start_date=start_date,
+            end_date=end_date,
+            rows=rows,
+            rows_available=len(rows),
+            fetched_at=datetime.now(UTC),
+            complete=stop_reason == "exhausted",
+            stop_reason=stop_reason,
+        )
 
-                # A URL-prefix property is listed with a trailing slash. A domain
-                # property is not, and `sc-domain:example.com/` names nothing.
-                # Matched case-insensitively, as the form and the validator do,
-                # and sent in the lowercase form Search Console lists it under.
-                if property_url.lower().startswith(_DOMAIN_PROPERTY_PREFIX):
-                    api_property_url = property_url.rstrip("/").lower()
-                elif property_url.endswith("/"):
-                    api_property_url = property_url
-                else:
-                    api_property_url = f"{property_url}/"
+    def fetch_top_queries(
+        self,
+        property_url: str,
+        start_date: str,
+        end_date: str,
+        row_limit: int = ROW_LIMIT_MAX,
+    ) -> GscPageQueries:
+        """Fetch every (page, query) row for a GSC property, across pages.
 
-                request = service.searchanalytics().query(
-                    siteUrl=api_property_url,
-                    body={
-                        "startDate": start_date,
-                        "endDate": end_date,
-                        "dimensions": ["page"],
-                        "rowLimit": row_limit,
-                    },
-                )
+        The query dimension multiplies the rows, which is why the default page is
+        Search Console's maximum rather than the page-level default. The rows are
+        returned as received; choosing the top queries per URL is the export's
+        job, so no ranking decision is baked in here.
 
-                response = request.execute()
+        Args:
+            property_url: GSC property, as for `fetch_analytics`.
+            start_date: Start date (YYYY-MM-DD).
+            end_date: End date (YYYY-MM-DD).
+            row_limit: Rows requested per page (1 to 25,000).
 
-                # Parse response into GscAnalyticsResponse
-                rows: list[GscPageMetrics] = []
-                for row in response.get("rows", []):
-                    keys = row.get("keys", [])
-                    if not keys:
-                        continue
+        Returns:
+            GscPageQueries carrying every row received, `complete`, and
+            `stop_reason`.
 
-                    url = keys[0]
-                    impressions = int(row.get("impressions", 0))
-                    clicks = int(row.get("clicks", 0))
-                    position = float(row.get("position", 1.0))
+        Raises:
+            ValueError: If `row_limit` is outside 1 to 25,000. Raised before the
+                token is fetched.
+            GscAuthenticationError: If the refresh token is revoked or invalid.
+                Raised once, before any query request.
+            GscAuthorizationError: On a 403 on any page.
+            GscPropertyNotFoundError: On a 404 on any page.
+        """
+        check_row_limit(row_limit)
+        token = self._token_manager.get_or_refresh_token()
+        api_url = api_property_url(property_url)
+        body: dict[str, object] = {
+            "startDate": start_date,
+            "endDate": end_date,
+            "dimensions": ["page", "query"],
+        }
 
-                    # Calculate CTR, clamped to [0, 1]
-                    ctr = (clicks / impressions) if impressions > 0 else 0.0
-                    ctr = min(1.0, max(0.0, ctr))
-
-                    rows.append(
-                        GscPageMetrics(
-                            url=url,
-                            impressions=impressions,
-                            clicks=clicks,
-                            avg_position=position,
-                            ctr=ctr,
-                        )
-                    )
-
-                return GscAnalyticsResponse(
-                    property_url=api_property_url,
-                    start_date=start_date,
-                    end_date=end_date,
-                    rows=rows,
-                    rows_available=len(rows),
-                    fetched_at=datetime.now(UTC),
-                )
-            except HttpError as exc:
-                # Map HTTP errors to specific exception types before retry logic catches them
-                status_code = exc.resp.status
-                reason = exc.resp.reason or "Unknown"
-
-                if status_code == 404:
-                    raise GscPropertyNotFoundError(property_url) from exc
-                if status_code == 403:
-                    raise GscAuthorizationError(
-                        f"Property not accessible or verification pending: {reason}"
-                    ) from exc
-                if status_code == 429:
-                    retry_after = None
-                    if "retry-after" in exc.resp:
-                        with suppress(ValueError, TypeError):
-                            retry_after = float(exc.resp["retry-after"])
-                    raise GscQuotaExceededError(retry_after_s=retry_after) from exc
-                if status_code == 410:
-                    raise GscApiDeprecatedError(410, f"Endpoint deprecated: {reason}") from exc
-                if status_code == 501:
-                    raise GscApiDeprecatedError(501, f"Endpoint not implemented: {reason}") from exc
-                # Re-raise HttpError for other status codes (retry will handle)
-                raise
-
-        try:
-            return self.call("fetch_analytics", attempt)
-        except (GscPropertyNotFoundError, GscAuthorizationError):
-            # Not degraded to an empty response: that reads as "no search data"
-            # and the crawl reported success with 0 matched pages. The caller
-            # reports these as a failed enrichment step instead.
-            raise
-        except (
-            GscQuotaExceededError,
-            GscApiDeprecatedError,
-        ):
-            # These are mapped errors; return empty response (graceful degradation)
-            # They're raised from within attempt(), so they come out of self.call()
-            _logger.warning(
-                "gsc_fetch_analytics_error",
-                extra={"property": property_url},
-                exc_info=True,
-            )
-            # Return empty response (graceful degradation)
-            return GscAnalyticsResponse(
-                property_url=property_url,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        except Exception as exc:
-            _logger.exception(
-                "gsc_fetch_analytics_failed",
-                extra={"property": property_url, "error": str(exc)},
-            )
-            # Return empty response (graceful degradation)
-            return GscAnalyticsResponse(
-                property_url=property_url,
-                start_date=start_date,
-                end_date=end_date,
-            )
+        raw, stop_reason = self._page_through("fetch_top_queries", token, api_url, body, row_limit)
+        result = GscPageQueries(
+            property_url=api_url,
+            start_date=start_date,
+            end_date=end_date,
+            rows=query_rows(raw),
+            complete=stop_reason == "exhausted",
+            stop_reason=stop_reason,
+        )
+        _logger.info(
+            "gsc_top_queries_fetched",
+            extra={"rows": len(result.rows), "stop_reason": stop_reason},
+        )
+        return result

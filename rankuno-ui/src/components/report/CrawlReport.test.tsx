@@ -125,6 +125,7 @@ describe("CrawlReport", () => {
           account: "acme",
           property_url: null,
           reason: "",
+          complete: true,
         },
       }),
     );
@@ -195,6 +196,7 @@ describe("CrawlReport", () => {
         account: null,
         property_url: "https://e.com/",
         reason: "",
+        complete: true,
       },
     });
     const model = buildDashModel(result, "path");

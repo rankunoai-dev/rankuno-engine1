@@ -1,5 +1,6 @@
 """Tests for GSC API client."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
@@ -488,3 +489,386 @@ class TestDomainProperty:
             client.fetch_analytics("SC-Domain:Example.com/", "2026-08-01", "2026-08-31")
 
         assert analytics.query.call_args[1]["siteUrl"] == "sc-domain:example.com"
+
+
+def _serve(rows: list[dict[str, object]]) -> tuple[Callable[..., Mock], list[dict[str, object]]]:
+    """A fake `searchanalytics.query` that pages a fixed dataset the way Search Console does.
+
+    Each request returns the slice starting at its `startRow`, of its `rowLimit`
+    length, so the cursor arithmetic under test is checked against real offsets
+    rather than against a canned sequence of responses.
+    """
+    calls: list[dict[str, object]] = []
+
+    def query(siteUrl: str, body: dict[str, object]) -> Mock:  # noqa: ARG001
+        calls.append(body)
+        start = body["startRow"]
+        limit = body["rowLimit"]
+        assert isinstance(start, int)
+        assert isinstance(limit, int)
+        request = Mock()
+        request.execute.return_value = {"rows": rows[start : start + limit]}
+        return request
+
+    return query, calls
+
+
+def _page_row(i: int) -> dict[str, object]:
+    return {
+        "keys": [f"https://example.com/p{i}"],
+        "clicks": 1,
+        "impressions": 10,
+        "position": 3.0,
+    }
+
+
+def _query_row(i: int, query: str = "widgets") -> dict[str, object]:
+    return {
+        "keys": [f"https://example.com/p{i}", query],
+        "clicks": 2,
+        "impressions": 20,
+        "position": 4.0,
+    }
+
+
+@pytest.fixture
+def no_backoff(monkeypatch) -> None:
+    """Retries sleep for real otherwise; a failing page would take seconds per test."""
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _seconds: None)
+
+
+def _http_error(status: int) -> Exception:
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    return HttpError(httplib2.Response({"status": str(status)}), b"{}")
+
+
+class TestPagedPageAnalytics:
+    """`fetch_analytics` reads every page, not just the first 10,000 rows."""
+
+    def test_pages_through_until_a_short_page(self, mock_settings, mock_token_manager):
+        query, calls = _serve([_page_row(i) for i in range(25)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            response = client.fetch_analytics(
+                "https://example.com", "2026-08-01", "2026-08-31", row_limit=10
+            )
+
+        assert [body["startRow"] for body in calls] == [0, 10, 20]
+        assert len(response.rows) == 25
+        assert response.complete is True
+        assert response.stop_reason == "exhausted"
+
+    def test_a_full_last_page_costs_one_more_request_to_prove_the_end(
+        self, mock_settings, mock_token_manager
+    ):
+        query, calls = _serve([_page_row(i) for i in range(20)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            response = client.fetch_analytics(
+                "https://example.com", "2026-08-01", "2026-08-31", row_limit=10
+            )
+
+        assert len(calls) == 3
+        assert len(response.rows) == 20
+        assert response.complete is True
+
+    def test_stops_at_the_page_cap_and_says_so(self, mock_settings, mock_token_manager):
+        from src.integrations.gsc_requests import MAX_PAGES
+
+        query, calls = _serve([_page_row(i) for i in range(MAX_PAGES * 10 + 50)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            response = client.fetch_analytics(
+                "https://example.com", "2026-08-01", "2026-08-31", row_limit=10
+            )
+
+        assert len(calls) == MAX_PAGES
+        assert len(response.rows) == MAX_PAGES * 10
+        assert response.complete is False
+        assert response.stop_reason == "row_cap"
+
+    def test_one_call_per_page_so_each_page_takes_a_rate_limit_slot(
+        self, mock_settings, mock_token_manager
+    ):
+        query, _calls = _serve([_page_row(i) for i in range(25)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            with patch.object(
+                GscApiClient, "call", autospec=True, side_effect=GscApiClient.call
+            ) as spy:
+                client.fetch_analytics(
+                    "https://example.com", "2026-08-01", "2026-08-31", row_limit=10
+                )
+
+        assert spy.call_count == 3
+
+    def test_token_is_fetched_once_not_per_page(self, mock_settings, mock_token_manager):
+        query, _calls = _serve([_page_row(i) for i in range(25)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            client.fetch_analytics("https://example.com", "2026-08-01", "2026-08-31", row_limit=10)
+
+        assert mock_token_manager.get_or_refresh_token.call_count == 1
+
+    def test_a_failed_later_page_keeps_the_rows_before_it(
+        self, mock_settings, mock_token_manager, no_backoff
+    ):
+        good, _calls = _serve([_page_row(i) for i in range(10)])
+
+        def query(siteUrl: str, body: dict[str, object]) -> Mock:  # noqa: ARG001
+            request = Mock()
+            if body["startRow"] == 0:
+                request.execute.return_value = good(siteUrl, body).execute.return_value
+            else:
+                request.execute.side_effect = RuntimeError("connection reset")
+            return request
+
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            response = client.fetch_analytics(
+                "https://example.com", "2026-08-01", "2026-08-31", row_limit=10
+            )
+
+        assert len(response.rows) == 10
+        assert response.complete is False
+        assert response.stop_reason == "fetch_failed"
+
+    def test_a_first_page_failure_is_an_empty_incomplete_response(
+        self, mock_settings, mock_token_manager, no_backoff
+    ):
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            request = mock_build.return_value.searchanalytics.return_value.query.return_value
+            request.execute.side_effect = RuntimeError("down")
+            client = GscApiClient(settings=mock_settings)
+            response = client.fetch_analytics("https://example.com", "2026-08-01", "2026-08-31")
+
+        assert response.rows == []
+        assert response.complete is False
+        assert response.stop_reason == "fetch_failed"
+
+    def test_a_403_on_a_later_page_still_propagates(
+        self, mock_settings, mock_token_manager, no_backoff
+    ):
+        from src.core.errors import GscAuthorizationError
+
+        good, _calls = _serve([_page_row(i) for i in range(10)])
+
+        def query(siteUrl: str, body: dict[str, object]) -> Mock:  # noqa: ARG001
+            request = Mock()
+            if body["startRow"] == 0:
+                request.execute.return_value = good(siteUrl, body).execute.return_value
+            else:
+                request.execute.side_effect = _http_error(403)
+            return request
+
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            with pytest.raises(GscAuthorizationError):
+                client.fetch_analytics(
+                    "https://example.com", "2026-08-01", "2026-08-31", row_limit=10
+                )
+
+    @pytest.mark.parametrize("row_limit", [0, -1, 25001])
+    def test_a_row_limit_outside_gsc_bounds_is_refused_before_any_request(
+        self, mock_settings, mock_token_manager, row_limit
+    ):
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            client = GscApiClient(settings=mock_settings)
+            with pytest.raises(ValueError, match="row_limit"):
+                client.fetch_analytics(
+                    "https://example.com", "2026-08-01", "2026-08-31", row_limit=row_limit
+                )
+
+        mock_token_manager.get_or_refresh_token.assert_not_called()
+        mock_build.assert_not_called()
+
+
+class TestFetchTopQueries:
+    """`fetch_top_queries` reads every (page, query) row, one page at a time."""
+
+    def test_requests_both_dimensions_at_the_maximum_page_size(
+        self, mock_settings, mock_token_manager
+    ):
+        query, calls = _serve([_query_row(0)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            client.fetch_top_queries("https://example.com", "2026-08-01", "2026-08-31")
+
+        assert calls == [
+            {
+                "startDate": "2026-08-01",
+                "endDate": "2026-08-31",
+                "dimensions": ["page", "query"],
+                "rowLimit": 25000,
+                "startRow": 0,
+            }
+        ]
+
+    def test_advances_the_cursor_by_rows_received_across_pages(
+        self, mock_settings, mock_token_manager
+    ):
+        query, calls = _serve([_query_row(i) for i in range(7)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            result = client.fetch_top_queries(
+                "https://example.com", "2026-08-01", "2026-08-31", row_limit=3
+            )
+
+        assert [body["startRow"] for body in calls] == [0, 3, 6]
+        assert len(result.rows) == 7
+        assert result.complete is True
+        assert result.stop_reason == "exhausted"
+
+    def test_row_cap_is_reported_as_incomplete(self, mock_settings, mock_token_manager):
+        from src.integrations.gsc_requests import MAX_PAGES
+
+        query, calls = _serve([_query_row(i) for i in range(MAX_PAGES + 10)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            result = client.fetch_top_queries(
+                "https://example.com", "2026-08-01", "2026-08-31", row_limit=1
+            )
+
+        assert len(calls) == MAX_PAGES
+        assert len(result.rows) == MAX_PAGES
+        assert result.complete is False
+        assert result.stop_reason == "row_cap"
+
+    def test_one_call_per_page_and_the_token_fetched_once(self, mock_settings, mock_token_manager):
+        query, _calls = _serve([_query_row(i) for i in range(5)])
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            with patch.object(
+                GscApiClient, "call", autospec=True, side_effect=GscApiClient.call
+            ) as spy:
+                client.fetch_top_queries(
+                    "https://example.com", "2026-08-01", "2026-08-31", row_limit=2
+                )
+
+        assert spy.call_count == 3
+        assert mock_token_manager.get_or_refresh_token.call_count == 1
+
+    def test_a_mid_paging_failure_keeps_the_rows_received(
+        self, mock_settings, mock_token_manager, no_backoff
+    ):
+        good, _calls = _serve([_query_row(i) for i in range(4)])
+
+        def query(siteUrl: str, body: dict[str, object]) -> Mock:  # noqa: ARG001
+            request = Mock()
+            if body["startRow"] == 0:
+                request.execute.return_value = good(siteUrl, body).execute.return_value
+            else:
+                request.execute.side_effect = RuntimeError("timeout")
+            return request
+
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            result = client.fetch_top_queries(
+                "https://example.com", "2026-08-01", "2026-08-31", row_limit=2
+            )
+
+        assert len(result.rows) == 2
+        assert result.complete is False
+        assert result.stop_reason == "fetch_failed"
+
+    def test_a_row_without_both_keys_is_skipped(self, mock_settings, mock_token_manager):
+        rows: list[dict[str, object]] = [
+            {"keys": ["https://example.com/p1"], "clicks": 1, "impressions": 1, "position": 1.0},
+            _query_row(2),
+        ]
+        query, _calls = _serve(rows)
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            mock_build.return_value.searchanalytics.return_value.query.side_effect = query
+            client = GscApiClient(settings=mock_settings)
+            result = client.fetch_top_queries("https://example.com", "2026-08-01", "2026-08-31")
+
+        assert [row.page for row in result.rows] == ["https://example.com/p2"]
+
+    @pytest.mark.parametrize("row_limit", [0, 25001])
+    def test_a_row_limit_outside_1_to_25000_raises_value_error(
+        self, mock_settings, mock_token_manager, row_limit
+    ):
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            client = GscApiClient(settings=mock_settings)
+            with pytest.raises(ValueError, match="between 1 and 25000"):
+                client.fetch_top_queries(
+                    "https://example.com", "2026-08-01", "2026-08-31", row_limit=row_limit
+                )
+
+        mock_token_manager.get_or_refresh_token.assert_not_called()
+        mock_build.assert_not_called()
+
+    def test_a_403_raises_authorization_error(self, mock_settings, mock_token_manager, no_backoff):
+        from src.core.errors import GscAuthorizationError
+
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            request = mock_build.return_value.searchanalytics.return_value.query.return_value
+            request.execute.side_effect = _http_error(403)
+            client = GscApiClient(settings=mock_settings)
+            with pytest.raises(GscAuthorizationError):
+                client.fetch_top_queries("https://example.com", "2026-08-01", "2026-08-31")

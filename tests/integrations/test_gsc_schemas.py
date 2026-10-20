@@ -3,12 +3,15 @@
 from datetime import datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 from src.integrations.gsc_schemas import (
     GscAnalyticsResponse,
     GscOAuthToken,
     GscPageMetrics,
+    GscPageQueries,
     GscProperty,
     GscQueryMetrics,
+    GscQueryRow,
 )
 
 
@@ -228,3 +231,122 @@ class TestGscAnalyticsResponse:
         after = datetime.utcnow()
 
         assert before <= response.fetched_at <= after
+
+    def test_a_default_response_is_complete(self):
+        response = GscAnalyticsResponse(
+            property_url="https://example.com/",
+            start_date="2026-08-01",
+            end_date="2026-08-31",
+        )
+
+        assert response.complete is True
+        assert response.stop_reason == "exhausted"
+
+    def test_complete_contradicting_stop_reason_is_refused(self):
+        with pytest.raises(ValidationError, match="contradicts"):
+            GscAnalyticsResponse(
+                property_url="https://example.com/",
+                start_date="2026-08-01",
+                end_date="2026-08-31",
+                complete=True,
+                stop_reason="row_cap",
+            )
+
+
+class TestGscQueryRow:
+    """One (page, query) row from the query-by-page fetch."""
+
+    def test_valid_row_is_accepted(self):
+        row = GscQueryRow(
+            page="https://example.com/a",
+            query="invoice software",
+            clicks=3,
+            impressions=40,
+            avg_position=2.5,
+        )
+
+        assert row.query == "invoice software"
+
+    def test_a_negative_count_is_refused(self):
+        with pytest.raises(ValidationError):
+            GscQueryRow(
+                page="https://example.com/a",
+                query="q",
+                clicks=-1,
+                impressions=0,
+                avg_position=1.0,
+            )
+
+    def test_an_unknown_field_is_refused(self):
+        """StrictModel forbids extra fields, so a renamed API key is caught, not dropped."""
+        with pytest.raises(ValidationError):
+            GscQueryRow(
+                page="https://example.com/a",
+                query="q",
+                clicks=0,
+                impressions=0,
+                avg_position=1.0,
+                ctr=0.5,
+            )
+
+
+class TestGscPageQueries:
+    """The stored result of a query-by-page fetch, with its completeness."""
+
+    def _row(self) -> GscQueryRow:
+        return GscQueryRow(
+            page="https://example.com/a",
+            query="q",
+            clicks=1,
+            impressions=2,
+            avg_position=3.0,
+        )
+
+    def test_exhausted_fetch_is_complete(self):
+        result = GscPageQueries(
+            property_url="https://example.com/",
+            start_date="2026-08-01",
+            end_date="2026-08-31",
+            rows=[self._row()],
+            complete=True,
+            stop_reason="exhausted",
+        )
+
+        assert result.complete is True
+        assert len(result.rows) == 1
+
+    @pytest.mark.parametrize("stop_reason", ["row_cap", "fetch_failed"])
+    def test_a_partial_fetch_must_say_incomplete(self, stop_reason):
+        with pytest.raises(ValidationError, match="contradicts"):
+            GscPageQueries(
+                property_url="https://example.com/",
+                start_date="2026-08-01",
+                end_date="2026-08-31",
+                complete=True,
+                stop_reason=stop_reason,
+            )
+
+    def test_an_unknown_stop_reason_is_refused(self):
+        with pytest.raises(ValidationError):
+            GscPageQueries(
+                property_url="https://example.com/",
+                start_date="2026-08-01",
+                end_date="2026-08-31",
+                complete=False,
+                stop_reason="timeout",
+            )
+
+    def test_round_trips_through_json(self):
+        """The sidecar stores `model_dump(mode="json")` and reads it back with validation."""
+        original = GscPageQueries(
+            property_url="https://example.com/",
+            start_date="2026-08-01",
+            end_date="2026-08-31",
+            rows=[self._row()],
+            complete=False,
+            stop_reason="fetch_failed",
+        )
+
+        restored = GscPageQueries.model_validate(original.model_dump(mode="json"))
+
+        assert restored == original

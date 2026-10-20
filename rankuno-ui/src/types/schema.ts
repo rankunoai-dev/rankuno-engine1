@@ -384,6 +384,8 @@ export interface GscEnrichmentReport {
   account: string | null;
   property_url: string | null;
   reason: string;
+  /** False when the page-level fetch stopped before the last page. The rows that arrived are still applied; this says the totals may be short. */
+  complete: boolean;
 }
 
 /** Whether GA4 metrics were attached, and why they were not. */

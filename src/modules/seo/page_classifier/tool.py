@@ -409,6 +409,13 @@ class GscEnrichmentReport(StrictModel):
     account: str | None = None
     property_url: str | None = None
     reason: str = ""
+    complete: bool = Field(
+        default=True,
+        description=(
+            "False when the page-level fetch stopped before the last page. The rows "
+            "that arrived are still applied; this says the totals may be short."
+        ),
+    )
 
 
 class PageClassificationOutput(StrictModel):
@@ -804,6 +811,7 @@ class PageClassificationTool(BaseTool[PageClassificationInput, PageClassificatio
                 unmatched_gsc_urls=len(result.unmatched_gsc_urls),
                 account=payload.gsc_account,
                 property_url=payload.gsc_property_url,
+                complete=response.complete,
             )
 
         except Exception as exc:  # noqa: BLE001 - GSC failure must not fail the crawl
