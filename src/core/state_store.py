@@ -390,6 +390,14 @@ class JobStore(Protocol):
         """Read the saved performance report, or `None` if there is none."""
         ...
 
+    def write_gsc_queries(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save the Search Console query-by-page fetch for this job."""
+        ...
+
+    def read_gsc_queries(self, job_id: str) -> Mapping[str, object] | None:
+        """Read the saved query-by-page fetch, or `None` if there is none."""
+        ...
+
     def recover_orphans(self) -> list[str]:
         """Fail every job left non-terminal by a previous process."""
         ...
@@ -484,6 +492,9 @@ class DiskJobStore:
 
     def _performance_path(self, job_id: str) -> Path:
         return self._root / f"{job_id}.performance.json"
+
+    def _gsc_queries_path(self, job_id: str) -> Path:
+        return self._root / f"{job_id}.gsc_queries.json"
 
     def _read(self, job_id: str) -> JobRecord:
         path = self._record_path(job_id)
@@ -859,6 +870,46 @@ class DiskJobStore:
                 return None
         return loaded
 
+    def write_gsc_queries(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save a query-by-page Search Console fetch, replacing any earlier one.
+
+        Replaces rather than accumulates, for the reason `write_performance` gives:
+        a refetch is how a stale or partial result is corrected, and two fetches
+        with no record of which is current would be worse than either.
+
+        Unlike `write_performance` this one raises on failure. The fetch is an
+        API call that cost quota; a write that silently fails would discard it,
+        and the caller must be able to say so rather than report a saved result.
+
+        Raises:
+            JobNotFoundError: If the job does not exist.
+            OSError: If the sidecar cannot be written.
+        """
+        with self._lock:
+            self._read(job_id)
+            _atomic_write(self._gsc_queries_path(job_id), json.dumps(dict(payload)))
+
+    def read_gsc_queries(self, job_id: str) -> Mapping[str, object] | None:
+        """Read a job's saved query-by-page fetch, or `None` if there is none.
+
+        A corrupt file reads as absent, logged. The export then omits query data
+        rather than failing, and the warning is the place the corruption shows.
+        """
+        path = self._gsc_queries_path(job_id)
+        with self._lock:
+            if not path.exists():
+                return None
+            try:
+                loaded: Mapping[str, object] = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                # Class name only: a decode error can quote bytes from the saved query text.
+                _logger.warning(
+                    "gsc_queries_read_failed",
+                    extra={"job_id": job_id, "error": type(exc).__name__},
+                )
+                return None
+        return loaded
+
     def read_checkpoint(self, job_id: str) -> Mapping[str, object] | None:
         """Read a job's saved partial work.
 
@@ -1002,6 +1053,7 @@ class DiskJobStore:
                 self._homepage_path(job_id),
                 self._reconciliation_path(job_id),
                 self._performance_path(job_id),
+                self._gsc_queries_path(job_id),
             ]
 
             try:

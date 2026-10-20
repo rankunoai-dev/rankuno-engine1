@@ -28,7 +28,12 @@ from src.core.postgres_store import (
     PostgresJobStore,
     _row_to_job_record,
 )
-from src.core.state_store import JobNotFoundError, JobRecord, JobTelemetry
+from src.core.state_store import (
+    JobNotFoundError,
+    JobRecord,
+    JobStoreUnavailableError,
+    JobTelemetry,
+)
 
 # --------------------------------------------------------------------------
 # Fake connection/cursor: understands exactly PostgresJobStore's SQL.
@@ -135,6 +140,7 @@ class _FakeCursor:
                 "homepage_html": homepage,
                 "reconciliation": None,
                 "performance": None,
+                "gsc_queries": None,
                 "updated_at": updated,
             }
         elif q.startswith("INSERT INTO jobs"):
@@ -189,6 +195,8 @@ class _FakeCursor:
             self._upsert_payload(params, "reconciliation")
         elif q.startswith("INSERT INTO job_payloads (job_id, performance"):
             self._upsert_payload(params, "performance")
+        elif q.startswith("INSERT INTO job_payloads (job_id, gsc_queries"):
+            self._upsert_payload(params, "gsc_queries")
         elif (
             q == "SELECT 1 FROM jobs WHERE id = %s FOR UPDATE"
             or q == "SELECT 1 FROM jobs WHERE id = %s"
@@ -232,6 +240,10 @@ class _FakeCursor:
             (job_id,) = params
             payload = self._db.payloads.get(job_id)
             self._one = (payload.get("performance"),) if payload is not None else None
+        elif q == "SELECT gsc_queries FROM job_payloads WHERE job_id = %s":
+            (job_id,) = params
+            payload = self._db.payloads.get(job_id)
+            self._one = (payload.get("gsc_queries"),) if payload is not None else None
         else:  # pragma: no cover - defensive: an unmodelled query fails the test loudly
             raise AssertionError(f"fake cursor does not understand query: {q!r}")
 
@@ -245,7 +257,7 @@ class _FakeCursor:
         # sent in. `homepage_html` is plain TEXT and stays a string.
         import json
 
-        json_columns = ("result", "checkpoint", "reconciliation", "performance")
+        json_columns = ("result", "checkpoint", "reconciliation", "performance", "gsc_queries")
         job_id, value, updated_at = params
         if column in json_columns and value is not None:
             value = json.loads(value)
@@ -257,6 +269,7 @@ class _FakeCursor:
                 "homepage_html": None,
                 "reconciliation": None,
                 "performance": None,
+                "gsc_queries": None,
             },
         )
         row[column] = value
@@ -687,6 +700,34 @@ class TestPostgresJobStoreRealSql:
         assert result == {"summary": "ok"}
         fallback.write_performance.assert_not_called()
         fallback.read_performance.assert_not_called()
+
+    def test_gsc_queries_round_trip(self) -> None:
+        db = _FakeDB()
+        store, fallback = _make_store(db)
+        job = store.create(tool_name="t", request={})
+
+        assert store.read_gsc_queries(job.id) is None
+        store.write_gsc_queries(job.id, {"rows": [{"page": "https://e.com/a"}]})
+        assert store.read_gsc_queries(job.id) == {"rows": [{"page": "https://e.com/a"}]}
+        fallback.write_gsc_queries.assert_not_called()
+        fallback.read_gsc_queries.assert_not_called()
+
+    def test_gsc_queries_write_refuses_a_missing_job_rather_than_dropping_it(self) -> None:
+        """A silent no-op would discard an API fetch that cost quota, so it must raise."""
+        db = _FakeDB()
+        store, _fallback = _make_store(db)
+        with pytest.raises(JobNotFoundError):
+            store.write_gsc_queries("ghost-job", {"a": 1})
+
+    def test_gsc_queries_write_refuses_while_the_circuit_is_open(self) -> None:
+        """The disk fallback cannot hold a Postgres job's sidecar, so refuse rather than lie."""
+        fallback = MagicMock()
+        breaker = CircuitBreaker(failure_threshold=1)
+        breaker.record_failure(RuntimeError("test"))
+        store = PostgresJobStore(circuit_breaker=breaker, fallback_store=fallback)
+        with pytest.raises(JobStoreUnavailableError):
+            store.write_gsc_queries("job-id", {"a": 1})
+        fallback.write_gsc_queries.assert_not_called()
 
     def test_redeploy_simulation_new_instance_same_db_sees_old_job(self) -> None:
         """A new store instance reads a job an earlier instance created.

@@ -802,6 +802,72 @@ class PostgresJobStore(JobStore):
             return None
         return cast(Mapping[str, object], row[0])
 
+    def write_gsc_queries(self, job_id: str, payload: Mapping[str, object]) -> None:
+        """Save a query-by-page Search Console fetch in `job_payloads.gsc_queries`.
+
+        Unlike `write_performance`, this raises rather than degrading. The fetch
+        spent API quota, and a write that falls back to disk would no-op for a
+        Postgres-backed job, because the disk store only writes a sidecar for a
+        job whose record it holds (build-log 0118). A silent discard is the failure
+        this method exists to avoid, so the caller is told.
+
+        Raises:
+            JobNotFoundError: If the job does not exist in Postgres.
+            JobStoreUnavailableError: If the circuit is open or the write fails.
+        """
+        if self.circuit_breaker.is_open():
+            raise JobStoreUnavailableError("the job database is unavailable; try again shortly")
+
+        now = datetime.now(tz=UTC)
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT 1 FROM jobs WHERE id = %s", (job_id,))
+                if cur.fetchone() is None:
+                    raise JobNotFoundError(f"no job with id {job_id!r}")
+                cur.execute(
+                    "INSERT INTO job_payloads (job_id, gsc_queries, updated_at) "
+                    "VALUES (%s, %s, %s) ON CONFLICT (job_id) DO UPDATE SET "
+                    "gsc_queries = EXCLUDED.gsc_queries, updated_at = EXCLUDED.updated_at",
+                    (job_id, json.dumps(dict(payload)), now),
+                )
+        except JobNotFoundError:
+            raise
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            self.circuit_breaker.record_failure(err)
+            _logger.warning(
+                "gsc_queries_write_failed",
+                extra={"job_id": job_id, "error": type(err).__name__},
+            )
+            raise JobStoreUnavailableError("the job database is unavailable; try again") from err
+        self.circuit_breaker.record_success()
+
+    def read_gsc_queries(self, job_id: str) -> Mapping[str, object] | None:
+        """Read a job's saved query-by-page fetch, or `None`. Never raises.
+
+        A Postgres-backed job's fetch lives only in `job_payloads`, so the disk
+        fallback is consulted solely when the circuit is open, and returns `None`
+        for a job it never held.
+        """
+        if self.circuit_breaker.is_open():
+            return self.fallback_store.read_gsc_queries(job_id)
+
+        try:
+            with self._cursor() as cur:
+                cur.execute("SELECT gsc_queries FROM job_payloads WHERE job_id = %s", (job_id,))
+                row = cur.fetchone()
+        except (psycopg.OperationalError, psycopg.DatabaseError) as err:
+            self.circuit_breaker.record_failure(err)
+            _logger.warning(
+                "gsc_queries_read_failed",
+                extra={"job_id": job_id, "error": type(err).__name__},
+            )
+            return None
+
+        self.circuit_breaker.record_success()
+        if row is None or row[0] is None:
+            return None
+        return cast(Mapping[str, object], row[0])
+
     def write_performance(self, job_id: str, payload: Mapping[str, object]) -> None:
         """Save a Search Console report. Never raises — matches `DiskJobStore`.
 

@@ -359,3 +359,54 @@ class TestIterResultPageUrls:
         store = DiskJobStore(tmp_path)
         job_id = self._finished(store, [])
         assert list(store.iter_result_page_urls(job_id)) == []
+
+
+class TestGscQueriesSidecar:
+    """The query-by-page fetch is a sidecar: it is replaced, read and deleted with its job."""
+
+    def test_round_trip_and_replacement(self, tmp_path):
+        store = DiskJobStore(tmp_path)
+        job_id = store.create(TOOL, REQUEST).id
+
+        assert store.read_gsc_queries(job_id) is None
+        store.write_gsc_queries(job_id, {"rows": [1]})
+        store.write_gsc_queries(job_id, {"rows": [2]})
+
+        assert store.read_gsc_queries(job_id) == {"rows": [2]}
+
+    def test_a_missing_job_is_refused_rather_than_silently_dropped(self, tmp_path):
+        store = DiskJobStore(tmp_path)
+        with pytest.raises(JobNotFoundError):
+            store.write_gsc_queries("no-such-job", {"rows": []})
+
+    def test_delete_removes_the_sidecar_with_its_job(self, tmp_path):
+        store = DiskJobStore(tmp_path)
+        job_id = store.create(TOOL, REQUEST).id
+        store.write_gsc_queries(job_id, {"rows": [1]})
+        sidecar = tmp_path / f"{job_id}.gsc_queries.json"
+        assert sidecar.exists()
+
+        store.delete(job_id)
+
+        assert not sidecar.exists()
+        assert store.read_gsc_queries(job_id) is None
+
+    def test_the_sidecar_is_not_listed_as_a_job(self, tmp_path):
+        store = DiskJobStore(tmp_path)
+        job_id = store.create(TOOL, REQUEST).id
+        store.write_gsc_queries(job_id, {"rows": [1]})
+
+        assert [record.id for record in store.list_jobs()] == [job_id]
+
+    def test_a_corrupt_sidecar_reads_as_absent_and_logs_the_class_only(self, tmp_path, caplog):
+        store = DiskJobStore(tmp_path)
+        job_id = store.create(TOOL, REQUEST).id
+        (tmp_path / f"{job_id}.gsc_queries.json").write_bytes(b"\xff\xfe private search phrase")
+
+        with caplog.at_level("WARNING"):
+            assert store.read_gsc_queries(job_id) is None
+
+        failed = [r for r in caplog.records if r.getMessage() == "gsc_queries_read_failed"]
+        assert len(failed) == 1
+        assert failed[0].error == "UnicodeDecodeError"
+        assert "private search phrase" not in caplog.text
