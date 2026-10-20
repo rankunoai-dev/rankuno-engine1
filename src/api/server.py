@@ -52,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import math
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -1429,6 +1430,41 @@ def _seed_bootstrap_operator(operator_store: OperatorStore, settings: Settings) 
     _logger.warning(
         "bootstrap_operator_created",
         extra={"operator_id": operator.operator_id, "org": operator.org_id},
+    )
+
+
+_DELETE_RATE_LIMITED_DETAIL = "too many delete attempts; wait a moment and try again"
+
+_DELETE_DUMMY_HASH = hash_password("no-job-has-this-delete-password")
+"""Checked against on a locked job, so a lock costs the same PBKDF2 time as a real check."""
+
+
+def _delete_lockout_store(store: JobStore) -> DiskJobStore | None:
+    """The disk store that holds a job's delete lock counter, if there is one.
+
+    The lock is disk-only (see `DiskJobStore.record_failed_delete`). Under
+    Postgres the counter goes to the disk fallback every production wiring
+    supplies, bypassing the Postgres circuit breaker. `None` means no lock
+    applies and only the rate limiter stands between a guesser and the password.
+    """
+    if isinstance(store, DiskJobStore):
+        return store
+    if isinstance(store, PostgresJobStore) and isinstance(store.fallback_store, DiskJobStore):
+        return store.fallback_store
+    return None
+
+
+def _delete_locked(job_id: str, operator_id: str, retry_after_s: float) -> HTTPException:
+    """The `429` for a job whose delete is locked, with the time left in `Retry-After`."""
+    seconds = math.ceil(retry_after_s)
+    _logger.warning(
+        "delete_job_locked",
+        extra={"job_id": job_id, "operator_id": operator_id, "retry_after_s": seconds},
+    )
+    return HTTPException(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=_DELETE_RATE_LIMITED_DETAIL,
+        headers={"Retry-After": str(seconds)},
     )
 
 
@@ -3855,24 +3891,36 @@ def create_app(
                 org owns it (ADR 0016 condition 2) or if the job has no password
                 set (deletion requires a password), `429` if too many delete
                 attempts are made in a short time (rate limited to prevent
-                brute-force attacks).
+                brute-force attacks), or if the job is locked after repeated
+                wrong passwords. The lock answer carries `Retry-After`; the
+                lock is time-bounded and disk-only (see `DiskJobStore`).
 
         Returns:
             204 No Content on successful deletion.
         """
-        # Rate limit: 5 attempts per minute per job, to prevent brute-force.
-        bucket = state.principal_rate_limiter.get_or_create(
-            f"delete:{job_id}", requests_per_minute=5, burst=5
-        )
-        if not bucket.try_acquire():
-            _logger.warning("delete_job_rate_limited", extra={"job_id": job_id})
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="too many delete attempts; wait a moment and try again",
-            )
-
-        # Verify session token and extract org_id.
+        # Authenticate before any limiter key is built. The keys carry the verified
+        # operator, so an anonymous request must be refused before it creates or
+        # spends a bucket. Keyed on the job alone, the old bucket let anyone
+        # outside the org spend the owner's attempts.
         principal = require_principal(authorization, session_secret=state.session_secret)
+
+        # Per-job: 5 attempts a minute for this operator on this job. Per-operator:
+        # a ceiling across every job, so one operator cannot sweep an org's jobs.
+        # The registry never evicts, so each (operator, job) pair tried leaves a key.
+        per_job = state.principal_rate_limiter.get_or_create(
+            f"delete:{principal.operator_id}:{job_id}", requests_per_minute=5, burst=5
+        )
+        per_operator = state.principal_rate_limiter.get_or_create(
+            f"delete-op:{principal.operator_id}", requests_per_minute=20, burst=20
+        )
+        if not per_job.try_acquire() or not per_operator.try_acquire():
+            _logger.warning(
+                "delete_job_rate_limited",
+                extra={"job_id": job_id, "operator_id": principal.operator_id},
+            )
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS, detail=_DELETE_RATE_LIMITED_DETAIL
+            )
 
         # Get job record.
         try:
@@ -3894,12 +3942,32 @@ def create_app(
                 detail="deletion requires a password set at job creation",
             )
 
+        # Per-job lock after repeated wrong passwords. Checked before the password,
+        # so a locked job refuses even the right one.
+        password = payload.password.get_secret_value()
+        lockout = _delete_lockout_store(state.store)
+        if lockout is not None:
+            remaining_s = lockout.delete_lockout_remaining_s(job_id)
+            if remaining_s > 0:
+                verify_password(password, _DELETE_DUMMY_HASH)
+                raise _delete_locked(job_id, principal.operator_id, remaining_s)
+
         # Verify password (constant-time compare).
-        if not verify_password(payload.password.get_secret_value(), record.password_hash):
+        if not verify_password(password, record.password_hash):
             _logger.warning(
-                "delete_job_wrong_password", extra={"job_id": job_id, "org_id": principal.org_id}
+                "delete_job_wrong_password",
+                extra={"job_id": job_id, "operator_id": principal.operator_id},
             )
+            if lockout is not None:
+                locked_for = lockout.record_failed_delete(job_id)
+                if locked_for > 0:
+                    raise _delete_locked(job_id, principal.operator_id, locked_for)
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="incorrect password")
+
+        # The right password is proven, so the wrong-password history is moot.
+        # Cleared before the delete, not after.
+        if lockout is not None:
+            lockout.clear_delete_lockout(job_id)
 
         # If job is still running, signal it to stop gracefully.
         if record.status == JobStatus.RUNNING:

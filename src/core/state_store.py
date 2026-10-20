@@ -41,7 +41,7 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -123,6 +123,42 @@ A bound, not a preference. A 20,000-page crawl returning every URL on every
 status poll would push megabytes per second at a browser that only ever renders
 the last handful — the poller would cost more than the crawl.
 """
+
+
+DELETE_LOCK_FAILURES = 5
+"""Wrong delete passwords on one job before it locks."""
+
+DELETE_LOCK_BASE_S = 60
+"""First lock window. Each further lock doubles it."""
+
+DELETE_LOCK_MAX_S = 24 * 60 * 60
+"""Ceiling on any lock window. A lock always expires; it is never permanent."""
+
+DELETE_LOCK_SOFT_CAP = 50
+"""Lifetime wrong passwords on one job after which every lock uses the ceiling."""
+
+
+def _delete_lock_window_s(lockouts: int, lifetime_failures: int) -> float:
+    """Seconds a job stays locked after its `lockouts`-th lock."""
+    if lifetime_failures >= DELETE_LOCK_SOFT_CAP:
+        return float(DELETE_LOCK_MAX_S)
+    return float(min(DELETE_LOCK_MAX_S, DELETE_LOCK_BASE_S * 2 ** (lockouts - 1)))
+
+
+class _DeleteLockout(StrictModel):
+    """Wrong-password counter for one job's delete, persisted beside the job.
+
+    Kept as `<id>.delete_lockout.json` rather than as a `JobRecord` field,
+    because the counter must not depend on which store holds the record. A
+    Postgres job has no disk record, and `PostgresJobStore`'s row mapper would
+    drop a new field, so the count would reset on every request. Two dots in
+    the name keep `list_jobs` and `_find_import` from reading it as a job.
+    """
+
+    failures: int = 0
+    lockouts: int = 0
+    lifetime_failures: int = 0
+    locked_until: datetime | None = None
 
 
 class JobNotFoundError(KeyError):
@@ -607,6 +643,76 @@ class DiskJobStore:
             self._write(updated)
         return updated
 
+    def _delete_lockout_path(self, job_id: str) -> Path:
+        return self._root / f"{job_id}.delete_lockout.json"
+
+    def _read_delete_lockout(self, job_id: str) -> _DeleteLockout:
+        """Read a job's delete counter. Caller holds the lock.
+
+        An unreadable counter reads as zero and is logged. The only writer is
+        this process and writes are atomic, so a bad file is a storage fault,
+        not something an attacker can produce.
+        """
+        path = self._delete_lockout_path(job_id)
+        if not path.exists():
+            return _DeleteLockout()
+        try:
+            return _DeleteLockout.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            _logger.warning(
+                "delete_lockout_unreadable", extra={"job_id": job_id, "error": str(exc)}
+            )
+            return _DeleteLockout()
+
+    # Disk-only by design. The lock counter lives in a sidecar on this store and
+    # is never written through `PostgresJobStore`, so a counter write cannot trip
+    # its circuit breaker, and there is no Postgres column behind it. On a
+    # hosted deployment the limiter in `server.py` is the only delete control.
+    def delete_lockout_remaining_s(self, job_id: str) -> float:
+        """Seconds until a job's delete lock lifts. `0.0` when it is not locked."""
+        with self._lock:
+            state = self._read_delete_lockout(job_id)
+        if state.locked_until is None:
+            return 0.0
+        return max(0.0, (state.locked_until - _now()).total_seconds())
+
+    def record_failed_delete(self, job_id: str) -> float:
+        """Count a wrong delete password, locking the job when the count is reached.
+
+        Every `DELETE_LOCK_FAILURES` wrong passwords lock the job for
+        `DELETE_LOCK_BASE_S`, doubled on each later lock and capped at
+        `DELETE_LOCK_MAX_S`. Once `DELETE_LOCK_SOFT_CAP` wrong passwords have
+        accumulated, every lock uses the ceiling. No lock is permanent.
+
+        Returns:
+            The lock window in seconds if this failure set a lock, else `0.0`.
+        """
+        with self._lock:
+            state = self._read_delete_lockout(job_id)
+            failures = state.failures + 1
+            lifetime = state.lifetime_failures + 1
+            lockouts = state.lockouts
+            locked_until = state.locked_until
+            locked_for = 0.0
+            if failures >= DELETE_LOCK_FAILURES:
+                lockouts += 1
+                failures = 0
+                locked_for = _delete_lock_window_s(lockouts, lifetime)
+                locked_until = _now() + timedelta(seconds=locked_for)
+            updated = _DeleteLockout(
+                failures=failures,
+                lockouts=lockouts,
+                lifetime_failures=lifetime,
+                locked_until=locked_until,
+            )
+            _atomic_write(self._delete_lockout_path(job_id), updated.model_dump_json())
+        return locked_for
+
+    def clear_delete_lockout(self, job_id: str) -> None:
+        """Forget a job's wrong-password history. Called on a correct password."""
+        with self._lock:
+            self._delete_lockout_path(job_id).unlink(missing_ok=True)
+
     def mark_running(self, job_id: str) -> JobRecord:
         """Move a job to `RUNNING` and stamp its start time."""
         return self._transition(job_id, status=JobStatus.RUNNING, started_at=_now())
@@ -1054,6 +1160,7 @@ class DiskJobStore:
                 self._reconciliation_path(job_id),
                 self._performance_path(job_id),
                 self._gsc_queries_path(job_id),
+                self._delete_lockout_path(job_id),
             ]
 
             try:
