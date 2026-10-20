@@ -134,9 +134,12 @@ def test_an_abandoned_level_keeps_its_link_charge(tmp_path, monkeypatch, link_ch
 
     report = asyncio.run(scenario())
     assert report.abandoned_in_flight == 1
-    fast_links = sizeof_links((f"{BASE}/x/",))
+    # The landed page is charged what `sizeof_reading` says, not just its strings: the body
+    # subset's pointer array is charged too (ADR 0039, a5c1456).
+    fast = read_page_links(site["/fast/"], f"{BASE}/fast/", document_url=f"{BASE}/fast/")
     outstanding = account.links_charged_bytes - account.links_credited_bytes
-    assert outstanding == fast_links, "the abandoned level's charge stays: a safe over-count"
+    expected = sizeof_reading(fast)
+    assert outstanding == expected, "the abandoned level's charge stays: a safe over-count"
 
 
 def test_link_charges_alone_can_stop_a_crawl(tmp_path):
@@ -155,14 +158,16 @@ def test_link_charges_alone_can_stop_a_crawl(tmp_path):
 
 
 class TestCreditLinks:
-    def test_a_negative_count_is_refused(self):
+    def test_a_negative_count_is_refused(self: TestCreditLinks):
         account = MemoryBudget(10**9, 5).open("a")
         with pytest.raises(ValueError, match="negative"):
             account.charge_links(-1)
         with pytest.raises(ValueError, match="negative"):
             account.credit_links(-1)
 
-    def test_an_over_credit_is_clamped_and_logged(self, monkeypatch, allow_over_credit):
+    def test_an_over_credit_is_clamped_and_logged(
+        self: TestCreditLinks, monkeypatch, allow_over_credit
+    ):
         errors: list[dict[str, object]] = []
         monkeypatch.setattr(
             memory_budget._logger,
@@ -184,7 +189,7 @@ class TestCreditLinks:
             }
         ]
 
-    def test_a_link_credit_never_selects_a_victim(self):
+    def test_a_link_credit_never_selects_a_victim(self: TestCreditLinks):
         budget = MemoryBudget(1000, 5)  # share 200
         mid = budget.open("mid")
         mid.charge(300)  # projected 600, under budget
