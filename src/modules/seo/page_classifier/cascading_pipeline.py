@@ -31,6 +31,7 @@ from typing import Protocol, runtime_checkable
 from src.core.logger import get_logger
 from src.modules.seo.page_classifier.schemas import (
     LLM_FALLBACK_CONFIDENCE_THRESHOLD,
+    MAX_CRAWL_DEPTH,
     ConsensusMethod,
     ConversionRole,
     FullPageIntelligenceProfile,
@@ -45,7 +46,7 @@ from src.modules.seo.page_classifier.signal_parsers import (
     PageEvidence,
     collect_structural_signals,
 )
-from src.modules.seo.page_classifier.url_rules import depth_of, url_fast_path
+from src.modules.seo.page_classifier.url_rules import url_fast_path
 from src.modules.seo.page_classifier.weights import SiteProfile, get_weight_profile
 
 __all__ = [
@@ -329,7 +330,9 @@ def classify_page(
         normalized_path=evidence.normalized_path,
         hierarchy_level=level,
         primary_page_type=page_type,
-        depth_from_l0=depth_of(evidence.normalized_path),
+        # Click distance from the crawl's breadth-first walk, not path depth.
+        # Saturated at the schema ceiling, which a link chain can exceed.
+        depth_from_l0=(None if evidence.depth is None else min(evidence.depth, MAX_CRAWL_DEPTH)),
         breadcrumb_path=evidence.breadcrumb_path,
         # The same value, kept where the navigation pass cannot overwrite it.
         own_breadcrumb=evidence.breadcrumb_path,

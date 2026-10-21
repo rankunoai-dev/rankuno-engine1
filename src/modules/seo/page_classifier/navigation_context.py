@@ -129,7 +129,7 @@ class NavigationContextClassifier:
             return NavigationReachabilityTier.TIER_1_STANDARD
 
         # 3+ hops = deep discovery
-        if page.depth_from_l0 >= 3:
+        if page.depth_from_l0 is not None and page.depth_from_l0 >= 3:
             return NavigationReachabilityTier.TIER_2_DEEP
 
         # No path but in sitemap = metadata only
@@ -175,7 +175,7 @@ class NavigationContextClassifier:
             return NavigationSourceAuthority.FROM_MAIN_HUB
 
         # Content pages link to it (depth 3+ or scattered links)
-        if page.depth_from_l0 >= 3:
+        if page.depth_from_l0 is not None and page.depth_from_l0 >= 3:
             return NavigationSourceAuthority.FROM_CONTENT
 
         # Sidebar/secondary area links (in OTHERS but reachable)

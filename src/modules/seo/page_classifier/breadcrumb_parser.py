@@ -523,7 +523,12 @@ def breadcrumb_parent_url(trail: BreadcrumbTrail, page_url: str) -> str | None:
     if not kept:
         return None
     candidate = kept[-1].url
-    if not candidate or safe_split(candidate) is None or is_malformed_url(candidate):
+    if not candidate:
+        return None
+    parts = safe_split(candidate)
+    # An empty path segment (`https://host//`) names no page. Dropped rather than
+    # collapsed, because collapsing it would invent a URL the markup never gave.
+    if parts is None or "//" in parts.path or is_malformed_url(candidate):
         return None
     if len(candidate) > MAX_URL_LENGTH:
         return None

@@ -445,3 +445,56 @@ class TestIndexability:
     def test_a_non_html_200_is_not_a_page(self):
         verdict, _ = indexability_of("https://e.com/a.pdf", status_code=200, is_html=False)
         assert verdict is Indexability.NOT_A_PAGE
+
+
+class TestPageTypeHeuristicsThatMislabelled:
+    """Two heuristics that stamped the wrong page type on real pages.
+
+    FAQPage is a content format, not an article, and the stored crawl labelled
+    30 pages from it, most of them product and service pages. A top-level nav
+    item was read as a service hub wherever it sat, so About and Careers became
+    service category hubs.
+    """
+
+    def test_an_faq_page_with_no_article_signal_gives_no_article_opinion(self):
+        html = '<script type="application/ld+json">{"@type": "FAQPage"}</script>'
+        assert parse_jsonld_signal(evidence(html=html)) is None
+
+    def test_an_faq_page_that_also_declares_an_article_is_an_article(self):
+        html = (
+            '<script type="application/ld+json">'
+            '{"@graph": [{"@type": "FAQPage"}, {"@type": "Article"}]}'
+            "</script>"
+        )
+        signal = parse_jsonld_signal(evidence(html=html))
+        assert signal is not None
+        assert signal.suggested_page_type is PrimaryPageType.BLOG_ARTICLE
+
+    def test_a_top_level_about_item_does_not_force_a_service_hub(self):
+        signal = parse_aria_nav_signal(
+            evidence(
+                normalized_path="/about-us/",
+                nav_links=(NavLink(href="/about-us/", nav_depth=0),),
+            )
+        )
+        assert signal is None
+
+    def test_a_top_level_careers_item_does_not_force_a_service_hub(self):
+        signal = parse_aria_nav_signal(
+            evidence(
+                normalized_path="https://e.com/careers/",
+                nav_links=(NavLink(href="https://e.com/careers/", nav_depth=0),),
+            )
+        )
+        assert signal is None
+
+    def test_a_top_level_service_item_is_still_a_primary_hub(self):
+        """The corporate exemption must not weaken the rule it sits beside."""
+        signal = parse_aria_nav_signal(
+            evidence(
+                normalized_path="https://e.com/services/",
+                nav_links=(NavLink(href="https://e.com/services/", nav_depth=0),),
+            )
+        )
+        assert signal is not None
+        assert signal.suggested_level is HierarchyLevel.L1_PRIMARY_NAV_HUB

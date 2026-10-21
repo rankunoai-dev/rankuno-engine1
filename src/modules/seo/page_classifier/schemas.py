@@ -451,10 +451,11 @@ class FullPageIntelligenceProfile(StrictModel):
             stripping. The join key for deduplication.
         hierarchy_level: Structural position.
         primary_page_type: Functional purpose.
-        depth_from_l0: Graph distance from the homepage. Distinct from
-            `hierarchy_level`: a blog post linked on the homepage is depth 1 but
-            still an `L3_LEAF_PAGE`. This is the click-depth fallacy the engine
-            exists to avoid.
+        depth_from_l0: Click distance from the homepage, which is 0 for the
+            homepage itself, saturated at `MAX_CRAWL_DEPTH`. `None` when no
+            crawled page linked here, so the distance is unknown rather than
+            zero. Distinct from `hierarchy_level`: a blog post linked on the
+            homepage is depth 1 but still an `L3_LEAF_PAGE`.
         nav_parent_url: Parent in the navigation tree, if one was resolved.
         breadcrumb_path: The trail this page is placed under, outermost first.
             Despite the name it is not always the page's own breadcrumb —
@@ -520,7 +521,7 @@ class FullPageIntelligenceProfile(StrictModel):
 
     hierarchy_level: HierarchyLevel
     primary_page_type: PrimaryPageType
-    depth_from_l0: int = Field(ge=0, le=MAX_CRAWL_DEPTH)
+    depth_from_l0: int | None = Field(ge=0, le=MAX_CRAWL_DEPTH)
 
     final_url: str = ""
     redirect_chain: tuple[str, ...] = ()

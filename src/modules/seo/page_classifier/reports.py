@@ -205,7 +205,7 @@ class MasterURLReport:
                 page.gsc_impressions or 0,
                 (page.gsc_ctr * 100) if page.gsc_ctr else 0,
                 page.gsc_avg_position or 0,
-                page.depth_from_l0,
+                page.depth_from_l0 if page.depth_from_l0 is not None else "—",
                 page.navigation_discovery_method or "—",
                 page.navigation_reachability_tier or "—",
             ]

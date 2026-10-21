@@ -99,7 +99,9 @@ _SCHEMA_TYPE_MAP: dict[str, tuple[HierarchyLevel, PrimaryPageType]] = {
     "collectionpage": (HierarchyLevel.L2_SUB_NAV_HUB, PrimaryPageType.PRODUCT_CATEGORY_HUB),
     "aboutpage": (HierarchyLevel.L3_LEAF_PAGE, PrimaryPageType.COMPANY_ABOUT),
     "contactpage": (HierarchyLevel.UTILITY_PAGE, PrimaryPageType.COMMERCIAL_LEAD_GEN),
-    "faqpage": (HierarchyLevel.L3_LEAF_PAGE, PrimaryPageType.BLOG_ARTICLE),
+    # FAQPage is deliberately absent. It marks a question-and-answer block, which
+    # sits on product, service and article pages alike, so it names no page type.
+    # Mapping it to BLOG_ARTICLE labelled 30 stored pages, most of them products.
     "blog": (HierarchyLevel.L1_PRIMARY_NAV_HUB, PrimaryPageType.BLOG_HUB),
     "softwareapplication": (HierarchyLevel.L3_LEAF_PAGE, PrimaryPageType.TOOL_APPLICATION),
     "webapplication": (HierarchyLevel.L3_LEAF_PAGE, PrimaryPageType.TOOL_APPLICATION),
@@ -121,6 +123,12 @@ _SITEMAP_HINTS: tuple[tuple[str, HierarchyLevel, PrimaryPageType], ...] = (
     ("software", HierarchyLevel.L3_LEAF_PAGE, PrimaryPageType.SERVICE_DETAIL_PAGE),
     ("global-page", HierarchyLevel.L1_PRIMARY_NAV_HUB, PrimaryPageType.COMPANY_ABOUT),
     ("page", HierarchyLevel.L1_PRIMARY_NAV_HUB, PrimaryPageType.SERVICE_CATEGORY_HUB),
+)
+
+# First path segments of corporate pages. A judgement list, not a measurement:
+# it exempts these from the top-level-nav-is-a-service-hub rule and nothing else.
+_CORPORATE_SEGMENTS: frozenset[str] = frozenset(
+    {"about", "about-us", "company", "careers", "team", "leadership", "investors"}
 )
 
 _JSONLD_BLOCK_RE = re.compile(
@@ -286,6 +294,10 @@ class PageEvidence(StrictModel):
     Attributes:
         url: Absolute URL.
         normalized_path: Canonical dedup path from `url_rules.normalize_url`.
+        depth: Click distance from the homepage: the breadth-first level the
+            link crawl recorded. `None` when no crawled page linked here, as for
+            a sitemap or CMS entry the crawl never reached. Never derived from
+            the URL text, which says nothing about how a page is reached.
         html: Raw HTML, if fetched. Absent for URLs resolved before fetching.
         nav_links: Links extracted from the site's navigation landmarks. Site
             level, not page level — the same tree for every page on the site.
@@ -361,6 +373,7 @@ class PageEvidence(StrictModel):
     indexability: Indexability = Indexability.UNKNOWN
     indexability_reason: str = ""
     normalized_path: str = Field(min_length=1)
+    depth: int | None = Field(default=None, ge=0)
     html: str | None = None
     nav_links: tuple[NavLink, ...] = ()
     discovery_sources: DiscoverySource = DiscoverySource()
@@ -508,6 +521,12 @@ def parse_aria_nav_signal(evidence: PageEvidence) -> SignalScore | None:
 
     depth = min(link.nav_depth for link in matches)
     if depth == 0:
+        # A top-level item is a service hub only for the site's offering. About
+        # and Careers sit in the same menu row and say nothing about services,
+        # so the nav tree abstains there and leaves the call to other signals.
+        segments = [segment for segment in target.split("/") if segment]
+        if segments and segments[0].lower() in _CORPORATE_SEGMENTS:
+            return None
         level, page_type = HierarchyLevel.L1_PRIMARY_NAV_HUB, PrimaryPageType.SERVICE_CATEGORY_HUB
         confidence = 0.90
     elif depth == 1:

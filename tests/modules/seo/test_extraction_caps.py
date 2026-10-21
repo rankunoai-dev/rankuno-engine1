@@ -81,7 +81,7 @@ class TestSchemaTypes:
 
     def test_at_most_eight_distinct_types_are_kept_and_the_first_still_wins(self):
         names = ["Article", "Product", "Service", "AboutPage", "ContactPage", "Blog",
-                 "FAQPage", "ItemPage", "CollectionPage", "WebApplication"]  # fmt: skip
+                 "BlogPosting", "ItemPage", "CollectionPage", "WebApplication"]  # fmt: skip
         html = jsonld({"@graph": [{"@type": name} for name in names]})
         assert extract_schema_types(html) == tuple(names[:MAX_SCHEMA_TYPES])
         signals_agree(html)

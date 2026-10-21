@@ -94,3 +94,20 @@ class TestTheParentURLIsScreened:
     def test_an_unparseable_parent_is_dropped(self):
         html = _jsonld({"name": "Odd", "item": "https://[bad/"}, {"name": "Page"})
         assert _parent(html, "https://e.com/page/") is None
+
+    def test_a_parent_with_an_empty_path_segment_is_dropped(self):
+        """`https://host//` is markup that names no page; it must not become a parent."""
+        html = _jsonld(
+            {"name": "Home", "item": "https://e.com//"},
+            {"name": "Page"},
+        )
+        assert _parent(html, "https://e.com/page/") is None
+
+    def test_an_empty_segment_mid_path_is_dropped_not_repaired(self):
+        """Collapsing `//` would invent a URL; the honest answer is no parent."""
+        html = _jsonld(
+            {"name": "Home", "item": "https://e.com/"},
+            {"name": "Odd", "item": "https://e.com/a//b/"},
+            {"name": "Page"},
+        )
+        assert _parent(html, "https://e.com/a/b/page/") is None

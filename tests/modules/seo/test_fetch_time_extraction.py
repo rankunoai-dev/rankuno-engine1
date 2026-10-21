@@ -129,14 +129,14 @@ class TestSchemaTypes:
         '<script type="application/ld+json">{"@graph": [{"@type": "Article"},'
         ' {"@type": ["Thing", "Product"]}]}</script>'
         '<script type="application/ld+json">{"@type": "Product",</script>'
-        '<script type="application/ld+json">{"@type": "https://schema.org/FAQPage"}</script>'
+        '<script type="application/ld+json">{"@type": "https://schema.org/BlogPosting"}</script>'
     )
 
     def test_keeps_recognised_types_verbatim_in_document_order(self):
         assert extract_schema_types(self.TWO_TYPES) == (
             "Article",
             "Product",
-            "https://schema.org/FAQPage",
+            "https://schema.org/BlogPosting",
         )
 
     def test_the_first_recognised_type_still_wins_without_the_body(self):

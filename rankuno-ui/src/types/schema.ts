@@ -143,7 +143,7 @@ export interface FullPageIntelligenceProfile {
   normalized_path: string;
   hierarchy_level: HierarchyLevel;
   primary_page_type: PrimaryPageType;
-  depth_from_l0: number;
+  depth_from_l0: number | null;
   final_url: string;
   redirect_chain: string[];
   nav_parent_url: string | null;

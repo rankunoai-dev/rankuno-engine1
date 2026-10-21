@@ -1202,6 +1202,8 @@ class SiteGraph:
                 PageEvidence(
                     url=node.url,
                     normalized_path=node.normalized,
+                    # The breadth-first level `record_links` kept: click distance.
+                    depth=node.depth,
                     html=self._html.get(key),
                     discovery_sources=node.sources,
                     sitemap_source=node.sitemap_source,

@@ -78,7 +78,7 @@ def pdf_row(page: FullPageIntelligenceProfile) -> list[str]:
         str(page.gsc_impressions or 0),
         f"{(page.gsc_ctr * 100):.2f}" if page.gsc_ctr else "0.00",
         str(page.gsc_avg_position or 0),
-        str(page.depth_from_l0),
+        str(page.depth_from_l0) if page.depth_from_l0 is not None else "—",
         str(page.navigation_discovery_method) if page.navigation_discovery_method else "—",
         str(page.navigation_reachability_tier) if page.navigation_reachability_tier else "—",
     ]
