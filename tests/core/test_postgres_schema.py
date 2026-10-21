@@ -225,13 +225,14 @@ class TestJobPasswordHashMigration:
         assert 'revision: str = "010"' in content
         assert 'down_revision: str | None = "009"' in content
 
-    def test_single_head_is_012_and_follows_011(self) -> None:
-        """Was `get_heads() == ["011"]`; 012 (ADR 0038) now follows it."""
+    def test_single_head_is_013_and_follows_012_and_011(self) -> None:
+        """Was `["011"]`, then `["012"]` (ADR 0038); 013 now follows 012 and keeps one head."""
         from alembic.config import Config
         from alembic.script import ScriptDirectory
 
         script = ScriptDirectory.from_config(Config("alembic.ini"))
-        assert script.get_heads() == ["012"]
+        assert script.get_heads() == ["013"]
+        assert script.get_revision("013").down_revision == "012"
         assert script.get_revision("012").down_revision == "011"
         assert script.get_revision("011").down_revision == "010"
 
