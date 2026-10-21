@@ -364,3 +364,32 @@ describe("CrawlJobsView imported jobs", () => {
     },
   );
 });
+
+/**
+ * Delete is offered only where it can succeed (ADR 0042). A job started without
+ * a deletion password can never be deleted, so its button is disabled and says
+ * why, rather than inviting a password the server would refuse.
+ */
+describe("CrawlJobsView deletion (ADR 0042)", () => {
+  const deletable = (): CrawlDataAdapter =>
+    ({
+      listJobs: vi.fn(),
+      getResult: vi.fn(),
+      getProgress: vi.fn(),
+      deleteJob: vi.fn(),
+    }) as unknown as CrawlDataAdapter;
+
+  it("disables Delete for a job that was started without a deletion password", () => {
+    useCrawlStore.setState({ adapter: deletable() });
+    withJob({ status: "succeeded", hasDeletePassword: false });
+    render(<CrawlJobsView />);
+    expect(screen.getByRole("button", { name: "Delete this crawl" })).toBeDisabled();
+  });
+
+  it("enables Delete for a job that has a deletion password", () => {
+    useCrawlStore.setState({ adapter: deletable() });
+    withJob({ status: "succeeded", hasDeletePassword: true });
+    render(<CrawlJobsView />);
+    expect(screen.getByRole("button", { name: "Delete this crawl" })).toBeEnabled();
+  });
+});

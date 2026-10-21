@@ -6,6 +6,7 @@ import { API_BASE, downloadFile } from "../../adapters/httpAdapter";
 import { downloadCsv, hostSlug, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { useUiStore } from "../../store/useUiStore";
+import { JobPasswordPrompt } from "./JobPasswordPrompt";
 import "./jobs.css";
 
 /**
@@ -97,6 +98,11 @@ interface Props {
  */
 export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Element {
   const reconcile = useCrawlStore((state) => state.reconcileScreamingFrog);
+  const protectedJob = useCrawlStore(
+    (state) => state.jobs.find((job) => job.id === jobId)?.hasDeletePassword === true,
+  );
+  // The export waiting on the job's deletion password (ADR 0042).
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const selectJob = useCrawlStore((state) => state.selectJob);
   const setView = useUiStore((state) => state.setView);
 
@@ -150,7 +156,7 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
     setBusy(false);
   }
 
-  async function accept(file: File): Promise<void> {
+  async function accept(file: File, deletionPassword?: string): Promise<boolean> {
     setProblem(null);
     if (file.size > MAX_CSV_BYTES) {
       // Checked here as well as on the server. A 200 MB file read into a string
@@ -160,7 +166,13 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
         `That file is ${(file.size / 1e6).toFixed(0)} MB. Export "Internal → HTML" ` +
           `rather than the full crawl, or trim it first.`,
       );
-      return;
+      return false;
+    }
+    // A reconciliation against a protected job creates a new job, so it asks
+    // for the deletion password first (ADR 0042).
+    if (protectedJob && deletionPassword === undefined) {
+      setPendingFile(file);
+      return false;
     }
     setBusy(true);
     try {
@@ -173,26 +185,28 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
       // a second copy of a 50 MB export in memory — and `File.arrayBuffer` does
       // not exist in jsdom, so reading it here would also cost the component
       // its tests.
-      const result = await reconcile(jobId, file);
+      const result = await reconcile(jobId, file, deletionPassword);
       setSavedAt(null);
       if (result === null) {
         setProblem("The reconciliation failed. See the error banner on the dashboard.");
-      } else {
-        setSummary(result);
-        // The reconcile response carries the counts only. The per-figure
-        // downloads need the addresses, and the server has just written them,
-        // so read the sidecar back rather than widening the response shape.
-        // A failure here costs the download buttons, not the result.
-        try {
-          const adapter = useCrawlStore.getState().adapter;
-          const saved = await adapter?.getReconciliation?.(jobId);
-          if (saved) setLists(saved);
-        } catch {
-          setLists(null);
-        }
+        return false;
       }
+      setSummary(result);
+      // The reconcile response carries the counts only. The per-figure
+      // downloads need the addresses, and the server has just written them,
+      // so read the sidecar back rather than widening the response shape.
+      // A failure here costs the download buttons, not the result.
+      try {
+        const adapter = useCrawlStore.getState().adapter;
+        const saved = await adapter?.getReconciliation?.(jobId);
+        if (saved) setLists(saved);
+      } catch {
+        setLists(null);
+      }
+      return true;
     } catch (cause) {
       setProblem(cause instanceof Error ? cause.message : String(cause));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -272,6 +286,20 @@ export function ReconcilePanel({ jobId, label, open, onClose }: Props): JSX.Elem
             <p className="jb-drop-title">{busy ? "Reconciling…" : "Drop internal_html.csv or .xlsx"}</p>
             <p className="jb-dim">or click to choose a file</p>
           </Upload.Dragger>
+          <JobPasswordPrompt
+            open={pendingFile !== null}
+            title="Deletion password"
+            okText="Reconcile"
+            description="This crawl is protected. Enter its deletion password to reconcile the Screaming Frog export against it."
+            onSubmit={async (password) => {
+              const file = pendingFile;
+              if (file === null) return false;
+              const accepted = await accept(file, password);
+              if (accepted) setPendingFile(null);
+              return accepted;
+            }}
+            onCancel={() => setPendingFile(null)}
+          />
           {problem && (
             <Alert type="error" showIcon message={problem} style={{ marginTop: 12 }} />
           )}

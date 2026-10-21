@@ -16,6 +16,13 @@ import { LiveCrawlModal } from "./LiveCrawlModal";
 
 const ACCOUNT_LABEL = "Search Console account";
 const NOOP = (): void => {};
+const PASSWORD_LABEL = "Deletion password";
+const PASSWORD = "crawl-password-12";
+
+/** The form requires a deletion password (ADR 0042). Every submit fills it. */
+function fillPassword(value: string = PASSWORD): void {
+  fireEvent.change(screen.getByLabelText(PASSWORD_LABEL), { target: { value } });
+}
 
 function adapter(listGscAccounts?: CrawlDataAdapter["listGscAccounts"]): CrawlDataAdapter {
   const base: CrawlDataAdapter = {
@@ -38,6 +45,7 @@ async function submit(startCrawl: ReturnType<typeof vi.fn>): Promise<PageClassif
   fireEvent.change(screen.getByPlaceholderText("https://www.example.com/"), {
     target: { value: "https://e.com/" },
   });
+  fillPassword();
   fireEvent.click(screen.getByRole("button", { name: "Start crawl" }));
   await waitFor(() => expect(startCrawl).toHaveBeenCalledTimes(1));
   return startCrawl.mock.calls[0]?.[0] as PageClassificationInput;
@@ -151,6 +159,7 @@ describe("LiveCrawlModal custom speed", () => {
     fillBaseUrl();
     selectCustom();
 
+    fillPassword();
     fireEvent.click(screen.getByRole("button", { name: "Start crawl" }));
     expect(await screen.findByText("Enter a requests-per-second value.")).toBeInTheDocument();
     expect(startCrawl).not.toHaveBeenCalled();
@@ -236,6 +245,7 @@ describe("LiveCrawlModal GSC property field", () => {
     });
     fillProperty(value);
 
+    fillPassword();
     fireEvent.click(screen.getByRole("button", { name: "Start crawl" }));
     expect(await screen.findByText(/or sc-domain:example\.com/)).toBeInTheDocument();
     expect(startCrawl).not.toHaveBeenCalled();
@@ -329,5 +339,48 @@ describe("LiveCrawlModal GA4 dropdown", () => {
 
     const request = await submit(startCrawl);
     expect(request.ga4_property_id).toBeNull();
+  });
+});
+
+describe("LiveCrawlModal deletion password", () => {
+  function fillBase(): void {
+    fireEvent.change(screen.getByPlaceholderText("https://www.example.com/"), {
+      target: { value: "https://e.com/" },
+    });
+  }
+
+  it("blocks submission without a password", async () => {
+    const startCrawl = mount(adapter());
+    fillBase();
+    fireEvent.click(screen.getByRole("button", { name: "Start crawl" }));
+    expect(await screen.findByText("Set a deletion password.")).toBeInTheDocument();
+    expect(startCrawl).not.toHaveBeenCalled();
+  });
+
+  it("refuses a password under twelve characters", async () => {
+    const startCrawl = mount(adapter());
+    fillBase();
+    fillPassword("short-one");
+    fireEvent.click(screen.getByRole("button", { name: "Start crawl" }));
+    expect(await screen.findByText("Use at least 12 characters.")).toBeInTheDocument();
+    expect(startCrawl).not.toHaveBeenCalled();
+  });
+
+  it("refuses a password with characters a request header cannot carry", async () => {
+    const startCrawl = mount(adapter());
+    fillBase();
+    fillPassword("pässwörd-long-1");
+    fireEvent.click(screen.getByRole("button", { name: "Start crawl" }));
+    expect(
+      await screen.findByText("Use only letters, digits and common symbols (no accents)."),
+    ).toBeInTheDocument();
+    expect(startCrawl).not.toHaveBeenCalled();
+  });
+
+  it("sends the password as deletion_password and nothing else carries it", async () => {
+    const startCrawl = mount(adapter());
+    const request = await submit(startCrawl);
+    expect(request.deletion_password).toBe(PASSWORD);
+    expect(JSON.stringify({ ...request, deletion_password: null })).not.toContain(PASSWORD);
   });
 });

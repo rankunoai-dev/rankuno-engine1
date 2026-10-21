@@ -82,6 +82,8 @@ interface FormValues {
   respect_robots: boolean;
   browser_headers: boolean;
   user_agent: string;
+  /** Required by the form (ADR 0042). Sent as `deletion_password`, never stored client-side. */
+  deletion_password: string;
 }
 
 /**
@@ -169,7 +171,13 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
 
   async function submit(): Promise<void> {
     const values = await form.validateFields();
-    const { speed: _speed, custom_rate: _customRate, custom_concurrency: _customConcurrency, ...rest } = values;
+    const {
+      speed: _speed,
+      custom_rate: _customRate,
+      custom_concurrency: _customConcurrency,
+      deletion_password: deletionPassword,
+      ...rest
+    } = values;
 
     // Custom mode reads its own independent inputs; the three fixed presets
     // still read their bundled rate/concurrency pair unchanged.
@@ -193,6 +201,9 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
       // `""` is the default option, and an absent field (no picker rendered)
       // is `undefined`; both mean the engine's default credentials.
       gsc_account: values.gsc_account || null,
+      // Required by the form, so it is always set here. Not trimmed: a space is
+      // part of the password the operator types. Held only in this request.
+      deletion_password: deletionPassword,
       // Only the mapped property is ever sent. Off, unmapped and unreadable
       // all send null, which the engine reads as "GA4 not requested" (ADR 0038).
       ga4_property_id:
@@ -253,6 +264,7 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           respect_robots: true,
           browser_headers: false,
           user_agent: DEFAULT_CRAWL_REQUEST.user_agent,
+          deletion_password: "",
         }}
         onValuesChange={(changed: Partial<FormValues>) => {
           if (changed.respect_robots !== undefined) {
@@ -281,6 +293,23 @@ export function LiveCrawlModal({ open, onClose }: Props): JSX.Element {
           ]}
         >
           <Input placeholder="https://www.example.com/" autoFocus />
+        </Form.Item>
+
+        <Form.Item
+          name="deletion_password"
+          label="Deletion password"
+          extra="Required to delete this crawl, and to cancel, retry, resume, or attach Search Console or Screaming Frog data to it. At least 12 characters, letters, digits and common symbols only. It cannot be recovered, and a crawl started without one can never be deleted."
+          rules={[
+            { required: true, message: "Set a deletion password." },
+            { min: 12, message: "Use at least 12 characters." },
+            { max: 256, message: "Use at most 256 characters." },
+            {
+              pattern: /^[\x20-\x7e]+$/,
+              message: "Use only letters, digits and common symbols (no accents).",
+            },
+          ]}
+        >
+          <Input.Password autoComplete="new-password" placeholder="At least 12 characters" />
         </Form.Item>
 
         <Form.Item

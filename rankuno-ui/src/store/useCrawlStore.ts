@@ -131,6 +131,7 @@ interface CrawlState {
   reconcileScreamingFrog: (
     jobId: string,
     export_: Blob,
+    deletionPassword?: string,
   ) => Promise<ReconciliationSummary | null>;
   /**
    * Attach a Search Console export to a finished job.
@@ -139,7 +140,11 @@ interface CrawlState {
    * `error` — the same shape as `reconcileScreamingFrog`, so the panel handles
    * both failures identically.
    */
-  uploadGscExport: (jobId: string, export_: Blob) => Promise<PerformanceSummary | null>;
+  uploadGscExport: (
+    jobId: string,
+    export_: Blob,
+    deletionPassword?: string,
+  ) => Promise<PerformanceSummary | null>;
   refreshJobs: () => Promise<void>;
   loadCheckpoint: (jobId: string) => Promise<void>;
   /**
@@ -148,9 +153,19 @@ interface CrawlState {
    * Both produce a *new* job, so both are watched exactly like a fresh crawl —
    * the header pill and the jobs table need no special case for them.
    */
-  relaunch: (jobId: string, mode: "retry" | "resume", label: string) => Promise<string | null>;
-  /** Abandon a running job and reclaim its concurrency slot. */
-  cancel: (jobId: string) => Promise<void>;
+  relaunch: (
+    jobId: string,
+    mode: "retry" | "resume",
+    label: string,
+    deletionPassword?: string,
+  ) => Promise<string | null>;
+  /**
+   * Abandon a running job and reclaim its concurrency slot.
+   *
+   * Resolves to `true` when the server accepted the cancel, so a prompt can
+   * close on success and stay open on a wrong password.
+   */
+  cancel: (jobId: string, deletionPassword?: string) => Promise<boolean>;
   /** Permanently delete a job using its password. */
   deleteJob: (jobId: string, password: string) => Promise<void>;
 }
@@ -329,7 +344,7 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     await loadPerformance(get, adapter, jobId);
   },
 
-  async uploadGscExport(jobId, export_) {
+  async uploadGscExport(jobId, export_, deletionPassword) {
     const adapter = get().adapter;
     if (!adapter?.uploadGscExport) {
       set({ error: "This data source cannot ingest Search Console data." });
@@ -339,21 +354,21 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
       // No `refreshJobs` here, unlike a reconciliation. Attaching performance
       // data creates no job and mutates no result — it writes a sidecar the
       // crawl knows nothing about — so the job list is not stale afterwards.
-      return await adapter.uploadGscExport(jobId, export_);
+      return await adapter.uploadGscExport(jobId, export_, deletionPassword);
     } catch (cause) {
       set({ error: cause instanceof Error ? cause.message : String(cause) });
       return null;
     }
   },
 
-  async reconcileScreamingFrog(jobId, export_) {
+  async reconcileScreamingFrog(jobId, export_, deletionPassword) {
     const adapter = get().adapter;
     if (!adapter?.reconcileScreamingFrog) {
       set({ error: "This data source cannot reconcile against Screaming Frog." });
       return null;
     }
     try {
-      const summary = await adapter.reconcileScreamingFrog(jobId, export_);
+      const summary = await adapter.reconcileScreamingFrog(jobId, export_, deletionPassword);
       // A merge creates a new job, so the list is stale the moment this
       // returns. Refreshed here rather than by the caller, or a panel that
       // forgot would leave the merged crawl unselectable.
@@ -457,13 +472,16 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     }
   },
 
-  async relaunch(jobId, mode, label) {
+  async relaunch(jobId, mode, label, deletionPassword) {
     const adapter = get().adapter;
     if (!(adapter instanceof HttpAdapter)) return null;
 
     let newId: string;
     try {
-      newId = mode === "retry" ? await adapter.retryJob(jobId) : await adapter.resumeJob(jobId);
+      newId =
+        mode === "retry"
+          ? await adapter.retryJob(jobId, deletionPassword)
+          : await adapter.resumeJob(jobId, deletionPassword);
     } catch (cause) {
       // The engine refuses these for specific, stateful reasons — nothing left
       // to fetch, a checkpoint that predates the feature, no free slot. Its
@@ -486,19 +504,20 @@ export const useCrawlStore = create<CrawlState>((set, get) => ({
     return newId;
   },
 
-  async cancel(jobId) {
+  async cancel(jobId, deletionPassword) {
     const adapter = get().adapter;
-    if (!(adapter instanceof HttpAdapter)) return;
+    if (!(adapter instanceof HttpAdapter)) return false;
     try {
-      await adapter.cancelJob(jobId);
+      await adapter.cancelJob(jobId, deletionPassword);
     } catch (cause) {
       set({ error: describe(cause) });
-      return;
+      return false;
     }
     // Refreshed rather than patched optimistically: the server decides whether
     // the job was still cancellable, and a row that flips to cancelled locally
     // and back on the next poll is worse than one that waits a beat.
     await get().refreshJobs();
+    return true;
   },
 
   async deleteJob(jobId, password) {

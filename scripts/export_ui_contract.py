@@ -39,7 +39,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, SecretStr  # noqa: E402
 from src.api.crawl_activity import CrawlActivityView  # noqa: E402
 from src.core.job_provenance import JobProvenance  # noqa: E402
 from src.core.state_store import JobTelemetry  # noqa: E402
@@ -178,6 +178,12 @@ def ts_type(annotation: object) -> str:
     """
     if annotation is None or annotation is type(None):
         return "null"
+
+    # `SecretStr` is a Python-side mask, not a different wire type. A write-only
+    # secret (ADR 0042's deletion password) travels as a JSON string in, and no
+    # response model returns one, so the UI sees a plain string.
+    if annotation is SecretStr:
+        return "string"
 
     if isinstance(annotation, type):
         if isinstance(annotation, EnumMeta):

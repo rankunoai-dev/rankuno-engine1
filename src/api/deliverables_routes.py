@@ -44,8 +44,10 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, 
 from pydantic import Field, ValidationError
 
 from src.api.auth import org_scoped_or_404, require_principal
+from src.api.job_password_gate import header_password, require_job_password
 from src.api.job_view import JobView, job_views
 from src.api.worker_dashboard_routes import human_owned_job
+from src.core.job_password import JOB_PASSWORD_HEADER
 from src.core.logger import get_logger
 from src.core.schemas import StrictModel
 from src.core.state_store import JobNotFoundError, JobRecord
@@ -305,6 +307,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
         job_id: str,
         payload: DeliverableBuildRequest | None = None,
         authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
     ) -> DeliverableAccepted:
         """Build a workbook from an already-finished crawl job.
 
@@ -318,13 +321,23 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
                 result predates the current output contract, `429` if the
                 deliverable concurrency guard is saturated.
         """
-        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        org_id = principal.org_id
         body = payload if payload is not None else DeliverableBuildRequest()
         try:
             crawl_record = state.store.get(job_id)
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
         org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="deliverable")
+        await asyncio.to_thread(
+            require_job_password,
+            limiter=state.principal_rate_limiter,
+            store=state.store,
+            record=crawl_record,
+            operator_id=principal.operator_id,
+            password=header_password(x_deletion_password),
+            action="deliverable",
+        )
         if not crawl_record.has_result:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -679,6 +692,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
         job_id: str,
         service_slug: str,
         authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
     ) -> DeliverableAccepted:
         """Build one masterfile workbook from a job's Screaming Frog exports.
 
@@ -716,7 +730,8 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
         """
         from src.modules.seo.deliverables.masterfile_registry import AVAILABLE_SERVICES
 
-        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        org_id = principal.org_id
 
         if service_slug not in AVAILABLE_SERVICES:
             raise HTTPException(
@@ -732,6 +747,15 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             # Org-scoped before the refusal, so this route cannot be used to
             # probe which ids exist in another organization.
             org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="job")
+            await asyncio.to_thread(
+                require_job_password,
+                limiter=state.principal_rate_limiter,
+                store=state.store,
+                record=crawl_record,
+                operator_id=principal.operator_id,
+                password=header_password(x_deletion_password),
+                action="masterfile",
+            )
             _reject_engine_job(job_id)
 
         job = human_owned_job(state, job_id, org_id)
@@ -779,6 +803,7 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
     async def build_all_masterfiles(
         job_id: str,
         authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
     ) -> DeliverableAccepted:
         """Build every measurable masterfile and return them as one ZIP.
 
@@ -791,7 +816,8 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             HTTPException: same as `build_masterfile`, minus the 404 for an
                 unknown slug.
         """
-        org_id = require_principal(authorization, session_secret=state.session_secret).org_id
+        principal = require_principal(authorization, session_secret=state.session_secret)
+        org_id = principal.org_id
 
         try:
             crawl_record: JobRecord | None = state.store.get(job_id)
@@ -799,6 +825,15 @@ def build_deliverables_router(state: ApiState) -> APIRouter:
             crawl_record = None
         if crawl_record is not None:
             org_scoped_or_404(record=crawl_record, record_id=job_id, org_id=org_id, kind="job")
+            await asyncio.to_thread(
+                require_job_password,
+                limiter=state.principal_rate_limiter,
+                store=state.store,
+                record=crawl_record,
+                operator_id=principal.operator_id,
+                password=header_password(x_deletion_password),
+                action="masterfiles-all",
+            )
             _reject_engine_job(job_id)
 
         job = human_owned_job(state, job_id, org_id)

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from src.api import server as server_module
 from src.api.job_view import JobView, job_views
 from src.api.server import API_PREFIX, create_app
+from src.core.auth import hash_password
 from src.core.state_store import DiskJobStore, JobRecord
 from src.core.url_safety import UrlSafetyPolicy
 from src.modules.seo.page_classifier.discovery import DiscoveryReport
@@ -26,6 +27,7 @@ from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
 
 PUBLIC_IP = "93.184.216.34"
 HASH = "pbkdf2_sha256$210000$c2FsdA$ZGlnZXN0"
+PASSWORD = "correct-horse-1"  # noqa: S105 - the test job's deletion password, not a credential
 BASE = "https://e.com/"
 
 
@@ -108,16 +110,19 @@ def test_every_jobrecord_route_omits_password_hash(app, store, tmp_path):
     deliverable = DiskJobStore(tmp_path / "deliverables").create(
         "seo.deliverable", {"x": "y"}, password_hash=HASH
     )
-    finished = _record(store)
+    # A real hash, so the gated writes below can verify the header password.
+    protected = hash_password(PASSWORD)
+    finished = _record(store, protected)
     store.finish(finished.id, _output())
     with TestClient(app, headers=auth_headers()) as client:
         # Created after startup: boot-time orphan recovery fails any queued job.
-        queued = _record(store)
+        queued = _record(store, protected)
+        gate = {"X-Deletion-Password": PASSWORD}
         responses = [
             client.get(f"{API_PREFIX}/jobs"),
             client.get(f"{API_PREFIX}/jobs/{finished.id}"),
-            client.post(f"{API_PREFIX}/jobs/{finished.id}/reparse"),
-            client.post(f"{API_PREFIX}/jobs/{queued.id}/cancel"),
+            client.post(f"{API_PREFIX}/jobs/{finished.id}/reparse", headers=gate),
+            client.post(f"{API_PREFIX}/jobs/{queued.id}/cancel", headers=gate),
             client.get(f"{API_PREFIX}/deliverables"),
             client.get(f"{API_PREFIX}/deliverables/{deliverable.id}"),
         ]
