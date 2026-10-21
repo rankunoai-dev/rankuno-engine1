@@ -9,6 +9,7 @@ import type {
 import { API_BASE, downloadFile } from "../../adapters/httpAdapter";
 import { downloadCsv, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
+import { TopQueriesPanel } from "../gsc/TopQueriesPanel";
 import "./jobs.css";
 
 /**
@@ -65,6 +66,8 @@ const GAP_LABELS: Record<string, string> = {
 interface Props {
   jobId: string;
   label: string;
+  /** Whether the job has a finished result. Passed on to the top-queries panel. */
+  finished: boolean;
   open: boolean;
   onClose: () => void;
 }
@@ -82,7 +85,7 @@ interface Props {
  * section totals without knowing that a third of the export failed to resolve
  * is reading a confident understatement.
  */
-export function PerformancePanel({ jobId, label, open, onClose }: Props): JSX.Element {
+export function PerformancePanel({ jobId, label, finished, open, onClose }: Props): JSX.Element {
   const upload = useCrawlStore((state) => state.uploadGscExport);
 
   const [busy, setBusy] = useState(false);
@@ -179,6 +182,8 @@ export function PerformancePanel({ jobId, label, open, onClose }: Props): JSX.El
       </Upload.Dragger>
 
       {problem && <Alert type="error" showIcon message={problem} className="jb-alert" />}
+
+      <TopQueriesPanel jobId={jobId} finished={finished} />
 
       {summary && (
         <>

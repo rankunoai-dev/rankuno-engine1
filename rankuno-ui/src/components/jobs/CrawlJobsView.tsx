@@ -276,6 +276,7 @@ export function CrawlJobsView(): JSX.Element {
         <PerformancePanel
           jobId={performing.id}
           label={performing.label}
+          finished={performing.status === "succeeded" || performing.status === "partial"}
           open
           onClose={() => setPerforming(null)}
         />

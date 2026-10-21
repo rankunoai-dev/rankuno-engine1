@@ -792,6 +792,15 @@ export interface CrawlDataAdapter {
   getPerformance?(jobId: string): Promise<SavedPerformance | null>;
 
   /**
+   * Ask the engine to fetch a finished crawl's Search Console top queries.
+   *
+   * Resolves to the raw body, typed `unknown` on purpose: the engine's answer
+   * is validated by the caller before anything is shown. Optional, like
+   * `getPerformance`, because fixtures have no Search Console behind them.
+   */
+  fetchTopQueries?(jobId: string, init?: RequestInit): Promise<unknown>;
+
+  /**
    * Every URL a finished crawl found, as an `.xlsx` workbook.
    *
    * A `Blob` rather than a URL for the same reason as `downloadWorkerBundle`:

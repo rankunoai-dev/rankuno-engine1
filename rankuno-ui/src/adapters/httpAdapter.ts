@@ -637,6 +637,21 @@ export class HttpAdapter implements CrawlDataAdapter {
   }
 
   /**
+   * Fetch this finished crawl's Search Console top queries and keep them on the job.
+   *
+   * POST with no body and no password: the job is named in the path and the
+   * org comes from the session token. `init` is passed through so a caller can
+   * attach a signal; `method` is set after the spread so it cannot be overridden.
+   * Returns `unknown` on purpose, see `CrawlDataAdapter.fetchTopQueries`.
+   */
+  async fetchTopQueries(jobId: string, init?: RequestInit): Promise<unknown> {
+    return this.request<unknown>(`/jobs/${encodeURIComponent(jobId)}/gsc/top-queries`, {
+      ...init,
+      method: "POST",
+    });
+  }
+
+  /**
    * Profile names the engine will accept in `gsc_account`, sorted.
    *
    * Not cached: a profile is added by editing `.env.local` and restarting the
