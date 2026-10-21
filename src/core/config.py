@@ -562,6 +562,22 @@ class Settings(BaseSettings):
         default=DEFAULT_ORG_ID,
         description="Org the bootstrap operator belongs to. Defaults to 'default'.",
     )
+    admin_email: str | None = Field(
+        default=None,
+        description=(
+            "Email of the first admin in the `users` table (ADR 0040). Used only when "
+            "the table has no admin row and ADMIN_INITIAL_PASSWORD is also set. Never "
+            "logged."
+        ),
+    )
+    admin_initial_password: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Initial password for the bootstrapped admin (ADR 0040). The row is "
+            "created with must_change_password=true. Remove it from the environment "
+            "after the first login; a startup warning is logged while it is set."
+        ),
+    )
     auth_local_autosignin_token: SecretStr | None = Field(
         default=None,
         description=(

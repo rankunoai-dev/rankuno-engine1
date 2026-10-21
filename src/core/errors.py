@@ -102,6 +102,18 @@ class Ga4AccessStoreUnavailableError(RankunoError):
         super().__init__("GA4 access storage is temporarily unavailable; try again shortly.")
 
 
+class UserStoreUnavailableError(RankunoError):
+    """The user store cannot answer, so no user may be authenticated from it.
+
+    Fixed message, for the same reason as the GA4 store's: a database error can
+    quote the row, and the row holds an email address and a password hash.
+    """
+
+    def __init__(self) -> None:
+        """Build the one fixed, safe-to-render message."""
+        super().__init__("User storage is temporarily unavailable; try again shortly.")
+
+
 class Ga4CredentialDecryptionError(RankunoError):
     """The stored GA4 credential cannot be decrypted with this server's keys.
 

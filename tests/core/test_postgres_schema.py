@@ -225,13 +225,15 @@ class TestJobPasswordHashMigration:
         assert 'revision: str = "010"' in content
         assert 'down_revision: str | None = "009"' in content
 
-    def test_single_head_is_012_and_follows_011(self) -> None:
-        """Was `get_heads() == ["011"]`; 012 (ADR 0038) now follows it."""
+    def test_single_head_is_014_and_follows_013(self) -> None:
+        """Was `get_heads() == ["012"]`; 013 (ADR 0038 follow-on) and 014 (ADR 0040) follow it."""
         from alembic.config import Config
         from alembic.script import ScriptDirectory
 
         script = ScriptDirectory.from_config(Config("alembic.ini"))
-        assert script.get_heads() == ["012"]
+        assert script.get_heads() == ["014"]
+        assert script.get_revision("014").down_revision == "013"
+        assert script.get_revision("013").down_revision == "012"
         assert script.get_revision("012").down_revision == "011"
         assert script.get_revision("011").down_revision == "010"
 
@@ -247,6 +249,46 @@ class TestJobPasswordHashMigration:
         from src.core.postgres_store import _JOB_COLUMNS
 
         assert _JOB_COLUMNS.endswith("password_hash")
+
+
+class TestUsersMigration:
+    """Migration 0014 (ADR 0040): the `users` table and its single-admin index."""
+
+    PATH = "alembic/versions/0014_users.py"
+
+    def _content(self) -> str:
+        with open(self.PATH, encoding="utf-8") as f:
+            return f.read()
+
+    def test_follows_013(self) -> None:
+        content = self._content()
+        assert 'revision: str = "014"' in content
+        assert 'down_revision: str | None = "013"' in content
+
+    def test_upgrade_creates_the_table_with_its_constraints(self) -> None:
+        sql = _offline_sql("013:014")
+        assert "CREATE TABLE users" in sql
+        assert "CONSTRAINT ck_users_role CHECK (role IN ('admin', 'user'))" in sql
+        assert "CONSTRAINT ck_users_email_lower CHECK (email = lower(email))" in sql
+        assert "CONSTRAINT uq_users_email UNIQUE (email)" in sql
+        assert "CONSTRAINT uq_users_google_sub UNIQUE (google_sub)" in sql
+        assert "session_version INTEGER DEFAULT 0 NOT NULL" in sql
+
+    def test_single_admin_index_is_unique_and_partial(self) -> None:
+        sql = _offline_sql("013:014")
+        assert (
+            "CREATE UNIQUE INDEX ux_users_single_admin ON users (role) WHERE role = 'admin'" in sql
+        )
+
+    def test_password_hash_and_google_sub_are_nullable(self) -> None:
+        content = self._content()
+        assert 'sa.Column("google_sub", sa.Text(), nullable=True)' in content
+        assert 'sa.Column("password_hash", sa.Text(), nullable=True)' in content
+
+    def test_downgrade_drops_the_index_then_the_table(self) -> None:
+        sql = _offline_sql("014:013", downgrade=True)
+        assert "DROP INDEX ux_users_single_admin" in sql
+        assert "DROP TABLE users" in sql
 
 
 def _offline_sql(revisions: str, *, downgrade: bool = False) -> str:

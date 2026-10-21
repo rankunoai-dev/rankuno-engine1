@@ -126,6 +126,14 @@ src/
 │   ├── postgres_ga4_access_store.py # ADR 0038: org_ga4_access (migration 012). Fail
 │   │                            # closed like the GSC store; status never reads
 │   │                            # ciphertext; set_property refuses malformed ids
+│   ├── user_store.py            # ADR 0040 (Proposed): UserStore protocol, UserRecord,
+│   │                            # AdminBootstrapOutcome, email and initial-password
+│   │                            # rules, bootstrap_admin_from_settings(). No request
+│   │                            # auth reads it yet (build-log 0164)
+│   ├── postgres_user_store.py   # ADR 0040: users (migration 014). One guarded INSERT
+│   │                            # for the first admin; circuit-breaker wrapped; no
+│   │                            # disk fallback, UserStoreUnavailableError (fail
+│   │                            # closed); logs class + SQLSTATE only
 │   ├── postgres_store.py        # PostgresJobStore (ADR 0022): the same JobStore
 │   │                            # Protocol as state_store.py's DiskJobStore, over
 │   │                            # real Postgres (jobs + job_payloads, migration
