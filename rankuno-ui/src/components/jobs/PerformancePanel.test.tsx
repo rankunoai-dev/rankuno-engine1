@@ -136,7 +136,9 @@ function dropFile(container: HTMLElement, file: File): void {
 }
 
 function open() {
-  return render(<PerformancePanel jobId="job-1" label="e.com" open onClose={() => {}} />);
+  return render(
+    <PerformancePanel jobId="job-1" label="e.com" finished open onClose={() => {}} />,
+  );
 }
 
 /** Capture a download without writing a file. */

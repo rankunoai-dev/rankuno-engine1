@@ -312,3 +312,12 @@
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* Top queries: the button and its row count, wrapping on a narrow sheet. */
+.gsc-top-queries-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
