@@ -335,3 +335,67 @@ describe("HttpAdapter.listJobs provenance", () => {
     expect(job?.importedFrom).toBeNull();
   });
 });
+
+/**
+ * ADR 0042: the deletion password travels in a header on gated writes, only
+ * when the operator supplied one, and the list reports whether a job is
+ * protected. The server never returns the hash or the password.
+ */
+describe("HttpAdapter deletion password (ADR 0042)", () => {
+  const JOB = "job-abc";
+  const headerOf = (call: unknown[]): Headers =>
+    new Headers((call[1] as RequestInit).headers);
+
+  it("sends X-Deletion-Password on cancel, retry and resume when given", async () => {
+    const adapter = new HttpAdapter("http://engine/api/v1");
+    (fetch as any).mockImplementation(async () =>
+      new Response(JSON.stringify({ id: "new" }), { status: 202 }),
+    );
+
+    await adapter.cancelJob(JOB, "crawl-password-12");
+    await adapter.retryJob(JOB, "crawl-password-12");
+    await adapter.resumeJob(JOB, "crawl-password-12");
+
+    for (const call of (fetch as any).mock.calls) {
+      expect(headerOf(call).get("X-Deletion-Password")).toBe("crawl-password-12");
+    }
+  });
+
+  it("sends no password header when none is supplied", async () => {
+    const adapter = new HttpAdapter("http://engine/api/v1");
+    (fetch as any).mockResolvedValueOnce(new Response("{}", { status: 200 }));
+
+    await adapter.cancelJob(JOB);
+
+    expect(headerOf((fetch as any).mock.calls[0]).get("X-Deletion-Password")).toBeNull();
+  });
+
+  it("reports a job as protected only when the server says so", async () => {
+    const adapter = new HttpAdapter("http://engine/api/v1");
+    const record = (extra: Record<string, unknown>) => ({
+      id: "j",
+      tool_name: "seo.page_classifier",
+      label: "e.com",
+      status: "succeeded",
+      created_at: "2026-10-20T00:00:00Z",
+      updated_at: "2026-10-20T00:00:00Z",
+      started_at: null,
+      finished_at: null,
+      error: null,
+      has_result: true,
+      has_checkpoint: false,
+      ...extra,
+    });
+    (fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify([record({ has_delete_password: true })]), { status: 200 }),
+    );
+    const [protectedJob] = await adapter.listJobs();
+    expect(protectedJob?.hasDeletePassword).toBe(true);
+
+    (fetch as any).mockResolvedValueOnce(
+      new Response(JSON.stringify([record({})]), { status: 200 }),
+    );
+    const [legacy] = await adapter.listJobs();
+    expect(legacy?.hasDeletePassword).toBe(false);
+  });
+});

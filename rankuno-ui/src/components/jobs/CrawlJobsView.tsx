@@ -33,6 +33,7 @@ import { token } from "../../styles/tokens";
 import { PerformancePanel } from "./PerformancePanel";
 import { ReconcilePanel } from "./ReconcilePanel";
 import { DeleteJobModal } from "./DeleteJobModal";
+import { JobPasswordPrompt } from "./JobPasswordPrompt";
 import { UrlTicker } from "../telemetry/UrlTicker";
 import "./jobs.css";
 
@@ -50,6 +51,20 @@ interface JobRow {
   synthetic: boolean;
   /** Ran on a local machine and was imported here (ADR 0034); null otherwise. */
   importedFrom: ImportedFrom | null;
+}
+
+/**
+ * A gated write waiting on the job's deletion password (ADR 0042). Cancel and
+ * the two re-runs ask first on a protected job; an unprotected one runs at once.
+ */
+interface PendingWrite {
+  row: JobRow;
+  action: "cancel" | "retry" | "resume";
+}
+
+/** True when the job was started with a deletion password. Unknown reads as false. */
+function isProtected(row: JobRow): boolean {
+  return row.summary?.hasDeletePassword === true;
 }
 
 const STATUS_COLOUR: Record<JobStatus, string> = {
@@ -115,6 +130,7 @@ export function CrawlJobsView(): JSX.Element {
   const [reconciling, setReconciling] = useState<JobRow | null>(null);
   const [performing, setPerforming] = useState<JobRow | null>(null);
   const [deleting, setDeleting] = useState<JobRow | null>(null);
+  const [pendingWrite, setPendingWrite] = useState<PendingWrite | null>(null);
 
   /**
    * Fetch the workbook and save it — no panel, the click is the whole flow.
@@ -216,8 +232,14 @@ export function CrawlJobsView(): JSX.Element {
         <ActionCell
           row={row}
           onOpen={() => openTree(row)}
-          onRelaunch={(mode) => void relaunch(row.id, mode, `${row.label} (${mode})`)}
-          onCancel={() => void cancel(row.id)}
+          onRelaunch={(mode) => {
+            if (isProtected(row)) setPendingWrite({ row, action: mode });
+            else void relaunch(row.id, mode, `${row.label} (${mode})`);
+          }}
+          onCancel={() => {
+            if (isProtected(row)) setPendingWrite({ row, action: "cancel" });
+            else void cancel(row.id);
+          }}
           onReconcile={() => setReconciling(row)}
           onPerformance={() => setPerforming(row)}
           onDownloadUrls={() => void downloadUrls(row)}
@@ -279,6 +301,31 @@ export function CrawlJobsView(): JSX.Element {
           finished={performing.status === "succeeded" || performing.status === "partial"}
           open
           onClose={() => setPerforming(null)}
+        />
+      )}
+
+      {pendingWrite && (
+        <JobPasswordPrompt
+          open
+          title="Deletion password"
+          okText={
+            pendingWrite.action === "cancel"
+              ? "Cancel crawl"
+              : pendingWrite.action === "retry"
+                ? "Run again"
+                : "Resume"
+          }
+          description="This crawl is protected. Enter its deletion password to continue."
+          onSubmit={async (password) => {
+            const { row, action } = pendingWrite;
+            const accepted =
+              action === "cancel"
+                ? await cancel(row.id, password)
+                : (await relaunch(row.id, action, `${row.label} (${action})`, password)) !== null;
+            if (accepted) setPendingWrite(null);
+            return accepted;
+          }}
+          onCancel={() => setPendingWrite(null)}
         />
       )}
 
@@ -572,15 +619,28 @@ function ActionCell({
           Shown only when the adapter supports deletion (fixtures do not) and the
           job is finished. Password confirmation is required and happens in a modal. */}
       {canDelete && finished && (
-        <Tooltip title="Permanently delete this crawl and all associated data. This action cannot be undone.">
-          <Button
-            size="small"
-            type="text"
-            danger
-            onClick={onDelete}
-            aria-label="Delete this crawl"
-            icon={<DeleteOutlined />}
-          />
+        // A job with no deletion password cannot be deleted (ADR 0042, D1). The
+        // button stays visible and disabled, so the reason is shown rather than
+        // the control silently missing. The span keeps the tooltip working on a
+        // disabled button.
+        <Tooltip
+          title={
+            isProtected(row)
+              ? "Permanently delete this crawl and all associated data. This action cannot be undone."
+              : "This crawl was started without a deletion password, so it cannot be deleted."
+          }
+        >
+          <span>
+            <Button
+              size="small"
+              type="text"
+              danger
+              onClick={onDelete}
+              disabled={!isProtected(row)}
+              aria-label="Delete this crawl"
+              icon={<DeleteOutlined />}
+            />
+          </span>
         </Tooltip>
       )}
     </div>

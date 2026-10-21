@@ -228,6 +228,17 @@ function filenameFromContentDisposition(header: string | null): string | null {
  * longer change — so re-fetching 16 MB when the user switches back to a crawl
  * they already viewed would be pure waste.
  */
+/**
+ * The `X-Deletion-Password` header for a write to a protected job (ADR 0042).
+ *
+ * Empty for an unprotected job or when the operator supplied nothing, so the
+ * header is never sent on a request the server would not check. The password
+ * is never stored by the adapter and never logged.
+ */
+function jobPasswordHeader(password: string | undefined): Record<string, string> {
+  return password ? { "X-Deletion-Password": password } : {};
+}
+
 export class HttpAdapter implements CrawlDataAdapter {
   private readonly cache = new Map<string, PageClassificationOutput>();
 
@@ -271,6 +282,9 @@ export class HttpAdapter implements CrawlDataAdapter {
       label: record.label || record.id,
       baseUrl: record.label,
       status: record.status,
+      // Drives the prompt before a gated write, and whether Delete is offered.
+      // Absent from a server that predates it, which reads as unprotected.
+      hasDeletePassword: record.has_delete_password === true,
       // The engine reports no incremental count, so this is 0 until the result
       // exists. Shown as "—" rather than "0 pages", which would read as a
       // finished crawl that found nothing.
@@ -354,6 +368,7 @@ export class HttpAdapter implements CrawlDataAdapter {
   async reconcileScreamingFrog(
     jobId: string,
     export_: Blob,
+    deletionPassword?: string,
   ): Promise<ReconciliationSummary> {
     return this.request<ReconciliationSummary>(
       `/jobs/${encodeURIComponent(jobId)}/reconcile/screaming-frog`,
@@ -362,7 +377,10 @@ export class HttpAdapter implements CrawlDataAdapter {
         // Deliberately generic. The server detects .csv from .xlsx by reading
         // the first bytes, because a Content-Type set by a file picker is
         // whatever the operating system guessed and a renamed file lies.
-        headers: { "Content-Type": "application/octet-stream" },
+        headers: {
+          "Content-Type": "application/octet-stream",
+          ...jobPasswordHeader(deletionPassword),
+        },
         body: export_,
       },
     );
@@ -608,12 +626,19 @@ export class HttpAdapter implements CrawlDataAdapter {
    * Whatever Search Console produced is accepted: the ZIP from Export → CSV is
    * the default download and the one an analyst actually has.
    */
-  async uploadGscExport(jobId: string, export_: Blob): Promise<PerformanceSummary> {
+  async uploadGscExport(
+    jobId: string,
+    export_: Blob,
+    deletionPassword?: string,
+  ): Promise<PerformanceSummary> {
     return this.request<PerformanceSummary>(
       `/jobs/${encodeURIComponent(jobId)}/performance/gsc`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
+        headers: {
+          "Content-Type": "application/octet-stream",
+          ...jobPasswordHeader(deletionPassword),
+        },
         body: export_,
       },
     );
@@ -692,8 +717,11 @@ export class HttpAdapter implements CrawlDataAdapter {
    * while doing none. This restores the ability to crawl; it does not free the
    * bandwidth.
    */
-  async cancelJob(jobId: string): Promise<void> {
-    await this.request(`/jobs/${jobId}/cancel`, { method: "POST" });
+  async cancelJob(jobId: string, deletionPassword?: string): Promise<void> {
+    await this.request(`/jobs/${jobId}/cancel`, {
+      method: "POST",
+      headers: jobPasswordHeader(deletionPassword),
+    });
   }
 
   /**
@@ -724,9 +752,10 @@ export class HttpAdapter implements CrawlDataAdapter {
    * record is the evidence of what ran and when, and a failed crawl is often
    * the finding itself.
    */
-  async retryJob(jobId: string): Promise<string> {
+  async retryJob(jobId: string, deletionPassword?: string): Promise<string> {
     const accepted = await this.request<{ id: string }>(`/jobs/${jobId}/retry`, {
       method: "POST",
+      headers: jobPasswordHeader(deletionPassword),
     });
     return accepted.id;
   }
@@ -739,9 +768,10 @@ export class HttpAdapter implements CrawlDataAdapter {
    * a checkpoint holds URLs only, so a merged report would carry wrong numbers
    * for the finding operators rely on most.
    */
-  async resumeJob(jobId: string): Promise<string> {
+  async resumeJob(jobId: string, deletionPassword?: string): Promise<string> {
     const accepted = await this.request<{ id: string }>(`/jobs/${jobId}/resume`, {
       method: "POST",
+      headers: jobPasswordHeader(deletionPassword),
     });
     return accepted.id;
   }

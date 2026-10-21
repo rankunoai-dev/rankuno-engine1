@@ -52,7 +52,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import math
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -78,10 +77,11 @@ from src.api.error_handlers import install_error_handlers
 from src.api.ga4_account_routes import build_ga4_account_router
 from src.api.gsc_account_routes import build_gsc_account_router
 from src.api.job_import_routes import build_job_import_router
+from src.api.job_password_gate import header_password, require_job_password
 from src.api.job_view import JobView, job_views
 from src.api.local_signin import build_local_signin_router, ensure_local_operator
 from src.api.worker_routes import build_worker_router
-from src.core.auth import Operator, OperatorStore, hash_password, verify_password
+from src.core.auth import Operator, OperatorStore, hash_password
 from src.core.config import DEFAULT_ORG_ID, ProcessRole, Settings, get_settings
 from src.core.errors import (
     ConfigurationError,
@@ -94,6 +94,10 @@ from src.core.facet_router import FacetRouter
 from src.core.ga4_access_store import Ga4AccessStore
 from src.core.gsc_account_store import DiskGscAccountStore, GscAccountStore
 from src.core.guardrails import CallbackApprovalProvider, GuardrailEngine
+from src.core.job_password import (
+    JOB_PASSWORD_HEADER,
+    MAX_DELETION_PASSWORD_LENGTH,
+)
 from src.core.local_signin import DEFAULT_LINK_TTL_S, LocalSigninGate
 from src.core.logger import get_logger
 from src.core.memory_budget import MIB, MemoryBudget
@@ -867,7 +871,9 @@ class DeleteJobRequest(StrictModel):
         password: The password set at job creation time. Used to authorize deletion.
     """
 
-    password: SecretStr = Field(min_length=1, max_length=256)
+    # No minimum here (ADR 0042, decision A): the 12-character floor applies at
+    # creation only, so a job created with a shorter password stays deletable.
+    password: SecretStr = Field(min_length=1, max_length=MAX_DELETION_PASSWORD_LENGTH)
 
 
 class ScreamingFrogJobPreviewRequest(StrictModel):
@@ -1433,38 +1439,27 @@ def _seed_bootstrap_operator(operator_store: OperatorStore, settings: Settings) 
     )
 
 
-_DELETE_RATE_LIMITED_DETAIL = "too many delete attempts; wait a moment and try again"
+def _require_job_password(
+    *,
+    state: ApiState,
+    record: JobRecord,
+    operator_id: str,
+    password: SecretStr | None,
+    action: str,
+) -> None:
+    """Gate one write to an existing job on its deletion password (ADR 0042).
 
-_DELETE_DUMMY_HASH = hash_password("no-job-has-this-delete-password")
-"""Checked against on a locked job, so a lock costs the same PBKDF2 time as a real check."""
-
-
-def _delete_lockout_store(store: JobStore) -> DiskJobStore | None:
-    """The disk store that holds a job's delete lock counter, if there is one.
-
-    The lock is disk-only (see `DiskJobStore.record_failed_delete`). Under
-    Postgres the counter goes to the disk fallback every production wiring
-    supplies, bypassing the Postgres circuit breaker. `None` means no lock
-    applies and only the rate limiter stands between a guesser and the password.
+    A job with no hash is not gated (D1): it keeps today's write behaviour,
+    and only delete refuses it. Synchronous, so async routes must run it
+    through `asyncio.to_thread`; the PBKDF2 check takes a quarter second.
     """
-    if isinstance(store, DiskJobStore):
-        return store
-    if isinstance(store, PostgresJobStore) and isinstance(store.fallback_store, DiskJobStore):
-        return store.fallback_store
-    return None
-
-
-def _delete_locked(job_id: str, operator_id: str, retry_after_s: float) -> HTTPException:
-    """The `429` for a job whose delete is locked, with the time left in `Retry-After`."""
-    seconds = math.ceil(retry_after_s)
-    _logger.warning(
-        "delete_job_locked",
-        extra={"job_id": job_id, "operator_id": operator_id, "retry_after_s": seconds},
-    )
-    return HTTPException(
-        status.HTTP_429_TOO_MANY_REQUESTS,
-        detail=_DELETE_RATE_LIMITED_DETAIL,
-        headers={"Retry-After": str(seconds)},
+    require_job_password(
+        limiter=state.principal_rate_limiter,
+        store=state.store,
+        record=record,
+        operator_id=operator_id,
+        password=password,
+        action=action,
     )
 
 
@@ -2127,7 +2122,21 @@ def create_app(
                     label=existing_job.label,
                 )
 
-        result = _start(payload, payload.base_url, facet_id=facet_id, org_id=org_id)
+        # Hashed off the event loop (about a quarter second of PBKDF2), then the
+        # plaintext is cleared before the payload is stored or dispatched.
+        password_hash: str | None = None
+        if payload.deletion_password is not None:
+            password_hash = await asyncio.to_thread(
+                hash_password, payload.deletion_password.get_secret_value()
+            )
+            payload = payload.model_copy(update={"deletion_password": None})
+        result = _start(
+            payload,
+            payload.base_url,
+            facet_id=facet_id,
+            org_id=org_id,
+            password_hash=password_hash,
+        )
 
         # Store idempotency key for future duplicate requests
         if idempotency_key:
@@ -2301,6 +2310,7 @@ def create_app(
         label: str,
         facet_id: str = "seo.page_classifier",
         org_id: str | None = None,
+        password_hash: str | None = None,
     ) -> JobAccepted:
         """Admit a crawl, reserve a slot, and dispatch it.
 
@@ -2316,6 +2326,8 @@ def create_app(
             label: Human-readable job description.
             facet_id: Which facet to run under. Defaults to page_classifier.
             org_id: Organization id (for access control). None for default org.
+            password_hash: Hash of the deletion password the new job inherits, or
+                None. Stored verbatim; the plaintext never reaches this function.
 
         Raises:
             HTTPException: `400` on SSRF/GSC account issues, `403` on facet access
@@ -2403,13 +2415,10 @@ def create_app(
             )
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, detail=detail)
         try:
-            # Extract deletion password, hash it, and remove it from the stored request
-            # (never store plaintext credentials).
+            # The caller hashed the password and cleared it from the payload (see
+            # create_job), so no plaintext reaches the stored request.
             request_dict = payload.model_dump(mode="json")
-            deletion_password = request_dict.pop("deletion_password", None)
-            password_hash = None
-            if deletion_password:
-                password_hash = hash_password(deletion_password)
+            request_dict.pop("deletion_password", None)
 
             record = state.store.create(
                 TOOL_NAME,
@@ -2484,7 +2493,9 @@ def create_app(
         status_code=status.HTTP_202_ACCEPTED,
     )
     async def retry_job(
-        job_id: str, authorization: str | None = Header(default=None)
+        job_id: str,
+        authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
     ) -> JobAccepted:
         """Run a job's crawl again from scratch, with its original settings.
 
@@ -2500,6 +2511,9 @@ def create_app(
             job_id: The job to retry.
             authorization: Bearer session token (ADR 0016). `org_id` comes
                 from its verified claim.
+            x_deletion_password: The job's deletion password, sent in the
+                `X-Deletion-Password` header. Required when the job has one (ADR 0042);
+                ignored otherwise.
 
         Raises:
             HTTPException: `401` if the token is missing or invalid, `404` if
@@ -2518,18 +2532,33 @@ def create_app(
             record=original_record, record_id=job_id, org_id=principal.org_id, kind="job"
         )
         _refuse_imported(original_record, "retried")
+        await asyncio.to_thread(
+            _require_job_password,
+            state=state,
+            record=original_record,
+            operator_id=principal.operator_id,
+            password=header_password(x_deletion_password),
+            action="retry",
+        )
 
         payload = _stored_payload(job_id)
-        # Retry under the same facet and org as the original job
+        # Retry under the same facet and org as the original job. The new job
+        # inherits the hash (ADR 0042): it is the same job's password, and the
+        # caller has just proven it, so no plaintext is needed.
         return _start(
             payload,
             f"{payload.base_url} (retry)",
             facet_id=original_record.facet_id,
             org_id=original_record.org_id,
+            password_hash=original_record.password_hash,
         )
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/reparse", response_model=JobView)
-    async def reparse_job(job_id: str, authorization: str | None = Header(default=None)) -> JobView:
+    async def reparse_job(
+        job_id: str,
+        authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
+    ) -> JobView:
         """Re-run placement over a finished job under today's rules.
 
         Synchronous and offline. No worker thread, no concurrency slot, no
@@ -2552,6 +2581,9 @@ def create_app(
             job_id: The finished job to reparse.
             authorization: Bearer session token (ADR 0016). `org_id` comes
                 from its verified claim.
+            x_deletion_password: The job's deletion password, sent in the
+                `X-Deletion-Password` header. Required when the job has one (ADR 0042);
+                ignored otherwise.
 
         Raises:
             HTTPException: `401` if the token is missing or invalid, `404` if
@@ -2579,6 +2611,14 @@ def create_app(
                 detail="this job's result predates the current output contract",
             ) from exc
 
+        await asyncio.to_thread(
+            _require_job_password,
+            state=state,
+            record=original_record,
+            operator_id=principal.operator_id,
+            password=header_password(x_deletion_password),
+            action="reparse",
+        )
         homepage = state.store.read_homepage(job_id)
         after = reparse_placement(before, homepage)
 
@@ -2587,6 +2627,7 @@ def create_app(
             {"base_url": before.base_url},
             label=f"{before.base_url} (reparsed)",
             org_id=original_record.org_id,
+            password_hash=original_record.password_hash,
         )
         state.store.finish(record.id, after.model_dump(mode="json"))
         # Carried over so the new job can itself be reparsed. Without this the
@@ -2609,7 +2650,10 @@ def create_app(
         response_model=ReconciliationSummary,
     )
     async def reconcile_screaming_frog(
-        job_id: str, request: Request, authorization: str | None = Header(default=None)
+        job_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
     ) -> ReconciliationSummary:
         """Compare a Screaming Frog export against a finished job, and merge the gap.
 
@@ -2638,6 +2682,9 @@ def create_app(
             request: Carries the raw CSV/xlsx body.
             authorization: Bearer session token (ADR 0016). `org_id` comes
                 from its verified claim.
+            x_deletion_password: The job's deletion password, sent in the
+                `X-Deletion-Password` header. Required when the job has one (ADR 0042);
+                ignored otherwise.
 
         Raises:
             HTTPException: `401` if the token is missing or invalid, `404` if
@@ -2674,6 +2721,14 @@ def create_app(
                 detail="this job's result predates the current output contract",
             ) from exc
 
+        await asyncio.to_thread(
+            _require_job_password,
+            state=state,
+            record=original_record,
+            operator_id=principal.operator_id,
+            password=header_password(x_deletion_password),
+            action="reconcile",
+        )
         # Raw bytes, not text. The body may be an `.xlsx`, and decoding a
         # spreadsheet to a string turns it into mojibake that fails to parse —
         # which is how a dropped workbook once surfaced as "Is the API server
@@ -2692,6 +2747,7 @@ def create_app(
                 {"base_url": before.base_url},
                 label=f"{before.base_url} (+{outcome.merged} from Screaming Frog)",
                 org_id=original_record.org_id,
+                password_hash=original_record.password_hash,
             )
             state.store.finish(record.id, outcome.output.model_dump(mode="json"))
             homepage = state.store.read_homepage(job_id)
@@ -2904,7 +2960,9 @@ def create_app(
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/gsc/top-queries")
     def fetch_top_queries(
-        job_id: str, authorization: str | None = Header(default=None)
+        job_id: str,
+        authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
     ) -> Mapping[str, object]:
         """Fetch every (page, query) row this crawl's property has, and keep it on the job.
 
@@ -2922,6 +2980,9 @@ def create_app(
             job_id: The finished crawl whose property to query.
             authorization: Bearer session token (ADR 0016). `org_id` comes
                 from its verified claim.
+            x_deletion_password: The job's deletion password, sent in the
+                `X-Deletion-Password` header. Required when the job has one (ADR 0042);
+                ignored otherwise.
 
         Returns:
             Counts and the stop reason only. The query text stays server-side and
@@ -2942,6 +3003,15 @@ def create_app(
                 status.HTTP_409_CONFLICT,
                 detail=f"job {job_id} is {record.status.value} and has no result",
             )
+        # Synchronous route: FastAPI already runs it on a worker thread, so the
+        # PBKDF2 check does not block the event loop.
+        _require_job_password(
+            state=state,
+            record=record,
+            operator_id=principal.operator_id,
+            password=header_password(x_deletion_password),
+            action="top-queries",
+        )
         property_url = record.request.get("gsc_property_url")
         if not isinstance(property_url, str) or not property_url:
             raise HTTPException(
@@ -3098,7 +3168,10 @@ def create_app(
         response_model=PerformanceSummary,
     )
     async def upload_gsc(
-        job_id: str, request: Request, authorization: str | None = Header(default=None)
+        job_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
     ) -> PerformanceSummary:
         """Attach a Search Console page export to a finished crawl.
 
@@ -3131,6 +3204,9 @@ def create_app(
             request: Carries the raw export body.
             authorization: Bearer session token (ADR 0016). `org_id` comes
                 from its verified claim.
+            x_deletion_password: The job's deletion password, sent in the
+                `X-Deletion-Password` header. Required when the job has one (ADR 0042);
+                ignored otherwise.
 
         Raises:
             HTTPException: `401` if the token is missing or invalid, `404` if
@@ -3157,7 +3233,15 @@ def create_app(
                 ),
             )
 
-        _owned_job(job_id, principal.org_id, "performance")
+        owned = _owned_job(job_id, principal.org_id, "performance")
+        await asyncio.to_thread(
+            _require_job_password,
+            state=state,
+            record=owned,
+            operator_id=principal.operator_id,
+            password=header_password(x_deletion_password),
+            action="performance-gsc",
+        )
         try:
             stored = state.store.read_result(job_id)
         except JobNotFoundError as exc:
@@ -3804,7 +3888,11 @@ def create_app(
         return _workbook_response(sheets, name)
 
     @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel", response_model=JobView)
-    async def cancel_job(job_id: str, authorization: str | None = Header(default=None)) -> JobView:
+    async def cancel_job(
+        job_id: str,
+        authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
+    ) -> JobView:
         """Abandon a job and stop it from making new requests.
 
         Applies to the Python crawler (`PageClassificationTool`) only —
@@ -3836,6 +3924,9 @@ def create_app(
             job_id: The job to cancel.
             authorization: Bearer session token (ADR 0016). `org_id` comes
                 from its verified claim.
+            x_deletion_password: The job's deletion password, sent in the
+                `X-Deletion-Password` header. Required when the job has one (ADR 0042);
+                ignored otherwise.
 
         Raises:
             HTTPException: `401` if the token is missing or invalid, `404` if
@@ -3850,6 +3941,14 @@ def create_app(
         except JobNotFoundError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
         org_scoped_or_404(record=record, record_id=job_id, org_id=principal.org_id, kind="job")
+        await asyncio.to_thread(
+            _require_job_password,
+            state=state,
+            record=record,
+            operator_id=principal.operator_id,
+            password=header_password(x_deletion_password),
+            action="cancel",
+        )
         if record.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
@@ -3912,24 +4011,6 @@ def create_app(
         # outside the org spend the owner's attempts.
         principal = require_principal(authorization, session_secret=state.session_secret)
 
-        # Per-job: 5 attempts a minute for this operator on this job. Per-operator:
-        # a ceiling across every job, so one operator cannot sweep an org's jobs.
-        # The registry never evicts, so each (operator, job) pair tried leaves a key.
-        per_job = state.principal_rate_limiter.get_or_create(
-            f"delete:{principal.operator_id}:{job_id}", requests_per_minute=5, burst=5
-        )
-        per_operator = state.principal_rate_limiter.get_or_create(
-            f"delete-op:{principal.operator_id}", requests_per_minute=20, burst=20
-        )
-        if not per_job.try_acquire() or not per_operator.try_acquire():
-            _logger.warning(
-                "delete_job_rate_limited",
-                extra={"job_id": job_id, "operator_id": principal.operator_id},
-            )
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS, detail=_DELETE_RATE_LIMITED_DETAIL
-            )
-
         # Get job record.
         try:
             record = state.store.get(job_id)
@@ -3939,7 +4020,8 @@ def create_app(
         # Check org ownership.
         org_scoped_or_404(record=record, record_id=job_id, org_id=principal.org_id, kind="job")
 
-        # Check if job has password_hash set. Deletion requires one.
+        # Check if job has password_hash set. Deletion requires one (D1: this is the
+        # one write that refuses an unprotected job).
         if record.password_hash is None:
             _logger.warning(
                 "delete_job_no_password_hash",
@@ -3950,32 +4032,16 @@ def create_app(
                 detail="deletion requires a password set at job creation",
             )
 
-        # Per-job lock after repeated wrong passwords. Checked before the password,
-        # so a locked job refuses even the right one.
-        password = payload.password.get_secret_value()
-        lockout = _delete_lockout_store(state.store)
-        if lockout is not None:
-            remaining_s = lockout.delete_lockout_remaining_s(job_id)
-            if remaining_s > 0:
-                verify_password(password, _DELETE_DUMMY_HASH)
-                raise _delete_locked(job_id, principal.operator_id, remaining_s)
-
-        # Verify password (constant-time compare).
-        if not verify_password(password, record.password_hash):
-            _logger.warning(
-                "delete_job_wrong_password",
-                extra={"job_id": job_id, "operator_id": principal.operator_id},
-            )
-            if lockout is not None:
-                locked_for = lockout.record_failed_delete(job_id)
-                if locked_for > 0:
-                    raise _delete_locked(job_id, principal.operator_id, locked_for)
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="incorrect password")
-
-        # The right password is proven, so the wrong-password history is moot.
-        # Cleared before the delete, not after.
-        if lockout is not None:
-            lockout.clear_delete_lockout(job_id)
+        # Rate limit, lock and verify, shared with every other gated write. The
+        # hash check runs off the event loop: PBKDF2 costs a quarter second.
+        await asyncio.to_thread(
+            _require_job_password,
+            state=state,
+            record=record,
+            operator_id=principal.operator_id,
+            password=payload.password,
+            action="delete",
+        )
 
         # If job is still running, signal it to stop gracefully.
         if record.status == JobStatus.RUNNING:
@@ -4004,7 +4070,9 @@ def create_app(
         status_code=status.HTTP_202_ACCEPTED,
     )
     async def resume_job(
-        job_id: str, authorization: str | None = Header(default=None)
+        job_id: str,
+        authorization: str | None = Header(default=None),
+        x_deletion_password: str | None = Header(default=None, alias=JOB_PASSWORD_HEADER),
     ) -> JobAccepted:
         """Crawl the URLs an interrupted job discovered but never fetched.
 
@@ -4026,6 +4094,9 @@ def create_app(
             job_id: The interrupted job to resume.
             authorization: Bearer session token (ADR 0016). `org_id` comes
                 from its verified claim.
+            x_deletion_password: The job's deletion password, sent in the
+                `X-Deletion-Password` header. Required when the job has one (ADR 0042);
+                ignored otherwise.
 
         Raises:
             HTTPException: `401` if the token is missing or invalid, `404` if
@@ -4042,6 +4113,14 @@ def create_app(
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id}") from exc
         org_scoped_or_404(record=record, record_id=job_id, org_id=principal.org_id, kind="job")
         _refuse_imported(record, "resumed")
+        await asyncio.to_thread(
+            _require_job_password,
+            state=state,
+            record=record,
+            operator_id=principal.operator_id,
+            password=header_password(x_deletion_password),
+            action="resume",
+        )
         payload = _stored_payload(job_id)
 
         if not record.is_terminal:
@@ -4121,6 +4200,7 @@ def create_app(
             f"{payload.base_url} (resumed +{len(remaining):,})",
             facet_id=record.facet_id,
             org_id=record.org_id,
+            password_hash=record.password_hash,
         )
 
     return app

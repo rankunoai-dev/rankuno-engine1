@@ -425,7 +425,7 @@ export interface PageClassificationInput {
   include_patterns: string[] | null;
   /** Optional URL blacklist patterns (wildcard or regex). If provided, URLs matching any pattern are excluded. */
   exclude_patterns: string[] | null;
-  /** Optional password for deletion protection. */
+  /** Optional password that gates deletion and every other write to this job. */
   deletion_password: string | null;
 }
 

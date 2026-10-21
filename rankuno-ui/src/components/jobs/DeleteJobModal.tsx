@@ -96,6 +96,9 @@ export function DeleteJobModal({
         <Input
           id="delete-password"
           type="password"
+          // The password already exists, so password managers should offer the
+          // saved one. "new-password" would offer to generate a fresh secret.
+          autoComplete="current-password"
           placeholder="Password set at job creation"
           value={password}
           onChange={(e) => setPassword(e.target.value)}

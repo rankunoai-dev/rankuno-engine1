@@ -10,6 +10,7 @@ import { API_BASE, downloadFile } from "../../adapters/httpAdapter";
 import { downloadCsv, toCsv } from "../../lib/csv";
 import { useCrawlStore } from "../../store/useCrawlStore";
 import { TopQueriesPanel } from "../gsc/TopQueriesPanel";
+import { JobPasswordPrompt } from "./JobPasswordPrompt";
 import "./jobs.css";
 
 /**
@@ -87,6 +88,12 @@ interface Props {
  */
 export function PerformancePanel({ jobId, label, finished, open, onClose }: Props): JSX.Element {
   const upload = useCrawlStore((state) => state.uploadGscExport);
+  const protectedJob = useCrawlStore(
+    (state) => state.jobs.find((job) => job.id === jobId)?.hasDeletePassword === true,
+  );
+  // The export waiting on the job's deletion password (ADR 0042). Only a
+  // protected job sets it; an unprotected one uploads straight away.
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [summary, setSummary] = useState<PerformanceSummary | null>(null);
@@ -120,7 +127,7 @@ export function PerformancePanel({ jobId, label, finished, open, onClose }: Prop
     };
   }, [open, jobId]);
 
-  async function accept(file: File): Promise<void> {
+  async function accept(file: File, deletionPassword?: string): Promise<boolean> {
     setProblem(null);
     if (file.size > MAX_EXPORT_BYTES) {
       setProblem(
@@ -128,7 +135,11 @@ export function PerformancePanel({ jobId, label, finished, open, onClose }: Prop
           `${MAX_EXPORT_BYTES / 1e6} MB limit. A Search Console export is normally ` +
           `well under 1 MB — check you exported the Performance report and not a log.`,
       );
-      return;
+      return false;
+    }
+    if (protectedJob && deletionPassword === undefined) {
+      setPendingFile(file);
+      return false;
     }
     setBusy(true);
     try {
@@ -137,15 +148,17 @@ export function PerformancePanel({ jobId, label, finished, open, onClose }: Prop
       // as nothing. Handing `fetch` the Blob also lets the browser stream it —
       // and `File.arrayBuffer` does not exist in jsdom, so reading it here
       // would cost this component its tests.
-      const result = await upload(jobId, file);
+      const result = await upload(jobId, file, deletionPassword);
       setSavedAt(null);
       if (result === null) {
         setProblem("The upload failed. See the error banner on the dashboard.");
-      } else {
-        setSummary(result);
+        return false;
       }
+      setSummary(result);
+      return true;
     } catch (cause) {
       setProblem(cause instanceof Error ? cause.message : String(cause));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -180,6 +193,20 @@ export function PerformancePanel({ jobId, label, finished, open, onClose }: Prop
           pages tab is found inside it. Excel workbooks and a bare CSV work too.
         </p>
       </Upload.Dragger>
+      <JobPasswordPrompt
+        open={pendingFile !== null}
+        title="Deletion password"
+        okText="Attach export"
+        description="This crawl is protected. Enter its deletion password to attach the Search Console export."
+        onSubmit={async (password) => {
+          const file = pendingFile;
+          if (file === null) return false;
+          const accepted = await accept(file, password);
+          if (accepted) setPendingFile(null);
+          return accepted;
+        }}
+        onCancel={() => setPendingFile(null)}
+      />
 
       {problem && <Alert type="error" showIcon message={problem} className="jb-alert" />}
 

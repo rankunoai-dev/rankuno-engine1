@@ -9,13 +9,14 @@ in-memory fake cursor `tests/core/test_postgres_store.py` provides.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from unittest.mock import MagicMock
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from src.api.server import API_PREFIX, create_app
 from src.core.auth import hash_password
 from src.core.postgres_store import PostgresJobStore
+from src.core.state_store import DiskJobStore
 from src.core.url_safety import UrlSafetyPolicy
 
 from tests.api.conftest import TEST_SESSION_SECRET, auth_headers
@@ -30,8 +31,12 @@ def db() -> _FakeDB:
 
 
 @pytest.fixture
-def store(db: _FakeDB) -> PostgresJobStore:
-    return PostgresJobStore(fallback_store=MagicMock(), connection_factory=_factory(db))
+def store(db: _FakeDB, tmp_path: Path) -> PostgresJobStore:
+    # The production fallback. The delete lock is a disk sidecar, and a store
+    # without one is refused (fail closed, ADR 0042), so a mock would not model it.
+    return PostgresJobStore(
+        fallback_store=DiskJobStore(tmp_path / "jobs"), connection_factory=_factory(db)
+    )
 
 
 @pytest.fixture
@@ -61,9 +66,12 @@ def test_wrong_password_is_403_and_the_job_survives(
     client: TestClient, store: PostgresJobStore, db: _FakeDB
 ) -> None:
     job = store.create(
-        "seo_crawl", {"url": "https://a.test"}, org_id="org-a", password_hash=hash_password("right")
+        "seo_crawl",
+        {"url": "https://a.test"},
+        org_id="org-a",
+        password_hash=hash_password("right-password"),
     )
-    assert _delete(client, job.id, "wrong") == 403
+    assert _delete(client, job.id, "wrong-password") == 403
     assert job.id in db.jobs
 
 
@@ -71,17 +79,20 @@ def test_correct_password_deletes_the_job(
     client: TestClient, store: PostgresJobStore, db: _FakeDB
 ) -> None:
     job = store.create(
-        "seo_crawl", {"url": "https://a.test"}, org_id="org-a", password_hash=hash_password("right")
+        "seo_crawl",
+        {"url": "https://a.test"},
+        org_id="org-a",
+        password_hash=hash_password("right-password"),
     )
     # A fresh read, as the route does: the hash must come back from the database.
     assert store.get(job.id).password_hash is not None
-    assert _delete(client, job.id, "right") == 204
+    assert _delete(client, job.id, "right-password") == 204
     assert job.id not in db.jobs
-    assert _delete(client, job.id, "right") == 404
+    assert _delete(client, job.id, "right-password") == 404
 
 
 def test_job_without_a_password_still_refuses_deletion(
     client: TestClient, store: PostgresJobStore
 ) -> None:
     job = store.create("seo_crawl", {"url": "https://a.test"}, org_id="org-a")
-    assert _delete(client, job.id, "anything") == 403
+    assert _delete(client, job.id, "anything-long-enough") == 403

@@ -128,8 +128,12 @@ the last handful — the poller would cost more than the crawl.
 DELETE_LOCK_FAILURES = 5
 """Wrong delete passwords on one job before it locks."""
 
-DELETE_LOCK_BASE_S = 60
-"""First lock window. Each further lock doubles it."""
+DELETE_LOCK_BASE_S = 15 * 60
+"""First lock window: 15 minutes. Each further lock doubles it.
+
+Raised from 60 s (ADR 0042): a minute is cheap enough to sit out a guessing
+run in sixty-second rounds, which is what the per-job lock exists to stop.
+"""
 
 DELETE_LOCK_MAX_S = 24 * 60 * 60
 """Ceiling on any lock window. A lock always expires; it is never permanent."""

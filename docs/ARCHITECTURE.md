@@ -1,8 +1,8 @@
 # 🏗️ Rankuno AI Automation Platform - System Architecture & Standard Index
 
-> **Document ID**: `RKN-ARCH-2026-V1`  
-> **Status**: Binding Architecture Specification  
-> **Repository Role**: Master Standards & SDLC Governance Foundation  
+> **Document ID**: `RKN-ARCH-2026-V1`
+> **Status**: Binding Architecture Specification
+> **Repository Role**: Master Standards & SDLC Governance Foundation
 
 ---
 
@@ -85,11 +85,13 @@ src/
 │   │                            # racing requests cannot both succeed. 300 s TTL
 │   │                            # from app construction; 5 mismatches disarm it
 │   │                            # for the life of the process. No HTTP import
+│   ├── job_password.py          # ADR 0042: the deletion-password floor (12 characters),
+│   │                            # ceiling (256) and the X-Deletion-Password header name.
 │   ├── state_store.py           # Durable background-job records. Domain-agnostic:
 │   │                            # opaque request/result mappings, atomic writes.
 │   │                            # JobRecord.provenance (None unless imported),
 │   │                            # JobRecord.password_hash (optional, for password-
-│   │                            # protected deletion, cycle 0145), JobStore.delete()
+│   │                            # gates every job write, ADR 0042), JobStore.delete()
 │   │                            # (atomically removes record + sidecars), and
 │   │                            # JobStore.import_terminal (ADR 0034)
 │   ├── json_stream.py           # Pull one field out of a huge JSON array without
@@ -336,8 +338,11 @@ src/
 │   │                            # one already in flight. Screaming Frog dispatches
 │   │                            # are out of scope — its poll loop cannot tell a
 │   │                            # normal exit from an external terminate() apart
-│   │                            # DELETE /jobs/{id} (cycle 0145): password-protected
-│   │                            # permanent deletion. Rate limited 5/min per job to
+│   │                            # DELETE /jobs/{id} (cycle 0145; the check is now the
+│   │                            # shared gate in job_password_gate.py, ADR 0042):
+│   │                            # password-protected permanent deletion. A locked job
+│   │                            # refuses even the right password for 15 minutes,
+│   │                            # doubling to 24 h. Rate limited 5/min per job to
 │   │                            # prevent brute-force password guessing. Requires a
 │   │                            # password set at creation time (password_hash non-
 │   │                            # None); rejects deletion without password with 403.
@@ -399,6 +404,12 @@ src/
 │   │                            # 422 lists locations only, never values.
 │   │                            # Import memory is NOT counted by the ADR 0031
 │   │                            # budget (~1.1 GiB measured for an 89 MiB bundle)
+│   ├── job_password_gate.py     # ADR 0042: the deletion-password gate every job-
+│   │                            # scoped write passes through (cancel, retry, reparse,
+│   │                            # resume, reconcile, GSC, deliverables, delete). One
+│   │                            # rate limit, one lock, one PBKDF2 verify. A job with
+│   │                            # no hash is not gated. Sync: async routes call it via
+│   │                            # asyncio.to_thread; sync routes call it directly.
 │   ├── job_view.py              # Cycle 0147: JobView, the response model for
 │   │                            # every route that returns a job. JobRecord minus
 │   │                            # password_hash, plus has_delete_password (bool).

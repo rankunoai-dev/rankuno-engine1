@@ -37,7 +37,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, ClassVar, Literal, Protocol, runtime_checkable
 
-from pydantic import Field
+from pydantic import Field, SecretStr, field_validator
 
 from src.core.base_tool import BaseTool
 from src.core.config import DEFAULT_ORG_ID, get_settings
@@ -47,6 +47,7 @@ from src.core.errors import (
     GscPropertyNotFoundError,
 )
 from src.core.ga4_access_store import GA4_PROPERTY_ID_PATTERN, Ga4AccessStore
+from src.core.job_password import MAX_DELETION_PASSWORD_LENGTH, MIN_DELETION_PASSWORD_LENGTH
 from src.core.logger import get_logger
 from src.core.memory_budget import MemoryAccount
 from src.core.rate_limiter import CostLedger
@@ -313,18 +314,34 @@ class PageClassificationInput(StrictModel):
     exclude are provided, include is applied first (whitelist), then exclude
     is applied (blacklist)."""
 
-    deletion_password: str | None = Field(
+    deletion_password: SecretStr | None = Field(
         default=None,
-        min_length=1,
-        max_length=256,
-        description="Optional password for deletion protection.",
+        min_length=MIN_DELETION_PASSWORD_LENGTH,
+        max_length=MAX_DELETION_PASSWORD_LENGTH,
+        description="Optional password that gates deletion and every other write to this job.",
     )
-    """Optional password to protect this job from accidental or malicious deletion.
+    """Optional password protecting this job's writes (ADR 0042).
 
-    If provided at creation, the job can only be deleted via DELETE /jobs/{id}
-    when the correct password is supplied. If None (the default), the job cannot
-    be deleted, only cancelled or allowed to finish. See `src/api/server.py`'s
-    `delete_job` endpoint for the deletion mechanism."""
+    Write-only: it is wrapped in `SecretStr` so `repr` and `model_dump` mask it,
+    and `server.py` hashes it and clears the field before the request is stored
+    or dispatched. Once a job has a hash, deletion and every job-scoped write
+    (cancel, retry, reparse, resume and the GSC and reconciliation attachments)
+    needs it. `None` means the job is unprotected and cannot be deleted.
+
+    Printable ASCII only. It travels in the `X-Deletion-Password` header, and a
+    character outside that range would not survive the trip, leaving the owner
+    unable to act on their own job.
+    """
+
+    @field_validator("deletion_password")
+    @classmethod
+    def _printable_ascii(cls, value: SecretStr | None) -> SecretStr | None:
+        """Refuse a password the `X-Deletion-Password` header cannot carry."""
+        if value is not None:
+            raw = value.get_secret_value()
+            if not raw.isascii() or not raw.isprintable():
+                raise ValueError("must contain only printable ASCII characters")
+        return value
 
 
 class CrawlSummary(StrictModel):

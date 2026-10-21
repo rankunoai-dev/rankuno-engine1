@@ -26,6 +26,13 @@ export interface CrawlJobSummary {
   pagesClassified: number;
   /** True when a ceiling stopped discovery early. Every live crawl so far. */
   truncated: boolean;
+  /**
+   * Whether this job was started with a deletion password (ADR 0042). When true,
+   * cancel, retry, resume, and the Search Console and Screaming Frog attachments
+   * ask for it first, and Delete is offered. Optional so fixtures and a server
+   * that predates the field both read as unprotected.
+   */
+  hasDeletePassword?: boolean;
   /** Generated rather than crawled. Never quote a synthetic run as evidence. */
   synthetic: boolean;
   /**
@@ -774,7 +781,11 @@ export interface CrawlDataAdapter {
    * a UI that offers the control then fails on click is worse than one that
    * hides it.
    */
-  reconcileScreamingFrog?(jobId: string, export_: Blob): Promise<ReconciliationSummary>;
+  reconcileScreamingFrog?(
+    jobId: string,
+    export_: Blob,
+    deletionPassword?: string,
+  ): Promise<ReconciliationSummary>;
 
   /** The last cross-check saved against a job, or `null` if there is none. */
   getReconciliation?(jobId: string): Promise<SavedReconciliation | null>;
@@ -786,7 +797,11 @@ export interface CrawlDataAdapter {
    * have no Search Console data, and a control that fails on click is worse
    * than one that is not there.
    */
-  uploadGscExport?(jobId: string, export_: Blob): Promise<PerformanceSummary>;
+  uploadGscExport?(
+    jobId: string,
+    export_: Blob,
+    deletionPassword?: string,
+  ): Promise<PerformanceSummary>;
 
   /** The last Search Console report saved against a job, or `null`. */
   getPerformance?(jobId: string): Promise<SavedPerformance | null>;
@@ -1134,8 +1149,7 @@ export const DEFAULT_CRAWL_REQUEST: PageClassificationInput = {
   // though the engine treats both as "no restriction".
   include_patterns: null,
   exclude_patterns: null,
-  // Password for deletion protection. The UI does not currently provide a way
-  // to set this (see cycle 0145 §6), so it is always null for operator-started
-  // crawls. Programmatic callers may set it.
+  // Set by the Start-crawl form, which requires it (ADR 0042). Null here so a
+  // request built from the defaults is unprotected unless the form sets one.
   deletion_password: null,
 };
