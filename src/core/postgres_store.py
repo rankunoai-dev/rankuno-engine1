@@ -842,14 +842,21 @@ class PostgresJobStore(JobStore):
         self.circuit_breaker.record_success()
 
     def read_gsc_queries(self, job_id: str) -> Mapping[str, object] | None:
-        """Read a job's saved query-by-page fetch, or `None`. Never raises.
+        """Read a job's saved query-by-page fetch: the payload, or `None` if none was saved.
 
+        Returns `None` only when the row genuinely has no saved payload. A store
+        that cannot be read raises instead, because `None` here means "nothing was
+        fetched" and an export built on it would show a blank Top Queries column
+        with no banner. That is the silent failure this method refuses to produce.
         A Postgres-backed job's fetch lives only in `job_payloads`, so the disk
-        fallback is consulted solely when the circuit is open, and returns `None`
-        for a job it never held.
+        fallback is never consulted for it, and an open circuit is a refusal, not
+        a disk lookup that would report "no fetch" for a job it never held.
+
+        Raises:
+            JobStoreUnavailableError: If the circuit is open or the read fails.
         """
         if self.circuit_breaker.is_open():
-            return self.fallback_store.read_gsc_queries(job_id)
+            raise JobStoreUnavailableError("the job database is unavailable; try again shortly")
 
         try:
             with self._cursor() as cur:
@@ -861,7 +868,7 @@ class PostgresJobStore(JobStore):
                 "gsc_queries_read_failed",
                 extra={"job_id": job_id, "error": type(err).__name__},
             )
-            return None
+            raise JobStoreUnavailableError("the job database is unavailable; try again") from err
 
         self.circuit_breaker.record_success()
         if row is None or row[0] is None:

@@ -28,7 +28,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from src.integrations.gsc_schemas import GscPageQueries
+from src.integrations.gsc_schemas import GscPageQueries, GscQueryRow
 from src.modules.seo.contracts.cell_guard import safe_cell
 from src.modules.seo.contracts.url_category import category_key, category_sort_key
 from src.modules.seo.performance.query_by_url import top_queries_by_crawl_url
@@ -59,6 +59,7 @@ from .report_columns import (
 )
 from .report_pdf import pdf_row as _pdf_cells
 from .report_pdf import render_url_pdf
+from .url_rules import normalize_url
 
 if TYPE_CHECKING:
     from .schemas import FullPageIntelligenceProfile
@@ -89,7 +90,12 @@ class MasterURLReport:
         """
         self.result = result
         self._queries = queries
-        self._top_by_url = top_queries_by_crawl_url(result.pages, queries)
+        # The join returns each query set under the surviving copy's URL. Export rows
+        # walk every page, including the copies the dedupe dropped, so both sides are
+        # keyed by the dedupe's own key (`normalize_url`). Otherwise a dropped copy
+        # would find nothing under its raw URL.
+        top_by_url = top_queries_by_crawl_url(result.pages, queries)
+        self._top_by_key = {normalize_url(url): rows for url, rows in top_by_url.items()}
         self.workbook = Workbook()
         self.workbook.remove(self.workbook.active)  # Remove default sheet
 
@@ -131,6 +137,14 @@ class MasterURLReport:
             page_metrics_complete=gsc.complete if gsc is not None else True,
             queries=self._queries,
         )
+
+    def _top_queries_for(self, page: FullPageIntelligenceProfile) -> tuple[GscQueryRow, ...]:
+        """The page's ranked queries, found by the same key the dedupe uses.
+
+        Returns an empty tuple when no query row matched this page, so the cell is
+        blank rather than attached to a guess.
+        """
+        return self._top_by_key.get(normalize_url(page.url), ())
 
     def _pdf_row(self, page: FullPageIntelligenceProfile) -> list[str]:
         """The twelve "All URLs" cell values for one page, as plain strings.
@@ -196,7 +210,7 @@ class MasterURLReport:
                 page.navigation_reachability_tier or "—",
             ]
             row.extend(trailing_cells(page))
-            row.append(top_queries_cell(self._top_by_url.get(page.url, ())))
+            row.append(top_queries_cell(self._top_queries_for(page)))
             row.append(category_key(page.url))
             ws.append([safe_cell(value) for value in row])
             ws.cell(row=ws.max_row, column=ctr_decimal_column).number_format = CTR_DECIMAL_FORMAT
@@ -312,12 +326,12 @@ class MasterURLReport:
         the three sheets it always had.
         """
         ws = self.workbook.create_sheet(TOP_QUERIES_SHEET)
-        urls = list(
-            dict.fromkeys(
-                page.url for page in self._ordered_pages() if page.url in self._top_by_url
-            )
-        )
-        write_top_queries_sheet(ws, urls, self._top_by_url, self._banner())
+        rows_by_url: dict[str, tuple[GscQueryRow, ...]] = {}
+        for page in self._ordered_pages():
+            ranked = self._top_queries_for(page)
+            if ranked:
+                rows_by_url.setdefault(page.url, ranked)
+        write_top_queries_sheet(ws, list(rows_by_url), rows_by_url, self._banner())
         self._auto_fit_columns(ws)
 
     @staticmethod

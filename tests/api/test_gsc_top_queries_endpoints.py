@@ -17,7 +17,7 @@ from openpyxl import load_workbook
 from src.api import server as server_module
 from src.api.server import API_PREFIX, create_app
 from src.core.errors import GscAuthorizationError
-from src.core.state_store import DiskJobStore, JobRecord
+from src.core.state_store import DiskJobStore, JobRecord, JobStoreUnavailableError
 from src.core.url_safety import UrlSafetyPolicy
 from src.integrations.gsc_schemas import GscPageQueries, GscQueryRow
 from src.modules.seo.page_classifier.discovery import DiscoveryReport
@@ -208,6 +208,21 @@ class TestFetch:
 
 
 class TestExports:
+    def test_an_unreadable_saved_fetch_is_503_not_a_blank_column(
+        self, client, crawl, store, monkeypatch
+    ) -> None:
+        store.write_gsc_queries(crawl.id, fetched(row("shoes", 4)).model_dump(mode="json"))
+
+        def unreadable(job_id: str) -> None:
+            raise JobStoreUnavailableError("the job database is unavailable; try again")
+
+        monkeypatch.setattr(store, "read_gsc_queries", unreadable)
+
+        for path in ("urls.xlsx", "urls.pdf"):
+            response = client.get(f"{API_PREFIX}/jobs/{crawl.id}/{path}")
+            assert response.status_code == 503, path
+            assert b"shoes" not in response.content
+
     def test_top_queries_appear_in_all_urls_and_on_their_own_sheet(
         self, client, crawl, store
     ) -> None:

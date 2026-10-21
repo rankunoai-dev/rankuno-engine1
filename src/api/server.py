@@ -2774,9 +2774,17 @@ def create_app(
         read under the same ownership check as the record it belongs to.
 
         Raises:
-            HTTPException: `409` if the saved fetch predates the current schema.
+            HTTPException: `503` if the saved fetch cannot be read, so the export is
+                refused rather than written with a blank Top Queries column. `409` if
+                the saved fetch predates the current schema.
         """
-        stored = state.store.read_gsc_queries(job_id)
+        try:
+            stored = state.store.read_gsc_queries(job_id)
+        except JobStoreUnavailableError as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="the saved Search Console query data could not be read; try again",
+            ) from exc
         if stored is None:
             return None
         try:

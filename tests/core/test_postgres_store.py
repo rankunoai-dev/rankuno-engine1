@@ -729,6 +729,28 @@ class TestPostgresJobStoreRealSql:
             store.write_gsc_queries("job-id", {"a": 1})
         fallback.write_gsc_queries.assert_not_called()
 
+    def test_gsc_queries_read_failure_raises_rather_than_reading_as_no_fetch(self) -> None:
+        """A failed read must not look like "nothing was fetched" (a blank Top Queries column)."""
+        fallback = MagicMock()
+        store = PostgresJobStore(
+            circuit_breaker=CircuitBreaker(failure_threshold=5),
+            fallback_store=fallback,
+            connection_factory=_raising_factory(psycopg.OperationalError("connection refused")),
+        )
+        with pytest.raises(JobStoreUnavailableError):
+            store.read_gsc_queries("job-id")
+        fallback.read_gsc_queries.assert_not_called()
+
+    def test_gsc_queries_read_refuses_while_the_circuit_is_open(self) -> None:
+        """An open circuit cannot prove the job has no fetch, so it must refuse, not return None."""
+        fallback = MagicMock()
+        breaker = CircuitBreaker(failure_threshold=1)
+        breaker.record_failure(RuntimeError("test"))
+        store = PostgresJobStore(circuit_breaker=breaker, fallback_store=fallback)
+        with pytest.raises(JobStoreUnavailableError):
+            store.read_gsc_queries("job-id")
+        fallback.read_gsc_queries.assert_not_called()
+
     def test_redeploy_simulation_new_instance_same_db_sees_old_job(self) -> None:
         """A new store instance reads a job an earlier instance created.
 

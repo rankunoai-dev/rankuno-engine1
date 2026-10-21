@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 
 from openpyxl import load_workbook
+from src.integrations.gsc_schemas import GscPageQueries, GscQueryRow
 from src.modules.seo.page_classifier.discovery import OUTCOME_NOT_FETCHED
 from src.modules.seo.page_classifier.fetch_status import LABEL_NOT_RECORDED
 from src.modules.seo.page_classifier.report_columns import (
@@ -215,3 +216,66 @@ class TestPdfUnchanged:
     def test_the_pdf_is_still_a_pdf(self) -> None:
         pdf = MasterURLReport(make_result(make_page())).generate_pdf()
         assert pdf.getvalue().startswith(b"%PDF")
+
+
+class TestDuplicateUrlTopQueries:
+    """A crawl that emitted one page twice still shows its queries on both copies."""
+
+    @staticmethod
+    def _queries(*rows: GscQueryRow) -> GscPageQueries:
+        return GscPageQueries(
+            property_url="https://e.com/",
+            start_date="2025-10-19",
+            end_date="2026-10-19",
+            rows=list(rows),
+            complete=True,
+            stop_reason="exhausted",
+        )
+
+    @staticmethod
+    def _top_queries_column(pages, queries) -> dict[str, object]:
+        book = load_workbook(MasterURLReport(make_result(*pages), queries).generate())
+        ws = book["All URLs"]
+        headers = [str(cell.value) for cell in ws[1]]
+        column = headers.index("Top Queries")
+        return {row[0]: row[column] for row in ws.iter_rows(min_row=2, values_only=True)}
+
+    def test_a_trailing_slash_and_tracking_duplicate_both_get_the_queries(self) -> None:
+        pages = (
+            make_page("https://e.com/x/"),
+            make_page("https://e.com/x/?ref=1"),
+            make_page("https://e.com/y/"),
+        )
+        queries = self._queries(
+            GscQueryRow(
+                page="https://e.com/x/",
+                query="shoes",
+                clicks=4,
+                impressions=40,
+                avg_position=2.0,
+            )
+        )
+
+        cells = self._top_queries_column(pages, queries)
+
+        assert cells["https://e.com/x/"] == "shoes (4)"
+        assert cells["https://e.com/x/?ref=1"] == "shoes (4)"
+        assert cells["https://e.com/y/"] in (None, "")
+
+    def test_the_top_queries_sheet_lists_both_duplicate_copies(self) -> None:
+        pages = (make_page("https://e.com/x/"), make_page("https://e.com/x/?ref=1"))
+        queries = self._queries(
+            GscQueryRow(
+                page="https://e.com/x/?ref=1",
+                query="shoes",
+                clicks=4,
+                impressions=40,
+                avg_position=2.0,
+            )
+        )
+
+        book = load_workbook(MasterURLReport(make_result(*pages), queries).generate())
+        listed = [row[0] for row in book["Top Queries"].iter_rows(min_row=3, values_only=True)]
+
+        assert "https://e.com/x/" in listed
+        assert "https://e.com/x/?ref=1" in listed
