@@ -94,6 +94,8 @@ Procedural skills in `skills/` equipping subagents and review agents with domain
 
 Honest state of the codebase. See [CLAUDE.md](CLAUDE.md) §8 for the full gap register.
 
+Deploy note: the hosted Railway service is deployed from `Dockerfile`, and its start command runs `alembic upgrade head` on every start before uvicorn (Dockerfile line 61), so schema migrations, including `0014_users`, apply at each boot. Creating the first admin is not wired into startup on `main`, and [ADR 0040](docs/adr/0040-user-sessions-check-session-version-and-active-per-request.md) is still `Proposed`, not accepted.
+
 | Component | Status |
 | :--- | :--- |
 | `core/` governed pipeline, guardrails, rate limiting, retry, registry | ✅ Implemented & tested |
