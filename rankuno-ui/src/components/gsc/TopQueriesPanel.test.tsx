@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CrawlDataAdapter } from "../../adapters/adapterInterface";
 import { ApiError } from "../../adapters/httpAdapter";
@@ -268,5 +268,72 @@ describe("TopQueriesPanel job change", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(button()).toBeEnabled();
+  });
+});
+
+/** A job row as the store holds it, with only the fields the panel reads. */
+function listJob(id: string, hasDeletePassword: boolean): void {
+  useCrawlStore.setState({
+    jobs: [{ id, hasDeletePassword }] as unknown as ReturnType<typeof useCrawlStore.getState>["jobs"],
+  });
+}
+
+/** Type a password into the open prompt and press its confirm button. */
+async function submitPassword(password: string): Promise<void> {
+  const dialog = await screen.findByRole("dialog");
+  const input = dialog.querySelector("input[type=password]") as HTMLInputElement;
+  fireEvent.change(input, { target: { value: password } });
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole("button", { name: /Fetch Top Queries/ }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+describe("TopQueriesPanel job password (ADR 0042)", () => {
+  afterEach(() => {
+    useCrawlStore.setState({ jobs: [] });
+  });
+
+  it("asks for the deletion password on a protected job and sends it in the header", async () => {
+    listJob("pw-ok", true);
+    const spy = stubAdapter(() => Promise.resolve(COMPLETE_BODY));
+    render(<TopQueriesPanel jobId="pw-ok" finished />);
+
+    await clickButton();
+    expect(spy).not.toHaveBeenCalled();
+
+    await submitPassword("crawl-password-12");
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [jobId, init] = spy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(jobId).toBe("pw-ok");
+    expect(new Headers(init.headers).get("X-Deletion-Password")).toBe("crawl-password-12");
+    expect(await screen.findByRole("status")).toHaveTextContent("1,200 rows fetched");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps the prompt open and shows the server reason when the password is wrong", async () => {
+    listJob("pw-wrong", true);
+    stubAdapter(() => Promise.reject(new ApiError(403, "incorrect password")));
+    render(<TopQueriesPanel jobId="pw-wrong" finished />);
+
+    await clickButton();
+    await submitPassword("not-the-password");
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("incorrect password");
+    expect(dialog.querySelector("input[type=password]")).toBeInTheDocument();
+  });
+
+  it("prompts on a 403 'job password required' even when the list did not flag the job", async () => {
+    listJob("pw-fallback", false);
+    const spy = stubAdapter(() => Promise.reject(new ApiError(403, "job password required")));
+    render(<TopQueriesPanel jobId="pw-fallback" finished />);
+
+    await clickButton();
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

@@ -14,6 +14,11 @@ interface Props {
    */
   onSubmit: (password: string) => Promise<boolean>;
   onCancel: () => void;
+  /**
+   * The server's own reason for a refusal, shown in place of the generic line
+   * when the caller has one. The caller owns it and clears it on the next try.
+   */
+  error?: string | null;
 }
 
 /**
@@ -31,6 +36,7 @@ export function JobPasswordPrompt({
   description,
   onSubmit,
   onCancel,
+  error = null,
 }: Props): JSX.Element {
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -62,6 +68,8 @@ export function JobPasswordPrompt({
     }
   }
 
+  const shown = error ?? problem;
+
   return (
     <Modal
       open={open}
@@ -83,7 +91,7 @@ export function JobPasswordPrompt({
         disabled={submitting}
         autoFocus
       />
-      {problem && <Alert type="error" showIcon message={problem} style={{ marginTop: 12 }} />}
+      {shown && <Alert type="error" showIcon message={shown} style={{ marginTop: 12 }} />}
     </Modal>
   );
 }
