@@ -6,6 +6,7 @@ ensures no unexpected fields slip through, preventing silent data loss.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -14,8 +15,10 @@ from pydantic import Field, SecretStr, model_validator
 from src.core.schemas import StrictModel
 
 __all__ = [
+    "GSC_FAILURE_PHRASES",
     "GscAnalyticsRequest",
     "GscAnalyticsResponse",
+    "GscFailureClass",
     "GscOAuthToken",
     "GscPageMetrics",
     "GscPageQueries",
@@ -24,6 +27,7 @@ __all__ = [
     "GscQueryMetrics",
     "GscQueryRow",
     "GscStopReason",
+    "failure_phrase",
 ]
 
 GscStopReason = Literal["exhausted", "row_cap", "fetch_failed"]
@@ -35,6 +39,27 @@ arriving, so rows past it exist and were never asked for. `fetch_failed` means a
 page request failed after retries; the rows received before it are kept, never
 discarded, and the result is marked incomplete.
 """
+
+GscFailureClass = Literal["timeout", "connection", "server_error", "quota", "unexpected"]
+"""The kind of failure that ended a fetch, as a closed label.
+
+Only the class of the failure crosses into the result. The exception message can
+quote the property and the search phrase, so it never does.
+"""
+
+GSC_FAILURE_PHRASES: Mapping[GscFailureClass, str] = {
+    "timeout": "timed out",
+    "connection": "connection failed",
+    "server_error": "server error",
+    "quota": "quota exceeded",
+    "unexpected": "unexpected error",
+}
+"""The fixed words an HTTP response uses for each failure class."""
+
+
+def failure_phrase(failure_class: GscFailureClass | None) -> str:
+    """Return the fixed phrase for a failure class; an absent class reads as unexpected."""
+    return GSC_FAILURE_PHRASES[failure_class or "unexpected"]
 
 
 def _complete_matches_reason(complete: bool, stop_reason: GscStopReason) -> None:
@@ -185,6 +210,10 @@ class GscPageQueries(StrictModel):
     )
     complete: bool = Field(..., description="True only when the last page came back short")
     stop_reason: GscStopReason = Field(..., description="Why paging stopped")
+    failure_class: GscFailureClass | None = Field(
+        default=None,
+        description="Kind of failure that stopped a fetch with `fetch_failed`; None otherwise",
+    )
     fetched_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="When the fetch finished (UTC)",

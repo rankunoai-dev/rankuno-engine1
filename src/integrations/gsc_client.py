@@ -17,6 +17,7 @@ from src.core.config import Settings
 from src.core.errors import (
     GscAuthorizationError,
     GscPropertyNotFoundError,
+    GscQuotaExceededError,
     GuardrailViolationError,
 )
 from src.core.logger import get_logger
@@ -32,6 +33,7 @@ from src.integrations.gsc_requests import (
 )
 from src.integrations.gsc_schemas import (
     GscAnalyticsResponse,
+    GscFailureClass,
     GscPageQueries,
     GscProperty,
     GscStopReason,
@@ -41,6 +43,25 @@ from src.integrations.gsc_token_manager import GscTokenManager
 __all__ = ["GscApiClient"]
 
 _logger = get_logger("integrations.gsc_client")
+
+
+def _failure_class(exc: Exception) -> GscFailureClass:
+    """Name the kind of failure a page raised, from a closed list.
+
+    `call()` wraps a failed request in `IntegrationError` with the transport error as
+    `__cause__`, so the class is read from there. The message is never read: it can
+    quote the property and the search phrase.
+    """
+    if isinstance(exc, GscQuotaExceededError):
+        return "quota"
+    cause = exc.__cause__ if exc.__cause__ is not None else exc
+    if isinstance(cause, HttpError):
+        return "server_error" if 500 <= cause.resp.status <= 599 else "unexpected"
+    if isinstance(cause, TimeoutError):
+        return "timeout"
+    if isinstance(cause, ConnectionError):
+        return "connection"
+    return "unexpected"
 
 
 class GscApiClient(BaseAPIClient):
@@ -218,7 +239,7 @@ class GscApiClient(BaseAPIClient):
         api_url: str,
         body: dict[str, object],
         row_limit: int,
-    ) -> tuple[list[dict[str, Any]], GscStopReason]:
+    ) -> tuple[list[dict[str, Any]], GscStopReason, GscFailureClass | None]:
         """Read pages of `searchAnalytics.query` until one comes back short.
 
         Each page is one `self.call()`, so each takes a rate-limit slot. The
@@ -235,8 +256,9 @@ class GscApiClient(BaseAPIClient):
             row_limit: Rows requested per page.
 
         Returns:
-            The raw rows received, in order, and why paging stopped. Rows
-            received before a failed page are returned, never dropped.
+            The raw rows received, in order, why paging stopped, and the class of
+            the failure when it stopped on one. Rows received before a failed page
+            are returned, never dropped.
 
         Raises:
             GscPropertyNotFoundError: On a 404 on any page; refusals propagate.
@@ -261,17 +283,17 @@ class GscApiClient(BaseAPIClient):
                         "rows_kept": len(collected),
                     },
                 )
-                return collected, "fetch_failed"
+                return collected, "fetch_failed", _failure_class(exc)
 
             collected.extend(page)
             if len(page) < row_limit:
-                return collected, "exhausted"
+                return collected, "exhausted", None
 
         _logger.warning(
             "gsc_row_cap_reached",
             extra={"operation": operation, "pages": MAX_PAGES, "rows": len(collected)},
         )
-        return collected, "row_cap"
+        return collected, "row_cap", None
 
     def fetch_analytics(
         self,
@@ -316,7 +338,9 @@ class GscApiClient(BaseAPIClient):
             "dimensions": ["page"],
         }
 
-        raw, stop_reason = self._page_through("fetch_analytics", token, api_url, body, row_limit)
+        raw, stop_reason, _failure = self._page_through(
+            "fetch_analytics", token, api_url, body, row_limit
+        )
         rows = page_metrics(raw)
         return GscAnalyticsResponse(
             property_url=api_url,
@@ -370,7 +394,9 @@ class GscApiClient(BaseAPIClient):
             "dimensions": ["page", "query"],
         }
 
-        raw, stop_reason = self._page_through("fetch_top_queries", token, api_url, body, row_limit)
+        raw, stop_reason, failure_class = self._page_through(
+            "fetch_top_queries", token, api_url, body, row_limit
+        )
         result = GscPageQueries(
             property_url=api_url,
             start_date=start_date,
@@ -378,6 +404,7 @@ class GscApiClient(BaseAPIClient):
             rows=query_rows(raw),
             complete=stop_reason == "exhausted",
             stop_reason=stop_reason,
+            failure_class=failure_class,
         )
         _logger.info(
             "gsc_top_queries_fetched",

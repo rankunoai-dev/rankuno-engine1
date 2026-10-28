@@ -123,7 +123,7 @@ from src.core.worker_auth import WorkerStore
 from src.core.worker_dispatch_keys import DispatchSigningKey
 from src.core.worker_dispatch_store import WorkerDispatchStore
 from src.integrations.gsc_client import GscApiClient
-from src.integrations.gsc_schemas import GscPageQueries
+from src.integrations.gsc_schemas import GscPageQueries, failure_phrase
 from src.modules.seo.deliverables.rulebook_store import RulebookStore
 from src.modules.seo.page_classifier.discovery import DiscoveryReport, SiteGraph
 from src.modules.seo.page_classifier.reports import MasterURLReport
@@ -3049,7 +3049,10 @@ def create_app(
         if fetched.stop_reason == "fetch_failed" and not fetched.rows:
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY,
-                detail="Search Console did not answer; the saved query data was kept",
+                detail=(
+                    f"Search Console did not answer ({failure_phrase(fetched.failure_class)}); "
+                    "the saved query data was kept"
+                ),
             )
         try:
             state.store.write_gsc_queries(job_id, fetched.model_dump(mode="json"))

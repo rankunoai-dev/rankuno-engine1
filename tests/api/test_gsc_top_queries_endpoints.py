@@ -82,7 +82,10 @@ def row(query: str, clicks: int = 4, page: str = "https://e.com/") -> GscQueryRo
 
 
 def fetched(
-    *rows: GscQueryRow, complete: bool = True, stop_reason: str = "exhausted"
+    *rows: GscQueryRow,
+    complete: bool = True,
+    stop_reason: str = "exhausted",
+    failure_class: str | None = None,
 ) -> GscPageQueries:
     return GscPageQueries(
         property_url=PROPERTY,
@@ -91,6 +94,7 @@ def fetched(
         rows=list(rows),
         complete=complete,
         stop_reason=stop_reason,  # type: ignore[arg-type]
+        failure_class=failure_class,  # type: ignore[arg-type]
     )
 
 
@@ -181,6 +185,55 @@ class TestFetch:
         saved = store.read_gsc_queries(crawl.id)
         assert saved is not None
         assert saved["rows"][0]["query"] == "kept"
+
+    @pytest.mark.parametrize(
+        ("failure_class", "phrase"),
+        [
+            ("timeout", "timed out"),
+            ("connection", "connection failed"),
+            ("server_error", "server error"),
+            ("quota", "quota exceeded"),
+            ("unexpected", "unexpected error"),
+        ],
+    )
+    def test_a_failed_refetch_names_its_class_and_keeps_the_earlier_result(
+        self, client, crawl, store, failure_class, phrase
+    ) -> None:
+        store.write_gsc_queries(crawl.id, fetched(row("kept")).model_dump(mode="json"))
+        patcher, _instance = fake_client(
+            fetched(complete=False, stop_reason="fetch_failed", failure_class=failure_class)
+        )
+        with patcher:
+            response = fetch(client, crawl.id)
+
+        assert response.status_code == 502
+        assert response.json()["detail"] == (
+            f"Search Console did not answer ({phrase}); the saved query data was kept"
+        )
+        saved = store.read_gsc_queries(crawl.id)
+        assert saved is not None
+        assert saved["rows"][0]["query"] == "kept"
+
+    def test_the_502_never_carries_the_exception_message(
+        self, client, crawl, store, monkeypatch
+    ) -> None:
+        """The real client path: a socket timeout quoting the search phrase reaches the route."""
+        monkeypatch.setattr("tenacity.nap.time.sleep", lambda _seconds: None)
+        token_manager = MagicMock()
+        token_manager.get_or_refresh_token.return_value = "ya29.test-token"
+        secret = "private search phrase for e.com"
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            request = mock_build.return_value.searchanalytics.return_value.query.return_value
+            request.execute.side_effect = TimeoutError(secret)
+            response = fetch(client, crawl.id)
+
+        assert response.status_code == 502
+        assert response.json()["detail"].startswith("Search Console did not answer (timed out)")
+        assert secret not in response.text
+        assert store.read_gsc_queries(crawl.id) is None
 
     def test_a_partial_fetch_with_rows_is_saved_and_says_so(self, client, crawl, store) -> None:
         patcher, _instance = fake_client(

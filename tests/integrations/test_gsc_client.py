@@ -872,3 +872,53 @@ class TestFetchTopQueries:
             client = GscApiClient(settings=mock_settings)
             with pytest.raises(GscAuthorizationError):
                 client.fetch_top_queries("https://example.com", "2026-08-01", "2026-08-31")
+
+
+class TestFailedPageClass:
+    """A failed fetch says what kind of failure it was, and never what the message said.
+
+    The message can quote the property and the search phrase, so the result carries
+    a closed class label and nothing else from the exception.
+    """
+
+    SECRET = "private search phrase for example.com"
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (TimeoutError(SECRET), "timeout"),
+            (ConnectionResetError(SECRET), "connection"),
+            (_http_error(503), "server_error"),
+            (_http_error(429), "quota"),
+            (RuntimeError(SECRET), "unexpected"),
+        ],
+    )
+    def test_the_class_is_recorded_and_the_message_is_not(
+        self, mock_settings, mock_token_manager, no_backoff, error, expected
+    ):
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            request = mock_build.return_value.searchanalytics.return_value.query.return_value
+            request.execute.side_effect = error
+            client = GscApiClient(settings=mock_settings)
+            result = client.fetch_top_queries("https://example.com", "2026-08-01", "2026-08-31")
+
+        assert result.stop_reason == "fetch_failed"
+        assert result.rows == []
+        assert result.failure_class == expected
+        assert self.SECRET not in result.model_dump_json()
+
+    def test_a_successful_fetch_has_no_failure_class(self, mock_settings, mock_token_manager):
+        with (
+            patch("src.integrations.gsc_client.GscTokenManager", return_value=mock_token_manager),
+            patch("src.integrations.gsc_client.build") as mock_build,
+        ):
+            request = mock_build.return_value.searchanalytics.return_value.query.return_value
+            request.execute.return_value = {"rows": []}
+            client = GscApiClient(settings=mock_settings)
+            result = client.fetch_top_queries("https://example.com", "2026-08-01", "2026-08-31")
+
+        assert result.stop_reason == "exhausted"
+        assert result.failure_class is None
