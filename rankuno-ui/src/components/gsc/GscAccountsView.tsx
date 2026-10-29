@@ -1,6 +1,7 @@
-import { Button, Empty, Popconfirm, Spin, message } from "antd";
+import { Button, Empty, Popconfirm, Spin, Tooltip, message } from "antd";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
+import type { Ga4Mapping } from "../../adapters/adapterInterface";
 import { API_BASE, ApiError, authorizedFetch } from "../../adapters/httpAdapter";
 import { CredentialSetupGuide } from "./CredentialSetupGuide";
 import { GscAccountForm } from "./GscAccountForm";
@@ -16,6 +17,90 @@ interface Props {
   orgId?: string;
 }
 
+/** `null` while loading, `"error"` when the read failed, else the org's answer. */
+type Ga4State = Ga4Mapping | "error" | null;
+
+/**
+ * Narrows an untrusted response body to `Ga4Mapping`. Anything else is treated
+ * as a failed read, so an unknown status can never render as a green or red dot.
+ */
+function isGa4Mapping(value: unknown): value is Ga4Mapping {
+  if (typeof value !== "object" || value === null) return false;
+  const status = (value as { status?: unknown }).status;
+  return status === "mapped" || status === "unmapped" || status === "not_configured";
+}
+
+interface Ga4Display {
+  tone: "ok" | "missing" | "muted";
+  label: string;
+  tooltip: string;
+}
+
+/**
+ * The fixed words for each GA4 state. Loading and error are grey and say the
+ * status is unavailable: neither is a claim that the credential is missing.
+ * Unmapped is green because a stored credential with no property chosen is
+ * the normal first step, not a fault.
+ */
+function ga4Display(state: Ga4State): Ga4Display {
+  if (state === null) {
+    return {
+      tone: "muted",
+      label: "GA4 status unavailable",
+      tooltip: "Checking the GA4 credential for this organisation.",
+    };
+  }
+  if (state === "error") {
+    return {
+      tone: "muted",
+      label: "GA4 status unavailable",
+      tooltip: "The GA4 status could not be loaded. Reload the page to try again.",
+    };
+  }
+  if (state.status === "mapped") {
+    return {
+      tone: "ok",
+      label: "GA4 credential stored",
+      tooltip: "This organisation has a GA4 credential and a property mapped.",
+    };
+  }
+  if (state.status === "unmapped") {
+    return {
+      tone: "ok",
+      label: "GA4 credential stored",
+      tooltip:
+        "This organisation has a GA4 credential, but no property is mapped yet. GA4 is not requested until one is chosen.",
+    };
+  }
+  return {
+    tone: "missing",
+    label: "No GA4 credential",
+    tooltip: "This organisation has no GA4 credential stored, so GA4 data cannot be read.",
+  };
+}
+
+/**
+ * One organisation-level GA4 status line, shown above the account list.
+ *
+ * The dot is decorative: the visible text carries the meaning, so colour is
+ * never the only signal. The span is focusable so the tooltip opens on
+ * keyboard focus as well as hover.
+ */
+function Ga4StatusLine({ state }: { state: Ga4State }): JSX.Element {
+  const display = ga4Display(state);
+  return (
+    <div className="gsa-ga4-status" role="status" aria-live="polite">
+      {/* antd's default trigger is hover only; focus must open it too. */}
+      <Tooltip title={display.tooltip} trigger={["hover", "focus"]}>
+        <span className="gsa-ga4-trigger" tabIndex={0}>
+          <span className={`gsa-ga4-dot gsa-ga4-dot-${display.tone}`} aria-hidden="true" />
+          <span className="gsa-ga4-label">{display.label}</span>
+        </span>
+      </Tooltip>
+    </div>
+  );
+}
+
 /**
  * View for managing GSC accounts at the organization level.
  *
@@ -28,9 +113,30 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
+  const [ga4, setGa4] = useState<Ga4State>(null);
 
   useEffect(() => {
     void fetchAccounts();
+  }, [orgId]);
+
+  // One read per page load (and per org change). No polling, and the GA4
+  // result never blocks or fails the GSC list above it.
+  useEffect(() => {
+    let cancelled = false;
+    setGa4(null);
+    authorizedFetch(`${API_BASE}/orgs/${encodeURIComponent(orgId)}/ga4`)
+      .then(async (response) => {
+        if (!response.ok) throw new ApiError(response.status, response.statusText);
+        const body: unknown = await response.json();
+        if (!isGa4Mapping(body)) throw new Error("Unrecognised GA4 status");
+        if (!cancelled) setGa4(body);
+      })
+      .catch(() => {
+        if (!cancelled) setGa4("error");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [orgId]);
 
   async function fetchAccounts(): Promise<void> {
@@ -128,6 +234,8 @@ export function GscAccountsView({ orgId = "default" }: Props): JSX.Element {
       </div>
 
       <CredentialSetupGuide />
+
+      <Ga4StatusLine state={ga4} />
 
       <Spin spinning={loading}>
         {accounts.length === 0 ? (
